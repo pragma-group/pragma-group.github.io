@@ -9,7 +9,7 @@ already-published papers and rewrites links for offline browsing.
 ## Contents
 
 The scripts live in `.github/workflows/assets/`. Mirrored content is written
-directly to the repository root (no `wg21-mirror/` subdirectory):
+directly to the repository root:
 
 ```
 repo-root/
@@ -151,7 +151,7 @@ browsable offline via `file://`.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--mirror-dir DIR` | `~/wg21-mirror` | Root of the repo / local mirror |
+| `--mirror-dir DIR` | `.` | Root of the repo / local mirror |
 | `--threads N` | `3` | Parallel download threads (1–10) |
 | `--wait SECS` | `0.5` | Base wait between requests in seconds |
 | `--no-random-wait` | off | Disable ×1–2 random jitter on the wait |
@@ -174,7 +174,7 @@ attributes to a relative path.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--mirror-dir DIR` | `~/wg21-mirror` | Root of the repo / local mirror |
+| `--mirror-dir DIR` | `.` | Root of the repo / local mirror |
 | `--verbose` / `-v` | off | Print per-file REWRITTEN/UNCHANGED to stdout |
 
 **Exit codes:** 0 = success, 1 = rewrite errors, 2 = bad arguments or no stdin.

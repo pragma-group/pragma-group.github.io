@@ -9,7 +9,7 @@ Usage
 
 Options
 -------
-    --mirror-dir DIR   Root of the local mirror  (default: ~/wg21-mirror)
+    --mirror-dir DIR   Root of the repo / local mirror  (default: .)
     --threads N        Parallel download threads, 1-10  (default: 3)
     --wait SECS        Base polite wait between requests  (default: 0.5)
     --no-random-wait   Disable x1-2 jitter on the wait time
@@ -638,7 +638,7 @@ def main() -> None:
     )
     ap.add_argument(
         "--mirror-dir",
-        default=str(Path.home() / "wg21-mirror"),
+        default=".",
         help="Root directory of the local mirror",
     )
     ap.add_argument(

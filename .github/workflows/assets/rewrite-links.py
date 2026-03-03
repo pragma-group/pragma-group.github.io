@@ -13,15 +13,15 @@ exactly one file at a time.
 
 Usage
 -----
-    # Rewrite all HTML files in the mirror:
-    find ~/wg21-mirror -name "*.html" | python rewrite-links.py
+    # Rewrite all HTML files (run from the repo root):
+    find . -name "*.html" | python .github/workflows/assets/rewrite-links.py
 
-    # Specify a non-default mirror location:
-    find /mnt/data/wg21 -name "*.html" | python rewrite-links.py --mirror-dir /mnt/data/wg21
+    # Specify an explicit mirror location:
+    find /path/to/repo -name "*.html" | python rewrite-links.py --mirror-dir /path/to/repo
 
 Options
 -------
-    --mirror-dir DIR   Root of the local mirror  (default: ~/wg21-mirror)
+    --mirror-dir DIR   Root of the repo / local mirror  (default: .)
     --verbose / -v     Print per-file REWRITTEN/UNCHANGED lines to stdout
                        (ERROR lines always go to stderr)
 
@@ -113,7 +113,7 @@ def main() -> None:
     )
     ap.add_argument(
         "--mirror-dir",
-        default=str(Path.home() / "wg21-mirror"),
+        default=".",
         help="Root directory of the local mirror",
     )
     ap.add_argument(
@@ -126,7 +126,7 @@ def main() -> None:
         ap.print_help(sys.stderr)
         sys.stderr.write(
             "\nError: no file paths on stdin.\n"
-            "Example: find ~/wg21-mirror -name '*.html' | python rewrite-links.py\n"
+            "Example: find . -name '*.html' | python .github/workflows/assets/rewrite-links.py\n"
         )
         sys.exit(2)
 
