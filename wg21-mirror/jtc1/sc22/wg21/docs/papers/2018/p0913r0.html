@@ -1,0 +1,323 @@
+
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+"http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta charset="utf-8">
+<title>Add symmetric coroutine control transfer</title>
+<style type="text/css">
+p {text-align:justify}
+li {text-align:justify}
+blockquote.note
+{
+background-color:#E0E0E0;
+padding-left: 15px;
+padding-right: 15px;
+padding-top: 1px;
+padding-bottom: 1px;
+}
+ins {background-color:#A0FFA0}
+del {background-color:#FFA0A0}
+table {border-collapse: collapse;}
+table, th, td {
+border: 1px solid black;
+border-collapse: collapse;
+} 
+</style>
+</head>
+<body>
+<table>
+<tr>
+<td align="left">Doc. no.</td>
+<td align="left">P0913R0</td>
+</tr>
+<!--
+<tr>
+<td align="left">Revises</td>
+<td align="left">P0664R1</td>
+</tr>
+-->
+<tr>
+<td align="left">Date:</td>
+<td align="left">2018-02-08 at 14:25:00 UTC
+</td>
+</tr>
+<!--
+<tr>
+<td align="left">Project:</td>
+<td align="left">Programming Language C++</td>
+</tr>
+-->
+<tr>
+<td align="left">Reference:</td>
+<td align="left">ISO/IEC TS 22277, C++ Extensions for Coroutines</td>
+</tr>
+<tr>
+<td align="left">Audience:</td>
+<td align="left">EWG</td>
+</tr>
+<tr>
+<td align="left">Reply to:</td>
+<td align="left">Gor Nishanov &lt;<a href="mailto:gorn@microsoft.com">gorn@microsoft.com</a>&gt;</td>
+</tr>
+</table>
+<h1>Add symmetric coroutine control transfer</h1>
+
+<h2>Issue</h2>
+<p>
+Currently Coroutines TS only supports asymmetric control transfer where suspend always 
+returns control back to the current coroutine caller or resumer. In order to emulate 
+symmetric coroutine to coroutine control transfer, one needs to build a queue and a 
+scheduler: prior to suspension, a coroutine enqueues the next-to-resume coroutine
+into a scheduler queue and then returns control to its caller. At some point, control will
+transfer to a scheduler loop that dequeues and resumes coroutines.
+</p>
+<p>
+Recursive generators, zero-overhead futures and other facilities require efficient coroutine
+to coroutine control transfer. Involving a queue and a scheduler makes coroutine 
+to coroutine control transfer inefficient. Coroutines need direct and efficient way of 
+expressing the desired behavior.
+</p>
+<h2>Proposed resolution:</h2>
+<ol>
+<li>Allow <code>await_suspend</code> to designate a coroutine to perform a symmetric
+control transfer to.    
+</li>
+<li>Add library function <code>noop_coroutine</code> that returns a handle to a coroutine
+that has no observable side effects when resumed. Having such a coroutine handle
+allows library writer to perform either symmetric or asymmetric control transfer
+based on runtime considerations.</li>
+</ol>
+
+<table>
+<tr>
+  <th>Before</th>
+  <th>After</th> 
+</tr>
+<tr>
+  <td>
+    <pre>
+  thread_local queue&lt;coroutine_handle&lt;&gt;&gt;</coroutine_handle> resume_queue; 
+
+  void scheduler_loop() {
+    while (!resume_queue.empty()) {
+      resume_queue.front().resume();
+      resume_queue.pop_front();
+    }
+  }
+
+  struct Awaiter {
+    ...
+    void await_suspend(coroutine_handle&lt;&gt; h) {
+      ...
+      if (cond)
+        resume_queue.push(next_coro);
+    }
+  };
+    </pre>
+  </td>
+  <td>
+    <pre>
+ struct Awaiter {
+   ...
+   auto await_suspend(coroutine_handle&lt;&gt; h) {
+     ...
+     return cond ? next_coro : noop_coroutine(); 
+   }
+ };
+</pre>
+  </td> 
+</tr>
+</table>
+<h2>Implementation and usage experience:</h2>
+
+Language changes implement in clang 5.1. 
+Adopted by open source coroutine class library <a href="https://github.com/lewissbaker/cppcoro/tree/tailcall">cppcoro</a>.
+
+<h2>Wording</h2>
+<p><i>[All proposed wording is relative to <a href="https://isocpp.org/files/papers/N4680.pdf">N4680</a> (ISO/IEC TS 22277)].</i></p>
+<h3>Core wording:</h3>
+
+<p>Modify paragraph 5.3.8/3 as follows</p>
+<blockquote>
+(3.7) — <it>await-suspend</it> is the expression <it>e</it>.<code>await_suspend(</code><it>h</it>), which shall be a prvalue 
+of type <code>void</code>
+<ins>,</ins><del>or</del> <code>bool</code><ins>, or <code>std::experimental::coroutine_handle&lt;Z&gt;</code> for some type <code>Z</code></ins> .  
+</blockquote>
+
+<p>Modify paragraph 5.3.8/5 as follows:<p>
+
+<blockquote>
+  <p>5 The await-expression evaluates the await-ready expression, then:</p>
+  <p style="text-align:left">
+  (5.1) — If the result is <code>false</code>, the coroutine is considered suspended. Then, 
+  the <i>await-suspend</i> expression is evaluated.<ins> 
+  If that expression has type <code>std::experimental::coroutine_handle&LT;Z&GT;</code>
+  and evaluates to value <i>s</i>, the coroutine referred to by <i>s</i> is resumed as if by a call 
+  <i>s</i><code>.resume()</code> and then control flow returns to the current coroutine caller or resumer (8.4.4).
+  Implementations shall not impose any limits on how many coroutines can be resumed in this fashion.
+  </ins>
+  If that expression has type <code>bool</code> and evaluates to <code>false</code>, 
+  the coroutine is resumed. If that expression exits via an exception, the exception is caught, the
+  coroutine is resumed, and the exception is immediately re-thrown (15.1). Otherwise, control
+  flow returns to the current <ins>coroutine</ins> caller or resumer (8.4.4) <del>without exiting any scopes (6.6)</del>.</p>
+</blockquote>
+
+<h3>Library Wording:</h3>
+
+<p>Add the following to <code>&LT;experimental/coroutine&GT;</code> synopsis in [support.coroutine]/1:<p>
+<blockquote>
+<pre>
+namespace std {
+namespace experimental {
+inline namespace coroutines_v1 {
+
+<ins><i>// class </i><code>noop_coroutine_promise</code> <i>18.11.4</i></ins>
+<ins>struct noop_coroutine_promise;</ins>
+
+// 18.11.1 coroutine traits
+template &lt;typename R, typename... ArgTypes&gt;
+struct coroutine_traits;
+
+// 18.11.2 coroutine handle
+template &lt;typename Promise = void&gt;
+struct coroutine_handle;
+
+<ins>template &lt;&gt;</ins>
+<ins>struct coroutine_handle&lt;noop_coroutine_promise&gt;;</ins>
+
+<ins><i>// noop coroutine handle 18.11.5</i></ins>
+<ins>using noop_coroutine_handle = coroutine_handle&LTnoop_coroutine_promise&GT;;</ins>
+
+<ins><i>// noop coroutine 18.11.6</i></ins>
+<ins>noop_coroutine_handle noop_coroutine() noexcept;</ins>
+
+...
+</pre>
+</blockquote>
+
+<p>Add the following to <code>coroutine_handle</code> synopsis in [coroutine.handle]:</p>
+
+<blockquote>
+<pre>
+template &LT;&GT; struct coroutine_handle&LT;noop_coroutine_promise&GT : coroutine_handle&LT;&GT;
+{
+<i>// 18.11.2.2 export</i>
+constexpr void* address() const noexcept;
+
+// 18.11.2.7 noop observers
+constexpr explicit operator bool() const noexcept;
+constexpr bool done() const noexcept;
+
+<i>// 18.11.2.8 noop resumption</i>
+constexpr void operator()() const noexcept;
+constexpr void resume() const noexcept;
+constexpr void destroy() const noexcept;
+
+<i>// 18.11.2.9 noop promise access</i>
+noop_coroutine_promise&amp; promise() const noexcept;
+private:
+// constructor unspecified
+};
+</pre>
+</blockquote>
+
+<p>Modify subclause 18.11.2.2 [coroutine.handle.export.import] as follows:</p>
+
+<blockquote>
+<h3>18.11.2.2 <code>coroutine_handle</code> export/import [coroutine.handle.export.import]</h3>
+<p><code>constexpr void* address() const noexcept;</code></p>
+1 <i>Returns:</i> <code>ptr</code>.<br>
+<ins>2 <i>Remarks:</i> A noop coroutine's <code>ptr</code> always contains non-null pointer value.</ins>
+</blockquote>
+
+<!--
+
+<p>Modify subclause 18.11.2.3 [coroutine.handle.observers] as follows:</p>
+
+<blockquote>
+<h3>18.11.2.3 <code>coroutine_handle</code> observers [coroutine.handle.observers]</h3>
+<p><code>bool <ins>coroutine_handle&lt;&gt;::</ins>done() const;</code><br>
+  <ins><code>bool coroutine_handle&lt;Promise&gt;::done() const;</code></ins><br>
+  <ins><code>bool coroutine_handle&lt;noop_coroutine_promise&gt;::done() const noexcept;</code></ins>
+  </p>
+<p>
+  2 <i>Requires:</i> <code>*this</code> refers to a suspended coroutine. <br>
+  3 <i>Returns:</i> <code>true</code> if the coroutine is suspended at its final suspend point, otherwise <code>false</code>.<br>
+  <ins>4 <i>Remarks:</i> A noop coroutine is always considered suspended at non final suspend point and therefore
+    <code>done</code> always return <code>false</code>.</ins>
+</p>
+</blockquote>
+-->
+
+<p>Add subclause 18.11.2.7 [coroutine.handle.noop.observers]:</p>
+
+<blockquote>
+<h3>18.11.2.7 <code>noop_coroutine_handle</code> observers [coroutine.handle.noop.observers]:</h3>
+<code>constexpr explicit operator bool() const noexcept;</code>
+<p>1 <i>Returns:</i> <code>true</code> <br><p></p>
+<code>constexpr bool done() const noexcept;</code>
+<p>2 <i>Returns:</i> <code>false</code> </p>
+</blockquote>
+
+<p>Add subclause 18.11.2.8 [coroutine.handle.noop.resumption]:</p>
+
+<blockquote>
+<h3>18.11.2.8 <code>noop_coroutine_handle</code> resumption [coroutine.handle.noop.resumption]:</h3>
+<pre>
+constexpr void operator()() const noexcept;
+constexpr void resume() const noexcept;
+constexpr void destroy() const noexcept; </pre>
+<p style="text-align:left">
+1 <i>Effects:</i> No observable side effects. <br>
+2 <i>Remarks:</i> If <code>noop_coroutine_handle</code> is converted to
+<code>coroutine_handle&lt;&gt;</code>, calls to <code>operator()</code>, 
+<code>resume</code> and <code>destroy</code> on that handle will also
+have no observable side effects.
+</p>
+</blockquote>
+
+<p>Add subclause 18.11.2.9 [coroutine.handle.noop.promise]:</p>
+
+<blockquote>
+<h3>18.11.2.9 <code>noop_coroutine_handle</code> promise access [coroutine.handle.noop.promise]:</h3>
+<code>noop_coroutine_promise&amp; promise() const noexcept;</code>
+<p>1 <i>Returns:</i> a reference to a promise object associated with this coroutine handle. <br><p></p>
+</blockquote>
+
+<p>Add subclause 18.11.4 [coroutine.promise.noop]:</p>
+
+<blockquote>
+<h3>18.11.4 Class <code>noop_coroutine_promise</code> [coroutine.promise.noop]</h3>
+<p><code>struct noop_coroutine_promise{};</code></p>
+<p>1 The class <code>noop_coroutine_promise</code> defines the promise type for 
+the coroutine referred to by <code>noop_coroutine_handle</code> (18.11.5).
+</p>
+</blockquote>
+
+<p>Add subclause 18.11.5 [coroutine.handle.noop]:</p>
+
+<blockquote>
+<h3>18.11.5 Class <code>noop_coroutine_handle</code> [coroutine.handle.noop]</h3>
+<p style="text-align:left">1 The type <code>noop_coroutine_handle</code> is a synonym for 
+<code>coroutine_handle&LTnoop_coroutine_promise&GT;</code>.
+</p>
+</blockquote>
+
+<p>Add subclause 18.11.6 [coroutine.noop]:</p>
+
+<blockquote>
+<h3>18.11.6 Function <code>noop_coroutine</code> [coroutine.noop]</h3>
+<code>noop_coroutine_handle noop_coroutine() noexcept;</code>
+<p>1 <i>Returns:</i> A handle to a coroutine that has no observable side effects when 
+resumed or destroyed.
+</p>
+<p>2 <i>Remarks:</i> A handle returned from <code>noop_coroutine</code> may or may
+not compare equal to a handle returned from another invocation of <code>noop_coroutine</code>.
+</p>
+</blockquote>
+
+<!-- <i>[Accepted: Toronto-7/10/2017]</i> -->
+
+</body>
+</html>

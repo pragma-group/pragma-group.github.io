@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>Networking TS changes to improve completion token flexibility and performance</title>
+  <style type="text/css">
+      code{white-space: pre-wrap;}
+      span.smallcaps{font-variant: small-caps;}
+      span.underline{text-decoration: underline;}
+      div.column{display: inline-block; vertical-align: top; width: 50%;}
+  </style>
+  <!--[if lt IE 9]>
+    <script src="//cdnjs.cloudflare.com/ajax/libs/html5shiv/3.7.3/html5shiv-printshiv.min.js"></script>
+  <![endif]-->
+  <style type="text/css">
+      h1.title {display:none}
+      ins {color:#00A000}
+      ins p code {color:#00A000}
+      p ins code {color:#00A000}
+      del {color:#A00000}
+      del p code {color:#A00000}
+      p del code {color:#A00000}
+      blockquote {border-left:0.4em solid #C0C0C0; padding-left:0.2em}
+      table, th, td {border:1px solid #C0C0C0}
+  </style>
+</head>
+<body>
+<header>
+<h1 class="title">Networking TS changes to improve completion token flexibility and performance</h1>
+</header>
+<pre>
+Document number: P1943R0
+Date:            2019-10-07
+Project:         Programming Language C++
+Audience:        LEWG, SG1
+Reply-to:        Christopher Kohlhoff &lt;chris&#x40;kohlhoff.com&gt;
+</pre>
+<h1 id="networking-ts-changes-to-improve-completion-token-flexibility-and-performance">Networking TS changes to improve completion token flexibility and performance</h1>
+<h2 id="introduction">Introduction</h2>
+<p>The Networking TS, and the Asio library on which it is based, uses <i>completion tokens</i> as a mechanism to customise the asynchronous API surface of the library. Completion tokens, which were first released in 2013 as part of Boost 1.54, automatically adapt asynchronous operations to the look and feel of the user&#8217;s preferred coordination mechanism. For example, the <code>use_future</code> token causes operations to produce a <code>std::future</code>; Asio&#8217;s <code>use_awaitable</code> token makes operations produce awaitables that are compatible with the Coroutines TS; and Asio&#8217;s <code>yield_context</code> or Boost.Fiber&#8217;s <code>yield</code> provide a synchronous experience on top of coroutines and fibers. The response from users has been overwhelmingly positive.</p>
+<p>However, completion tokens as currently specified have some limitations that constrain their support for, and efficiency in, certain use cases. In particular:</p>
+<ul>
+<li><p>The underlying asynchronous operations are always launched immediately, and there is no support for deferring the launch of the operation. Consequently, some form of synchronisation is required to prevent a race between suspension and resumption, when using coroutines or fibers.</p></li>
+<li><p>Many asynchronous operations allocate memory to store some intermediate state, and allocators may be used to optimise this cost away. However, there is no way to determine the memory requirements at compile time, and then to use this information to automatically pre-allocate suitable storage.</p></li>
+</ul>
+<p>This paper proposes the following changes to the completion token mechanism:</p>
+<ul>
+<li><p>Give concrete completion token implementations control over when and where an operation is initiated.</p></li>
+<li><p>Permit completion token implementations to incorporate operation initiation into the function return type, without type erasure.</p></li>
+<li><p>Introduce concepts to improve completion token usability.</p></li>
+<li><p>Allow completion token implementations to determine an operation&#8217;s intermediate memory storage requirements.</p></li>
+</ul>
+<h2 id="overview-of-proposed-changes">Overview of proposed changes</h2>
+<h3 id="new-form-for-the-async_result-customisation-point">New form for the <code>async_result</code> customisation point</h3>
+<p>These changes alter <code>async_result</code> to a simpler form with only a static member function named <code>initiate()</code>:</p>
+<pre lang="cpp">
+template &lt;class CompletionToken, class Signature&gt;
+struct async_result
+{
+  template&lt;
+      class Initiation,
+      class RawCompletionToken,
+      class... Args
+    &gt;
+  static <i>initiating-fn-return-type</i> initiate(
+      Initiation&amp;&amp; initiation,
+      RawCompletionToken&amp;&amp; token,
+      Args&amp;&amp;... args
+    );
+};
+</pre>
+<p>An <code>async_result</code> specialisation&#8217;s implementation of the <code>initiate()</code> static member function must:</p>
+<ul>
+<li><p>Transform the completion token into a completion handler object <code>handler</code>.</p></li>
+<li><p>Cause the invocation of the function object <code>initiation</code> as if by calling:</p></li>
+</ul>
+<pre><code>      std::forward&lt;Initiation&gt;(initiation)(
+          std::move(handler),
+          std::forward&lt;Args&gt;(args)...);</code></pre>
+<p>The invocation of <code>initiation</code> may be immediate, or it may be deferred (e.g.&#160;to support lazily evaluation). If initiation is deferred, the <code>initiation</code> and <code>args</code> objects must be decay-copied and moved as required.</p>
+<p>A helper function template <code>async_initiate</code> has also been added as a wrapper for the invocation of <code>async_result&lt;&gt;::initiate</code>:</p>
+<pre lang="cpp">
+template<
+    class CompletionToken,
+    completion_signature Signature,
+    class Initiation,
+    class... Args
+  >
+<i>DEDUCED</i> async_initiate(
+    Initiation&amp;&amp; initiation,
+    CompletionToken&amp; token,
+    Args&amp;&amp;... args
+  );
+</pre>
+<p>This change to <code>async_result</code> gives concrete completion token implementations control over when and where an operation is initiated. This enables use cases such as:</p>
+<ul>
+<li><p>Coroutines and fibers can defer initiation until after suspension. This eliminates a potential race between suspension and resumption that must otherwise be addressed using synchronisation.</p></li>
+<li><p>Users can specify a completion token that guarantees that operation initiation always occurs within the context of a particular executor, such as a strand.</p></li>
+<li><p>Lazy initiation of operations, by capturing the initiation object and arguments into the return type.</p></li>
+</ul>
+<p>In addition, this change also permits completion token implementations to incorporate the initiation object (and its arguments) into the function return type, without type erasure.</p>
+<h3 id="introduce-new-concepts">Introduce new concepts</h3>
+<p>This change introduces three new concepts:</p>
+<ul>
+<li><p><code>template &lt;class T&gt; concept completion_signature = /*...*/;</code><br/><br/> Checks if <code>T</code> is a signature of the form <code>R(Args...)</code>.</p></li>
+<li><p><code>template &lt;class T, completion_signature Signature&gt; concept completion_handler_for = /*...*/;</code><br/><br/> Checks if <code>T</code> is usable as a completion handler with the specified signature.</p></li>
+<li><p><code>template &lt;class T, completion_signature Signature&gt; concept completion_token_for = /*...*/;</code><br/><br/> Checks if <code>T</code> is a completion token that can be used with <code>async_initiate</code> and the specified signature.</p></li>
+</ul>
+<p>These concepts improve user experience by checking constraints at the API boundary. They also make asynchronous operation declarations self-documenting with respect to the operation&#8217;s completion signature, as in:</p>
+<pre lang="cpp">
+template&lt;
+    class AsyncReadStream,
+    class MutableBufferSequence,
+    completion_token_for&lt;void(error_code, size_t)&gt;&amp;&amp; CompletionToken
+  &gt;
+<i>DEDUCED</i> async_read(
+    AsyncReadStream&amp; s,
+    const MutableBufferSequence&amp; buffers,
+    CompletionToken&amp;&amp; token
+  );
+</pre>
+<h3 id="add-a-trait-to-determine-intermediate-storage-requirements">Add a trait to determine intermediate storage requirements</h3>
+<p>As specified in the Networking TS section <b>[async.reqmts.async.alloc]</b>, asynchronous operations may allocate memory and, if they do, will use the completion handler&#8217;s associated allocator. To support the pre-allocation of correctly sized memory, these changes add a new trait <code>intermediate_storage</code>.</p>
+<pre><code>template&lt;class T, class... Args&gt;
+struct intermediate_storage
+{
+  typedef see-below type;
+};
+
+template&lt;class T, class... Args&gt;
+using intermediate_storage_t = typename intermediate_storage&lt;T, Args...&gt;::type;</code></pre>
+<p>The primary template is defined such that:</p>
+<ul>
+<li><p>If <code>T</code> has a nested template type <code>type&lt;Args...&gt;</code>, <code>type</code> is <code>T::type&lt;Args...&gt;</code>.</p></li>
+<li><p>Otherwise, <code>type</code> is void.</p></li>
+</ul>
+<p>The trait may be specialised for user-defined types of <code>T</code>.</p>
+<p>When <code>type</code> is non-void, it shall be a trivial standard-layout type suitable for use as uninitialised storage by the operation initiated by the type <code>T</code>. The <code>type</code> shall be non-void only if an operation allocates fixed size memory, with at most one allocated object extant at any one time. If this requirement is not met, <code>type</code> shall be void. The trait may then be applied to the <code>Initiation</code> object passed to a concrete completion token&#8217;s <code>async_result</code> specialisation, and this requirement enables a trivial allocator implementation that simply returns the address of the pre-allocated storage.</p>
+<p>Asynchronous operations are not required to specialise this trait. However, implementation experience in Asio indicates that all operations defined within the TS can satisfy the requirement of this trait, and we may wish to mandate that they do.</p>
+<p>Importantly, this change places no burden on a user to maintain pre-allocated storage, unless they wish to do so. Users can continue to simply launch asynchronous operations without being exposed to the asynchronous lifetime requirements of the operation&#8217;s underlying state.</p>
+<h2 id="impact-of-proposed-changes">Impact of proposed changes</h2>
+<h3 id="impact-on-users-of-asynchronous-operations">Impact on users of asynchronous operations</h3>
+<p>Existing code, where asynchronous operations are consumed using the currently available completion tokens, is unaffected.</p>
+<p>For new code, users of asynchronous operations will have a wider set of completion token types and capabilities available to them. Some examples of these new completion tokens are illustrated in the Appendix below.</p>
+<h3 id="impact-on-authors-of-asynchronous-operations">Impact on authors of asynchronous operations</h3>
+<p>In order to illustrate the impact on authors of asynchronous operations, the following table shows the changes to the example from Networking TS section <b>[async.reqmts.async.return.value]</b>.</p>
+<table>
+<tr>
+<th>
+Before
+</th>
+<th>
+After
+</th>
+<tr>
+<td valign="top">
+<p>
+Given an asynchronous operation with Completion signature <code>void(R1 r1, R2 r2)</code>, an initiating function meeting these requirements may be implemented as follows:
+</p>
+<pre lang="cpp">
+template&lt;class CompletionToken&gt;
+auto async_xyz(T1 t1, T2 t2, CompletionToken&amp;&amp; token)
+{
+  typename async_result&lt;decay_t&lt;CompletionToken&gt;,
+    void(R1, R2)&gt;::completion_handler_type
+      completion_handler(forward&lt;CompletionToken&gt;(token));
+
+  async_result&lt;decay_t&lt;CompletionToken&gt;, void(R1, R2)&gt;
+    result(completion_handler);
+
+  <i>// initiate the operation and cause completion_handler</i>
+  <i>// to be invoked with the result</i>
+
+  return result.get();
+}
+</pre>
+</td>
+<td valign="top">
+<p>
+Given an asynchronous operation with Completion signature <code>void(R1 r1, R2 r2)</code>, an initiating function meeting these requirements may be implemented as follows:
+</p>
+<pre lang="cpp">
+template&lt;completion_token_for&lt;void(R1, R2)&gt; CompletionToken&gt;
+auto async_xyz(T1 t1, T2 t2, CompletionToken&amp;&amp; token)
+{
+  return async_result&lt;decay_t&lt;CompletionToken&gt;,
+    void(R1, R2)&gt;::initiate(
+      [](auto completion_handler, T1 t1, T2 t2)
+      {
+        <i>// initiate the operation and cause completion_handler</i>
+        <i>// to be invoked with the result</i>
+      }, forward&lt;CompletionToken&gt;(token), t1, t2);
+}
+</pre>
+</td>
+</tr>
+<tr>
+<td valign="top">
+<p>
+For convenience, initiating functions may be implemented using the <code>async_completion</code> template:
+</p>
+<pre lang="cpp">
+template&lt;class CompletionToken&gt;
+auto async_xyz(T1 t1, T2 t2, CompletionToken&amp;&amp; token)
+{
+  async_completion&lt;CompletionToken, void(R1, R2)&gt; init(token);
+
+  <i>// initiate the operation and cause init.completion_handler</i>
+  <i>// to be invoked with the result</i>
+
+  return init.result.get();
+}
+</pre>
+</td>
+<td valign="top">
+<p>
+For convenience, initiating functions may be implemented using the <code>async_initiate</code> function template:
+</p>
+<pre lang="cpp">
+template&lt;completion_token_for&lt;void(R1, R2)&gt; CompletionToken&gt;
+auto async_xyz(T1 t1, T2 t2, CompletionToken&amp;&amp; token)
+{
+  return async_initiate&lt;CompletionToken, void(R1, R2)&gt;(
+      [](auto completion_handler, T1 t1, T2 t2)
+      {
+        <i>// initiate the operation and cause completion_handler</i>
+        <i>// to be invoked with the result</i>
+      }, token, t1, t2);
+}
+</pre>
+</td>
+</tr>
+</table>
+<h3 id="impact-on-authors-of-completion-tokens">Impact on authors of completion tokens</h3>
+<p>As an example, let us consider a simple completion token:</p>
+<pre><code>constexpr struct log_result_t {} log_result;</code></pre>
+<p>that is used as follows:</p>
+<pre><code>my_timer.async_wait(log_result);</code></pre>
+<p>and which logs the result of an operation to <code>std::cout</code>. The following table illustrates the implementation of the completion token before and after the proposed changes.</p>
+<table>
+<tr>
+<th>
+Before
+</th>
+<th>
+After
+</th>
+<tr>
+<td valign="top">
+<pre lang="cpp">
+template &lt;class R, class... Args&gt;
+class async_result&lt;log_result_t, R(Args...)&gt;
+{
+public:
+  struct completion_handler_type
+  {
+    completion_handler_type(log_result_t)
+    {
+    }
+
+    void operator()(Args... args)
+    {
+      std::cout &lt;&lt; "Result:";
+      ((std::cout &lt;&lt; " " &lt;&lt; args), ...);
+      std::cout &lt;&lt; "\n";
+    }
+  };
+
+  using return_type = void;
+
+  explicit async_result(completion_handler_type&amp;)
+  {
+  }
+
+  return_type get()
+  {
+  }
+};
+</pre>
+</td>
+<td valign="top">
+<pre lang="cpp">
+template &lt;class R, class... Args&gt;
+struct async_result&lt;log_result_t, R(Args...)&gt;
+{
+  template &lt;class Initiation, class... InitArgs&gt;
+  static void initiate(Initiation initiation,
+      log_result_t, InitArgs&amp;&amp;... init_args)
+  {
+    initiation(
+        [](Args... args)
+        {
+          std::cout &lt;&lt; "Result:";
+          ((std::cout &lt;&lt; " " &lt;&lt; args), ...);
+          std::cout &lt;&lt; "\n";
+        }, std::forward&lt;InitArgs&gt;(init_args)...);
+  }
+};
+</pre>
+</td>
+</tr>
+</table>
+<h2 id="implementation-experience">Implementation experience</h2>
+<p>The first of the proposed changes:</p>
+<blockquote>
+<ul>
+<li>Give concrete completion token implementations control over when and where an operation is initiated.</li>
+</ul>
+</blockquote>
+<p>has been implemented in Asio 1.14.0, which was shipped as part of the Boost 1.70 release. The remaining three changes are currently implemented on branches of Asio and Boost.Asio.</p>
+<h2 id="appendix-example-completion-tokens">Appendix: Example completion tokens</h2>
+<h3 id="a-token-to-make-any-operation-lazy">A token to make any operation lazy</h3>
+<p>The <code>lazy</code> completion token transforms any asynchronous operation into a function object. This function object can be stored and used to launch the operation at a later time, using another completion token.</p>
+<h4 id="usage-example">Usage example</h4>
+<pre><code>auto lazy_op = my_timer.async_wait(lazy);
+// ...
+lazy_op([](auto...){ /*...*/ });</code></pre>
+<h4 id="completion-token-definition">Completion token definition</h4>
+<pre><code>constexpr struct lazy_t {} lazy;
+
+template &lt;completion_signature Signature&gt;
+struct async_result&lt;lazy_t, Signature&gt;
+{
+  template &lt;typename Initiation, typename... InitArgs&gt;
+  static auto initiate(Initiation initiation,
+      lazy_t, InitArgs... init_args)
+  {
+    return [
+        initiation = std::move(initiation),
+        init_arg_pack = std::make_tuple(std::move(init_args)...)
+      ](auto&amp;&amp; token) mutable
+    {
+      return std::apply(
+          [&amp;](auto&amp;&amp;... args)
+          {
+            return async_initiate&lt;decltype(token), Signature&gt;(
+                std::move(initiation), token,
+                std::forward&lt;decltype(args)&gt;(args)...);
+          },
+          std::move(init_arg_pack)
+        );
+    };
+  }
+};</code></pre>
+<h3 id="support-for-fibers">Support for fibers</h3>
+<p>The <code>use_fiber</code> completion token provides native support for fibers via the <code>boost::context::fiber</code> class (on which the proposed standards fibers are based).</p>
+<h4 id="usage-example-1">Usage example</h4>
+<pre><code>boost::context::fiber echo(tcp::socket socket, boost::context::fiber f)
+{
+  for (;;)
+  {
+    char data[1024];
+    auto [e1, n] = socket.async_read_some(buffer(data), use_fiber(f));
+    if (e1) break;
+    auto [e2, _] = async_write(socket, buffer(data, n), use_fiber(f));
+    if (e2) break;
+  }
+  return f;
+}</code></pre>
+<h4 id="completion-token-definition-1">Completion token definition</h4>
+<pre><code>struct use_fiber
+{
+  explicit use_fiber(boost::context::fiber&amp; f) : fiber(f) {}
+  boost::context::fiber&amp; fiber;
+};
+
+template &lt;typename R, typename... Args&gt;
+class async_result&lt;use_fiber, R(Args...)&gt;
+{
+public:
+  template &lt;typename Initiation, typename... InitArgs&gt;
+  static auto initiate(Initiation&amp;&amp; initiation,
+      use_fiber u, InitArgs&amp;&amp;... init_args)
+  {
+    std::tuple&lt;Args...&gt;* result_ptr;
+
+    u.fiber = std::move(u.fiber).resume_with(
+        [&amp;](boost::context::fiber f)
+        {
+          std::forward&lt;Initiation&gt;(initiation)(
+              [&amp;, f = std::move(f)](Args... results) mutable
+              {
+                std::tuple&lt;Args...&gt; result(std::move(results)...);
+                result_ptr = &amp;result;
+                std::move(f).resume();
+              },
+              std::forward&lt;InitArgs&gt;(init_args)...
+            );
+
+          return boost::context::fiber{};
+        }
+      );
+
+    return std::move(*result_ptr);
+  }
+};</code></pre>
+<h3 id="support-for-coroutines">Support for coroutines</h3>
+<p>The <code>use_await</code> token allows operations to be used with arbitrary coroutines. This example illustrates how the operation&#8217;s initiation object is captured within the awaitable without type erasure, as well using the <code>intermediate_storage</code> trait to reserve space within the awaitable object for use by the operation.</p>
+<h4 id="usage-example-2">Usage example</h4>
+<p>Note: <code>simple_coro</code> is a user-defined coroutine wrapper with a corresponding user-defined promise implementation.</p>
+<pre><code>simple_coro listener(tcp::acceptor&amp; acceptor)
+{
+  for (;;)
+  {
+    if (auto [_, socket] = co_await acceptor.async_accept(use_await); socket.is_open())
+    {
+      for (;;)
+      {
+        char data[1024];
+        auto [e1, n] = co_await socket.async_read_some(buffer(data), use_await);
+        if (e1) break;
+        auto [e2, _] = co_await async_write(socket, buffer(data, n), use_await);
+        if (e2) break;
+      }
+    }
+  }
+}</code></pre>
+<h4 id="completion-token-definition-2">Completion token definition</h4>
+<pre><code>constexpr struct use_await_t {} use_await;
+
+template &lt;typename R, typename... Args&gt;
+class async_result&lt;use_await_t, R(Args...)&gt;
+{
+private:
+  template &lt;typename Initiation, typename... InitArgs&gt;
+  struct awaitable
+  {
+    template &lt;typename T&gt;
+    class allocator;
+
+    struct handler
+    {
+      typedef allocator&lt;void&gt; allocator_type;
+
+      allocator_type get_allocator() const
+      {
+        return allocator_type(nullptr);
+      }
+
+      void operator()(Args... results)
+      {
+        std::tuple&lt;Args...&gt; result(std::move(results)...);
+        awaitable_-&gt;result_ = &amp;result;
+        coro_.resume();
+      }
+
+      awaitable* awaitable_;
+      std::experimental::coroutine_handle&lt;&gt; coro_;
+    };
+
+    using storage_type = intermediate_storage_t&lt;Initiation, handler, InitArgs...&gt;;
+
+    template &lt;typename T&gt;
+    class allocator
+    {
+    public:
+      typedef T value_type;
+
+      explicit allocator(awaitable* a) noexcept
+        : awaitable_(a)
+      {
+      }
+
+      template &lt;typename U&gt;
+      allocator(const allocator&lt;U&gt;&amp; a) noexcept
+        : awaitable_(a.awaitable_)
+      {
+      }
+
+      T* allocate(std::size_t n)
+      {
+        if constexpr (std::is_same_v&lt;storage_type, void&gt;)
+        {
+          return static_cast&lt;T*&gt;(::operator new(sizeof(T) * n));
+        }
+        else
+        {
+          return static_cast&lt;T*&gt;(static_cast&lt;void*&gt;(&amp;awaitable_-&gt;storage_));
+        }
+      }
+
+      void deallocate(T* p, std::size_t)
+      {
+        if constexpr (std::is_same_v&lt;storage_type, void&gt;)
+        {
+          ::operator delete(p);
+        }
+      }
+
+    private:
+      template &lt;typename&gt; friend class allocator;
+      awaitable* awaitable_;
+    };
+
+    bool await_ready() const noexcept
+    {
+      return false;
+    }
+
+    void await_suspend(std::experimental::coroutine_handle&lt;&gt; h) noexcept
+    {
+      std::apply(
+          [&amp;](auto&amp;&amp;... a)
+          {
+            initiation_(handler{this, h}, std::forward&lt;decltype(a)&gt;(a)...);
+          },
+          init_args_
+        );
+    }
+
+    std::tuple&lt;Args...&gt; await_resume()
+    {
+      return std::move(*static_cast&lt;std::tuple&lt;Args...&gt;*&gt;(result_));
+    }
+
+    Initiation initiation_;
+    std::tuple&lt;InitArgs...&gt; init_args_;
+    void* result_ = nullptr;
+    std::conditional_t&lt;std::is_same_v&lt;storage_type, void&gt;, char, storage_type&gt; storage_{};
+  };
+
+public:
+  template &lt;typename Initiation, typename... InitArgs&gt;
+  static auto initiate(Initiation initiation,
+      use_await_t, InitArgs... init_args)
+  {
+    return awaitable&lt;Initiation, InitArgs...&gt;{
+        std::move(initiation),
+        std::forward_as_tuple(std::move(init_args)...)};
+  }
+};</code></pre>
+</body>
+</html>

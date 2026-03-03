@@ -1,0 +1,657 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<style type="text/css">
+pre {font-family: "Consolas", "Lucida Console", monospace; margin-left:20pt; }
+code {font-family: "Consolas", "Lucida Console", monospace; }
+pre > i   { font-family: "Consolas", "Lucida Console", monospace;  font-style:italic; }
+code > i  { font-family: "Consolas", "Lucida Console", monospace;  font-style:italic; }
+pre > em  { font-family: "Consolas", "Lucida Console", monospace;  font-style:italic; }
+code > em { font-family: "Consolas", "Lucida Console", monospace;  font-style:italic; }
+body { color: #000000; background-color: #FFFFFF; }
+del { text-decoration: line-through; color: #8B0040; }
+ins { text-decoration: underline; color: #005100; }
+
+p.example   { margin-left: 2em; }
+pre.example { margin-left: 2em; }
+div.example { margin-left: 2em; }
+
+code.extract { background-color: #F5F6A2; }
+pre.extract  { margin-left: 2em; background-color: #F5F6A2;  border: 1px solid #E1E28E; }
+
+p.function    { }
+.attribute    { margin-left: 2em; }
+.attribute dt { float: left; font-style: italic;  padding-right: 1ex; }
+.attribute dd { margin-left: 0em; }
+
+blockquote.std    { color: #000000; background-color: #F1F1F1;  border: 1px solid #D1D1D1;  padding-left: 0.5em; padding-right: 0.5em; }
+blockquote.stddel { text-decoration: line-through;  color: #000000; background-color: #FFEBFF;  border: 1px solid #ECD7EC;  padding-left: 0.5empadding-right: 0.5em; ; }
+blockquote.stdins { text-decoration: underline;  color: #000000; background-color: #C8FFC8;  border: 1px solid #B3EBB3; padding: 0.5em; }
+table.header { border: 0px; border-spacing: 0;  margin-left: 0px; font-style: normal; }
+table { border: 1px solid black; border-spacing: 0px;  margin-left: auto; margin-right: auto; }
+th { text-align: left; vertical-align: top;  padding-left: 0.4em; border: none;  padding-right: 0.4em; border: none; }
+td { text-align: left;  padding-left: 0.4em; border: none;  padding-right: 0.4em; border: none; }
+
+.revision   { /*color: #005599;*/ }
+
+</style>
+
+<title>Contract violation handlers</title>
+
+</head>
+<body>
+
+<table class="header"><tbody>
+  <tr>
+    <th>Document number:&nbsp;&nbsp;</th><th> </th><td>D2339R0</td>
+  </tr>
+  <tr>
+    <th>Date:&nbsp;&nbsp;</th><th> </th><td>2021-03-15</td>
+  </tr>
+  <tr>
+    <th>Audience:&nbsp;&nbsp;</th><th> </th><td>SG21</td>
+  </tr>
+  <tr>
+    <th>Reply-to:&nbsp;&nbsp;</th><th> </th><td><address>Andrzej Krzemie&#324;ski &lt;akrzemi1 at gmail dot com&gt;</address>
+        </td>
+  </tr>
+</tbody></table>
+
+
+
+<h1>Contract violation handlers</h1>
+
+
+<p>This document tries to put some structure to the recent reflector discussion about what
+   a contract violation handler should be allowed to do. There are basically three possibilities:</p>
+   
+<ol>
+  <li>It ends in calling <code>std::terminate()</code> or <code>std::abort()</code>.</li>
+  <li>It ends by throwing an exception.</li>
+  <li>It returns <em>normally</em> (like a function that calls <code>return;</code>).</li>
+  </ol>
+
+<p> The first option seems uncontroversial. The other two options face objections. Throwing an exception 
+    introduces a new control flow only for the path that contains a bug, which is likely not tested and one
+    that the program may not be prepared to handle. Returning normally does not protect against the likely
+    subsequent undefined behavior, which may result even in time travel and skipping the entire runtime check.</p>
+    
+<p> This document tries to describe in detail the use cases for non-aborting violation handlers. The hope is to 
+    build the common understanding of these use cases and their consequences within SG12. </p>
+
+
+
+<h2><a name="discussion">1. Discussion</a></h2>
+
+
+<h3><a name="discussion.expressing">1.1. Expressing preconditions in code</a></h3>
+
+<p> Preconditions in general are something that does not belong to code.
+    They are part of software documentation: part of human-to-human communication.
+	This is an example:</p>
+	
+<pre>int server_perform(Task * task);
+  <em>// Prerequisites: </em>
+  <em>// * `task` points to a valid object of type Task or derived</em>
+  <em>// * `task` has not already been performed</em>
+  <em>// * function `server_init` has been called prior to calling this function</em>
+</pre>
+
+<p> Only a subset of these prerequisites can be expressed in code. Using the notation from C++20 contracts (<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p0542r5.html"
+      >[P0542r5]</a>),
+    one could express a subset of these prerequisites like this:</p>
+	
+<pre>int server_perform(Task * task)
+  [[pre: task != nullptr]]
+  [[pre: !task->performed()]];
+  <em>// Prerequisites: </em>
+  <em>// * `task` points to a valid object of type Task or derived</em>
+  <em>// * function `server_init` has been called prior to calling this function</em>
+</pre>
+
+<p> However, if it is a policy in a given project that pointers passed and returned 
+    from functions are never null unless explicitly indicated, then typing <code>p != nullptr</code> on
+	every function may only add noice to the interface and distract human attention
+	from parts specific to a documented function. In order to address this, one could use 
+	C++ contracts in a different way: put contract annotations inside the function body:</p>
+	
+<pre>// header file:
+
+int server_perform(Task * task);
+  <em>// Prerequisites: </em>
+  <em>// * `task` points to a valid object of type Task or derived</em>
+  <em>// * `task` has not already been performed</em>
+  <em>// * function `server_init` has been called prior to calling this function</em>
+  
+// source file:
+
+int server_perform(Task * task)
+{
+  [[assert: task != nullptr]];
+  [[assert: !task->performed()]];
+  
+  // function logic ....
+}</pre>
+
+<p> In fact, testing parts of the precondition inside function body is what most libraries for contract-checking do today. 
+    For instance, C++ Core Guidelines (<a href="http://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines">[CppCoreGuidelines]</a>) recommend doing this.
+	Admittedly, current libraries often do this, because there is no way to put these annotations into function declarations. But even if this
+	possibility is added to the language, there may be cases where in-body annotations would be preferred:<p>
+	
+<pre>template&lt;forward_range R, class T,
+         indirect_strict_weak_order&lt;T*, iterator_t&lt;R&gt;&gt; Comp = ranges::less>
+  constexpr bool binary_search(R&amp;&amp; r, const T&amp; value, Comp comp = {})
+  {
+    auto checked_pred = [&amp;](iterator_t&lt;R&gt;&gt; lhs, iterator_t&lt;R&gt;&gt; rhs)
+    {
+      if (comp(lhs, rhs))
+      {
+        [[assert: !comp(rhs, lhs)]]; // the subset of requirements in `indirect_strict_weak_order`
+        return true;
+      }
+	  
+      return false;
+    };
+	
+    _binary_search(std::move(r), value, checked_pred);
+  }</pre>
+  
+<p>The runtime complexity of <code>binary_search</code> is O(log(<var>n</var>)). If we wanted to check the correctness of the predicate for all input values, if it respects the strict weak ordering rules, we would increase the complexity to O(<var>n</var><sup>2</sup>). We could turn it into an <code>audit</code>-level check, but it would never be usable in production. But if we test the predicate only on the values that we actually visit, we get back the complexity of O(log(<var>n</var>)). We could extract this hack into a dedicated function, but the way it is expressed in the above example feels simpler.</p>
+
+<h3><a name="discussion.precond_semantics">1.2. What do preconditions do?</a></h3>
+
+<p>What effect do precondition declarations have on the compiled binaries? For each precondition declaration there are two possible outcomes: </p>
+
+<ul>
+  <li>either the declaration does not affect the binary,</li>
+  <li>or an additional runtime code, possibly with side effects is injected.</li>
+</ul>
+
+<p> Which of the two it is, is dependent on factors external to the source code, such as build modes. 
+    What code is actually injected is still an open issue and the subject of this paper. 
+    The answer depends on whether we allow the handlers to throw or return normally.</p>
+    
+<p>Given the following declaration,</p>
+
+<pre>int f(int* p) 
+  [[pre: p != nullptr]]
+{
+  return *p;
+}</pre>
+
+<p> Assuming that the user-installed violation handler is accessible through function <code>violation_handler()</code>,
+    the code injected for a terminating violation handler could look like the following:</p>
+    
+<pre>int f(int* p) 
+{
+  if ((p != nullptr) == false)
+  {
+    []() noexcept { violation_handler(); }(); <em>// immediately invoked lambda</em>
+    std::terminate();
+  }
+  
+  return *p;
+}</pre>    
+
+
+<p> The call to the handler is wrapped into a <code>noexcept</code> lambda so that any exception trown
+    from inside the handler is turned into a call to <code>std::terminate()</code>. A different implementation of
+    terminating handler would be to statically enforce that the registered handler is declared as <code>noexcept</code>:</p>
+    
+<pre>int f(int* p) 
+{
+  if ((p != nullptr) == false)
+  {
+    static_assert(noexcept(violation_handler()));
+    violation_handler();
+    std::terminate();
+  }
+  
+  return *p;
+}</pre>    
+    
+<p>If throwing violation handlers are allowed, the "runtime check" generated from the precondition would be equivalent to:</p>
+
+<pre>int f(int* p) 
+{
+  if ((p != nullptr) == false)
+  {
+    violation_handler();
+    std::terminate();
+  }
+  
+  return *p;
+}</pre>  
+
+<p> Finally, a use case where the failed runtime check does not necessarily stop the execution of the function could be handled 
+    by the following generated runtime code:</p>
+
+<pre>int f(int* p) 
+{
+  if ((p != nullptr) == false)
+  {
+    violation_handler();
+  }
+  
+  return *p;
+}</pre>  
+
+
+<h3><a name="discussion.precond_purpose">1.3. What are preconditions used for?</a></h3>
+
+<p> Let's consider three use cases. First, a precondition expresses a condition which unsatisfied
+    leads to undefined behavior. We have seen an example of this in the previous section:
+    </p>
+
+<pre>int f(int* p) 
+  [[pre: p != nullptr]]
+{
+  return *p; <em>// UB if this pointer is null</em>
+}</pre>
+
+<p> Second use case is when we express a condition which when violated has a well defined behavior in C++,
+    but its consequences are known to be grave. Consider a precondition that expresses the potential SQL injection:</p>
+ 
+<pre>int Server::user_count(std::string user_name)
+  [[pre: is_sanitized(user_name)]]
+{
+  return execute(build_sql(user_name));
+}</pre>
+
+<p> Third use case is when upon a violated precondition nothing inside our function can "break", 
+    but it is clear that there is a bug in the caller. We provide three examples for this use case.</p>
+    
+<pre>int f(int* p) 
+  [[pre: p != nullptr]]
+{
+  if (p == nullptr)
+    throw std::logic_error("bad pointer value");
+    
+  return *p; <em>// never null</em>
+}</pre>
+
+<p> Here, the function protects itself against the incorrect usage, and signals it at runtime. But we still declare it
+    in the precondition in order to signal that such situation is a bug, and help tools like IDEs or static analyzers 
+    detect this bug statically rather than waiting till run time.</p>
+    
+<pre>bool is_in_range(int val, int min, int max) 
+  [[pre: min &lt;= max]]
+{
+  return min &lt;= val &amp;&amp; val &lt;= max;
+}</pre>
+
+<p> In the above example we are comfortable with returning <em>some</em> result for any combination of input values.
+    However, we are able to tell that if <code>min &gt; max</code> there must be a bug in the caller, because then
+    <code>min</code> and <code>max</code> no longer represent a range, so the function call is meaningless.
+    </p>
+
+<p>The last illustration:</p>
+
+<pre>Cache::Cache(size_t size)
+  [[size > 0]]
+  : vector(size)
+{
+  expensive_initialization_of_auxiliaty_data_structures();
+}</pre>
+
+<p> Creating a cache of size zero is technically correct. The application will perform correctly, but inefficiently.
+    There is no point in creating a zero-sized cache as you pay the cost of maintaining the data structure, 
+    but you are actually caching nothing. If this happens, it is possible that a user misunderstood the interface
+    of our cache. By using the precondition, we enable any tool that makes use of it to alert the user that their
+    solution can be improved by using the interface correctly. </p>
+    
+<p> All the above use case are quite different, but they have one thing in common: in each case we
+    detect that the program has a bug: big or small, fatal or benign, but definately a bug.
+   </p>
+
+
+<h3><a name="discussion.models">1.4. Programming models for contract annotations and contract violations</a></h3>
+
+
+<p> There are at least two ways of looking at what contract annotations represent:
+    </p>
+    
+<ol>
+  <li>They declare what constitutes a bug in the program.</li>
+  <li>They are a control flow mechanism, customizable through compiler switches.</li>
+</ol>
+
+<p> While to some extend these two views can co-exist, they have also incompatible differences. For instance,
+    under the first model it makes sense to allow the compiler to refuse to compile the code and report an error
+    when it can prove that the program when run would inevitably cause a contract expressed by an annotation
+    to be violated.</p>
+    
+<p> Under the second model, when the programmer knows that the violation handler ends in throwing an exception,
+    she can use contract annotations like this:</p>
+    
+<pre>void throw_if_contract_checking_enabled()
+  // Sys owner: remember to always install a throwing handler
+  [[pre: false]]
+{}
+
+int main()
+{
+  try {
+    throw_if_contract_checking_enabled();
+    std::cout &lt;&lt; "Hello, contract checking is disabled \n";
+  }
+  catch(...) {
+    std::cout &lt;&lt; "Hello, contract checking is enabled \n";
+  }
+  
+}</pre>
+
+
+<h3><a name="discussion.handler_usages">1.5. Use cases for violation handlers?</a></h3>
+
+<h4><a name="discussion.handler_usages.prevent_damage">1.5.1. Prevent damage</a></h4>
+
+<p> The most obvious and uncontroversial is the use case for preventing any damage that 
+    a program with runtime-confirmed bug may cause. 
+    We suspect that our program contains bugs and some of them may have grave consequences, 
+    like allowing unauthorized access or returning random results. We want to minimize the risk, 
+    so whenever our declared preconditions (or other contract annotations) detect one of these 
+    potential situations, we want to shut down the application immediately. 
+</p>
+
+<h4><a name="discussion.handler_usages.sanitize">1.5.2. Inform about runtime-detected potentially critical checks</a></h4>
+
+<p> Just to kill the application may not be satisfactory. We may also expect that the
+    application will communicate somehow that it made a deliberate decision to stop, and can give us some context
+    that would help us find the bug. This can be a short message displayed to standard output, or a core dump. This 
+    part wil be covered by the violation handler. But in order for this to work, we need the program to terminate. 
+    It is only the halting of the program that gives us the guarantee that: 
+</p>
+
+<ul>
+  <li>The program will not execute beyond the failed contract point.</li>
+  <li>The handler will be called for a failed contract check, regardless of what source code follows the precondition declaration.</li>
+</ul>
+
+
+<h4><a name="discussion.handler_usages.test">1.5.3. Test the existence of defensive checks</a></h4>
+
+
+<p> If precondition annotations are put in function declarations, it is easy to visually confirm that they are there.
+    However, if the library is interested in only performing runtime defensive checks inside the body of the function as in: </p>
+
+<pre>int server_perform(Task * task)
+{
+  [[assert: task != nullptr]];
+  [[assert: !task->performed()]];
+  
+  // function logic ....
+}</pre>
+
+<p> one might want to unit-test if these defensive checks have been put in place. The way to do it is to actually call the function
+    out of contract and see if the violation handler has been triggered. There are two tricky parts about this process, though.
+	</p>
+	
+<ol>
+    <li>This is the only place where we deliberately call a function with its contract violated. This breaks the programming model
+        which treats each contract violation as a bug that requires fixing. Implementations have license to diagnose it and even should be allowed to refuse
+        to compile such code. This may confuse the tools (static analyzers, IDEs).
+        Of course, this is just a proposed programming model. Under a different model, contract annotations are just control statements (like <code>throw</code>). Unit-testing of contract violations relies on this weaker model.
+    </li>
+    <li>The function that called the handler must not be allowed to continue (it may be not prepared for such case), but at the same
+        time we need the test program to continue in order to build the test report.</li>
+</ol>
+
+<p> While the first problem remains unresolved, there are two known ways of solving the second one. One is to use
+    "death tests", as called in <a href="https://github.com/google/googletest">[GTest]</a> 
+	(see <a href="https://github.com/google/googletest/blob/master/docs/advanced.md#death-tests"
+	>https://github.com/google/googletest/blob/master/docs/advanced.md#death-tests</a>). In short, for each such test we spawn a new process
+	and in that process call the function with violated contract; then we check if the process terminated. This process does not work
+	in all cases, though; and the time it takes to exectue the "negative" tests this way is noticeable.</p>
+	
+<p>	The other way of testing the existence of defensive runtime-checks is to install, for the purpose of performing unit tests,
+    a contract violation handler that throws a unique exception type representing the detected violation. Now the test can check if the
+	expected exception is thrown when bad function arguments are passed.</p>
+	
+<p> There are two objections to throwing violation handlers.</p>
+
+<ol>
+    <li>A program that caused the contract violation is allowed to continue.</li>
+    <li>Functions tested this way cannot be declared <code>noexcept</code>.</li>
+</ol>
+
+<p> Regarding the first objection. While a throw skips most of the function body, some subsequent instructions
+    inside the function are still executed: destructors. Destructors also require that the preceeding code has
+    not violated the contract. Destructors can also have preconditions that need to be satisfied. Second, 
+    while the body of the function may be skipped, the calling code will likely catch the exception at some
+    point, and continue the normal execution. This requires weakening the programming model and treating
+    contract violations as an ordinary control flow mechanism.</p>
+    
+<p> This part of the criticism assumes that throwing handlers are used in programs that potentially run in 
+    production environments. But this is not the case. Users who wish to test the presence of defensive checks in this way will only install
+    throwing violation handlers in their unit-test programs: never in the shipped executables. The unit-test environment
+    is special here: (1) only the developers are consumers, (2) exceptions from violation handlers never travel long
+    through the call stack: they are immediately caught at the next call stack frame.</p>
+
+<p> Regarding the second objection. This actually requires to answer a different question first: what is
+    <code>noexcept</code> for?</p>
+    
+<ol>
+    <li>Is it only for move constructor and move assignment, as was the original intent, reflected in
+        <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2010/n3050.html">[N3050]</a>?</li>
+    <li>Is it a guarantee that the function will never throw, so that compilers can skip generating
+        the stack unwinding code?</li>
+</ol>
+
+<p> If the answer is 1, then the "<code>noexcept</code>" objection to throwing violation handlers is moot.
+    Move operations practically always have wide contracts. If the answer is 2, then the objection becomes real.
+    Library vendors who chose to test their libraries this way would have to make sure that their functions
+    with narrow contracts are never <code>noexcept</code>, this will affect their consumers, who will get
+    libraries that generate suboptimal executables (in terms of performance).</p>
+    
+    
+<h4><a name="discussion.handler_usages.review">1.5.4. Check for benign bugs</a></h4>
+
+<p> A programmer may know that some contract annotations represent benign bugs. Sometimes this is because
+    the programmer knows the properties of a given component, like the implementation of cache, where zero
+    size will work, but suboptimally. Sometimes the programmer can assume that certain bugs are benign through
+    the following process. If a piece of software has been running in production for a couple of years and has
+    stabilized, it is safe to assume that it has no serious bugs. In the next release, one can add contract
+    annotations that were previously absent. If they are now runtime-checked and report the violation, it
+    is safe to assume that thus discovered bugs are benign. At this point terminating the program would
+    be a bad decision. So, we need a handler that will only log the violation event, and let the program continue.
+    </p>
+
+<p> There are two objections to violation handlers that just return normally (and let the program continue).
+    First, we loose the guarantee that doesn't allow the program to execute beyond the failed runtime check.</p>
+    
+<p> Second. some preconditions protect against the undefined behavior inside the function body. If the execution continues
+    after the failed runtime check, such undefined behavior is engaged, and its consequences can travel back through
+    time and cause the preceding runtime check to be erased. As a result, the programmer thinks that the condition is 
+    runtime-checked because runtime checking has been enabled by a compiler switch, but the precondition check is
+    in fact skipped due to the subsequent undefined behavior. The following example illustrates this:
+    </p>
+    
+<pre>namespace 
+{
+  int bug_count = 0;
+  void violation_handler() { ++bug_count; }  
+}
+
+int fun(int * p)
+  [[pre: p != nullptr]]
+{
+  return *p;  <em>// UB if p is null</em>
+}
+
+int gun(int* p)
+{
+  return fun(p) + bug_count;
+}</pre>
+
+<p> When runtime checks are generated from preconditions, and the program is allowed to continue after 
+    calling the violaiton handler, the generated code will be equivalent to:</p>
+
+<pre>namespace 
+{
+  int bug_count = 0;
+  void violation_handler() { ++bug_count; }  
+}
+
+int fun(int * p)
+{
+  return *p;  <em>// UB if p is null</em>
+}
+
+int gun(int* p)
+{
+  if (!p)                <em>// injected from precondition</em>
+    violation_handler(); <em>//</em>
+    
+  return fun(p) + bug_count;
+}</pre>
+
+<p> One might expect that the injected check is performed and the handler executed, but an optimizing compiler can observe
+    that if <code>p</code> passed to <code>gun</code> is null, then it will be passed to <code>fun</code> and there cause
+    undefined behavior (UB). The compiler is allowed to assume that UB never happens; from this it can conclude that <code>p</code>
+    is never null, and based on this conclusion it can eliminate the defensive check in <code>gun</code>. Compilers really 
+    do this today, as demonstrated in this Compiler Explorer example: <a href="https://godbolt.org/z/Yz73z4">https://godbolt.org/z/Yz73z4</a>.</p>
+    
+<p> In response to this concern, we could say that continuing violation handlers are a sharp tool that should 
+    be used only under a strict regime. This regime is: first test your application thoroughly for any bugs or UB, and if nothing shows up
+    only then add new preconditions that allow continuation. If any precondition violation is runtime-detected at that point, it must be
+    a benign bug, so runtime check cannot be magically compromised by the subsequent UB.
+    </p>
+
+<p>However, consider a different example, containing a benign bug:</p>
+
+<pre>int f(int * p)
+  [[pre: p]]
+  [[pre: *p &gt; 0]]
+{
+  if (!p || *p &lt;= 0)      <em>// safety double-check </em>
+    return std::logic_arror("");
+    
+  return *p - 1;
+}</pre>
+
+<p> If this function is invoked in a program that doesn't runtime-check contract annotations, it behaves in a tolerable way: it throws an exception.
+    But when runtime checking is enabled and the violation handler returns normally, this code is equivalent to:</p>
+  
+<pre>int f(int * p)
+{
+  if (!p)                 <em>// (1)</em>
+    violation_handler();
+    
+  if (*p &lt;= 0)            <em>// (2)</em>
+    violation_handler();
+    
+  if (!p || *p &lt;= 0)      <em>// safety double-check </em>
+    return std::logic_arror("");
+    
+  return *p - 1;
+}</pre>  
+    
+<p> Now, the compiler can see that if <code>p</code> is null, the control will eventually reach line marked with (2) 
+    and cause the dereference, which is UB. Since the compiler can assume that UB never happens, it can conclude that
+    <code>p</code> is never null and can ellide the null-ness check in two places, rendering the code equivalent to:</p>
+    
+<pre>int f(int * p)
+{    
+  if (*p &lt;= 0)            <em>// (2)</em>
+    violation_handler();
+    
+  if (*p &lt;= 0)            <em>// safety double-check also compromised</em>
+    return std::logic_arror("");
+    
+  return *p - 1;
+}</pre>
+
+<p> And now our program obtained undefined behavior for null pointer values of <code>p</code> only because we enabled the runtime-checking
+    of contract annotations! The key observetion here is that the defensive check that uses logical operator AND has the short-circuiting property:</p>
+    
+<pre>int f(int * p)
+{    
+  if (!p || *p &lt;= 0)      <em>// null `p` never dereferenced </em>
+    return std::logic_arror("");
+    
+  return *p - 1;
+}</pre>
+
+<p> Short-circuiting also occurs for a combination of <code>if</code>-statements and <code>return</code>s:</p>
+
+<pre>int f(int * p)
+{  
+  if (!p)
+    return std::logic_arror("");
+    
+  if (*p &lt;= 0)      <em>// null `p` never dereferenced </em>
+    return std::logic_arror("");
+    
+  return *p - 1;
+}</pre>
+
+<p> It also occurs for subsequent precndition annotations, provided that the violation handler terminates:</p>
+    
+<pre>int f(int * p)
+  [[pre: p]]      <em>// hopefully, the violation handler terminates </em>
+  [[pre: *p &gt; 0]]
+  ;</pre>
+
+<p>But short-circuiting is gone, when the handler allows the program flow to continue.</p>  
+
+<p> Avoiding this nasty effect in the language would require an introduction of a new thing into the language: <em>observable checkpoints</em>
+    as described in <a href="http://open-std.org/JTC1/SC22/WG21/docs/papers/2019/p1494r0.html">[P1494r0]</a>. Otherwise, 
+    we would have to leave it as a gothcha and teach that expressions that depend on another expressions be put in one annotation:</p>
+    
+<pre>int f(int * p)
+  [[pre: p &amp;&amp; *p &gt; 0]] 
+  ;</pre>    
+
+<p>or</p>
+
+<pre>int f(int * p)
+  [[pre: p]]
+  [[pre: p &amp;&amp; *p &gt; 0]] 
+  ;</pre>  
+
+<h2><a name="acknowledgments">2. Acknowledgments</a></h2>
+
+
+<p>This paper summarizes the input of a number of SG21 members, offerd in the meetings and the reflector.</p>
+
+
+
+<h2><a name="literature">3. References</a></h2>
+
+<ul>
+
+  <li>[P0542r5] &mdash; G. Dos Reis, J. D. Garcia, J. Lakos, A. Meredith, N. Myers, B. Stroustrup,
+      "Support for contract based programming in C++" <br>
+      (<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p0542r5.html"
+      >http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p0542r5.html</a>).
+      </li>
+	  
+  <li>[CppCoreGuidelines] &mdash; Bjarne Stroustrup, Herb Sutter, 
+      "C++ Core Guidelines" <br>
+      (<a href="http://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines"
+      >http://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines</a>).
+      </li>
+      
+  <li>[GTest] &mdash; <tt>googletest</tt> library <br>
+    (<a href="https://github.com/google/googletest"
+    >https://github.com/google/googletest</a>).
+    </li>
+
+  <li>[N3050] &mdash; David Abrahams, Rani Sharoni, Doug Gregor,
+    "Allowing Move Constructors to Throw (Rev. 1)" <br>
+    (<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2010/n3050.html"
+    >http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2010/n3050.html</a>).
+    </li>
+    
+   <li>[P1494r0] &mdash; S. Davis Herring, "Partial program correctness" <br>
+   (<a href="http://open-std.org/JTC1/SC22/WG21/docs/papers/2019/p1494r0.html">http://open-std.org/JTC1/SC22/WG21/docs/papers/2019/p1494r0.html</a>).
+
+</ul>
+
+</body>
+</html>
+

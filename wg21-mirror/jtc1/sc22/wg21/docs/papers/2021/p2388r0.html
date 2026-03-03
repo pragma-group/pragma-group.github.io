@@ -1,0 +1,774 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<style type="text/css">
+pre {font-family: "Consolas", "Lucida Console", monospace; margin-left:20pt; }
+code {font-family: "Consolas", "Lucida Console", monospace; }
+pre > i   { font-family: "Consolas", "Lucida Console", monospace;  font-style:italic; }
+code > i  { font-family: "Consolas", "Lucida Console", monospace;  font-style:italic; }
+pre > em  { font-family: "Consolas", "Lucida Console", monospace;  font-style:italic; }
+code > em { font-family: "Consolas", "Lucida Console", monospace;  font-style:italic; }
+body { color: #000000; background-color: #FFFFFF; }
+del { text-decoration: line-through; color: #8B0040; }
+ins { text-decoration: underline; color: #005100; }
+
+p.example   { margin-left: 2em; }
+pre.example { margin-left: 2em; }
+div.example { margin-left: 2em; }
+
+code.extract { background-color: #F5F6A2; }
+pre.extract  { margin-left: 2em; background-color: #F5F6A2;  border: 1px solid #E1E28E; }
+
+p.function    { }
+.attribute    { margin-left: 2em; }
+.attribute dt { float: left; font-style: italic;  padding-right: 1ex; }
+.attribute dd { margin-left: 0em; }
+
+blockquote.std    { color: #000000; background-color: #F1F1F1;  border: 1px solid #D1D1D1;  padding-left: 0.5em; padding-right: 0.5em; }
+blockquote.stddel { text-decoration: line-through;  color: #000000; background-color: #FFEBFF;  border: 1px solid #ECD7EC;  padding-left: 0.5empadding-right: 0.5em; ; }
+blockquote.stdins { text-decoration: underline;  color: #000000; background-color: #C8FFC8;  border: 1px solid #B3EBB3; padding: 0.5em; }
+table.header { border: 0px; border-spacing: 0;  margin-left: 0px; font-style: normal; }
+table { border: 1px solid black; border-spacing: 0px;  margin-left: auto; margin-right: auto; }
+th { text-align: left; vertical-align: top;  padding-left: 0.4em; border: none;  padding-right: 0.4em; border: none; }
+td { text-align: left;  padding-left: 0.4em; border: none;  padding-right: 0.4em; border: none; }
+
+.revision   { /*color: #005599;*/ }
+
+</style>
+
+<title>Abort-only contract support</title>
+
+</head>
+<body>
+
+<table class="header"><tbody>
+  <tr>
+    <th>Document number:&nbsp;&nbsp;</th><th> </th><td>P2388R0</td>
+  </tr>
+  <tr>
+    <th>Date:&nbsp;&nbsp;</th><th> </th><td>2021-06-15</td>
+  </tr>
+  <tr>
+    <th>Audience:&nbsp;&nbsp;</th><th> </th><td>SG21</td>
+  </tr>
+  <tr>
+    <th>Reply-to:&nbsp;&nbsp;</th><th> </th><td><address>Andrzej Krzemieński &lt;akrzemi1 at gmail dot com&gt;</address>
+    <address>Gašper Ažman &lt;gasper dot azman at gmail dot com&gt;</address>
+      </td>
+  </tr>
+</tbody></table>
+
+
+
+<h1>Abort-only contract support</h1>
+
+
+<p> This paper proposes a contract support framework which is smaller than
+    <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p2182r1.html">[P2182R1]</a>.
+    We try to remain compatible with the plan in <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p2182r1.html">[P2182R1]</a>
+    to introduce contract support in phases, with the first phase (the 
+Minimum Viable Product, MVP) being able to achieve the following goals:</p>
+    
+<ol>
+  <li>Be a coherent whole, and provide a value to multiple groups of developers.</li>
+  <li>Be small enough to guarantee that it will progress fast through the standardization pipeline.</li>
+  <li>Be devoid of any controversial design issues; this is to obtain the maximum consensus.</li>
+</ol>
+
+<p>Under this proposal a function containing a precondition annotation:</p>
+
+<pre>bool fun(int a, int b) 
+  [[pre: are_compatible(a, b)]] <em>// precondition annotation</em>
+{
+  return transform(a, b);
+}</pre>
+
+<p>Can render the runtime code where the precondition annotation is either ignored or produces code equivalent to:</p>
+
+<pre>bool fun(int a, int b)
+{
+  [&amp;]() noexcept { 
+    if (are_compatible(a, b) == false) {   <em>// Note: name lookup as in function declarations</em>
+      CONTRACT_VIOLATION_HANDLER("are_compatible(a, b)");
+      std::abort();
+    }
+  }(); <em>// immediately invoked lambda</em>
+    
+  return transform(a, b);
+}</pre>
+
+<p> That is: a runtime check is performed, and if it returns <code>false</code> an implementation-defined message is displayed 
+    to STDERR and <code>std::abort()</code> is called. If any exception is thrown during the evaluation of the predicate or the
+    logging statement, <code>std::terminate()</code> is called.</p>
+   
+
+<h2><a name="overview">1. Overview</a></h2>
+
+<p> In this document we use the following terms recommended in 
+    <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p2038r0.html">[P2038R0]</a> and
+    <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2021/p2358r0.pdf">[P2358R0]</a>:</p>
+
+<dl>
+<dt>Abstract machine violation</dt>
+<dd>This is what the Standard defines as Undefined Behavior in Clause 4 through Clause 15, which is often called a "hard undefined behavior" or "language undefined behavior", 
+    which includes things like <code>++INT_MAX</code>, <code>1/0</code> or null pointer dereference.</dd>
+<dt>BizBug</dt>
+<dd>A situation where a function is invoked in a way that is disallowed by its specification; or when it returns a value or has a side effect
+    disallowed by the specification. (This presupposes the existence of function "specification".)</dd>
+
+<dt>Contract annotation</dt>
+<dd>Declaration of a precondition or a postcondition or an assertion, such as <code>[[pre: i != 0]]</code> or <code>[[assert: x != y]]</code>.
+    Contract annotations can express a subset of function specification.</dd>
+</dl>
+
+<p> The minimum contract support proposed in this paper consists of the following elements. The attribute-like syntax for declaring
+    preconditions and postconditions on function declarations, and assertions inside function bodies:</p>
+    
+<pre>int select(int i, int j)   <em>// first declaration</em>
+  [[pre: i &gt;= 0]]
+  [[pre: j &gt;= 0]]
+  [[post r: r &gt;= 0]];      <em>// `r` names the return value</em>
+  
+int select(int i, int j);  <em>// subsequent declarations can</em>
+                           <em>// repeat or ignore the annotations</em>
+                          
+int select(int i, int j)   <em>// the definition</em>
+{
+  [[assert: _state &gt;= 0]];
+  
+  if (_state == 0) return i;
+  else             return j;
+} 
+</pre>
+
+<p> We require that the implementation allows the translation of the program in two modes: </p>
+
+<ol>
+  <li><em>Ignore</em>: compiler checks the validity of expressions in contract annotations, 
+      but the annotations have no effect on the generated binary. However, functions appearing in the predicate are ODR-used.
+      </li>
+  <li><em>Check_and_abort</em>: for each contract annotation compiler generates a runtime check.
+      The check evaluates the corresponding predicate, and if this evaluates to <code>false</code>
+      a <em>contract violation handler</em> is invoked.
+      </li>
+</ol>
+
+<p> We recommend (the ISO word "should") that the default mode is <em>Check_and_abort</em>.
+
+<p> What a contract violation handler does is implementation-defined subject to the following constraint.
+    The control never leaves the violation handler. It can either stop the program or run forever 
+    (e.g., in infinite loop or hit a breakpoint). If the program exits, an implementation-defined form 
+    of the status <em>unsuccessful termination</em> is returned. We recommend (the ISO word "should")
+    that the violation handler outputs a diagnostic message to the standard diagnostic stream and calls <code>std::abort()</code>.
+    This corresponds to what <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2021/p2358r0.pdf">[P2358R0]</a>
+    calls "Unspecified but never returns" and what <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1606r0.pdf">[P1606R0]</a>
+    calls "check_never_continue".</p>
+
+<p> We allow the implementations to provide a mixed mode, where some translation units are translated in 
+    <em>Ignore</em> mode and others in <em>Check_and_abort</em> mode. This may be necessary for linking
+    the user program with compiled libraries.</p>
+
+<p> This proposal does not include things like "assertion levels", "continuation mode", or the ability
+    to install a custom violation handler.</p>
+
+<p> Name lookup for preconditions and postconditions is performed as in trailing return type. Private and
+    protected members are accessible in predicates of preconditions and postconditions of member functions.
+    </p>
+
+<p> This proposal does not allow preconditions and postconditions for lambdas. Name lookup is already problematic
+    in lambdas in the face of lambda captures. This problem is pursued in 
+    <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2021/p2036r1.html">[P2036R1]</a>,
+    and until it has been solved we see no point in delaying the minimum contract support proposal.</p>
+
+<p> Although it is discouraged, side effects are allowed in the predicates of contract annotations.
+    Instead we allow the provision for the implementations to discard the side effects. This is similar to
+    copy elision from C++03.
+    Even in <em>Check_and_abort</em> mode, the implementation is allowed to discard or duplicate all (as opposed to 'some')
+    side effects of the evaluated predicate, as long as this does not affect the value returned by the expression. Consider:<p>
+
+<pre>bool is_positive(int i) {
+  std::printf("eval");
+  return i &gt; 0;
+}
+
+int produce() [[post r: is_positive(r)]];
+void consume(int i) [[pre: is_positive(i)]];
+
+int main() {
+  consume(produce());
+}</pre>
+
+<p> The above program translated in <em>Check_and_abort</em> mode is allowed to output "eval" 4, 3, 2, 1 or 0 times.
+    Of course, the program is still aborted if the value produced by <code>produce()</code>
+    is less than or equal to 0.</p>
+    
+<p> There is one case where we disallow naming the return value in the postcondition annotation: for non-definition declarations of
+    non-templated functions with placeholder return type:</p>
+    
+<pre>auto f(int i)
+  [[post r: r &gt;= 0]]; <em>// error: illegal introduction of name `r`</em>
+
+auto f(int i)
+  [[post r: r &gt;= 0]]  <em>// ok: this is definition</em>
+{
+  return std::abs(i);
+}
+</pre>
+
+<p>The rationale for this decision has been provided in  <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1323r2.html">[P1323R2]</a>.</p>
+
+
+<h2><a name="motivation">2. Motivation</a></h2>
+
+<p> The motivation for adding contract support to the language has already been provided multiple times, for example in
+    <a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2004/n1613.pdf">[N1613]</a>,
+    <a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2005/n1800.pdf">[N1800]</a>,
+    <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n4110.pdf">[N4110]</a>,
+    <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n4075.pdf">[N4075]</a>,  
+    <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n4135.pdf">[N4135]</a>,    
+    <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0380r0.pdf">[P0380R0]</a>,
+    <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p2182r1.html">[P2182R1]</a>.
+    
+    The motivation for starting with a minimal set of features has been provided in 
+    <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p2182r1.html">[P2182R1]</a>.
+    In short, the goal is to minimize the risk of having the discussions and disagreements about
+    the secondary features of contract support framework impede or prevent the addition of the primary
+    functionality: the ability for the programmer to communicate what is considered a bug in the program.
+    Thus, the plan for the MVP is to first determine if there exists a minimalistic subset that would
+    be considered uncontroversial and gather consensus, polish it, and deliver reasonably fast.
+    Only when this has been done, to start adding the secondary features on top of the stable core,
+    and if these features fail to get consensus, the core part of contract support framework would not be
+    in the risk of being removed or postponed.</p>    
+    
+<p> We have observed that even the portions of <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p2182r1.html">[P2182R1]</a>
+    arose controversies. This paper proposes to remove these portions. 
+    </p>
+
+
+<h3><a name="motivation.two_models">2.1. Two programming models</a></h3>
+
+<p> We have identified that there are at least two views on what a contract violation means. 
+    They both have supporters among the interested parties.</p>
+    
+<p> One view is that contract violation indicates a bug, and this situation is as serious as dereferencing
+    a null pointer or making an invalid access to memory. If this situation is detected at run-time,
+    the only acceptable default action is to immediately abort the execution of the program. This is
+    in order to prevent any further damage.</p>
+
+<p> The other view is that the contract violation is just a piece of information, usually about a bug 
+    (but not always: for instance, in unit tests a programmer may violate a contract on purpose), that can
+    be processed in a number of ways. Program termination is one, but the program might as well just
+    continue with the normal exectution or jump to a different location, for example, by throwing an exception.
+    </p>    
+
+<p> The two views conflict in wheher anything other than program termination should be allowed after
+    a runtime-confirmed contract violation. But they also have overlapping parts:</p>
+
+<ol>
+  <li>The common syntax for contract annotations.</li>
+  <li>The common understanding that contract violation, at least outside of unit tests, 
+      indicates a bug, which prorammers intend to avoid or fix.</li>
+  <li>Even the second view allows for the mode where the program is just aborted.</li>
+</ol>    
+
+<p> We believe that this overlapping part is already useful for many groups of programmers.
+    It allows the programmers to declare what they know to be a bug in their components.
+    It allows tools other than compilers — such as static analyzers or IDEs — 
+    to diagnose or help diagnose bugs in programs statically. The <em>Check_and_abort</em> mode
+    gives a guarantee to programmers that if a bug is detected at run-time the program — 
+    apart from aborting — will do no further damage. This enables UB-sanitizers to diagnose 
+    not only abstract machine violations ("hard" UB) but also contract violations: in a uniform way
+    (provided that this way does not require the program to contine after the reported violation).
+    </p>
+
+<p> Because this proposal is — we believe — a common part of the two views, 
+    we hope that proponents of either view should find nothing unacceptable, other than
+    that it is missing features.</p>
+
+
+<h2><a name="rationale">3. Design rationale</a></h2>
+
+
+<h3><a name="rationale.non_attribute">3.1. Why not use attributes</a></h3>
+
+<p> An alternative syntax for contract annotations would be to use attributes:</p>
+
+<pre><em>// not proposed</em>
+int f(int i)
+  [[pre(i &gt;= 0)]]
+  [[post(r: r &gt;= 0)]];
+</pre>
+
+<p> We do not propose this for two reasons. One is social: we do not want to depart
+    from what the previous proposal settled upon and what EWG agreed to. Second is technical.
+    this syntax will not work for assertions in function bodies:</p>
+
+<pre>
+int f(int i)
+{
+  [[assert(i &gt;= 0)]]; <em>// interpreted as macro</em>
+  return i;
+}
+</pre>
+
+<p> Here, the <code>assert</code> is interpreted as C macro and expanded, causeing a compiler error.
+    This problem is not present when identifier <code>assert</code> is followed by a colon.</p>
+
+
+
+<h3><a name="rationale.no_continue">3.2. Why disallow continuation (for now)</a></h3>
+
+
+<p> The behavior of runtime-checking, logging but not aborting has a number of surprising and non-obvious effects.</p>
+
+<p>First, in case the precondition is guarding against the Abstract Machine Violation (hard UB),
+   reaching the point of the abstract machine violation might result in what would be observed 
+   as removing the log entry for the previous contract violation. This is discussed in detail in appendix A.</p>
+     
+<p> Second, a mechanical transformation of every contract annotation to "check, log and continue"
+    can introduce a new Abstract Machine Violation (hard UB)
+   if the programmer assumes the short-circuiting behavior for subsequent contract 
+    annotations. Consider the following example. </p>
+
+<pre>int f(int * p)
+  [[pre: p]] [[pre: *p &gt; 0]]
+{
+  if (!p)      throw Bug{};  <em>// safety double-check </em>
+  if (*p &lt;= 0) throw Bug{};  <em>// safety double-check </em>
+
+  return *p - 1;             <em>// (*) business logic</em>
+}</pre>
+
+<p> This program upon <code>p == nullptr</code> behaves in a way that (1) does not cause abstract machine violation and
+    (2) guarantees that the business logic, indicated with *, is never reached. This happens for both <em>Ignore</em>
+    and <em>Check_and_abort</em> mode. However, in a mode that allows the program to continue, this causes abstract machine violation
+    upon runtime-checking the second precondition. This is explained in detail in appendix A.</p>    
+    
+<p> We believe that "the continuation mode" is a useful feature that is necessary for some essential applications
+    (like adding contracts in libraries in stages). Our motivation for omitting it from the MVP is the timing 
+    concerns: we want to deliver a small but relatively useful feature fast.</p>  
+
+
+<h3><a name="rationale.no_throw">3.3. Why disallow throwing on contract violation  (for now)</a></h3>
+
+<p> We propose to disallow throwing upon detected contract violation because it falls 
+    outside of one of the presented programming models: the one that says that it is unacceptable to allow
+    the program with a detected bug to continue.</p>
+    
+<p> By disallowing throwing we also avoid exploring and describing many aspects observable behavior that this would
+    trigger:</p>
+    
+<ol>
+  <li>How contracts interact with <code>noexcept</code>.</li>
+  <li>If the precondition is evaluated before the function call or inside the function.</li>
+</ol>
+
+<p> This makes the proposal smaller, and therefore more likely to progress faster through the WG21 process.</p>
+
+
+<h3><a name="rationale.no_handler">3.4. Why no user-provided violation handler (for now)</a></h3>
+
+<p> Not proposing the ability to install user-provided violation handlers is again motivated by timing constraints.
+    This way we avoid the necessity to specify the interface for the violation handler and its constraints.</p>
+    
+<p> However, the way we specify the handler (mostly implementation defined) allows for things like programmer installing
+    a callback in an implementation-defined way.</p>
+    
+    
+    
+<h3><a name="rationale.side_effects">3.5. Why allow side effects in predicates</a></h3>
+
+
+<p> We intuitively expect that predicates in contract annotations are referentially transparent; that is, they
+    have no side effects and they always return the same value for the same values of input parameters. This expectation
+    is reflected in terms like "if the precondition <em>holds</em>". However, it is impossible to enforce such constraint
+    in an imperative language like C++.    
+    </p>
+    
+<p> It is often impossible for programmers to even know if the function they use has any side effects. For instance,
+    the specification of <code>std::vector&lt;T&gt;::size() const</code> does not prevent the implementations from
+    performing side effects, such as logging.</p>
+    
+<p> Some side effects are practical to have, and they do not affect the reasoning about predicates in the mathematical sense.
+    These side effects include:</p>
+    
+<ol>
+  <li>Logging, which never affects subsequent computations.</li>
+  <li>Modifying private mutable data members for the purpose of caching function results.</li>
+  <li>Using mathematical functions from <code>&lt;cmath&gt;</code>, which store error results in global (thread-local)
+      variable <code>errno</code>.</li>
+  <li>Performing scoped locking inside the function, which may affect the execution of other threads.</li>
+  <li>Causing a contract violation handler when runtime-checking the precondition of the function called in the predicate.</li>
+</ol>
+
+<p> Our choice follows the existing practice with <code>assert()</code>: it allows side effects, but a lot of advice
+    comes with it, saying that side effects in the predicate cannot be relied upon.</p>
+
+<p> <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p0542r5.html">[P0542R5]</a> specified that invoking
+    any side effect inside a contract annotation predicate is undefined behavior. This allowed certain practical optimizations,
+    such as not performing two consecutive evaluations of the same predicate, which is often the case when postcondition of
+    one function is the same as the precondition of another function. It also allowed checking the same predicate twice,
+    for instance once inside the function body, and the second time in the calling context.</p>
+
+<p> While we drop this undefined behavior, we allow similar effects, by explicitly listing what transformations
+    the compiler is allowed to perform. Namely, it can remove or duplicate all (not some, all of them) side effects associated with evaluating
+    the predicate from a contract annotation. From this it follows that if you know what value would be returned by
+    the predicate without evaluating the predicate, you can just use this value rather than evaluating the predicate. This means
+    that when the following predicate is used in a contract annotation:</p>
+    
+<pre>bool is_positive(int i) {
+  std::printf("eval");
+  return i &gt; 0;
+}</pre>
+ 
+<p>It can be replaced with just <code>i &gt; 0</code>.</p>
+
+
+
+<h3><a name="rationale.elision">3.6. Why include side effect elision in the MVP</a></h3>
+
+
+<p> First, it cannot be added later, because then it would be a breaking change. User may start to rely
+    on the mandated side effects in <em>Check_and_abort</em> mode, as per the Hyrum Law, and these would
+    suddenly disappear.</p>
+    
+<p> Second, it gives a strong encouragement to the users not to put side effects in their predicates. 
+    Their side effects may disappear, even in <em>Check_and_abort</em> mode.</p>
+
+
+
+<h3><a name="rationale.access">3.7. Why allow access to private and protected members</a></h3>
+
+<p> Programming guidelines often recommend that in contract predicates of public member functions
+    one should only use the public interface of the class. This is in case when the class user
+    needs to manualy check if the contract is satisfied for an object whose state is not known.
+    However, this is only a guideline, and enforcing it statically would break other use cases
+    that do not subscribe to the above advice. This has been described in detail in 
+    <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p1289r1.pdf">[P1289R1]</a>,
+    and in fact adopted by EWG.</p>
+    
+
+<h3><a name="rationale.no_dafault">3.8. Why not mandate a defaut translation mode</a></h3>
+
+<p> We recommend that the default mode is <em>Check_and_abort</em>, but we do not require this of the
+    implementaitons. The reason for that is that we believe that it is not possible to mandate this
+    behavior in this International Standard. This has been discussed in detail in 
+    <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1769r0.html">[P1769R0]</a>. 
+   </p>
+
+
+<h2><a name="future">4. Future compatibility</a></h2>
+
+
+<p> While we propose to drop a number of features from the MVP, this proposal does not close the door for 
+    adding them in the future, once (if) the MVP has been agreed upon and baked.</p>
+
+<p> The ability to install a custom violation handler (along with the handler's interface) can be provided
+    as a future extension, with the behavior mandated by the MVP being the semantics of the default 
+    violation handler.</p>
+
+<p> The ability to continue after logging the contract violation has two use cases: </p> 
+
+<ol>
+  <li>Apply the "continue" semantics for all contract annotations when running the variant of a program with contract
+      checking enabled for the first time.</li>
+  <li>Applying the "continue" semantics selectively only for the newly added contract annotations.</li>
+</ol>  
+
+<p> In the first case, the application of the "continue" semanitcs is not a default behavior, and would require that
+    a person who assembles the program instructs the compiler to use the special behavior. This can be added in the future
+    as a thrird mode of translating the source code with contract annotaitons (in addition to "ignore" and "chack_and_abort").
+    </p>  
+    
+<p> In the second case, there is a need to discriminate the newly added 
+    contract annotations from the stable ones. This would require
+    some additional syntax to mark such annotations, for instance:</p>
+    
+<pre>int f(int * p)
+  [[pre: p]]            <em>// stable annotation </em>
+  [[pre: *p &gt; 0; new]]  <em>// new annotation </em>
+;</pre>
+
+<p> This can be added in the future by introducing a new syntax for the 
+    newly added annotations and allowing the programmer to control
+    separately what runtime code should be generted from these "new" 
+    annotations.</p>
+
+<p> The syntax space for additional information in contract annotaitons is
+    quite broad. The alternatives include:</p>
+    
+<pre>
+  [[post r: r &gt; 0: new]]
+  [[post{new} r: r &gt; 0]]
+  </pre>
+
+<p> Regarding the throwing violation handlers, the only known and 
+    well explored use case is for "negative" unit-testing.
+    We note that this abilty would only be used in special programs: 
+    ones that execute unit tests. It would also require of the tested
+    functions not to be marked as <code>noexcept</code>. For this 
+    special case it seems reasonable to expect of the person that assembles the 
+    program that they instruct the compiler in an explicit way 
+    that a unit-test program is built. This ability could be added as a 
+    future extension by introducing a yet another translation
+    mode where exceptions thrown from violation handlers are not 
+    immediately turned into a call to <code>std::terminate()</code> 
+    (but they can still be turned into <code>std::terminate()</code> when <code>noexcept</code> functions are executed in unit-test programs).  
+    </p>
+
+<p> This might look like a lot of modes of translation, but it should be kept in mind that the perspective of a person that looks
+    at the code will not have modes: a declaration starting with <code>[[pre:</code> is always a precondition: something that 
+    evaluates to <code>true</code> in correct programs. The modes will be visible only to the person assembling the program,
+    and in this case, having a lot of fine grained control is desired.</p>    
+
+<p> The point of this section is to illustrate that dropping features 
+like violation handlers, continuation after a failed runtime check or
+    throwing violation handers from the MVP does not build any technical
+ barriers that would prevent the addition of these features in the 
+future
+    revisions of the contract support framework. We also expect that 
+once the syntax for declaring contract annotations has been 
+    standardized, compiler vendors will offer non-standard extensions 
+that will allow the users to experiment with additional features
+    and become a basis for the future standardization.
+    </p>
+
+
+<h2><a name="open">5. Open Issues</a></h2>
+
+<h3><a name="open.const">5.1. Const qualification</a></h3>
+
+<p> Ideally, we would like contract predicates to be referentially transparent
+    (have no side effects, depend on nothing else but the objects directly refrenced in the expression).
+    This goal is not reallistically attainable. We could get closer, however, if we required that all objects
+    referenced in the predicate are treated as if they were <code>const</code>. Thus, only operators and functions
+    (including member functions) that take arguments by value or a refrence to <code>const</code> are allowed.
+    </p>
+    
+<p> This could cause some discrepancies in case we have two overloads: one for type <code>T const&amp;</code> and the 
+    other for <code>T&amp;</code> doing different things:</p>
+    
+<pre>struct X 
+{
+  bool is_fine() const { return <em>/* impl 1 */</em>; }
+  bool is_fine()       { return <em>/* impl 2 */</em>; }
+  
+  friend void fun(X&amp; x)
+    [[pre: x.is_fine()]]    <em>// uses impl 1</em>
+  {
+    [[asset: x.is_fine()]]; <em>// uses impl 2</em>
+  }  
+};</pre>
+
+<p> Also, there exist referentially trnsparent functions that do not mark their reference arguments as <code>const</code>.
+    While porgammers are often advised to mark any functions that do not modify their arguments by contract as <code>const</code>,
+    this is just and dvice, and does not have to be followed. And it is not clear if such functions should be excluded from
+    contract predicates.</p>
+
+
+<h3><a name="open.constexpr">5.2. Interaction with <code>constexpr</code> functions</a></h3>
+
+
+<p> Ideally, we would like the constant evaluation of a <code>constexpr</code> function when any contract annotaiton 
+    is violated to make the program ill-formed. However, we are not sure if this is implementable. It is still to be decided
+    if the violated contracts should turn into an ill-formed program when the translation mode is <em>Ignore</em>.
+    </p>
+
+
+<h2><a name="wording">6. Wording</a></h2>
+
+<p>TBD</p>
+
+
+<h2><a name="acknowledgments">7. Acknowledgments</a></h2>
+
+<p> Daveed Vandevoorde offerd useful feedback on the syntax of contract annotations.</p>
+
+
+
+<h2><a name="literature">8. References</a></h2>
+
+<ul>
+
+  <li>[N1613] — Thorsten Ottosen,
+      "Proposal to add Design by Contract to C++" <br>
+      (<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2004/n1613.pdf">http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2004/n1613.pdf</a>).
+      </li>  
+      
+  <li>[N1800] — Lawrence Crowl, Thorsten Ottosen,
+      "Contract Programming For C++0x" <br>
+      (<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2005/n1800.pdf">http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2005/n1800.pdf</a>).
+      </li> 
+
+  <li>[N4110] — J. Daniel Garcia,
+      "Exploring the design space of contract specifications for C++" <br>
+      (<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n4110.pdf">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n4110.pdf</a>).
+      </li> 
+
+  <li>[N4075] — John Lakos, Alexei Zakharov, Alexander Beels,
+      "Centralized Defensive-Programming Support for Narrow Contracts(Revision 6)" <br>
+      (<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n4075.pdf">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n4075.pdf</a>).
+      </li>  
+      
+  <li>[N4135] — John Lakos, Alexei Zakharov, Alexander Beels, Nathan Myers,
+      "Language Support for Runtime Contract Validation (Revision 8)" <br>
+      (<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n4135.pdf">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n4135.pdf</a>).
+      </li> 
+      
+  <li>[P0380R0] — G. Dos Reis, J. D. Garcia, J. Lakos, A. Meredith, N. Myers, B. Stroustrup,
+      "A Contract Design" <br>
+      (<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0380r0.pdf">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0380r0.pdf</a>).
+      </li> 
+      
+  <li>[P1494R1] — S. Davis Herring, "Partial program correctness" <br>
+      (<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1494r1.html">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1494r1.html</a>).
+      </li>
+      
+  <li>[P2339R0] — Andrzej Krzemieński, "Contract violation handlers" <br>
+      (<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2021/p2339r0.html">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2021/p2339r0.html</a>).
+      </li>
+ 
+  <li>[P2358R0] — Gašper Ažman, John McFarlane, Bronek Kozicki, "Defining Contracts" <br>
+      (<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2021/p2358r0.pdf">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2021/p2358r0.pdf</a>).
+      </li>
+      
+  <li>[P0542R5] — G. Dos Reis, J. D. Garcia, J. Lakos, A. Meredith, N. Myers, B. Stroustrup,
+      "Support for contract based programming in C++" <br>
+      (<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p0542r5.html">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p0542r5.html</a>).
+      </li>
+      
+  <li>[P1289R1] &mdash; J. Daniel Garcia, Ville Voutilainen, "Access control in contract conditions" <br>
+      (<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p1289r1.pdf"
+      >http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p1289r1.pdf</a>).
+      </li>
+      
+  <li>[P1323R2] &mdash; Hubert S.K. Tong, "Contract postconditions and return type deduction" <br>
+      (<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1323r2.html"
+      >http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1323r2.html</a>).
+      </li>
+ 
+  <li>[P1606R0] &mdash; Joshua Berne, "Requirements for Contract Roles" <br>
+      (<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1606r0.pdf"
+      >http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1606r0.pdf</a>).
+      </li>    
+ 
+  <li>[P1769R0] &mdash; Ville Voutilainen, Richard Smith, "The &laquo;default&raquo; contract build-level and continuation-mode should be implementation-defined"<br>
+      (<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1769r0.html"
+      >http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1769r0.html</a>).
+      </li> 
+ 
+  <li>[P2038R0] &mdash; Andrzej Krzemieński, Ryan McDougal, "Proposed nomenclature for contract-related proposals" <br>
+      (<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p2038r0.html"
+      >http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p2038r0.html</a>).
+      </li> 
+      
+  <li>[P2182R1] — Andrzej Krzemieński, Joshua Berne, Ryan McDougall,
+      "Contract Support: Defining the Minimum Viable Feature Set" <br>
+      (<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p2182r1.html">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p2182r1.html</a>).
+      </li> 
+ 
+  <li>[P2036R1] &mdash; Barry Revzin, "Change scope of lambda <em>trailing-return-type</em>"<br>
+      (<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2021/p2036r1.html"
+      >http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2021/p2036r1.html</a>).
+      </li> 
+    
+</ul>
+
+
+
+
+
+
+
+<h2><a name="appendix_a">Appendix A. Open issues with continuing violation handlers</a></h2>
+
+<p> We are aware of two unintuitive consequences of continuing violation handlers. First,
+    in case the precondition is guarding against the abstract machine violation (hard UB),
+    logging and then reaching the point of the abstract machine violation might result in
+    what would be observed as removing the log entry for the contract violation.
+    This has been described in detail in 
+   <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2021/p2339r0.html">[P2339R0]</a> as well as in
+   <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1494r1.html">[P1494R1]</a>.
+   This is no worse than disabling runtime checking altogether (which is uncontroversial),
+   but can really fool whoever troubleshoots the bug: we see no contract-violation log entry,
+   so we think control never reached this point, even though it did. Thus, the continuing violation
+   handler has the potential to deceive whoever uses contract violation logs. There is no agreement
+   on how realistic the possibility of encountering this effect is. The solution presented in 
+   <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1494r1.html">[P1494R1]</a>
+    has the potential to address the above issue. But until this is explored, any wider contract proposal that
+    allows continuation would be blocked on <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1494r1.html">[P1494R1]</a>.</p>
+     
+<p> Second, the continuation mode can introduce new abstract machine violations. Going back to the example provided earlier:</p>
+
+<pre>int f(int * p)
+  [[pre: p]]
+  [[pre: *p &gt; 0]]
+{
+  if (!p)             <em>// safety double-check </em>
+    throw Bug{};
+    
+  if (*p &lt;= 0)        <em>// safety double-check </em>
+    throw Bug{};
+    
+  return *p - 1;
+}</pre>
+
+<p> If this function is invoked in a program that doesn't runtime-check contract annotations,
+    it behaves in a tolerable way for <code>p == nullptr</code>: it throws an exception. 
+    But when runtime checking is enabled and the program is allowed to 
+    continue after the failed check, this code is equivalent to:</p>
+  
+<pre>int f(int * p)
+{
+  if (!p)             <em>// (1)</em>
+    log_violation();
+    
+  if (*p &lt;= 0)        <em>// (2)</em>
+    log_violation();
+    
+  if (!p)             <em>// safety double-check </em>
+    throw Bug{};
+    
+  if (*p &lt;= 0)        <em>// safety double-check </em>
+    throw Bug{};
+    
+  return *p - 1;
+}</pre>  
+    
+<p> If <code>p</code> happens to be null, check (1) will fail and the violation will get logged. The program will proceed 
+    to check (2) and there, it will dereference the null pointer causing an Abstract Machine Violation (hard UB).
+    The key observation here is that the defensive checks that throw exceptions (or return) have the "short circuiting" property: if one fails,
+    the subsequent ones are not executed:</p>
+    
+<pre>int f(int * p)
+{  
+  if (!p)
+    throw Bug{};
+    
+  if (*p &lt;= 0)        <em>// null `p` never dereferenced </em>
+    throw Bug{};
+    
+  return *p - 1;
+}</pre>
+
+<p> Short-circuiting is also guaranteed for subsequent precondition annotations, provided that the contract violation
+    logging ends in calling <code>std::abort()</code>. But short-circuiting is gone, 
+    when the handler allows the program flow to continue. </p> 
+    
+<p>Splitting a precondition into smaller chunks is used for at least two purposes:</p>
+
+<ol>
+  <li>Obtaining as fine-grained information as possible from contract violation logs.</li>
+  <li>Differentiating cheap and expensive checks, for the purpose of controlling their behavior separately.</li>
+</ol>
+
+
+<p> Until this problem is addressed, the continuation after a runtime-evaluated check is a potentially dangerous
+    feature that can introduce an Abstract Machine Violation (hard UB) on top of a BizBug (a programmer bug).
+    While this problem may be solvable, the analysis and solution will take time, which will delay the 
+    adoption of the minimum contract support if it allows the continuation. </p>
+
+
+</body></html>

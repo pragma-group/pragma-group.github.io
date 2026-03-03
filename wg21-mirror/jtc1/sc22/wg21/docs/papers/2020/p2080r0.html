@@ -1,0 +1,219 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"
+        "http://www.w3.org/TR/html4/loose.dtd">
+<html>
+<head>
+	<title>Polymorphic allocators: There is no such thing as One True Vocabulary Type</title>
+
+	<style>
+	p {text-align:justify}
+	li {text-align:justify}
+	blockquote.note
+	{
+		background-color:#E0E0E0;
+		padding-left: 15px;
+		padding-right: 15px;
+		padding-top: 1px;
+		padding-bottom: 1px;
+	}
+	tab { padding-left: 2em; }
+    tab2 { padding-left: 4em; }
+	ins {background-color:#A0FFA0}
+	del {background-color:#FFA0A0}
+	</style>
+</head>
+<body>
+
+<address align=right>
+Document number: P2080R0
+<br/>
+Audience: LEWG
+<br/>
+<br/>
+<a href="mailto:ville.voutilainen@gmail.com">Ville Voutilainen</a><br/>
+2020-01-13<br/>
+</address>
+<hr/>
+<h1 align=center>Polymorphic allocators: There is no such thing as One True Vocabulary Type</h1>
+
+<h2>Abstract</h2>
+
+<p>
+  There is no such thing as One True Vocabulary Type..
+</p>
+<p>
+  ..because there are multiple vocabularies.</p>
+
+<p>Polymorphic allocators, and types using them, have two aspects:
+  <ol>
+    <li>The static part, aka the propagation traits and scoping</li>
+    <li>The dynamic part, aka the mechanism, memory_resource</li>
+  </ol>
+</p>
+
+<p>
+  Types like <code>std::vector</code> have both of these aspects intact.
+  Types like the envisioned allocator-aware <code>std::function</code>
+  and <code>std::optional</code> do not. The latter is a mistake.
+</p>
+
+<p>
+  Instead of adding library types that work with just <code>std::polymorphic_allocator</code>,  (and thus hard-code the propagation and scoping), we should
+  split such facilities into a generic part that has an allocator as a template
+  parameter, and a more-specific part (an alias, perhaps) that packages
+  a common allocator (perhaps a <code>polymorphic_allocator</code>) with
+  the generic part.
+</p>
+
+<p>
+  When standardizing utility types, we should consider standardizing
+  nice packages for common scenarios, but we should not forget to standardize
+  extensible and customizable building blocks.
+</p>
+
+<h2>Propagation</h2>
+
+<p>
+  A <code>std::polymorphic_allocator</code> is fine for the vocabulary
+  it intends to serve. However, that vocabulary, where POCMA is false,
+  is not suitable for all use cases under the sun. That vocabulary has
+  two problems:
+  <ol>
+    <li>Shuffling a pmr::vector of pmr::string will always perform copies
+      and will not perform moves. This is because in order to meet
+      exception-safety guarantees, <code>move_if_noexcept</code> will
+      copy, because the allocators are not always equal and they don't
+      propagate.</li>
+    <li>Other operations where the user can guarantee that the allocator's
+      memory arena outlives object instances will not propagate the allocator
+      either, because SOCCC returns a <code>polymorphic_allocator</code>
+      wrapping a default memory resource.</li>
+  </ol>
+</p>
+<p>
+  This is problematic. I can write a Major Architectural Sub-System (MASS)
+  where I have a MASS-specific memory arena shared by all objects living
+  under the control of that MASS. All propagation within the MASS is always
+  fine. Yet <code>polymorphic_allocator</code> will defeat this idea since
+  its POCMA and SOCCC will result in a default arena being used at the
+  slightest provocation.
+</p>
+<p>
+  It seems that the argument is that if I would transfer an object out of
+  a function when the allocator of the object is using a local arena,
+  the allocator should not try to propagate because the arena will have
+  expired. Another argument seems to be that between two different MASSes,
+  the arenas would be different and therefore allocators should not propagate.
+</p>
+<p>
+  That's all fine and good. That's what propagation traits are for. If I
+  have a local object using a local arena, I will give it an allocator
+  that does not propagate. If I expose allocator-aware objects between two
+  different MASSes, I will give those MASSes different allocator types, so
+  objects will not just propagate from
+  <blockquote>
+    <code>std::vector&lt;Foo, Mass1Allocator&gt; get_stuff();</code>
+  </blockquote>
+  to a
+  <blockquote>
+    <code>std::vector&lt;Foo, Mass2Allocator&gt; my_local = Mass1::get_stuff();</code>
+  </blockquote>
+</p>
+<p>
+  In other words: both the static and dynamic aspects of an allocator/mechanism
+  combination serve a purpose. Please don't drop either of those aspects
+  when designing allocator-aware non-container types, like <code>function</code>
+  or <code>optional</code>.
+</p>
+
+<h2>More about the static and dynamic aspects</h2>
+
+<p>
+  In the pseudo-example above, Mass1Allocator and Mass2Allocator
+  are BOTH polymorphic. They are, however, not
+  <code>std::polymorphic_allocator</code>, but rather reusing it
+  as an implementation detail. The allocators propagate, because
+  they propagate inside MASS 1 and inside MASS 2, but not across the
+  MASS boundary.
+</p>
+<p>
+  I can still do all the good things that memory_resources allow me to
+  do without "infecting" a type. I can have multiple different memory
+  resources as the mechanism of a std::vector&lt;Foo, Mass1Allocator&gt;.
+  What Mass1Allocator allows me to do is define propagation that is different
+  from <code>std::polymorphic_allocator</code>, and what Mass1Allocator
+  and Mass2Allocator allow me to do is to have two different
+  polymorphic-allocator-aware types that are not implicitly interoperable.
+</p>
+<p>
+  In other words, the best of both worlds.
+</p>
+
+<h2>Right, but what does this have to do with function and optional?</h2>
+
+<p>
+  Well, if <code>function</code> and <code>optional</code> support only
+  <code>std::polymorphic_allocator</code>, I lose the aforementioned
+  abilities. I need to write my own allocator-aware function and optional
+  to re-gain the static aspects of allocators. That would seem unfortunate.
+</p>
+
+<h2>So, what should we do?</h2>
+
+<p>
+  Instead of
+  <blockquote><pre>
+    template &lt;class T&gt;> class __alloc_optional {...};
+    template &lt;class T&gt; using optional = metaprogram_select&lt;T, __alloc_optional&lt;T&gt, optional&lt;T&gt;&gt;;
+    </pre>
+  </blockquote>
+</p>
+<p>
+  Do this instead:
+  <blockquote><pre>
+    template &lt;class T, class Alloc&gt; class basic_optional {...};
+    template &lt;class T&gt; using optional = metaprogram_select&lt;T, basic_optional&lt;T, std::polymorphic_allocator&lt;T&gt;&gt, optional&lt;T&gt;&gt;;
+    </pre>
+  </blockquote>
+</p>
+<p>
+  In other words, instead of
+  <ol>
+    <li>Have a hidden type for an allocator-aware type that uses <code>std::polymorphic_allocator</code></li>
+    <li>Provide an alias that aliases either the hidden type or an allocator-unaware type</li>
+  </ol>
+  we do
+  <ol>
+    <li>Have a named standardized type for an allocator-aware type that uses any allocator</li>
+    <li>Provide an alias that aliases either that type with a <code>std::polymorphic_allocator</code>or an allocator-unaware type</li>
+  </ol>
+</p>
+
+<h2>Why all this complexity? Polymorphic allocators are nice and simple.</h2>
+
+<p>
+  Polymorphic allocators are nice and simple, agreed. Even the package
+  of <code>std::polymorphic_allocator</code> is nice and simple,
+  for the vocabulary that works with it. For vocabularies that don't,
+  we reach for other kinds of allocators. And we want those allocators
+  to be customization points, and thus our allocator-aware types should
+  use those customization points. We can still package a
+  <code>pmr::optional</code> so that it out-of-the-box gives us
+  an optional with a standard polymorphic allocator, but we shouldn't
+  close the door of customizing the behavior of an allocator-aware optional.
+</p>
+
+<p>
+  Yes, this is more complex to specify. It's barely more complex to implement.
+  It's not more complex to design. One of the main headaches of designing
+  an allocator-aware optional was figuring out how it should propagate
+  in various scenarios. A <code>basic_optional</code> is _simpler_ in that
+  regard, to specify, and to design; its allocator propagates the way the
+  propagation traits of the allocator tell it to propagate. Layering
+  a <code>std::polymorphic_allocator</code> on top of such a design
+  is easy, it just plops in without any ado. And the design retains
+  the ability to change how the allocator behaves, by using the
+  <code>basic_optional</code> 'directly', or rather as a building block.
+</p>
+
+</body>
+</html> 

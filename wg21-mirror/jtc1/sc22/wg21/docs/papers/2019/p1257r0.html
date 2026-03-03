@@ -1,0 +1,142 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <meta http-equiv="Content-Style-Type" content="text/css" />
+  <meta name="generator" content="pandoc" />
+  <title>Implementation experience on trying to implement concurrent data and control structures with executors</title>
+  <style type="text/css">code{white-space: pre;}</style>
+</head>
+<body>
+<div id="header">
+<h1 class="title">Implementation experience on trying to implement concurrent data and control structures with executors</h1>
+</div>
+<table>
+<tbody>
+<tr class="odd">
+<td align="left">Doc. No.:</td>
+<td align="left">P1257R0</td>
+</tr>
+<tr class="even">
+<td align="left">Date:</td>
+<td align="left">2018-10-16</td>
+</tr>
+<tr class="odd">
+<td align="left">Reply to:</td>
+<td align="left">Detlef Vollmann, dv@vollmann.ch</td>
+</tr>
+<tr class="even">
+<td align="left">Audience:</td>
+<td align="left">SG1, (LEWG)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="abstract">Abstract</h2>
+<p>At the meeting 2016 in Oulu I presented a number of challenges / requirements on executors from a concurrency perspective. This paper reports the experience when I tried to implement some of the examples in that presentation based on the proposal in <a href="https://wg21.link/P0443R4">P0443R4</a>.</p>
+<p>This paper concludes with a list of unsolved problems that an executor proposal must address before it would be useful for concurrency use cases.</p>
+<h2 id="introduction">Introduction</h2>
+<p>In my presentation in Oulu I presented several examples that are typical concurrent data and control structures but that couldn't be implemented based on the proposals of that time.</p>
+<p>In the meantime we got <a href="https://wg21.link/P0443">P0443</a>. So I tried to implement the examples in that presentation based on P0443 and the respective demo implementation available on <a href="https://github.com/executors/executors">GitHub</a>. It was surprisingly hard and took much more time than I expected. When I started my implementation <a href="https://wg21.link/P0443R4">P0443R4</a> was the current version so my implementation is still based on that version, but I don't think that any of the changes since then make a major difference.</p>
+<p>For anybody interested in the full code, it's available at <a href="https://gitlab.com/cppzs/executor-examples/blob/master/doc/code-details.md">https://gitlab.com/cppzs/executor-examples/blob/master/doc/code-details.md</a>. It probably has bugs, but compiles and passes some tests.</p>
+<p>Too keep this paper short it only presents the problems and the chosen solutions in an abstract way. For more details please see <a href="https://gitlab.com/cppzs/executor-examples/blob/master/doc/code-details.md">https://gitlab.com/cppzs/executor-examples/blob/master/doc/code-details.md</a>.</p>
+<h2 id="basic-data-concentrator">Basic Data Concentrator</h2>
+<p>One of the examples for concurrent control structures was a data concentrator. It consists of three tasks, two of them reading input (typically from an external device) and one task to potentially run some filter and store the data (or write it to another external device). Such a use case is not universal enough to standardize a respective control structure but is still common enough to provide it as library.</p>
+<p>Based on a queue as proposed in <a href="https://wg21.link/P0260">P0260</a> and a latch as proposed in <a href="https://wg21.link/P0666">P0666</a>, it's not hard to come up with an implementation for concentrator that just creates a queue for communication, a latch for the providing tasks to signal when finished, and then starts tasks on a given executor with a small wrapper that calls the given functions and handles the queue interface:</p>
+<p>```c++ template <typename T, typename IN1, typename IN2, typename OUT> class Concentrator { public: Concentrator(IN1 producer1, IN2 producer2, OUT consumer, size_t bufSize);</p>
+<pre><code>template &lt;class Ex&gt; void run(Ex exec);</code></pre>
+<p>private:</p>
+<pre><code>IN1 p1;
+IN2 p2;
+OUT c;
+buffer_queue&lt;T&gt; q;
+latch inDone;</code></pre>
+<p>}; ```</p>
+<p>(This could be even simpler by just providing a single <code>run()</code> function or at least by giving deduction guides to the constructor.)</p>
+<p>To use the concentrator just create one and start it on an executor:</p>
+<p>```c++ auto prod1 = [] () { /* ... <em>/ }; auto prod2 = [] () { /</em> ... <em>/ }; auto consume = [] (int v) { /</em> ... */ };</p>
+<p>Concentrator<int
+         , decltype(prod1),
+         , decltype(prod2)
+         , decltype(consume)> dataConcentrator(prod1, prod2, consume, 1);</p>
+<pre><code>static_thread_pool pool{5};
+auto exec = pool.executor();
+dataConcentrator.run(exec);</code></pre>
+<p>```</p>
+<p>So basic concurrency works.</p>
+<h2 id="real-time">Real-Time</h2>
+<p>In the real world one of the input devices might be time critical and the task reading from it should have a higher priority.</p>
+<p>For this we need an executor that provides priorities. This can be done by providing an execution context <code>RTThreadContext</code> and an executor (that only supports oneway) based on it.</p>
+<p>But how do we tell our Concentrator that one of the tasks needs a different executor? <a href="https://wg21.link/P0113">P0113</a> (and the Networking TS) have <code>wrap()</code> and <code>get_associated_executor()</code> for this. P0443 doesn't provide it, but the <code>require()</code> mechanism can be used for this.</p>
+<p>The idea is to ask each task for its executor and then run it on this executor:</p>
+<p><code>c++     template &lt;class Ex&gt; void run(Ex exec)     {         // ...         auto exIn1A = require(exec, p1);         auto exIn1B = require(exIn1A, execution::oneway);         exIn1B.execute([this] { produceWrap&lt;IN1&gt;(p1); });         // ...     }</code></p>
+<p>With a generic <code>require()</code> an executor can be associated with a task by providing a respective overload: <code>c++ RTThreadContext RTContext; template&lt;class Ex&gt; RTExecutor require(Ex ex, decltype(prod1) &amp;) {     return RTContext.get_executor(80); }</code></p>
+<p>This specific mechanism doesn't work anymore in recent versions of P0443 due to changes in the <code>require</code> specification. But it was pointed out that it's still doable.</p>
+<p>Whether using <code>require()</code> for this is a good idea is a different question. I would prefer an approach along the lines of <code>wrap()</code>/<code>get_associated_executor()</code>, but as long as such an interface doesn't exist, generic control structures need to use <code>require()</code> to get the executor required by a task.</p>
+<h2 id="boost-blocking">Boost Blocking</h2>
+<p>The data concentrator works fine in a classic concurrent world. But it breaks down if the executor(s) given to it don't provide concurrent forward progress and can't be synchronized with <code>std::mutex</code> and <code>std::condition_variable</code>.</p>
+<p>But one of the goals of the executor proposal is to provide a common interface for all kinds of executors, even if they provide only weakly parallel forward progress.</p>
+<p>And something like a data concentrator should be able to run in a boost blocking environment.</p>
+<p>To try this I implemented an executor <code>TGExecutor</code> that completely relies on boost blocking. It's based on stackful coroutines and implemented with <code>boost::context</code>.</p>
+<p>To make the implementation easier <code>TGExecutor</code> is based on an execution context <code>TPool</code> and blocking is only defined inside the same pool or from the outside as entry point. In any given <code>TPool</code> only one task can make progress. This allows the implementation to identify the current task.</p>
+<p>Tasks that are not blocked on aren't executed. So sometimes tasks are not completed. The destructor of such a task does not complete the task, but it will call the destructors of the local objects of that task (stack unwinding).</p>
+<p><a href="https://wg21.link/P0073R2">P0073R2</a> proposed an event class with a <code>signal()</code> and <code>block()</code> interface. <code>TGExecutor</code> provides a class <code>TGEvent</code> with such functions as members.</p>
+<h3 id="queue">Queue</h3>
+<p>The implementation of the data concentrator is based on a concurrent queue. We need a concurrent queue that can work with boost blocking and can work with &quot;normal&quot; concurrent threads as well. Such a queue would be templated on the executors involved and was outlined in my presentation in Oulu. My implementation now is simpler as it assumes at least compatible executors on all sides.</p>
+<p>The standard (non-lock-free) implementation of a queue is based on condition variables and mutexes. I decided to keep such an implementation. For concurrent threads C++ provides mutexes and condition variables. For thread based executors we want to use these, so for other executors the interface should be as similar as possible.</p>
+<h3 id="mutex">Mutex</h3>
+<p>In a not really concurrent boost blocking world a mutex doesn't need to provide synchronization but just (possibly) boosting and still mutual exclusion.</p>
+<p>To keep the implementation simple I support only a single task waiting for a blocked mutex. But by keeping an internal stack multiple waiters would be possible as well.</p>
+<p>My mutex still provides the usual interface but on <code>lock()</code> it needs to store a reference to the current task so it can be boosted if another tasks tries to lock it. For access to the current task it needs access to our <code>TPool</code>. So the constructor needs somehow a reference to <code>TPool</code>.</p>
+<h3 id="condition-variable">Condition Variable</h3>
+<p>Implementing a condition variable in a boost blocking context is generally easy: in <code>notify_*()</code> we just boost block the task(s) currently waiting, and in <code>wait()</code> we just block. The question is to block on who? How do we know who's notifying a condition variable and who we need to boost if we're blocking on a condition variable? The only way is to tell the condition variable explicitly.</p>
+<p>This means that we not only need the standard interface <code>wait()</code>, <code>notify_one()</code> and <code>notify_all()</code>, but also a register interface. In my implementation I provide <code>attach(Handle &amp;task)</code> and <code>detach()</code>. I return a handle from attach to allow for detach.</p>
+<p>Again we need a somehow the <code>TPool</code> in the constructor. And I set a hard limit on attachers to avoid dynamic memory allocation.</p>
+<p>One interesting detail is <code>notify_all()</code>, which just calls <code>notify_one()</code>. Currently I only support multiple notifiers, but not multiple waiters. For multiple waiters we wouldn't need another register interface, but like for mutex a stack that we fill on <code>block()</code> calls.</p>
+<h3 id="handle">Handle</h3>
+<p>As mentioned before a boost blocking condition variable needs a register interface that registers the notifying task. We could require that the register function is called from the task that notifies and rely on the internal knowledge of the current task.</p>
+<p>But this restricts the usability as sometimes the synchronization mechanism is setup from the outside. So I decided to return from <code>twoway_execute</code> a handle to the task. This handle can be used to get something like a future to wait on, a condition variable that's already attached, a mutex (just to put things together) or to attach to a condition variable. I didn't call this handle <code>future</code> as this would be misleading.</p>
+<p>I don't return such a handle from <code>execute()</code> as for fire-and-forget tasks the handle would still be overhead.</p>
+<h3 id="execution-context">Execution context</h3>
+<p>Synchronization primitives are probably not executor specific but specific to the execution context.</p>
+<p>So I decided to provide an interface in <code>TPool</code> to get mutexes and condition variables:</p>
+<p><code>c++ class TPool { public:     // ...     SyncMutex&lt;TGEvent&gt; getMutex() const;     SyncCondVar&lt;TGEvent&gt; getEmptyCondVar() const; };</code> This provides condition variables with no attached tasks.</p>
+<h3 id="queue-again">Queue again</h3>
+<p>Based on our mutex and condition variable a queue implementation can be started.</p>
+<p>The attach / detach requirements of the condition variable make a general queue interface where everybody can push or pop not feasible. Instead we go with one part of P0260 that proposes front and back ends. Our queue implementation requires a separate end for each pushing or popping task.</p>
+<p>The base implementation for the queue now needs a template parameter for the executor type. A better option than the executor type would probably be the type of the execution context. I only have a single executor type parameter even though we can have different executors pushing or popping to/from the queue. But the (current) requirement is that the synchronization primitives can at least cooperate if they are not the same.</p>
+<p><code>TQueueTrunk</code> doesn't provide any public interface except constructors. The trunk also implements the <code>close()</code>, <code>push()</code> and <code>pop()</code> methods, but as private, and it declares the end types as friends.</p>
+<p><code>push()</code> and <code>pop()</code> are essentially the same as for &quot;standard&quot; queue implementations.</p>
+<p><code>close()</code> is different: I require that only the back ends (that push) can close a queue and that all of them must close it before it's really considered closed.</p>
+<p>Queue ends can be created from a queue trunk and a handle for the task to attach.</p>
+<h2 id="more-generic-concentrator">More generic concentrator</h2>
+<p>Based on the new queue the concentrator can be rewritten to work with more kinds of executors.</p>
+<p>The latch isn't needed anymore because closing the queue has changed.</p>
+<p>But now separate queue ends for each task is required. But for creating the queue ends a handle to the task is required. So I first create pointers to the ends that I capture by reference for the tasks, queue the tasks with <code>twoway_execute()</code> in the respective executor and use the returned handle to finally create the queue ends and let the pointers point to them. To avoid that the pointers are dereferenced before the queue ends actually are created I use a condition variable.</p>
+<p>Everything would be much simpler if <code>twoway_execute()</code> would give a reference to the handle of the created task to the function object started inside the task, but for now we don't have this.</p>
+<p>This modified concentrator can now be used essentially like the previous one, but now works with more kinds of executors.</p>
+<p>Mission accomplished, but only by inventing a lot of things that are still missing from the executor proposal.</p>
+<h2 id="notes">Notes</h2>
+<h3 id="forward-progress-guarantees">Forward progress guarantees</h3>
+<p>I thought about the kind of executors my concentrator can work with. And it turned out that the different forward progress guarantees given in [intro.progress] don't really help:</p>
+<p>My concentrator can clearly work on executors with concurrent forward progress (if they provide synchronization primitives with the correct interface).</p>
+<p>Parallel forward progress generally doesn't work as many executors with a parallel forward progress guarantee can't provide the correct boost blocking semantics. For parallel executors it might be generally hard to provide boost blocking and still give full concurrent forward progress on tasks already started.</p>
+<p>My executor based on stackful coroutines only provides weakly parallel forward progress, but is still usable for my concentrator as it provides the right kind of boost blocking.</p>
+<p>But I don't have yet the right vocabulary to specify the concrete requirements that my concentrator has on the executor given to it.</p>
+<h3 id="networking">Networking</h3>
+<p>To make the concentrator actually useful in a boost blocking world the networking library needs to work with this.</p>
+<p>I haven't actually tried it, but a correct incorporation of the executor interface for the networking library should also work with boost blocking.</p>
+<h3 id="different-types-of-executors">Different types of executors</h3>
+<p>I haven't explored how to implement concurrent queues that has different kind of executors pushing to or popping from it.</p>
+<p>It's probably not possible to do this generically, but for a given pair of executors it often should be possible to provide compatible synchronization primitives.</p>
+<p>A really interesting executor would be one that uses true concurrency as long as hardware resources are available and then starts to fallback to coroutines.</p>
+<p>I'm not sure how to implement such an executor.</p>
+<h2 id="conclusion">Conclusion</h2>
+<p>In general it is possible to implement generic concurrent data and control structures that can work with different types of executors. But the executor proposal from P0443 is insufficient to be useful for this.</p>
+<p>Before it can be actually useful it needs to specify at least some requirements on synchronization primitives. These requirements need to include an <code>attach()</code>/<code>detach()</code> interface for condition variables and an interface to create synchronization object from an executor or an execution context (or a different approach that works with boost blocking). And for <code>std::thread</code> we need to provide respective primitives.</p>
+<p>An executor proposal also needs to specify the requirements on the handles returned from <code>twoway_execute()</code>.</p>
+<p>It's important to decide what should go into executor types and what should go to execution context types. Synchronization primitives belong semantically to the execution context, but there's also the wish to have executors without execution contexts.</p>
+<p>It probably makes sense to always call the function object given to <code>twoway_execute()</code> with a reference to the handle returned by <code>twoway_execute()</code>. Otherwise another execution function (or an overload for <code>twoway_execute()</code>) is required that calls the function object with the handle.</p>
+<p><code>get_associated_executor()</code> and <code>wrap()</code> from P0113 should be added to the executor proposal to avoid the (ab)use of <code>require()</code> for getting the executor a task should be executed on. Otherwise at least the changes in P0443R5 on <code>require()</code> should be reverted to make it easier to use the <code>required()</code> mechanism for this.</p>
+<p>Finally it would be useful to provide helper constructs to avoid too much boilerplate for own executor types.</p>
+</body>
+</html>

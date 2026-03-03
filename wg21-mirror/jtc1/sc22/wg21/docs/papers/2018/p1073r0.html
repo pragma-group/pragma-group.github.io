@@ -1,0 +1,288 @@
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=windows-1252"></head>
+
+<style type="text/css">
+  blockquote.stdins { color: #000000; background-color: #A0FFA0; }
+  ins { text-decoration:none; background-color:#A0FFA0 }
+  del { text-decoration:line-through; background-color:#FFA0A0 }
+  tab { padding-left: 4em }
+</style>
+<body>
+<p align=right><b>P1073R0, 2018-05-04</b>
+<br/>EWG
+</p>
+
+<p align=right>
+<br/>Richard Smith (richard@metafoo.co.uk)  
+<br/>Andrew Sutton (andrew.n.sutton@gmail.com)  
+<br/>Daveed Vandevoorde (daveed@edg.com)
+</p>
+
+<h1 align="center">constexpr! functions</h1>
+
+<h3>Introduction and motivation</h3>
+
+<p>
+The <tt>constexpr</tt> specifier applied to a function or member function
+indicates that a call to that function might be valid in a context requiring
+a constant-expression.  It does not <i>require</i> that every such
+call be a constant-expression.  Sometimes, however, we want to express
+that a function should <i>always</i> produce a constant when called (directly
+or indirectly), and a non-constant result should produce an error.  Such a
+function is called an <i>immediate</i> function.  We propose the <i>decl-specifier</i>
+<tt>constexpr!</tt> for that purpose:
+
+<pre><code class="language-c++">constexpr! int sqr(int n) {
+  return n*n;
+}
+constexpr int r = sqr(100);  // Okay.
+int x = 100;
+int r2 = sqr(x);  // Error: Call does not produce a constant.
+</code></pre>
+</p>
+<p>
+There is one exception to the rule that a call to a <tt>constexpr!</tt>
+function must be a constant-expression: If the call appears directly in another
+<tt>constexpr!</tt>, it need not be a constant-expression at that point (since
+a call to the enclosing function would ultimately have to produce a core constant
+expression, we do not have to worry about ever having to evaluate that nested
+call at run time).  This permits composition of <tt>constexpr!</tt> functions:
+
+<pre><code class="language-c++">constexpr! int sqrsqr(int n) {
+  return sqr(sqr(n)); // Not a constant-expression at this  point,
+}                     // but that's okay.
+
+constexpr int dblsqr(int n) {
+  return 2*sqr(n); // Error: Enclosing function is not
+}                  // constexpr!.
+</code></pre>
+</p>
+<p>
+Finally, as is the case with a bound member function (e.g., "<tt>x.f</tt>"),
+a <tt>constexpr!</tt> function can only be called; no pointer or reference
+to it can be formed:
+
+<pre><code class="language-c++">using Int2Int = int(int);
+Int2Int *pf = sqr;  // Error.
+</code></pre>
+</p>
+<p>
+One consequence of this specification is that an immediate function never needs
+to be seen by a back end.  That means that immediate functions are an alternative
+to many function-style macros.  It also means that, unlike plain <tt>constexpr</tt>
+functions, <tt>constexpr!</tt> functions are unlikely to show up in symbolic
+debuggers.  That runs into the broader issue that programmers currently have few
+tools to debug compile-time evaluation: This proposal does not aim at solving
+that problem in any way.
+</p>
+
+<h4>Source Locations</h4>
+<p>
+The "Library Fundamentals v. 2" TS contains a "magic" <tt>source_location</tt>
+class get to information similar to the <tt>__FILE__</tt> and <tt>__LINE__</tt>
+macros and the <tt>__func__</tt> variable (see
+<a href="https://wg21.link/n4529.html#reflection.src_loc">N4529</a> for the
+current draft, and <a href="https://wg21.link/n4129">N4129</a> for some design
+notes).  Unfortunately, because the "value" of a <tt>source_location</tt> is
+frozen at the point <tt>source_location::current()</tt> is invoked, composing
+code making use of this magic class is tricky: Typically, a function wanting to
+track its point of invocation has to add a defaulted parameter as follows:
+<pre><code class="language-c++">
+void my_log_function(char const *msg,
+                     source_location src_loc
+		                  = source_location::current()) {
+  // ...
+}
+</code></pre>
+This idiom ensure that the value of the <tt>source_location::current()</tt>
+invocation is sampled where <tt>my_log_function</tt> is called instead of
+where it is defined.
+</p>
+<p>
+Immediate (i.e., <tt>constexpr!</tt>) functions, however, create a clean separation
+between the compilation process and the constexpr evaluation process (see also 
+<a href="http://wg21.link/p0992r0">P0992</a>).
+Thus, we can make <tt>source_location::current()</tt> an immediate function, and wrap
+it as needed in other immediate functions: The value produced will correspond to the
+source location of the "root" immediate function call.  For example:
+<pre><code class="language-c++">
+constexpr! src_line() {
+  return source_location::current().line();
+}
+
+void some_code() {
+  std::cout << src_line() << '\n';  // This line number is output.
+}
+</code></pre>
+</p>
+
+
+<h4>Variables</h4>
+<p>
+Given that <tt>constexpr!</tt> functions are a useful alternative to function-style
+macros, it is natural to wonder whether we could make <tt>constexpr!</tt>
+<i>variables</i> a useful alternative to non-function-style macros.  We'd call such
+variables &mdash; which would never be seen by a back end &mdash; <i>immediate</i> variables:
+<pre><code class="language-c++">constexpr! int RN = 42;
+int LN = 42;
+
+int f(int const&);
+
+int r1 = f(LN);  // Direct reference binding.
+int r2 = f(RN);  // Not a direct binding (temporary created).
+</code></pre>
+</p>
+<p>
+Unfortunately, the exact specification of such a facility raises some difficult
+questions, some of which relate to the topic of enabling class types for nontype
+template parameters as proposed in <a href="https://wg21.link/p0732r1">P0732R1</a>.
+This paper therefore does not pursue that extension at this time.
+</p>
+
+<h4>Notes</h4>
+
+<p>
+The desire for functionality like this comes up regularly.  Sometimes, the motivation
+is to eliminate macros, and sometimes it just falls naturally out of the development
+process (e.g., helper functions meant to create nontype template argument values).
+</p>
+<p>
+The impetus for the present paper, however, is the work being done by SG7 in the
+realm of compile-time reflection.  There is now general agreement that future language
+support for reflection should use constexpr functions, but since "reflection functions"
+typically <i>have</i> to be evaluated at compile time, they will in fact likely be
+<i>immediate</i> functions.
+</p>
+<p>
+The general principles of this facility were first discussed in Kona (2017) as part
+of the discussion of P0595r0.  At the time, the following poll was recorded:
+<blockquote>
+	Provide a way to write a function that is guaranteed to be produce a constant
+	expression, violations diagnosed at call site? (Direction poll for [immediate
+	functions], ignoring syntax):<br/>
+	SF: 8 | F: 13 | N: 2 | A: 0 | SA: 0
+</blockquote>
+(See <a href="http://wiki.edg.com/bin/view/Wg21kona2017/P0595R0">http://wiki.edg.com/bin/view/Wg21kona2017/P0595R0</a>.
+The syntax under consideration at that time was <tt>do constexpr</tt> instead of <tt>constexpr!</tt>.)
+</p>
+
+
+<h2>Wording changes</h2>
+
+<p>Add to the grammar of [dcl.spec] paragraph 1:</p>  
+<blockquote style="padding-left: 30px;">
+	<i>decl-specifier</i>:<br/>
+	<tab><i>storage-class-specifier</i><br/>
+	<tab><i>defining-type-specifier</i><br/>
+	<tab><i>function-specifier</i><br/>
+	<tab><tt>friend</tt><br/>
+	<tab><tt>typedef</tt><br/>
+	<tab><tt>constexpr</tt><br/>
+	<tab><ins><tt>constexpr!</tt></ins><br/>
+	<tab><tt>inline</tt>
+</blockquote>
+
+<p>Append to [dcl.spec] paragraph 2:</p>  
+<blockquote style="padding-left: 30px;">
+	<ins>The <tt>constexpr</tt> and <tt>constexpr!</tt> shall not both appear in a
+	<i>decl-specifiers-seq</i>.</ins>
+</blockquote>
+
+<p>Update [dcl.constexpr] paragraph 1 as follows:
+
+<blockquote style="padding-left: 30px;">
+	The <tt>constexpr</tt>specifier shall be applied only to the definition of a variable or
+	variable template or the declaration of a function or function template.
+	<ins>The <tt>constexpr!</tt>specifier shall be applied only to the definition of a
+	function or function template.</ins>	A function or static data member declared with the <tt>constexpr</tt>
+	<ins>or	<tt>constexpr!</tt> </ins>specifier is implicitly an inline function or variable (10.1.6). If any
+	declaration of a function or function template has a <tt>constexpr</tt> <ins> or
+	<tt>constexpr!</tt> </ins>specifier, then all its declarations shall contain
+	<del>the constexpr</del><ins>that same</ins> specifier. [ <i>Note:</i> An explicit specialization can differ
+	from the template declaration with respect to the <tt>constexpr</tt>
+	<ins>or <tt>constexpr!</tt> </ins>specifier. <i>&mdash; end note</i> ]
+	[<i>Note:</i> Function parameters cannot be declared <tt>constexpr</tt>. <i>&mdash; end note</i> ]
+</blockquote>
+
+<p>Update [dcl.constexpr] paragraph 2 as follows:
+<blockquote style="padding-left: 30px;">
+	A <tt>constexpr</tt> <ins>or <tt>constexpr!</tt> </ins>specifier used in the declaration of a function
+	that is not a constructor declares that function to be a <i>constexpr function</i>. Similarly, a
+	<tt>constexpr</tt> <ins>or <tt>constexpr!</tt> </ins>specifier used in a constructor declaration
+	declares that constructor to be a <i>constexpr constructor</i>.<ins>  A function or constructor declared
+	with the <tt>constexpr!</tt> specifier is called an <i>immediate function</i>.</ins>
+</blockquote>
+
+<p>Update [dcl.constexpr] paragraph 8 as follows:
+<blockquote style="padding-left: 30px;">
+	The <tt>constexpr</tt> <ins>or <tt>constexpr!</tt> </ins>specifier has no effect on the type of a
+	constexpr function or a constexpr constructor.
+</blockquote>
+
+<p>Add a paragraph after paragraph 2 of [expr.prim.id]:</p>
+<blockquote style="padding-left: 30px;" class="stdins">
+	An <i>id-expression</i> that denotes an immediate function (_dcl.constexpr_) and is not the
+	right hand expression of a class member access operation (_expr.ref_) can be used only as
+	the (possibly parenthesized) <i>postfix-expression</i> of a function call (_expr.call_).
+</blockquote>
+
+<p>Add a paragraph at the end of [expr.call]:</p>
+<blockquote style="padding-left: 30px;" class="stdins">
+	A call to an immediate function (_dcl.constexpr_) that does not lexically appear in the
+	<i>function-body</i> (_dcl.fct.def.general_) of an immediate function shall be a constant
+	expression (_expr.const_).
+</blockquote>
+
+<p>In bullet (4.3.2) of [expr.ref] paragraph 4, strike</p>
+<blockquote style="padding-left: 30px;">
+	<del>The expression can be used only as the left-hand operand of a member function call
+	(12.2.1). [ <i>Note:</i> Any redundant set of parentheses surrounding the expression is
+	ignored	(8.4). <i>&mdash; end note</i> ]</del>
+</blockquote>
+<p>and add to the end of bullet (4.3) of that same paragraph (after the two sub-bullets):</p>
+<blockquote style="padding-left: 30px;">
+	<ins>If <tt>E1.E2</tt> refers to a nonstatic member function (_class.mfct.non-static_) or
+	to an immediate function (_dcl.constexpr_) the expression can be used only as the left-hand
+	operand of a member function call (12.2.1). [ <i>Note:</i> Any redundant set of parentheses
+	surrounding the expression is ignored (8.4). <i>&mdash; end note</i> ]</ins>
+</blockquote>
+
+<p>Insert a bullet after the first bullet (8.6) of the definition of
+<i>needed for constant evaluation</i> in [expr.const] paragraph 8:</p>
+<blockquote style="padding-left: 30px;">
+	&mdash; a constexpr function ...<br/>
+	<ins>&mdash; an immediate function that is named by an expression (_basic.def.odr_), or</ins><br/>
+	&mdash; a variable ...<br/>
+</blockquote>
+and add an example at the end of the paragraph:
+<blockquote style="padding-left: 30px;">
+	[ <i>Example:</i>
+	<pre><tt>
+  struct N {
+    N(N const&) = delete;
+  };
+  template&lt;typename T&gt; constexpr void bad_assert_copyable() { T t; T t2 = t; }
+  using ineffective = decltype(bad_assert_copyable<N>());
+    // bad_assert_copyable<N> is not needed for constant evaluation
+    // (and thus not instantiated)
+  template&lt;typename T&gt; constexpr! void assert_copyable() { T t; T t2 = t; }
+  using check = decltype(assert_copyable<N>());
+    // error: assert_copyable<N> is instantiated (because it is needed for constant
+    // evaluation), but the attempt to copy t is ill-formed
+	</tt></pre>
+	<i>&mdash; end example</i> ]
+</blockquote>
+
+<p>Update [dcl.fct.def.default] paragraph 3 as follows:
+<blockquote style="padding-left: 30px;">
+An explicitly-defaulted function that is not defined as deleted may be declared
+<tt>constexpr</tt> <ins>or constexpr! </ins>only if it would have been implicitly
+declared as <tt>constexpr</tt>. [...]
+</blockquote>
+
+<p>Update [temp.explicit] paragraph 1 as follows:
+<blockquote style="padding-left: 30px;">
+	[...]An explicit instantiation of a function template, member function of a class template,
+	or variable template shall not use the <tt>inline</tt><del> or</del><ins>,</ins>
+	<tt>constexpr</tt><ins>, or <tt>constexpr!</tt></ins> specifiers.
+</blockquote>
+</body></html>

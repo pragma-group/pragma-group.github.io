@@ -1,0 +1,141 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <meta http-equiv="Content-Style-Type" content="text/css" />
+  <meta name="generator" content="pandoc" />
+  <title>P1494R0: Partial program correctness</title>
+  <style type="text/css">
+table.sourceCode, tr.sourceCode, td.lineNumbers, td.sourceCode {
+  margin: 0; padding: 0; vertical-align: baseline; border: none; }
+table.sourceCode { width: 100%; }
+td.lineNumbers { text-align: right; padding-right: 4px; padding-left: 4px; color: #aaaaaa; border-right: 1px solid #aaaaaa; }
+td.sourceCode { padding-left: 5px; }
+code > span.kw { color: #007020; font-weight: bold; }
+code > span.dt { color: #902000; }
+code > span.dv { color: #40a070; }
+code > span.bn { color: #40a070; }
+code > span.fl { color: #40a070; }
+code > span.ch { color: #4070a0; }
+code > span.st { color: #4070a0; }
+code > span.co { color: #60a0b0; font-style: italic; }
+code > span.ot { color: #007020; }
+code > span.al { color: #ff0000; font-weight: bold; }
+code > span.fu { color: #06287e; }
+code > span.er { color: #ff0000; font-weight: bold; }
+  </style>
+  <style type="text/css">
+  s { background: #ff8888; }
+  u { background: #88ff88; }
+  </style>
+</head>
+<body>
+<div id="header">
+<h1 class="title">P1494R0: Partial program correctness</h1>
+</div>
+<p><em>Audience</em>: EWG; CWG; LEWG; WG14<br />S. Davis Herring &lt;<script type="text/javascript">
+<!--
+h='&#108;&#x61;&#110;&#108;&#46;&#x67;&#x6f;&#118;';a='&#64;';n='&#104;&#x65;&#114;&#114;&#x69;&#110;&#x67;';e=n+a+h;
+document.write('<a h'+'ref'+'="ma'+'ilto'+':'+e+'">'+'<code>'+e+'</code>'+'<\/'+'a'+'>');
+// -->
+</script><noscript>&#104;&#x65;&#114;&#114;&#x69;&#110;&#x67;&#32;&#x61;&#116;&#32;&#108;&#x61;&#110;&#108;&#32;&#100;&#x6f;&#116;&#32;&#x67;&#x6f;&#118;</noscript>&gt;<br />Los Alamos National Laboratory<br />March 7, 2019</p>
+<h1 id="problem">Problem</h1>
+<p>The termination of the program on violation of a checked contract (with continuation mode “off”) allows additional assumptions on the part of the optimizer. Of course, evaluating the contract condition may more than offset such optimization. Since disabling contract checking is meant to allow faster execution, it seems reasonable to retain the assumptions; [dcl.attr.contract.check]/4 in N4800 therefore makes the behavior of an <em>unevaluated</em> check undefined if it “would evaluate to <code>false</code>”. Some users consider this introduction of undefined behavior to be an important benefit for optimization.</p>
+<p>Others have <a href="http://open-std.org/JTC1/SC22/WG21/docs/papers/2018/p1321r0.html">expressed concerns</a> over the possibility of adding contracts producing a less reliable program. In particular, unlike the checked termination, the undefined behavior exhibits “time travel” and affects the interpretation of code <em>preceding</em> the contract condition. In San Diego, EWG considered multiple presentations on the subject and expressed a preference to remove that effect, partly out of concern over the possibility of undefined behavior <em>within</em> a contract check:</p>
+<pre class="sourceCode cpp"><code class="sourceCode cpp"><span class="dt">void</span> f(<span class="dt">int</span> *p) [[expects: p]] [[expects: *p&lt;<span class="dv">5</span>]];</code></pre>
+<p>Here, if the violation handler is known to always return (<em>e.g.</em>, it merely calls <code>std::printf</code>) and the continuation mode is “on”, the first precondition can be <em>entirely</em> elided by the implementation: any path of execution either satisfies the condition or has undefined behavior. If it does have undefined behavior, the implementation is completely unconstrained “even with regard to operations preceding the first undefined operation” ([intro.abstract]/5).</p>
+<p>Extensive Evolution reflector discussion has continued since, and Kona saw <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1290r1.pdf">several</a> <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1421r0.md">proposals</a> to alter the treatment of contract checks and the suite of extra-textual controls for them. <a href="http://wiki.edg.com/pub/Wg21sandiego2018/EvolutionWorkingGroup/p1343-contracts-update.html">Many</a> have <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1429r0.pdf#subsection.A.1">wondered</a> about the possibility of making a contract violation handler “opaque to optimization”, so that the first precondition must be checked on the supposition that the handler might not return (but rather throw or terminate). The capability of establishing such a “checkpoint”, where subsequent program behavior, <em>even if undefined</em>, does not affect the preceding behavior, would be useful in general for purposes of stability and debugging.</p>
+<h1 id="previous-work">Previous work</h1>
+<p>D1343R1 suggested making a contract violation itself a side effect, but this does not rise to the level of <em>observable behavior</em> ([intro.abstract]/6). Optimization need preserve nothing else; what’s worse, even the observable behavior of a program may be compromised if undefined behavior occurs.</p>
+<p>I <a href="http://lists.isocpp.org/ext/2018/11/6427.php">suggested</a> a trick involving a <code>volatile</code> variable:</p>
+<pre class="sourceCode cpp"><code class="sourceCode cpp"><span class="kw">inline</span> <span class="dt">void</span> log(<span class="dt">const</span> <span class="dt">char</span> *msg)
+{std::fprintf(stderr, msg);}  <span class="co">// always returns</span>
+
+<span class="dt">bool</span> on_fire() {
+  <span class="dt">static</span> <span class="dt">volatile</span> <span class="dt">bool</span> fire;  <span class="co">// always false</span>
+  <span class="kw">return</span> fire;
+}
+
+<span class="dt">void</span> f(<span class="dt">int</span> *p) {
+  <span class="kw">if</span> (p == <span class="kw">nullptr</span>) log(<span class="st">&quot;bad thing 1&quot;</span>);
+  <span class="kw">if</span> (on_fire()) std::abort();
+  <span class="kw">if</span> (*p &gt;= <span class="dv">5</span>) log(<span class="st">&quot;bad thing 2&quot;</span>);
+}</code></pre>
+<p>The idea is that the compiler cannot assume that <code>on_fire()</code> returns <code>false</code>, and so the check for <code>p</code> being null cannot be eliminated. However, the compiler can observe that, if <code>p</code> is null, the behavior will be undefined <em>unless</em> <code>on_fire()</code> returns <code>true</code>, and so it can elide that check (though not the volatile read) and call <code>abort()</code>. This therefore seems to convey a certain capability of <em>observing</em> the upcoming undefined behavior without actually experiencing it.</p>
+<p>Unfortunately, conforming implementations are not constrained to follow this analysis. The volatile read is observable behavior, and it is logically necessary that the implementation perform that read unless it can somehow obtain its result otherwise. However, after reading the value <code>false</code> (as of course it will be in practice) the implementation may take any action whatsoever, even “undoing” the call to <code>log</code>. For example, it would be permissible to perform the implicit flush for <code>stderr</code> only just before the call to <code>std::abort</code> (which never happens). One might hope for the implementation to allow for the possibility that <code>log</code> affects some hardware state that affects the volatile read, but it might not as such a scheme would require support from the operating system.</p>
+<h1 id="general-solution">General solution</h1>
+<p>We can instead introduce a special library function</p>
+<pre class="sourceCode cpp"><code class="sourceCode cpp"><span class="kw">namespace</span> std {
+  <span class="co">// in &lt;cstdlib&gt;</span>
+  <span class="dt">void</span> observable() noexcept;
+}</code></pre>
+<p>that divides the program’s execution into <em>epochs</em>, each of which has its own observable behavior. If any epoch completes without undefined behavior occurring, the implementation is required to exhibit the epoch’s observable behavior. Ending an epoch is nonetheless distinct from ending the program: for example, there is no automatic flushing of <code>&lt;cstdio&gt;</code> streams.</p>
+<p>Undefined behavior in one epoch may obscure the observable behavior of a previous epoch (for example, by re-opening an output file), but external mechanisms such as pipes to a logging process can be used to guarantee receipt of an epoch’s output. With multiple threads, it is not the epochs themselves that are meaningful but their boundaries (or <em>checkpoints</em>); normal thread synchronization is required for the observable behavior of one thread to be included in an checkpoint defined by another.</p>
+<p>As a practical matter, a compiler can implement <code>std::observable</code> efficiently as an intrinsic that counts as a possible termination, which the optimizer thus cannot remove. After optimization (including any link-time optimization), the code generator can then produce zero machine instructions for it.</p>
+<h2 id="limited-assumptions">Limited assumptions</h2>
+A call to <code>std::observable</code> prevents the propagation of assumptions based on the potential for undefined behavior after it into code before it. The following functions offer the same opportunities for optimization:
+<table>
+<tr style="vertical-align: top">
+<td>
+
+<pre class="sourceCode cpp"><code class="sourceCode cpp"><span class="dt">void</span> a(<span class="dt">int</span> &amp;r, <span class="dt">int</span> *p) {
+  <span class="kw">if</span> (p) std::fprintf(stderr, <span class="st">&quot;count: %d</span><span class="ch">\n</span><span class="st">&quot;</span>, ++r);
+  <span class="kw">if</span> (!p) std::abort();  <span class="co">// henceforth, p is known to be non-null</span>
+  <span class="kw">if</span> (!p) std::fprintf(stderr, <span class="st">&quot;p is null</span><span class="ch">\n</span><span class="st">&quot;</span>);
+}</code></pre>
+</td>
+<td style="width: 5em"></td>
+<td>
+
+<pre class="sourceCode cpp"><code class="sourceCode cpp"><span class="dt">void</span> b(<span class="dt">int</span> &amp;r, <span class="dt">int</span> *p) {
+  <span class="kw">if</span> (p) std::fprintf(stderr, <span class="st">&quot;count: %d</span><span class="ch">\n</span><span class="st">&quot;</span>, ++r);
+  std::observable();
+  <span class="kw">if</span> (!p) std::fprintf(stderr, <span class="st">&quot;p is null</span><span class="ch">\n</span><span class="st">&quot;</span>);
+  *p += r;               <span class="co">// p may be assumed non-null</span>
+}</code></pre>
+</td>
+</tr>
+</table>
+<p>In both cases, the “p is null” output can be elided: in <code>a</code>, because execution would not continue past the <code>std::abort</code>; in <code>b</code>, because of the following dereference of <code>p</code>. In both cases, the <code>count</code> output must appear if <code>p</code> is null: in <code>a</code>, because the program thereafter has the defined behavior of aborting; in <code>b</code>, because the epoch ends before undefined behavior occurs.</p>
+<p>The function <code>b</code>, however, offers the additional optimization of not checking the condition at run time. We therefore achieve the controlled optimization benefits of a checked contract (without continuation) with the runtime efficiency of an unchecked contract.</p>
+<h2 id="usage">Usage</h2>
+<p>Adding a call to <code>std::observable</code> into a contract condition guarantees that previous contracts are checked, even if the violation handler always returns:</p>
+<pre class="sourceCode cpp"><code class="sourceCode cpp"><span class="dt">void</span> f(<span class="dt">int</span> *p) [[expects: p]] [[expects: (std::observable(), *p&lt;<span class="dv">5</span>)]];</code></pre>
+<p>This is permitted because <code>std::observable()</code> has no side effects ([dcl.attr.contract.syn]/6). If the condition is not checked because of the build level (and it isn’t evaluated anyway ([dcl.attr.contract.check]/4)), no epoch is ended but no undefined behavior occurs.</p>
+<p>Using <code>std::observable</code> in a contract condition does not, however, contain the undefined behavior from the condition being (known to be) <code>false</code> when <em>not</em> checked, since it is unspecified whether the condition is evaluated ([dcl.attr.contract.check]/4) and thus whether an epoch boundary occurs. A call can instead be inserted <em>before</em> a call to a function to contain assumptions based on its preconditions:</p>
+<pre class="sourceCode cpp"><code class="sourceCode cpp"><span class="dt">void</span> f(<span class="dt">int</span> i) [[expects: i&gt;<span class="dv">10</span>]];
+<span class="dt">void</span> client(<span class="dt">int</span> i) {
+  <span class="kw">if</span> (i &lt; <span class="dv">5</span>) log(<span class="st">&quot;small input&quot;</span>);  <span class="co">// will not be elided</span>
+  std::observable();
+  f(i);
+}</code></pre>
+<p>Such a call can be added to a wrapper for a function with a precondition or to a logging function to prevent the elision of any logging statement based on subsequent code. Added to a violation handler, it prevents the elision of any (enabled) contract check based on (unsurprising) undefined behavior following it.</p>
+<h1 id="wording">Wording</h1>
+<p>Relative to N4800.</p>
+<p>Add a paragraph before [intro.abstract]/5:</p>
+<blockquote>
+<p>An <em>observable checkpoint</em> is a call to <code>std::observable</code> ([support.start.term]) or program termination.</p>
+</blockquote>
+<p>Change [intro.abstract]/5 as follows:</p>
+<blockquote>
+<p>A conforming implementation executing a well-formed program shall produce the same observable behavior as one of the possible executions of the corresponding instance of the abstract machine with the same program and the same input. However, if any such execution contains an undefined operation, this document places no requirement on the implementation executing that program with that input <s>(not even with regard to operations preceding</s><u>with regard to any operation that does not happen before an observable checkpoint that happens before</u> the first undefined operation<s>)</s>.</p>
+</blockquote>
+<p>Change [intro.abstract]/6.2 as follows:</p>
+<blockquote>
+<p><s>At program termination</s><u>At each observable checkpoint</u>, all data <u>whose delivery to the host environment to be</u> written <s>into files</s><u>to any file happens before that checkpoint</u> shall be identical to one of the possible results that execution of the program according to the abstract semantics would have produced. <u>[<em>Note:</em> Not all host environments provide access to file contents before program termination. — <em>end note</em>]</u></p>
+</blockquote>
+<p>[<em>Drafting note:</em> The phrase “delivery to … any file” refers to C11 7.21.5.2/2. — <em>end note</em>]</p>
+<p>Add to [cstdlib.syn]:</p>
+<blockquote>
+<p><code>[[noreturn]] void quick_exit(int status) noexcept;</code></p>
+<p><u><code>void observable() noexcept;</code></u></p>
+</blockquote>
+<p>Add paragraphs to the end of [support.start.term]:</p>
+<blockquote>
+<p><code>void observable() noexcept;</code></p>
+</blockquote>
+<blockquote>
+<p><em>Effects:</em> Establishes an observable checkpoint ([intro.abstract]). No other effects.</p>
+</blockquote>
+</body>
+</html>

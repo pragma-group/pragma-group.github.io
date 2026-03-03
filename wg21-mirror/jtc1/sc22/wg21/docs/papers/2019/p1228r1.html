@@ -1,0 +1,319 @@
+<html>
+<head>
+  <title>A proposal to add an efficient string concatenation routine to the Standard Library (P1228)</title>
+  <meta Author="Jorg Brown" content="proposal">
+</head>
+
+<body bgcolor="#FFFFFF" text="#000000">
+
+<font size=-1>
+Jorg Brown &lt;jorg.brown@gmail.com&gt;
+<br>
+2019-01-21
+<br>
+Document P1228
+<code>$Id: proposal.html,v 1.50 2018/01/21 07:26:32 jorg Exp $</code>
+</font>
+
+<h1>A proposal to add an efficient string concatenation routine to the Standard Library (Revision 1)</h1>
+
+<h2>Revision history</h2>
+
+<ul>
+  <li>2019-01-21: Publication in the Pre-Kona mailing as P1228.</li>
+</ul>
+
+<h2>I. Motivation</h2>
+
+<blockquote><i>Why is this important? What kinds of problems does it
+address, and what kinds of programmers, is it intended to support?  Is
+it based on existing practice?</i></blockquote>
+
+<p>
+In 2004, I became aware that std::string's operator+ was hideously
+inefficient; adding 4 strings together involved the allocation (and
+destruction) of three temporary strings, and each time the entire
+contents of the string thus far was copied.  In an attempt to make
+this faster, our compiler had inlined the memcpy code four times,
+resulting in more than 1,000 bytes of code to construct a string
+that was generally 30 or 40 bytes long.  So I wrote a small string
+copying utility, StrCat, with the primary goal of reducing code size.
+</p><p>
+Initially, all the parameters to StrCat were char*/length pairs,
+similar to std::string_view.  But along the way I discovered I could
+also inexpensively format integers with the same API.  By using
+fixed-size buffers that could be put on the stack, rather than
+separate heap-allocated std::string temporaries, significant
+speed increases were obtained.  Combined with the original technique
+of computing the length of the string in advance, and thus
+eliminating all unnecessary copies, StrCat's performance became
+second only to hand-coded character-by-character copy loops.
+</p><p>
+C++11's rvalue references have dramatically improved the efficiency of
+operator+, however the utility of a purpose-built concatenation utility
+has proven itself; there are more than 1.6 million calls to StrCat in
+Google's internal code base, and it was one of the most highly-requested
+APIs for the open-source "Abseil" project.
+</p><p>
+Also, with C++11, it became possible to streamline StrCat itself; variadic
+template functions removed the need for 26 overloads to support up to
+26 parameters.  std::initializer_list allows us to reduce its stack
+usage, as well as add user-extensibility.  And C++17's to_char family
+of conversion routines handles the difficult task of efficiently
+converting numbers to characters.
+</p>
+<h2>Target Audience</h2>
+
+Any programmer who has ever used std::string's "operator+" to concatenate
+strings, or formatted them with a printf-like API, is a potential user.
+
+<h3>A. Uphill through the snow, both ways!</h3>
+
+Traditional concatenation looks like this:
+
+<p><code><pre>
+  std::string full_body = prologue + main_str + epilogue;
+</pre></code></p>
+
+<p>
+Which creates a temporary string that contains <code>prologue + main_str</code>, then appends epilogue to that temporary string, before finally moving the temporary into full_body.  Since the temporary is just big enough to hold <code>prologue + main_str</code>, appending epilogue generally results in a second allocation, and a copy of the existing data into the new allocation.
+</p>
+
+<p>
+Very commonly, integers are part of the result string:
+</p>
+
+<p><code><pre>
+  std::string err = "Write of " + std::to_string(num_bytes) + " bytes to " + filename + " failed";
+</pre></code></p>
+
+<p>
+A temporary string must first be created to store the result of to_string; then another is created to hold the combination of "Write of" and the temporary.  Then three more appends occur before the second temporary is moved into err, and the first temporary is destroyed.  Also, std::to_string uses printf, which then has to parse '%d' and consider locale information before proceeding.
+</p>
+
+<p>
+As if that weren't bad enough, certain mistakes are perfectly legal C++:
+</p>
+
+<p><code><pre>
+  std::string err = "Write of " + num_bytes + string(" bytes to ") + filename + " failed";
+</pre></code></p>
+
+<p>
+Here, the expression <code>"Write of " + num_bytes</code> merely increments the character pointer that once pointed to 'W'.
+</p>
+
+<h3>B. Now with a purpose-built concatenation routine.</h3>
+
+With std::concat, the source code looks very similar, but is much more efficient:
+
+<p><code><pre>
+  std::string err = std::concat("Write of ", num_bytes, " bytes to ", filename, " failed");
+</pre></code></p>
+
+The core API of concat is quite simple:
+
+<p><code><pre>
+template &lt;typename... T&gt;
+string concat(const T&amp;... t) {
+  using internal::to_concat;
+  return internal::concat_views({to_concat(t)...});
+}
+</pre></code></p>
+
+This time, a small stack buffer is set up, and num_bytes is stringified into it, using a routine that, unlike sprintf, doesn't need to first look up the current locale.  Then the lengths of all 5 parameters are added together, and a string is allocated of exactly that size.  Then the character data of each argument is copied into that string.
+
+On a 2.6GHz Intel Broadwell, the following timings were observed:
+<pre>
+  285ns: std::string err = "Write of " + std::to_string(num_bytes) + " bytes to " + filename + " failed";
+  175ns: snprintf(stack_buf, sizeof(stack_buf), "Write of %u bytes to %s failed", num_bytes, filename.c_str());
+         std::string err = stack_buf;
+  135ns: snprintf(stack_buf, sizeof(stack_buf), "Write of %u bytes to %s failed", num_bytes, filename.c_str());
+   78ns: std::string err = std::concat("Write of ", num_bytes, " bytes to ", filename, " failed");
+</pre>
+
+<h2>II. Impact On the Standard</h2>
+
+<blockquote><i>What does it depend on, and what depends on it?  Is it
+a pure extension, or does it require changes to standard components?
+Does it require core language changes?</i></blockquote>
+<p>
+This proposal is a pure library extension.  It does not require
+changes to any standard classes or existing functions.
+</p><p>
+It makes use of the <code>std::to_chars</code> functionality added in C++2017,
+to achieve good performance when writing to character buffers.
+</p>
+
+<h2>III. Design Decisions</h2>
+
+<blockquote><i>Why did you choose the specific design that you did?
+What alternatives did you consider, and what are the tradeoffs?  What
+are the consequences of your choice, for users and implementors?  What
+decisions are left up to implementors?  If there are any similar
+libraries in use, how do their design decisions compare to yours?
+</i></blockquote>
+
+
+<h3>A. Formatting of built-in integer types</h3>
+<p>
+Thankfully, almost everyone agrees how to format the integer types that are built-in to the language, other than the single-character types: The sign comes first, either "-" or "", and then the number itself, in base 10.
+</p><p>
+"char", however, is disputed.  <code>operator&lt;&lt;(ostream&amp;, char)</code> treats it as an actual character, while std::to_string(char) treats it the same as it would treat the same value, promoted to "int" type.  Many code bases define custom integer types such as int8 or int_0_255 which are defined in terms of char, signed char, or unsigned char, but since these are mere typedefs, it is not possible to know what was truly meant.  In my experience, it causes more mayhem when an integer is incorrectly treated as a character, than the other way around, therefore this paper treats "char", "signed char", and "unsigned char" as integers.  For those rare cases where a character is truly desired, a simple "string(1, ch)" call will force the value to be treated as an actual character.
+</p><p>
+"bool" is treated as an integer as well, by both std::stream and std::to_string, therefore std::concat treats it that way as well, even though many would prefer the text "true" and "false".  Making this decision slightly easier is the fact that users don't agree whether "true", "True", "TRUE", or "T" is the best stringified boolean representation for a "1" bit.
+</p>
+
+<h3>B. Formatting of built-in floating-point types</h3>
+<p>
+<code>stream::operator&lt;&lt;(float)</code> and <code>to_string(float)</code> return dramatically different results.  In printf terminology, the former uses "%g" while the latter uses "%f".  Consider the following code:
+<p><code><pre>
+  cout &lt;&lt; "positive normal float holds values from "
+       &lt;&lt; FLT_MIN &lt;&lt; " to " &lt;&lt; FLT_MAX &lt;&lt; "\n";
+  cout &lt;&lt; "positive normal float holds values from "
+       &lt;&lt; std::to_string(FLT_MIN) &lt;&lt; " to " &lt;&lt; std::to_string(FLT_MAX) &lt;&lt; "\n";
+</pre></code></p>
+It produces this output:
+<p><samp><pre>
+positive normal float holds values from 1.17549e-38 to 3.40282e+38
+positive normal float holds values from 0.000000 to 340282346638528859811704183484516925440.000000
+</pre></samp></p>
+
+<p>
+The treatment of small values as though they were zero is unfortunate, but the bigger issue is that, for speed, concat uses a fixed-size buffer.  And while all 32-bit IEEE-754 floats are represented in 12 characters or less with %g, %f uses up to 47 characters.  For 64-bit doubles, it's even worse: %g is limited to 13 characters while %f produces up to 317 characters.  Therefore concat opts for the stream behavior.
+</p>
+
+<h3>C. Support for user-defined types.</h3>
+
+<p>
+Using SFINAE to determine if a user-defined type has a "ToString" method was briefly considered, as was support for a type's existing <code>ostream operator&lt;&lt;()</code>.  Both were rejected on the grounds that std::concat exists for performance, so the use of an API which is not performant should be apparent.  Also, the use of a member function would not allow support for gcc / llvm's built-in __int128 type.  Therefore we have chosen to call to_concat with each of the parameters to std::concat, and to cast each result to a std::string_view.  This allows types with an upper bound for string representation size to return a fixed-size buffer, while types with a possibly-large representation can return a string.
+</p>
+
+<h3>D. Support for string types other than std::string.</h3>
+
+As of this writing, the C++ strings library supports not just std::string, but also wstring, u16string, u32string, u8string, and pmr variants of each.  Ideally std::concat would support all of them, but unfortunately, automatically determining what the result type of std::concat should be is not possible, since it's not required for any of the parameters to be indicative of string type.  Therefore, to support other string types would require a further-templated concat function:
+
+<p><code><pre>
+template &lt;class CharT = char,
+    class Traits = std::char_traits&lt;CharT&gt;,
+    class Allocator = std::allocator&lt;CharT&gt;, typename... T&gt;
+basic_string&lt;CharT, Traits, Allocator&gt; basic_concat(const T&amp;... t);
+</pre></code></p>
+
+<p>
+It would also require each user-defined to_concat function to be templated, as well as dealing with the fact that std::to_chars currently does not support anything other than "char".
+</p>
+
+<p>
+Another solution would be to provide wconcat, u16concat, etc... which would also require custom user-defined to_concat functions.  In the end, it seemed better to simply consider std::concat to be a low-level utility, and to consider that broader unicode support would likely call for locale support as well.  Therefore, this paper currently opts out of support for string types other than std::string.
+</p>
+
+<h3>E. More access to the underlying code?</h3>
+
+This proposal does not make the internal API for stringifying integers (e.g. <code>std::internal::to_concat(int)</code>) public, on the grounds that users can already use std::to_chars.  It's conceivable that it would it prove useful in other situations, however.
+
+<h3>S. Sketch of a sample implementation</h3>
+
+<p><code><pre>
+namespace std {
+namespace internal {
+
+template &lt;size_t max_size&gt;
+struct concat_buffer {
+  std::array&lt;char, max_size&gt; data;
+  unsigned short size;
+  operator std::string_view() const { return {&amp;data[0], size}; }
+};
+
+// The core: sums the lengths of the given views, creates a string of that size,
+// and copies the views in.
+string concat_views(std::initializer_list&lt;std::string_view&gt; views);
+
+concat_buffer&lt;16&gt; to_concat(int i);
+concat_buffer&lt;16&gt; to_concat(unsigned int i);
+concat_buffer&lt;32&gt; to_concat(long i);
+concat_buffer&lt;32&gt; to_concat(unsigned long i);
+concat_buffer&lt;32&gt; to_concat(long long i);
+concat_buffer&lt;32&gt; to_concat(unsigned long long i);
+concat_buffer&lt;16&gt; to_concat(float);
+concat_buffer&lt;32&gt; to_concat(double);
+
+// Normal enums are already handled by the integer formatters.
+// This overload matches only scoped enums.
+template &lt;typename T,
+          typename = typename std::enable_if&lt;
+              std::is_enum&lt;T&gt;{} &amp;&amp; !std::is_convertible&lt;T, int&gt;{}&gt;::type&gt;
+auto to_concat(T e) {
+  return to_concat(static_cast&lt;typename std::underlying_type&lt;T&gt;::type&gt;(e));
+}
+
+inline std::string_view to_concat(const std::string_view&amp; sv) { return sv; }
+
+}  // internal
+
+template &lt;typename... T&gt;
+inline __attribute__((always_inline)) string concat(const T&amp;... t) {
+  using internal::to_concat;
+  return internal::concat_views({std::string_view{to_concat(t)}...});
+}
+
+}  // namespace std
+
+</pre></code></p>
+
+
+<h2>IV. Proposed Additional Text</h2>
+
+<h3>Header <code>&lt;string&gt;</code> synopsis</h3>
+
+<pre>
+namespace std {
+// [string.conversions], numeric conversions
+template &lt;typename... T&gt; string concat(const T&amp;... t);
+template &lt;typename... T&gt; string concat(string&amp;&amp; dest, const T&amp;... t);
+} // namespace std
+</pre>
+
+<h3>Numeric conversions</h3>
+
+<pre>
+template &lt;typename... T&gt; string concat(const T&amp;... t);
+template &lt;typename... T&gt; string concat(string&amp;&amp; dest, const T&amp;... t);
+</pre>
+
+<p>
+The variadic template function <code>concat</code> converts its parameters into character strings, and then returns a <code>string</code> object holding the concatenation of those character strings.  The character strings hold the character representation of the values of their arguments: If an argument is of integral type, the conversion is performed as if by std::to_chars, with a base of 10.  An enum parameter is first cast to its underlying integral type, and then converted.  If an argument is of floating-point type, it is converted as if by std::to_chars, with chars_format::general and precision of 6.  Arguments that can be implicitly converted to std::string_view will be converted to std::string_view, and then concatenated.  If the expression "to_concat(arg)" is valid (that is, if ADL finds a to_concat overload in arg's namespace), the argument will first be passed to to_concat(), before being explicitly cast to std::string_view, and then concatenated.
+</p>
+
+<p>
+The second form of concat performs the same operation as the first, but is often more efficient because it simply appends the arguments to dest, before returning dest.  Specifically, if dest is already large enough, no memory allocation is needed.  Like string::append, if an exception is thrown during reallocation, the second form will not change the "dest" string parameter at all.
+</p>
+
+<h2>V. Acknowledgements</h2>
+
+<ul>
+<li>Thanks to Samuel Benza, who first introduced me to the concept of constructing an initializer_list from the result of a function call applied to each argument of a variadic function.  And also, for first suggesting accepting an rvalue string as the first parameter, purely as an optimization.</li>
+</ul>
+
+<h2>VI. References</h2>
+
+<ul>
+  <li>Jens Maurer, <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0067r5.html">"Elementary string conversions" (P0067R5)</a> </li>
+  <li>Abseil open-source C++ Library, <a href="https://abseil.io/docs/cpp/guides/strings#abslstrcat-and-abslstrappend-for-string-concatenation">"StrCat and StrAppend for String Concatenation"</a> </li>
+</ul>
+
+<h2>VII. Random quotes</h2>
+<blockquote>
+Your average "float" is just random noise after the first six significant digits.
+</blockquote>
+<p align="right">
+Jorg Brown, 2018.
+</p>
+
+<blockquote>
+Anyone who considers arithmetical methods of producing random digits is, of course, in a state of sin.
+</blockquote>
+<p align="right">
+John von Neumann, 1951
+</p>
+</body>

@@ -1,0 +1,186 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+	<title>Caller-side precondition checking, and Eval_and_throw</title>
+
+	<style>
+	p {text-align:justify}
+	li {text-align:justify}
+	blockquote.note
+	{
+		background-color:#E0E0E0;
+		padding-left: 15px;
+		padding-right: 15px;
+		padding-top: 1px;
+		padding-bottom: 1px;
+	}
+	ins {color:#00A000}
+	del {color:#A00000}
+	</style>
+</head>
+<body>
+
+<address align=right>
+Document number: P2780R0
+<br/>
+Audience: SG21
+<br/>
+<br/>
+<a href="mailto:ville.voutilainen@gmail.com">Ville Voutilainen</a><br/>
+2023-03-02<br/>
+</address>
+<hr/>
+<h1 align=center>Caller-side precondition checking, and Eval_and_throw</h1>
+
+<h2>Abstract</h2>
+
+<p>This paper describes how and why to do caller-side(-only) precondition
+  checking and explains how that makes a violation handling mode where
+  exceptions  are thrown on a contract violation viable.</p>
+
+<p>The general problem with a throwing violation handling mode is its
+  interaction with noexcept functions. But if preconditions are
+  checked at the call site, they can be checked before a function
+  body is entered, and thus they can avoid termination when a contract
+  violation throws, and then it's fine to use such a throwing violation
+  handling mode even with noexcept functions.</p>
+
+<h2>More rationale</h2>
+
+<p>
+  Caller-side(-only) precondition checking is useful for other things
+  than just making Eval_and_throw work. It has two major benefits:
+  <ol><li>It matches some ostensibly common uses well; it's probably
+      often so that programmers are interested in whether the functions
+      their code calls are called correctly, and it's less important
+      to find bugs in the functions called, so preconditions of called
+      code are of higher interest.</li>
+    <li>It allows binary libraries to ship just one version; there's
+      no need to ship a separate contract-enabled version for checking
+      preconditions, and a contract-disabled version for performance.
+      Callers can just turn on precondition checking at the caller
+      side, and can then verify that calls are correct, without
+      having to enable precondition checks at the definition side.
+      This seems _very_ attractive from the perspective of a library
+      vendor, and also from the perspective of a library user.</li>
+  </ol>
+</p>
+
+<h2>Design goals</h2>
+
+<p>
+  The most major goal here is to provide the ability to do caller-side
+  precondition checking without any cooperation from the callee.
+  No extra symbols, no other symbol table tricks, no shared tables
+  between translation units. No ABI break when enabling/disabling
+  contract checking in the callee, or in the caller.
+</p>
+<p>
+  I think it's important that the Contracts design allows the above
+  regardless of what the contents of the MVP are. In particular,
+  I consider it massively important that it's possible to implement
+  the contracts MVP without any ABI impact, in other words, I consider it
+  massively important that it's possible to implement the MVP so that
+  enabling or disabling contracts doesn't change ABI. Regardless of
+  whether this proposal ever gets adopted.
+</p>
+
+<h2>Target ship vehicle</h2>
+
+<p>
+  I am not suggesting that this proposal should be concerned
+  for the current Contracts MVP, or in C++26. However, if we end
+  up entertaining Eval_and_throw for C++26, I think we need to
+  entertain this paper as well.
+</p>
+
+<h2>So how does it work?</h2>
+
+<p>
+  This is relatively simple; when the compiler sees a call to an overload
+  set, i.e. a call that is not performed via a pointer-to-function
+  or a pointer-to-member-function, it can check the preconditions
+  of the call target after overload-resolving it, and change the
+  function call to be an expression that performs the precondition
+  check and then calls the function.
+</p>
+<p>
+  In pseudo-code, a call<pre><code>
+f()</code></pre>
+  is transformed into<pre><code>
+((precond() ? nop() : violation()), f())
+</code></pre>
+  where <code>precond()</code> is a function that evaluates the precondition
+  and returns the result of that evaluation, <code>nop()</code> is dummy
+  function that does nothing and returns void, and <code>violation()</code> is
+  a call to a violation handler, which either aborts in the case of
+  the MVP's Eval_and_abort, or throws with the suggested Eval_and_throw.
+</p>
+<p>This is doable in a relative straightforward fashion in just a compiler
+  front-end.</p>
+
+<h3>What about indirect calls?</h3>
+
+<p>
+  For pointers-to-function, this could be done so that a call to a function
+  actually calls a thunk, so when the address of a function is taken,
+  the addres of the thunk is used instead. But we might want to avoid
+  mandating that, because..
+</p>
+<p>..it becomes seriously difficult to handle indirect member function calls.
+  If the function is virtual, we'll have an index into a vtable element,
+  and we can't just thunk it. We would need to add additional vtable slots,
+  and that seems like a seriously awkward thing to require.</p>
+
+<p>For now, I'm suggesting that if we end up entertaining this sort
+  of checking mode, we plainly state that it doesn't work for calls
+  through pointers to functions or pointers to member functions.
+</p>
+
+<h2>So how does this make Eval_and_throw work?</h2>
+
+<p>Well, as we saw, a call<pre><code>
+f()</code></pre>
+  is transformed into<pre><code>
+((precond() ? nop() : violation()), f())
+</code></pre>
+  In this code, if <code>violation()</code> throws, we won't hit a possible
+  noexcept of <code>f()</code>, because we never call <code>f()</code>.
+  So the throwing precondition check works even if the target function
+  is noexcept.
+</p>
+
+<h2>So what is being proposed here?</h2>
+
+<p>
+  I am proposing that we, eventually, not necessarily as part of the MVP,
+  add a contract-checking mode that
+  <ol>
+    <li>enables precondition checking of functions called by the code in the current
+      TU, and</li>
+    <li>enables that checking for overloaded calls only, so calls to
+      functions and member functions that name the function called, and</li>
+    <li>enables checking of contract asserts in the current TU, and</li>
+    <li>does not enable checking of any postconditions, even in the current TU (I suppose this is debatable for the current TU), and</li>
+    <li>offers no guarantees on whether the preconditions are evaluated once
+      or more often.</li>
+  </ol>
+</p>
+<p>I am proposing that regardless of whether we adopt an Eval_or_throw.
+  In case we do adopt that option as a violation handling mode, I propose
+  that enabling that mode also implicitly enables exactly what is enabled in the
+  bullet list above, and nothing more.
+</p>
+
+<h2>What is the performance impact of this proposal?</h2>
+<p>
+  You may end up evaluating preconditions twice. But in general,
+  a precondition check is in an inline function, and such a function
+  may be codegen-emitted twice, both in the calling and in the called TU.
+  If it's all in a single TU, it's all visible to an optimizer. And even
+  in multiple different TUs, it's visible to link-time optimization.
+  The duplicate calls can be eliminated if the optimizer can prove
+  them to be side-effect free.
+</p>
+</body>
+</html>

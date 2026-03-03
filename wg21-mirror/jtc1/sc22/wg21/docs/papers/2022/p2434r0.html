@@ -1,0 +1,164 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <meta http-equiv="Content-Style-Type" content="text/css" />
+  <meta name="generator" content="pandoc" />
+  <title>P2434R0: Nondeterministic pointer provenance</title>
+  <style type="text/css">code{white-space: pre;}</style>
+  <style type="text/css">
+table.sourceCode, tr.sourceCode, td.lineNumbers, td.sourceCode {
+  margin: 0; padding: 0; vertical-align: baseline; border: none; }
+table.sourceCode { width: 100%; line-height: 100%; }
+td.lineNumbers { text-align: right; padding-right: 4px; padding-left: 4px; color: #aaaaaa; border-right: 1px solid #aaaaaa; }
+td.sourceCode { padding-left: 5px; }
+code > span.kw { color: #007020; font-weight: bold; }
+code > span.dt { color: #902000; }
+code > span.dv { color: #40a070; }
+code > span.bn { color: #40a070; }
+code > span.fl { color: #40a070; }
+code > span.ch { color: #4070a0; }
+code > span.st { color: #4070a0; }
+code > span.co { color: #60a0b0; font-style: italic; }
+code > span.ot { color: #007020; }
+code > span.al { color: #ff0000; font-weight: bold; }
+code > span.fu { color: #06287e; }
+code > span.er { color: #ff0000; font-weight: bold; }
+  </style>
+  <style type="text/css">
+  div.del, section.del { background: #fcd; }
+  div.ins, section.ins { background: #bfa; }
+  .mv { background: #ddf; }
+  s, .del { background: #ff8888; margin-right: 0.15ch; }
+  u, .ins { background: #88ff88; }
+  /* from https://stackoverflow.com/a/32456613 */
+  div > blockquote, body > blockquote {
+      display: list-item;
+      list-style-type: "- ";
+  }
+  /* With a 3 em gutter and two columns, ANSI letter is 127 characters wide. */
+  pre {
+  		margin-left: 1.2em;
+  }
+  .tony {
+    border-collapse: collapse;
+  }
+  .tony > tbody > tr {
+    vertical-align: top;
+  }
+  tr.hr, tr.hr {
+    border-bottom: thin solid #60a0b0;  /* relies on collapse */
+  }
+  </style>
+</head>
+<body>
+<div id="header">
+<h1 class="title">P2434R0: Nondeterministic pointer provenance<!-- -*- c++-md -*- --></h1>
+</div>
+<p><em>Audience</em>: EWG, SG22<br />S. Davis Herring &lt;<script type="text/javascript">
+<!--
+h='&#108;&#x61;&#110;&#108;&#46;&#x67;&#x6f;&#118;';a='&#64;';n='&#104;&#x65;&#114;&#114;&#x69;&#110;&#x67;';e=n+a+h;
+document.write('<a h'+'ref'+'="ma'+'ilto'+':'+e+'">'+e+'<\/'+'a'+'>');
+// -->
+</script><noscript>&#104;&#x65;&#114;&#114;&#x69;&#110;&#x67;&#32;&#x61;&#116;&#32;&#108;&#x61;&#110;&#108;&#32;&#100;&#x6f;&#116;&#32;&#x67;&#x6f;&#118;</noscript>&gt;<br />November 15, 2022</p>
+<h1 id="introduction">Introduction</h1>
+<p><a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2021/p2318r1.pdf">P2318R1</a> describes a variety of plausible models of pointer provenance that differ principally in how they handle conversions between pointers and integers (including the integer values of the storage bytes for a pointer). (See its §A.4 for discussion of the variants in terms of examples.) It proposes the variant called PNVI-ae-udi, which does seem to provide a good combination of optimization possibilities and support for existing code. However, in several cases it is overly charitable to the programmer: for example, using an explicit copy loop rather than calling <code>std::memcpy</code> “exposes” storage, which can interfere with optimization, even if the byte values obviously do not escape. (The paper proposes to eventually add annotations to avoid such unwanted side effects.) It also sometimes depends in an apparently arbitrary fashion on the order of operations with no data dependencies (as in the <code>pointer_from_integer_1ig.c</code> example with an exposure of <code>j</code> added).</p>
+<p>The main alternative is the PVI model, which avoids the notion of storage exposure but imposes further restrictions on integer conversions. These restrictions provide further opportunities for optimization but also complicate the execution model in subtle ways that make it difficult for the programmer to determine whether a manipulation preserves the validity of a pointer (yet to be reconstructed). They also interact badly with serialization of pointers where operations on the converted pointer value are entirely invisible; additional annotations might be required to support this use case.</p>
+<p>This paper compares the existing rules for pointers to the proposed provenance models and proposes minor changes to better align them.</p>
+<h1 id="analysis">Analysis</h1>
+<p>Pointer values are described in abstract terms ([basic.compound]/3); while they “represent the address” of an object, that address may be given a numerical interpretation only via copying the bits into an integer or via the implementation-defined mapping to integers ([expr.reinterpret.cast]/4), and there is no specification of how any address is chosen. As such, integers obtained by <code>memcpy</code>ing or casting pointers may be taken to be completely unspecified aside from the (separate) round-trip requirements. ([basic.align]/1 talks about addresses as ordinal or cardinal numbers of bytes, but nothing else depends on that interpretation.)</p>
+<p>This nondeterminism already implies undefined behavior in many of the circumstances that the provenance models are meant to reject. Consider the simple example</p>
+<pre class="sourceCode cpp"><code class="sourceCode cpp"><span class="dt">int</span> main() {
+  <span class="dt">int</span> jenny=<span class="dv">0</span>;
+  <span class="co">// std::cout &lt;&lt; &amp;jenny;</span>
+  *(<span class="dt">int</span>*)<span class="dv">8675309</span>=<span class="dv">1</span>;
+  <span class="kw">return</span> jenny;
+}</code></pre>
+<p>(Assume that the implementation does not specially define a pointer value corresponding to this particular integer.) Even if the address of <code>jenny</code> is the suspicious value given, this has undefined behavior under PNVI-ae-udi (because the address of <code>jenny</code> is never exposed) and PVI (because the integer literal is not derived from the address of <code>jenny</code>). However, it is equally undefined in N4917 because there are possible executions of the program ([intro.abstract]/5) where the address is some other value and the cast produces an invalid pointer value. Printing the address is no help: even if the program displays “0x845fed”, that itself can be a manifestation of the undefined behavior.</p>
+<p>On the other hand, consider</p>
+<pre class="sourceCode cpp"><code class="sourceCode cpp"><span class="dt">int</span> main() {
+  <span class="dt">int</span> x,y=<span class="dv">0</span>;
+  uintptr_t p=(uintptr_t)&amp;x,q=(uintptr_t)&amp;y;
+  p^=q;
+  q^=p;
+  p^=q;
+  *(<span class="dt">int</span>*)q=*(<span class="dt">int</span>*)p;
+  <span class="kw">return</span> x;
+}</code></pre>
+<p>PVI disallows this manipulation, saying that the values resulting from operations on <code>p</code> and <code>q</code> do not inherit their provenances; PNVI-ae-udi allows it because it simply observes that both addresses have escaped from the abstract world of pointer values. In the latter case, the compiler would have to support “guessing” addresses even if it could prove that the value of such a pointer doesn’t actually depend on the original pointer. N4917 already handles this case more elegantly: the program has well defined behavior because for any choice of addresses for <code>x</code> and <code>y</code>, <code>q</code> (<code>p</code>) ends up being the address of <code>x</code> (<code>y</code>), so the casts back to pointers produce the swapped pointer values. This interpretation extends to arbitrary integer manipulations and I/O: the operations allowed are precisely those that <em>reliably</em> reproduce some address initially obtained, whether via arithmetic, control flow, or data dependencies. In practice it is impossible to detect every pointer value construction that fails to be reliable (that “guesses”), but there is no obligation to do so since the behavior is undefined in such cases.</p>
+<p>The “pointer zap” rule ([basic.stc.general]/4) has two purposes: its footnote explains that even examining a pointer into deallocated storage might trap (in the course of loading something like a segment register), but it also serves as a sort of notional “generation counter” for reused parts of the free store. Consider</p>
+<pre class="sourceCode cpp"><code class="sourceCode cpp"><span class="dt">int</span> main() {
+  <span class="dt">int</span> *p=<span class="kw">new</span> <span class="dt">int</span>;
+  uintptr_t i=(uintptr_t)p;
+  <span class="kw">delete</span> p;
+  p=<span class="kw">new</span> <span class="dt">int</span>(<span class="dv">1</span>);
+  <span class="kw">if</span>((uintptr_t)p==i) *(<span class="dt">int</span>*)i=<span class="dv">0</span>;
+  <span class="kw">return</span> *p;
+}</code></pre>
+<p>PVI rejects this LBYL approach: <code>i</code> cannot acquire the provenance of the new <code>p</code> merely because it has been compared to another integer with that provenance. (Consider that the comparison might occur in an opaque function.) PNVI-ae-udi allows it because the address of that new object is exposed in the course of making the check; N4917 allows it simply because <code>i</code> is cast back to a pointer precisely when it has the same value as the cast of the new <code>p</code>. It is only natural that two integers with the same value should have the same behavior.</p>
+<p>N4917 does not, however, implement the user-disambiguation (<em>udi</em>) provision: in saying that a pointer subjected to a round trip conversion “will have its original value”, [expr.reinterpret.cast]/5 erroneously forbids real implementations that produce the same integer value for pointers to an object and one past the object that immediately precedes it in memory. Similarly, [basic.types.general]/2–3 refer to a singular value for what might be a pointer reconstructed from bytes (and /4 claims that the bits are <a href="https://lists.isocpp.org/core/2020/06/9454.php">sufficient to determine the value</a>). [bit.cast]/2 acknowledges the possibility of more than one value with the same value representation, but leaves it unspecified which is produced.</p>
+<h1 id="proposal">Proposal</h1>
+<p>To implement <em>udi</em>, apply the same <em>angelic nondeterminism</em> by which <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p0593r6.html">implicit object creation</a> selects the objects to create: if any pointer value exists that corresponds to the integer and gives the program defined behavior, one such value is the result. This change affects [basic.types.general]/2–4, [expr.reinterpret.cast]/5, and [bit.cast]/2 (which currently instead plays into the general <em>demonic nondeterminism</em> of [intro.abstract]/5). This paper does not attempt to address the situation of modifying a pointer by <a href="p1839r4.pdf">storing to <em>part</em> of its object representation</a>, but it changes the simple <code>memcpy</code> case to avoid eventually giving different behavior to direct and circuitous means of accomplishing a bit-wise copy.</p>
+<p>To avoid confusing inconsistencies with comparing their integer representations (on implementations where each address has just one such), restrict [expr.eq] to provide consistent results for any pair of pointer values. This change cannot be detected during constant evaluation ([expr.const]/5.24); following P2318R1, we could consider actually comparing the addresses other than during constant evaluation.</p>
+<h1 id="wording">Wording</h1>
+<p>Relative to N4917.</p>
+<h2 id="basic.types">#[basic.types]</h2>
+<h3 id="basic.types.general">#[basic.types.general]</h3>
+<p>Move paragraphs 2 and 3 to [basic.types.trivial] (<em>q.v.</em>).</p>
+<p>Change paragraph 4:</p>
+<blockquote>
+<p>The <em>object representation</em> of an object of type <code>T</code> is the sequence of <em>N</em> <code>unsigned</code> <code>char</code> objects taken up by the object of type <code>T</code>, where <em>N</em> equals <code>sizeof(T)</code>. The <em>value representation</em> of an object of type <code>T</code> is the set of bits that participate in representing a value of type <code>T</code>. Bits in the object representation that are not part of the value representation are <em>padding bits</em>. <s>For trivially copyable types, the value representation is a set of bits in the object representation that determines a <em>value</em>, which is one discrete element of an implementation-defined set of values.</s>[<em>Footnote</em>: […] — <em>end footnote</em>]</p>
+</blockquote>
+<h3 id="basic.types.trivial">#[basic.types.trivial]</h3>
+<p>Add this subclause before [basic.fundamental]:</p>
+<div class="ins">
+<blockquote>
+<p>Each trivially copyable type <code>T</code> has an implementation-defined set of discrete <em>values</em>. A <em>bit value</em> is a member of an implementation-defined disjoint partition of the set of values; for scalar types other than object pointer types, each contains no more than one value. The value representation of an object of type <code>T</code> determines a bit value for that object. When an object <em>acquires</em> a bit value, its value becomes an unspecified member of that bit value that would result in the program having defined behavior, if any.</p>
+</blockquote>
+</div>
+<p>Move paragraphs 2 and 3 here from [basic.types.general] and change them:</p>
+<blockquote>
+<p><s>For any</s><u>If an</u> object <s>(other than</s><u>of type <code>T</code> is not</u> a potentially-overlapping subobject<s>) of trivially copyable type <code>T</code></s>, whether or not the object holds a valid value of type <code>T</code>, the underlying bytes ([intro.memory]) making up the object can be copied into an array of <code>char</code>, <code>unsigned</code> <code>char</code>, or <code>std::byte</code> ([cstddef.syn]).[<em>Footnote</em>: […] — <em>end footnote</em>] If the content of that array is copied back into the object, the object <s>shall subsequently hold</s><u>acquires</u> its original <u>bit </u>value.</p>
+<p>[<em>Example</em>:</p>
+<p>[…]</p>
+<p>— <em>end example</em>]</p>
+</blockquote>
+<blockquote>
+<p>For two distinct <u>such </u>objects <code>obj1</code> and <code>obj2</code><s> of trivially copyable type <code>T</code>, where neither <code>obj1</code> nor <code>obj2</code> is a potentially-overlapping subobject</s>, if the underlying bytes ([intro.memory]) making up <code>obj1</code> are copied into <code>obj2</code>,[<em>Footnote</em>: […] — <em>end footnote</em>] <code>obj2</code> <s>shall subsequently hold</s><u>acquires</u> the <s>same</s><u>bit</u> value <s>as</s><u>of</u> <code>obj1</code>.</p>
+<p>[<em>Example</em>:</p>
+<p>[…]</p>
+<p>— <em>end example</em>]</p>
+</blockquote>
+<h2 id="expr">#[expr]</h2>
+<h3 id="expr.reinterpret.cast">#[expr.reinterpret.cast]</h3>
+<p>Change paragraphs 4 and 5:</p>
+<blockquote>
+<p>A pointer can be explicitly converted to any integral type large enough to <s>hold</s><u>distinguish</u> all <u>bit </u>values of its type. The mapping function is implementation-defined.</p>
+<p>[<em>Note</em>: It is intended to be unsurprising to those who know the addressing structure of the underlying machine. — <em>end note</em>]</p>
+<p>[…]</p>
+</blockquote>
+<blockquote>
+<p>A value of integral type or enumeration type can be explicitly converted to a pointer. <s>A pointer converted to an integer of sufficient size (if any such exists on the implementation) and back to the same pointer type will have its original value; mappings between pointers and integers are</s><u>If the value is equal to that produced by converting one or more pointer values to an integral type, the result is an unspecified choice among those values that would result in the program having defined behavior. If no such value exists, the behavior is undefined.</u> <s>o</s><u>O</u>therwise<u>, the result is</u> implementation-defined.</p>
+<p><u>[<em>Note</em>: It can be an invalid pointer value. — <em>end note</em>]</u></p>
+</blockquote>
+<h3 id="expr.eq">#[expr.eq]</h3>
+<p>Insert before paragraph 3:</p>
+<div class="ins">
+<blockquote>
+<p>Any two pointer values or two pointer-to-member values either compare equal or compare unequal.</p>
+<p>[<em>Note</em>: Repeated comparisons are consistent so long as neither value is an invalid pointer value. — <em>end note</em>]</p>
+</blockquote>
+</div>
+<p>Change paragraph 6:</p>
+<blockquote>
+<p>If two operands compare equal, the result is <code>true</code> for the <code>==</code> operator and <code>false</code> for the <code>!=</code> operator. If two operands compare unequal, the result is <code>false</code> for the <code>==</code> operator and <code>true</code> for the <code>!=</code> operator. <s>Otherwise, the result of each of the operators is unspecified.</s></p>
+</blockquote>
+<h2 id="bit.cast">#[bit.cast]</h2>
+<p>Change paragraph 2:</p>
+<blockquote>
+<p><em>Returns</em>: An object of type <code>To</code>. Implicitly creates objects nested within the result ([intro.object]). Each bit of the value representation of the result is equal to the corresponding bit in the object representation of <code>from</code>. Padding bits of the result are unspecified. <s>For t</s><u>T</u>he result and each object created within it<s>, if there is no value of the object’s type</s> <u>acquire the bit values </u>corresponding to the value representation produced<u>; if any such bit value is empty</u>, the behavior is undefined. <s>If there are multiple such values, which value is produced is unspecified.</s> A bit in the value representation of the result is indeterminate if it does not correspond to a bit in the value representation of <code>from</code> or corresponds to a bit of an object that is not within its lifetime or has an indeterminate value ([basic.indet]). For each bit in the value representation of the result that is indeterminate, the smallest object containing that bit has an indeterminate value; the behavior is undefined unless that object is of unsigned ordinary character type or <code>std::byte</code> type. The result does not otherwise contain any indeterminate values.</p>
+</blockquote>
+<h1 id="acknowledgments">Acknowledgments</h1>
+<p>Thanks to Richard Smith and Peter Sewell for reviewing an early, overcomplicated draft of this paper.</p>
+</body>
+</html>

@@ -1,0 +1,710 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+ "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8">
+<title>P1217R1: Out-of-thin-air, revisited, again</title>
+<style type="text/css">
+html { line-height: 135%; }
+ins { background-color: #DFD; }
+del { background-color: #FDD; }
+th, td { padding-right: 15px; padding-left: 15px }
+</style>
+</head>
+<body>
+<table>
+        <tr>
+                <th>Doc. No.:</th>
+                <td>WG21/P1217R1</td>
+        </tr>
+        <tr>
+                <th>Date:</th>
+                <td>2019-03-10</td>
+        </tr>
+        <tr>
+                <th>Reply-to:</th>
+                <td>Hans-J. Boehm</td>
+        </tr>
+        <tr>
+                <th>Email:</th>
+                <td><a href="mailto:hboehm@google.com">hboehm@google.com</a></td>
+        </tr>
+        <tr>
+                <th>Authors:</th>
+                <td>Hans-J. Boehm, with input from many others</td>
+        </tr>
+        <tr>
+                <th>Audience:</th>
+                <td>SG1</td>
+        </tr>
+</table>
+
+<h1>P1217R1: Out-of-thin-air, revisited, again</h1>
+
+<h2>Abstract</h2>
+<p>
+This is a status update attempting to summarize
+<a href="http://altair.cs.oswego.edu/pipermail/memory-model-design/">an external discussion</a>
+of so-called out-of-thin-air results with <code>memory_order_relaxed</code>.
+It was known that allowing such results often makes it impossible to reason about code
+using <code>memory_order_relaxed</code>, and that our current wording prohibiting them is
+excessively vague. Many of us believed that this was a stopgap until we determined a better
+way to word this restriction without invalidating current implementations.
+It has become much more clear that this cannot happen; current implementations in fact allow
+results that, unless we redefine the semantics of basic sequential constructs like if-statements,
+can only be understood as out-of-thin-air results.
+<p>
+There is a well-known and simple solution to this problem that amounts to prohibiting the
+compiler and hardware from reordering a relaxed load followed by a relaxed store. This remains
+controversial, mostly because it adds a small amount of overhead to memory_order_relaxed
+operations on architectures like ARM, and an unknown amount of overhead on at least some GPUs.
+It also affects the legality of compiler optimizations on <code>memory_order_relaxed</code>
+accesses.
+<h2>Acknowledgements</h2>
+<p>
+This benefited greatly from discussions and debates with many others, including
+Sarita Adve, Will Deacon, Brian Demsky, Doug Lea, Daniel Lustig, Paul McKenney,
+and Matt Sinclair. I believe we all agree that there is a problem that should be
+addressed, but not on a detailed solution.
+<h2>History</h2>
+<p>
+This topic was briefly discussed by SG1 at the Rapperswil meeting. This paper is in part
+an attempt to respond to the question, raised at that meeting, as to whether we can
+just live with the results allowed by current implementations.
+<p>
+The paper was discussed in San Diego, without a clear consensus how to proceed.
+<p>
+R1 corrects a mistake in the "data_wrapper" example that was pointed out by Derek Dreyer.
+
+<h2>The out-of-thin-air problem</h2>
+<p>
+The out-of-thin-air problem has been repeatedly discussed, e.g.
+in <a href="http://wg21.link/N3710">N3710</a>,
+and <a href="http://plv.mpi-sws.org/scfix/paper.pdf">http://plv.mpi-sws.org/scfix/paper.pdf</a>.
+<p>
+The fundamental problem is that without
+an explicit prohibition of such results, the C++ memory model allows
+<code>memory_order_relaxed</code> operations to execute in a way that introduces
+causal cycles, making it appear that values appeared out of thin air, commonly abbreviated as OOTA.
+The canonical example is the following, where <code>x</code> and
+<code>y</code> are atomic integers initialized to zero:
+<blockquote>
+<table border="1">
+<tr>
+<td colspan="2" align="center">OOTA Example 1</td>
+<tr>
+<td align="center">Thread 1</td> <td align="center">Thread 2</td>
+</tr>
+<tr>
+<td><code>r1 = x.load(memory_order_relaxed);</code><br>
+<code>y.store(r1, memory_order_relaxed);</code></td>
+
+<td><code>r1 = y.load(memory_order_relaxed);</code><br>
+<code>x.store(r1, memory_order_relaxed);</code></td>
+</tr>
+</table>
+</blockquote>
+<p>
+Without specific requirements to the contrary, the loads are allowed to see
+the effects of the racing stores. Thus an execution in which the stores write some
+arbitrary value, say 42, and the loads read those values, is valid.
+This can be interpreted as an execution in which both loads speculatively
+return 42, then perform the stores (e.g. to memory only visible to these two threads,
+where it could be rolled back if we guessed wrong),
+and then check that the guesses for the loads were correct, which they now are.
+<p>
+Thus with OOTA execution allowed, the above code can set <code>x</code> and
+<code>y</code> to a value that is computed nowhere in the code, and can only be
+justified by a circular argument, or one involving explicit reasoning about speculation.
+<p>
+Similarly, consider the following program in a world with out-of-thin-air results allowed:
+<p>
+<blockquote>
+<table border="1">
+<tr>
+<td colspan="2" align="center">OOTA Example 2</td>
+</tr>
+<tr>
+<td align="center">Thread 1</td> <td align="center">Thread 2</td>
+</tr>
+<tr>
+<td><code>if (x.load(memory_order_relaxed))</code><br>
+<code>&nbsp;&nbsp;&nbsp;&nbsp;y.store(1, memory_order_relaxed);</code></td>
+
+<td><code>if (y.load(memory_order_relaxed))</code><br>
+<code>&nbsp;&nbsp;&nbsp;&nbsp;x.store(1, memory_order_relaxed);</code></td>
+</tr>
+</table>
+</blockquote>
+<p>
+Again both stores can be speculated to occur, and be read by the loads, thus validating
+the speculation, and causing both variables to be set to 1. This is annoying because
+the corresponding program written without atomics, is data-race-free, and always does
+nothing, as expected.
+<p>
+However the worst scenario in this OOTA world is the following.
+Assume that <code>x</code> and <code>y</code> are declared as integers, but are
+only ever assigned 0, 1, or 2, and that functions <code>f()</code> and <code>g()</code>
+take one such 0-to-2 argument each. <code>f()</code> and <code>g()</code>'s precondition
+effectively includes the restriction that its argument is between 0 and 2.
+<p>
+<blockquote>
+<table border="1">
+<tr>
+<td colspan="2" align="center">OOTA Example 3</td>
+</tr>
+<tr>
+<td align="center">Thread 1</td> <td align="center">Thread 2</td>
+</tr>
+<tr>
+<td><code>r1 = x.load(memory_order_relaxed))</code><br>
+<code>f(r1)</code></td>
+
+<td><code>r2 = y.load(memory_order_relaxed))</code><br>
+<code>g(r2);</code></td>
+</tr>
+</table>
+</blockquote>
+<p>
+Again, we have to consider an execution in which each load guesses that the value
+seen is e.g. 42. This then gets passed to <code>f()</code> and <code>g()</code>,
+which are allowed to do anything, since their precondition is not satisfied.
+"Anything" includes assigning 42 to <code>y</code> and <code>x</code> respectively,
+e.g. as a result of an out-of-bounds array reference. This action would again validate
+the speculation, making it legal.
+<p>
+This last example is particularly disconcerting, since it seems essentially impossible to
+for the programmer to avoid in real code. It only requires that we perform relaxed
+loads from two variables in two different threads, and pass the result to some functions
+that make some assumption about their input. Any significant code performing relaxed
+loads on pointers is essentially certain to contain a variant of this pattern.
+<p>
+Fortunately nobody believes that any of the above three examples can actually produce these
+results in real implementations. All common hardware disallows such results by prohibiting
+a store from speculatively executing before a load on which it "depends". Unfortunately,
+as we will see below, the hardware notion of "depends" is routine invalidated by many important
+compiler transformations, and hence this definition does not carry over to compiled
+programming languages.
+<p>
+Although such results are not believed to occur in practice, the inability to precisely
+preclude them has serious negative effects. We have no usable and precise rules
+for reasoning about programs that use <code>memory_order_relaxed</code>. This means we have
+no hope of formally verifying most code that uses <code>memory_order_relaxed</code>
+(or <code>memory_order_consume</code>). "Formal verification" includes partial verification to
+show the absence of certain exploits. Since we don't have a precise semantics to base it
+on, informal reasoning about <code>memory_order_relaxed</code> also becomes harder.
+Compiler optimization and hardware rules are unclear.
+<p>
+It is also worth noticing that so far we have constrained ourselves to examples in
+which each thread is essentially limited to two lines of code. The effect on more
+realistic code is not completely clear. Most of this paper focusses on a new
+class of examples that we hadn't previously explored.
+
+<h2>The status quo</h2>
+<p>
+However, we have been unable to provide a meaningful C++-level definition of "out-of-thin-air"
+results. And thus the standard has not been able to meaningfully prohibit them. The current
+standard states:
+<blockquote>
+<p>
+“Implementations should ensure that no "out-of-thin-air" values are computed that circularly
+depend on their own computation.”
+</blockquote>
+<p>
+while offering only examples as to what that means.
+(See <a href="http://wg21.link/n3786">N3786</a> for a
+bit more on how we got here. This did not go over well in WG14.)
+<p>
+So far, our hope has been that this problem could be addressed with more ingenuity on our part, by finally
+developing a proper specification for "out-of-thin-air" results. Here I explain why
+I no longer believe this is a reasonable expectation.
+
+<h2>What changed</h2>
+<p>
+Although it was previously known (see e.g. <a href="https://dl.acm.org/citation.cfm?id=2618134">
+Boehm and Demsky</a> and Bill Pugh et al's much earlier Java memory model litmus
+tests) that there were borderline cases, which had a lot of similarity to out-of-thin-air
+results, but could be generated by existing implementations, it wasn't fully clear to us
+how similar these can get to true out-of-thin-air results, and the catastrophic damage they
+can already do. I no longer believe that it is possible to draw a meaningful line between these
+and "true" out-of-thin-air results. Even if we could draw such a line, it would be meaningless,
+we would still have no good way to reason about code on the "right" side of the line since,
+as we show below, that can still produce completely unacceptable results.
+<p>
+Note that we still do not have actual code failures that have been traced to this problem;
+we do now have small sections of contrived code that can result
+in the problems discussed here. And we
+do not have any way to convince ourselves that real code is immune from such problems.
+The most problematic cases are likely to involve atomics managed by different modules,
+with the atomic accesses potentially quite far apart. Thus failure rates are likely to
+be very low, even if the problem does occur in real code.
+<p>
+The central problem continues
+to be our inability to reason about code using <code>memory_order_relaxed</code>.
+
+
+<h2>A new class of out-of-thin-air results</h2>
+<p>
+Unfortunately, our initial canonical out-of-thin-air example above can be turned into
+a slightly more complicated example that can generate the same questionable result.
+Abstractly, as defined by the standard, the only difference between the two examples is
+an unexecuted conditional, something that should not make any difference. And I believe
+it cannot make any difference with anything like the specification we use in the current
+standard.
+<p>
+In external discussion, such examples have been dubbed "RFUB" ("read from unexecuted branch")
+instead of OOTA. Our initial example, with additions over OOTA Example 1 highlighted, is:
+<blockquote>
+<table border="1">
+<tr>
+<td colspan="2" align="center">RFUB Example 1</td>
+</tr>
+<tr>
+<td align="center">Thread 1</td> <td align="center">Thread 2</td>
+</tr>
+<tr>
+<td><code>r1 = x.load(memory_order_relaxed);</code><br>
+<code>y.store(r1, memory_order_relaxed);</code></td>
+
+<td><ins><code>bool assigned_42(false);</code></ins><br>
+<code>r1 = y.load(memory_order_relaxed);</code><br>
+<ins><code>if (r1 != 42) {</code></ins><br>
+<ins><code>&nbsp;&nbsp;&nbsp;&nbsp;assigned_42 = true;</code></ins><br>
+<ins><code>&nbsp;&nbsp;&nbsp;&nbsp;r1 = 42;</code></ins><br>
+<ins><code>}</code></ins><br>
+<code>x.store(r1, memory_order_relaxed);</code><br>
+<ins><code>assert_not(assigned_42);</code></ins></td>
+</tr>
+</table>
+</blockquote>
+<p>
+We argue that entirely conventional optimizations can result in
+an execution <em>in which the assertion succeeds</em>, but
+<code>x</code> and <code>y</code> have been assigned 42. In reality, this is achieved
+with a combination of hardware and compiler transformations.
+<p>
+(We assume that <code>assert_not</code> is a separately compiled function, with the
+implied semantics. In our environment, we get different code if we use the
+actual <code>assert</code> macro.)
+<p>
+The compiler transformations proceed roughly as follows:
+<ol>
+<li>Notice that the store to <code>x</code> must always assign 42. Update it to just store 42.
+<li>The assignment to <code>r1</code> is now dead. Remove it.
+<li>Replace the remaining conditional, whose body now just assigns to <code>assigned_42</code>,
+  with essentially <code>assigned_42 = (r1 != 42)</code>.
+</ol>
+<p>
+This gives us essentially:
+<blockquote>
+<p>
+<pre>
+bool assigned_42;
+r1 = y.load(memory_order_relaxed);
+assigned_42 = (r1 != 42);
+x.store(42, memory_order_relaxed);
+assert_not(assigned_42);
+</pre>
+</blockquote>
+<p>
+Gcc 7.2 -O2 on Aarch64 (ARMv8) generates (from the source in the table):
+<blockquote>
+<p>
+<pre>
+ldr	w1, [x0]   // w1 = y.load(...)
+add	x0, x0, 8  // x0 = &amp;x
+mov	w2, 42
+str	w2, [x0]   // x = 42
+cmp	w1, w2     // w0 = (y != 42)
+cset	w0, ne
+b	_Z10assert_notb  // call assert_not(w0)
+</pre>
+</blockquote>
+<p>
+Since ARMv8 allows an independent load followed by an independent store to be reordered,
+the store (<code>str</code>) instruction may be executed before any of the other instructions,
+effectively transforming the code to:
+<blockquote>
+<p>
+<pre>
+x.store(r1, memory_order_relaxed);
+bool assigned_42;
+r1 = y.load(memory_order_relaxed);
+assigned_42 = (r1 != 42);
+assert_not(assigned_42);
+</pre>
+</blockquote>
+<p>
+If Thread 1 executes immediately after the store instruction, before any other Thread 2
+instructions, the load of <code>y</code> will read 42, <code>assigned_42</code> will be
+false, and we will end up with exactly the problematic execution.
+<p>
+Note that there is no real obstacle to this occurring on a strongly ordered architecture
+like x86 as well; the hardware would not reorder a load with a later store, but there is
+no rule preventing the compiler from doing so. It is just difficult to construct
+examples in which that would be a profitable compiler transformation. On the other
+hand, the hardware may find this to be profitable if e.g. the load misses the cache.
+<p>
+This behavior makes it look as though the then-clause in the condition was partially
+executed. That is clearly not allowed by the current spec. But, aside from the vague
+"normative encouragement" to avoid OOTA results, this can be explained as the loads at
+the beginning of both threads speculatively observing the stores at the end, i.e.
+as an OOTA result.
+<p>
+Unfortunately, this means that current mainstream implementations are not actually following
+the "normative encouragement" to avoid OOTA results.
+<p>
+The separate external discussion has considered a number of RFUB examples. They don't
+seem quite as disastrous as OOTA Example 3 above. But the following section argues that
+reasoning about programs with RFUB results remains essentially intractable, since it
+invalidates arguments about properly used sequential code.
+
+<h2>Effect on sequential reasoning about code</h2>
+<p>
+[This section is not essential for the rest of this discussion.]
+<p>
+Here we focus on the fact that RFUB executions appear to be inconsistent, in that the
+only way to understand them, other than as a general OOTA result, is as partially executing
+a conditional clause. This example illustrates that observation
+more directly by pointing out that expected semantics of correctly called single-threaded code may
+be violated when combined with concurrent code residing in a separate module. To do so,
+we look at a larger example, consisting of two different files, which should be thought
+of as modules written by different authors. This is a thought experiment; I did
+not compile this code:
+
+<h4>data_wrapper.h:</h4>
+<p>
+This encapsulates a pointer to a piece of data, along with a binary property of that data.
+The data is automatically deallocated if it is never handed out to a client:
+
+<blockquote>
+<pre>
+// Concurrent calls on a single object not allowed.
+class data_wrapper {
+    private:
+       Foo *my_data;
+       int flags;
+       // flag values:
+         static const_expr int ESCAPED = 1;
+         static const_expr int IS_UNUSUAL = 2;
+
+    public:
+       data_wrapper() : flags(0), my_data(new Foo(...)) {}
+       ...
+
+       bool is_definitely_normal(Foo * x) {
+	  // This refers to x, and it hasn't been marked as unusual.
+          return my_data == x &amp;&amp; (flags &amp; IS_UNUSUAL == 0);
+       }
+
+       void set_weird() {
+          flags |= IS_UNUSUAL;
+       }
+
+       Foo* get_the_data() {
+          flags |= ESCAPED;
+          return my_data;
+       }
+
+       ~data_wrapper() {
+          if (!(flags &amp; ESCAPED)) {
+             delete my_data;
+          } // otherwise it will go away when its arena is deallocated.
+       }
+
+       ...
+}
+</pre>
+</blockquote>
+
+<p>
+Reasonable programmers would expect the delete call in the destructor to only be invoked
+when <code>my_data</code> did not escape, i.e. was never returned by
+<code>get_the_data()</code>. That safety
+argument is based purely on sequential reasoning; there is no concurrency involved
+up to this point. It should hold for any caller that does not invoke undefined behavior.
+<p>
+Nonetheless the following concurrent program, which invokes <code>data_wrapper</code> member
+functions from only a single thread, and is thus clearly data-race-free, violates
+this sequential reasoning, and allows <code>my_data</code> to be prematurely deleted.
+<p>
+Note that <code>IS_UNUSUSAL</code> is introduced
+only to illustrate how a conditional similar to that in the last example can be
+introduced in a non-obvious way; it is not crucial to the transformation.
+
+<h4>main.cpp:</h4>
+
+<blockquote>
+<p>
+<pre>
+#include "data_wrapper.h"
+std::atomic&lt;Foo *&gt; data1;
+std::atomic&lt;Foo *&gt; data2;
+</pre>
+</blockquote>
+
+<p>
+Thread 1 sometimes executes the following. It is the only thread that accesses a
+<code>data_wrapper</code>:
+
+<blockquote>
+<pre>
+{
+    data_wrapper dw ....;
+    ...
+    r1 = data1.load(memory_order_relaxed);
+    if (!dw.is_definitely_normal(r1)) {
+       r1 = dw.get_the_data();
+    }
+    data2.store(r1, memory_order_relaxed);
+    dw.set_weird();
+    ...
+}
+</pre>
+</blockquote>
+
+<p>
+Thread 2 may concurrently copy <code>data2</code> to <code>data1</code>,
+also using relaxed operations, as in e.g.
+
+<blockquote>
+<pre>
+r2 = data2.load(memory_order_relaxed);
+data1.store(r2, memory_order_relaxed);
+</pre>
+</blockquote>
+
+<h4>Transforming <code>data_wrapper</code> code</h4>
+<p>
+If the <code>data_wrapper</code> calls are inlined into Thread 1, we get, for the Thread 1
+code between ellipses:
+
+<blockquote>
+<pre>
+r1 = data1.load(memory_order_relaxed);
+if (!(dw.my_data == r1  &amp;&amp; dw.flags &amp; IS_UNUSUAL == 0)) {
+    dw.flags |= ESCAPED;
+    r1 = dw.my_data;
+}
+data2.store(r1, memory_order_relaxed);
+dw.flags |= IS_UNUSUAL;
+</pre>
+</blockquote>
+
+<p>
+The compiler is motivated to temporarily promote the flags field to a register.
+Since the atomic store is relaxed, this is allowed, and we get:
+
+<blockquote>
+<pre>
+r1 = data1.load(memory_order_relaxed);
+rflags = dw.flags;
+if (!(dw.my_data == r1 &amp;&amp; rflags &amp; IS_UNUSUAL == 0)) {
+    rflags |= ESCAPED;
+    r1 = dw.my_data;
+} // else dw.my_data == r1 &amp;&amp; ...
+data2.store(r1, memory_order_relaxed);
+rflags |= IS_UNUSUAL;
+dw.flags = rflags;
+</pre>
+</blockquote>
+
+<p>
+Applying De Morgan's law to the conditional for clarity, we get:
+
+<blockquote>
+<pre>
+r1 = data1.load(memory_order_relaxed);
+rflags = dw.flags;
+if (dw.my_data != r1 || rflags &amp; IS_UNUSUAL != 0) {
+    rflags |= ESCAPED;
+    r1 = dw.my_data;
+} // else dw.my_data == r1 &amp;&amp; ...
+data2.store(r1, memory_order_relaxed);
+rflags |= IS_UNUSUAL;
+dw.flags = rflags;
+</pre>
+</blockquote>
+
+
+<p>
+The compiler can now again conclude that <code>r1</code> will always be
+<code>dw.my_data</code> after the conditional,
+and transform this to (after also observing that the <code>r1</code> assignment in the
+conditional is dead after transforming the store to <code>data2</code>):
+
+<blockquote>
+<pre>
+r1 = data1.load(memory_order_relaxed);
+rflags = dw.flags;
+if (dw.my_data != r1 || rflags &amp; IS_UNUSUAL != 0) {
+    rflags |= ESCAPED;
+}
+data2.store(dw.my_data, memory_order_relaxed);
+rflags |= IS_UNUSUAL;
+dw.flags = rflags;
+</pre>
+</blockquote>
+
+<p>
+which, since <code>ESCAPED</code> happens to be 1, can be transformed to
+
+<blockquote>
+<pre>
+r1 = data1.load(memory_order_relaxed);
+rflags = dw.flags;
+rflags |= (dw.my_data != r1 || rflags &amp; IS_UNUSUAL != 0);
+data2.store(dw.my_data, memory_order_relaxed);
+rflags |= IS_UNUSUAL;
+dw.flags = rflags;
+</pre>
+</blockquote>
+
+<p>
+This once again allows the atomic store to be advanced before the atomic load,
+effectively giving us
+
+<blockquote>
+<pre>
+data2.store(dw.my_data, memory_order_relaxed);
+// Thread 2 may copy data2 to data1 here.
+r1 = data1.load(memory_order_relaxed);
+rflags = dw.flags;
+rflags |= (dw.my_data r != r1 || rflags &amp; IS_UNUSUAL != 0);
+rflags |= IS_UNUSUAL;
+dw.flags = rflags;
+</pre>
+</blockquote>
+
+<p>
+ARM or Power hardware is clearly allowed to advance the stomic store,
+if the <code>&amp;&amp;</code> expression is compiled
+without branches, which is entirely plausible. That in turn allows Thread 2 to copy
+<code>data2</code> to <code>data1</code> between the store and the load,
+causing the <code>data1</code> load to see a value of <code>dw.my_data</code>.
+The <code>IS_UNUSUAL</code> bit in <code>rflags</code> is zero until we explicitly
+set it.
+Thus <code>rflags</code> is not altered by the middle assignment to <code>rflags</code>,
+and <code>ESCAPED</code>
+is not added, in spite of the fact that both <code>data1</code> and <code>data2</code>
+now contain <code>dw.my_data</code>. Thus exiting the scope in which <code>dw</code> is
+declared will delete <code>dw.my_data</code>, leaving data1 and data2 as dangling references.
+
+<p>
+It is completely unclear what the programmer might have done wrong here. The
+<code>data_wrapper</code> implementation is clearly correct. And the author of the client
+couldn’t really avoid this without carefully inspecting the <code>data_wrapper</code> code,
+violating modularity, and fully understanding potential compiler transformations.
+
+<h2>Possible fixes and their cost</h2>
+
+<p>
+The kind of problems we have seen here cannot occur at the assembly language
+level, or with a naive compiler. Weak hardware memory models like ARM and
+Power allow the crucial reordering of a load followed by a store, but only
+if the store does not "depend" on the load. The architectural specification
+includes a definition of "depend". For our examples, when naively compiled,
+the final store "depends" on the initial load, so the reordering would be
+prohibited, preventing the problematic executions.
+<p>
+The core problem is that the architectural definitions of dependence are not
+preserved by any reasonable compiler. In order to preserve the intent of the hardware
+rules, and to prevent OOTA behavior, we need to strengthen this notion of dependence
+to something that can reasonably be preserved by compilation. Many attempts to do
+so in clever ways have failed. The RFUB examples argue that this is not possible in the context
+of the current specification, since the only difference between full OOTA
+behavior, and behavior allowed by current implementations, is an unexecuted
+if-branch. And even if we could make this distinction, it wouldn't be useful,
+since implementations currently allow behavior that we don't know how to
+reason about.
+<p>
+It seems increasingly clear that the best general solution is to strengthen this notion of
+"dependence" to simply the "sequenced before" relation, and thus require that
+a relaxed load followed by a relaxed store cannot be reordered. This clearly has the
+disadvantage of disallowing current implementations. We previously
+proposed a variant of this solution in <a href="http://wg21.link/n3710">N3710</a>.
+Any change in this direction may need to be phased in in some way, in order to
+allow compiler, and possibly hardware, vendors time to adjust.
+<p>
+This is also the solution that was formalized in 
+<a href="http://plv.mpi-sws.org/scfix/paper.pdf">http://plv.mpi-sws.org/scfix/paper.pdf</a>.
+The formal treatment is quite simple; we just insist that the "reads from" relation
+is consistent with "sequenced before". We also expect the standards wording to be
+quite simple.
+<p>
+The performance of this approach was recently studied in
+Peizhao Ou and Brian Demsky, "Towards Understanding the Costs of Avoiding Out-of-Thin-Air Results" 
+(OOPSLA'18, should be available by San Diego meeting). The overhead of preventing
+load; store reordering on ARM or Power is much less than that of enforcing acquire/release
+ordering. There are some uncertainties about machine memory models in this area, but
+the expectation is that the required ordering can be enforced by inserting a never-taken
+branch or the like after <code>memory_order_relaxed</code> loads. In many cases,
+even this will not be needed, because an existing branch, load, or store instruction
+either already fulfills that role, or can be made to do so. No CPU architecture
+appears to require an actual expensive fence instruction to enforce load;store
+ordering.
+<p>
+I am not aware of any cost measurements for enforcing load;store ordering on a GPU.
+Such measurements would be extremely useful.
+<p>
+Pursuing this path will require some compiler changes around the compilation
+of <code>memory_order_relaxed</code>. And I expect it would eventually result
+in the introduction of better hardware support than the current "bogus branch"
+technique.
+<p>
+Participants in the external discussion largely agreed that we need a replacement
+or replacements for <code>memory_order_relaxed</code>. But there is no clear
+consensus on many more detailed questions:
+<ol>
+<li> Should we simply strengthen the semantics of <code>memory_order_relaxed</code>
+along the above lines, or leave it as is, and add a stronger version amenable to
+precise reasoning?
+<li> It seems likely that even if we replace <code>memory_order_relaxed</code>
+semantics with the stronger semantics, we will want to offer one or more
+more specialized weaker versions, since some specific usage idioms do not
+require the stronger treatment. For example, a relaxed atomic increment of a counter
+often does not require the strengthening, because the result of the implied load is not
+otherwise used. Should there be one such weaker order, or one for each idiom?
+<li> If we have such weaker order(s), should they be specified in the same style as
+now, or as a set of constraints under which they imply sequentially consistent
+behavior, as in <a href="http://rsim.cs.illinois.edu/Pubs/17-ISCA-RAts.pdf">
+Sinclair, Alsop, and Adve, "Chasing Away RAts: Semantics and Evaluation for
+Relaxed Atomics on Heterogeneous Systems", ISCA 2017</a> (a.k.a. DRFrlx).
+<li> Or should we try to follow the path of DRFrlx, and only
+have <code>memory_order_relaxed</code> replacements that are specified in this way?
+</ol>
+<p>
+My opinion is that, since current implementations effectively do not follow the
+OOTA guidance in the standard, and since we want to preserve correctness of
+current code, while actually specifying its behavior precisely, we should
+change the existing semantics of <code>memory_order_relaxed</code> to guarantee
+load;store ordering.
+<p>
+We should then try to develop weaker memory orders tailored to specific idioms, and
+specified in a DRFrlx style, to regain any performance lost by the preceding step.
+I currently do not believe that we will be able to find a single weaker specification
+that avoids our current OOTA issues. Thus I expect the specifications to be tailored
+to specific idioms. It currently seems useful to expose
+these as different <code>memory_order</code>s to make it clear what part of the
+specification the user is relying on. It also seems likely that each of these
+will impose somewhat different optimization constraints. And many of us are of the
+opinion that <code>memory_order_relaxed</code> is already usable primarily
+in cases that match one of a small number of reasonably well-known idioms.
+<p>
+I haven't been convinced that the DRFrlx approach by itself is currently viable
+as a replacement for <code>memory_order_relaxed</code>, both due to backwards
+compatibility issues, and because some of the use cases we see in Android
+appear to be hard to cover.
+<p>
+The end result here should be a specification that provides performance similar to
+what we have now, but that is well-defined for all the <code>memory_order</code>s,
+rather than the current hand-waving for <code>memory_order_relaxed</code>.
+It would also address OOTA issues for <code>memory_order_consume</code>,
+but not touch the other <code>memory_order_consume</code> issues we have been
+discussing separately.
+<p>
+Full decisions here will have to wait for some of the missing information,
+particularly in regard to GPU performance implications. But a preliminary sense of the
+committee on these issues would be useful.
+</body>
+</html>

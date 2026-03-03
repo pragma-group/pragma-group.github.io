@@ -1,0 +1,208 @@
+<html><head><meta charset="UTF-8">
+<title>Discussing Pointer Provenance</title>
+  <style type='text/css'>
+  body {font-variant-ligatures: none;}
+  p {text-align:justify}
+  li {text-align:justify}
+  blockquote.note, div.note
+  {
+          background-color:#E0E0E0;
+          padding-left: 15px;
+          padding-right: 15px;
+          padding-top: 1px;
+          padding-bottom: 1px;
+  }
+  p code {color:navy}
+  ins p code {color:#00A000}
+  p ins code {color:#00A000}
+  p del code {color:#A00000}
+  ins {color:#00A000}
+  del {color:#A00000}
+  table#boilerplate { border:0 }
+  table#boilerplate td { padding-left: 2em }
+  table.bordered, table.bordered th, table.bordered td {
+    border: 1px solid;
+    text-align: center;
+  }
+  ins.block {color:#00A000; text-decoration: none}
+  del.block {color:#A00000; text-decoration: none}
+  #hidedel:checked ~ * del, #hidedel:checked ~ * del * { display:none; visibility:hidden }
+  </style>
+</head><body>
+<table id="boilerplate">
+<tr><td>Document number</td><td>P1434R0</td></tr>
+<tr><td>Date</td><td>2019-01-21</td></tr>
+<tr><td>Project</td><td>Programming Language C++, SG12 (Undefined and Unspecified Behavior)</td></tr>
+<tr><td>Reply-to</td><td>Hal Finkel &lt;hfinkel&#x40;anl.gov&gt;</td></tr>
+<tr><td>Authors</td><td>Hal Finkel &lt;hfinkel&#x40;anl.gov&gt;, Jens Gustedt &lt;jens.gustedt&#x40;inria.fr&gt;, Martin Uecker &lt;Martin.Uecker&#x40;med.uni-goettingen.de&gt;, </td></tr>
+</table><hr>
+<h1>Discussing Pointer Provenance</h1>
+<p>There is ongoing work on a proposal for WG14 based on this POPL 2019 paper: <a href="https://www.cl.cam.ac.uk/~pes20/cerberus/cerberus-popl2019.pdf">Exploring C Semantics and Pointer Provenance</a>. The authors of this paper, along with significant work by Jens Gustedt, are working on proposed wording changes to the C specification. Of the options discussed in that paper, the model variant currently receiving this attention is the provenance-not-via-integer, tainting all, user-disambiguation model (PNVI-taint-all-udis).</p>
+
+<p>See also the storage-instance paper by Jens (WG14 <a href="http://www.open-std.org/jtc1/sc22/wg14/www/docs/n2328.pdf">N2328</a>), and the closely-related formal model
+by <a href="https://dl.acm.org/citation.cfm?id=2738005">Kang et al.</a> <a href="http://www.cis.upenn.edu/~stevez/papers/KHM+15.pdf">(alt)</a>.</p>
+
+<p>What follows is a summary of this model by Jens and Martin. This represents work still under development and active revision; early feedback from WG21 is requested.</p>
+
+<p>A "storage instance" is the "byte array" that is created when either
+an object starts its lifetime (for static, automatic and thread
+storage duration) or an allocation function is called (<code>malloc</code>,
+<code>calloc</code> etc). Storage instances are more than just an address, they
+have a unique ID throughout the whole execution. Once their lifetime
+ends, another storage instance may receive the same address, but never
+the same ID.<p>
+
+<p>The provenance of a valid pointer is the "storage instance" to which
+the pointer refers (or one past). This is part of the "abstract state"
+in C's abstract machine, not necessarily part of the object
+representation of the pointer itself.</p>
+
+<p>Valid pointers keep provenance to the encapsulating storage instance
+of the referred object. When the storage instance dies (falls out of
+scope, end of thread, <code>free</code>) the pointer becomes indeterminate.</p>
+
+<p>Ordered comparisons (<, >, &gt;=, &lt;=) between pointers are only defined
+when the two pointers have the same provenance. They then can be
+defined by the relative byte position in the byte array of the common
+storage instance.</p>
+
+<p>Equality of pointers is handled by a case analysis:</p>
+
+<ul>
+<li>if both are null, they are equal</li>
+<li>if one is valid and the other is null, they are unequal</li>
+<li>if the types are function pointers, they compare equal if and only if the
+    refereed functions are equal</li>
+<li>if both are valid, have different provenance and compare equal,
+    then one is the end address of one storage instance and the other is the
+    start address of another storage instance that happens to follow immediately
+    in the address space</li>
+<li>if both are valid and have different provenance, they compare not
+    equal</li>
+<li>if both are valid and have the same provenance they compare
+    equal if and only if they have the same position in the byte array</li>
+<li>in all other cases (that is one of the pointers is
+    indeterminate) the behavior is undefined</li>
+</ul>
+
+<p>Pointer arithmetic (addition or subtraction of integers) preserves
+provenance. The pointer becomes indeterminate if the result is outside
+the storage instance or goes beyond the array that the pointer is
+referring to (or is is the "one past" address).</p>
+
+<p>Pointer difference is only defined for pointers with the same
+provenance and within the same array.</p>
+
+<p>Pointer values can be copied by the usual means that is: assignment,
+<code>memcpy</code> and byte-wise copy. These copy over provenance in addition to
+the representation and the effective type. (There is certainly more
+work to do here to say exactly what that means. For the moment, let's
+go with "any copy operation that would propagate the effective type".)</p>
+
+<p>No other manipulation of the representation of a pointer will lead to
+a valid pointer value, because neither the effective type nor the
+provenance can be reconstructed from such manipulations. Thus the
+value of such pointers is indeterminate.</p>
+
+<p>A storage instance is "tainted" once any valid pointer with this
+provenance is converted to integer (cast) or to IO (<code>printf</code> with
+"%p"). For the sake of the "happened before" relation, "tainting"
+constitutes a side effect, even though the taint is not observable.</p>
+
+<p>This "tainting" does *also* happen for the end address of a
+storage instance. An pointer-to-integer cast has to result in the same
+integer value, regardless if a the pointer has the provenance as end
+address of one storage instance A or as the start address of another
+storage instance B, where B happens to immediately follow A in the
+address space.</p>
+
+<p>The idea behind "tainting" is that once a pointer has escaped to an
+integer or to IO, all aliasing analysis is jeopardized. On the other
+hand, pointers to a storage instance for which a compiler can prove
+that it is untainted (e.g a because it is stack variable and no
+address has been taken), can never alias unexpectedly.</p>
+
+<p>An integer-to-pointer conversion (cast) or IO (<code>scanf</code> with "%p") is
+only defined if the corresponding storage instance had been tainted,
+and if the result is a pointer to a byte (or one-after) of the storage
+instance.</p>
+
+<p>Ambiguous Provenance:</p>
+
+<p>With the above, there is one special case where a back-converted
+pointer (let's just assume integer-to-pointer) could have two
+different provenances. This can happen when:</p>
+
+<ul>
+<li>X is the end address (one past) pointer of a storage instance A
+    and the start address of another storage instance B</li>
+<li>both storage instances A and B are tainted, that is at some point
+    we did a pointer-to-integer conversion with two pointers, <code>a</code>
+    having provenance A, and <code>b</code> having provenance B.</li>
+</ul>
+
+<p>In such a situation, both A and B could be valid choices for the
+provenance.</p>
+
+<p>Our trick is to leave which of A or B is chosen to the programmer. It
+is their responsibility to be consistent, and to disambiguate such
+situations when necessary:</p>
+
+<p>If <code>p</code> is the result of an integer-to-pointer cast with two
+possible provenances and <code>p</code> is used with both provenances, the
+behavior is undefined.</p>
+
+<p><b>Note: </b> If the result <code>p</code> of an integer-to-pointer conversion is the end address of
+a tainted storage instance <i>A</i> and the start address of another tainted
+storage instance <i>B</i> that happens to follow immediately in the address
+space, a conforming program must only use one of these provenances in any
+expressions that is derived from <code>p</code>.</p>
+
+<p>The following three cases determine if  <code>p</code> is used with one of
+<i>A</i> or <i>B</i> and must hence not be used otherwise:</p>
+
+<ul>
+<li> Operations that constitute a use of <code>p</code>  with either <i>A</i>
+     or <i>B</i> and do not prohibit a use with the other:
+
+    <ul>
+    <li>  any relational  operator or  pointer subtraction  where the
+      other operand <code>q</code> may have  both provenances, that is where
+      <code>q</code> is  also the result  of a similar conversion  and where
+      <code>p == q</code>;</li>
+    <li> <code>q == p</code> and <code>q != p</code> regardless of the provenance
+      of <code>q</code>;</li>
+    <li> addition or subtraction of the value <i>0</i>;</li>
+    <li> conversion to integer.</li>
+    </ul>
+    For the latter, <i>A</i> and <i>B</i>  must have been tainted before, and so
+    a any choice of provenance,  that would otherwise have tainted one
+    of the storage instances, is consistent with any other use.</li>
+  <li> Operations that, if otherwise well defined, constitute a use
+    of <code>p</code> with <i>A</i> and prohibit any use with <i>B</i>:
+    <ul>
+    <li>  Any relational  operator or  pointer subtraction  where the
+      other  operand  <code>q</code>  has  provenance <i>A</i>  and  cannot  have
+      provenance <i>B</i>.</li>
+    <li> <code>p + n</code> and <code>p[n]</code>, where <code>n</code> is an integer
+      strictly less than <code>0</code>.</li>
+    <li> <code>p -  n</code>, where <code>n</code> is an  integer strictly greater
+      than <code>0</code>.</li>
+    </ul>
+  <li> Operations that, if otherwise well defined, constitute a use
+    of <code>p</code> with <i>B</i> and prohibit any use with <i>A</i>:
+    <ul>
+    <li>  Any relational  operator or  pointer subtraction  where the
+      other  operand  <code>q</code>  has  provenance <i>B</i>  and  cannot  have
+      provenance <i>A</i>.</li>
+    <li> <code>p + n</code> and <code>p[n]</code>, where <code>n</code> is an integer
+      strictly greater than <code>0</code>.</li>
+    <li> <code>p - n</code>, where <code>n</code> is an integer strictly less
+      than <code>0</code>.</li>
+    <li> operations that access an object in <i>B</i>, that is indirection
+      (<code>*p</code> or <code>p[n]</code> for <code>n == 0</code>) and member access
+      (<code>p->member</code>).</li>
+    </ul>
+    </li>
+  </ul>
+</body></html>

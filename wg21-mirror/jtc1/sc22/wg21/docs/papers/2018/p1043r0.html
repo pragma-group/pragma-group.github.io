@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"> 
+<style>
+pre code {
+  background-color: #DDDDDD;
+  color: #111111;
+  margin-top: 10pt;
+}
+</style>
+<title>P1043r0 &mdash; Narrow contracts in <code>string_view</code> versus P0903R1</title>
+
+</head>
+<body>
+<table>
+<tr><td>Doc. No.:</td><td>P1043r0</td></tr>
+<tr><td>Date:</td><td>2018-05-07</td></tr>
+<tr><td>Audience:</td><td>LEWG, LWG, EWG</td></tr>
+<tr><td style="vertical-align:text-top">Reply to:</td><td>Andrzej Krzemieński (akrzemi1 (at) gmail (dot) com) <br> Nevin Liber (nevin (at) cplusplusguy (dot) com)</td></tr>
+</table>
+
+
+<h1 id="narrowcontractsinstring_viewversusp0903r1">Narrow contracts in <code>string_view</code> versus P0903R1</h1>
+
+<blockquote>
+  <p style="font-style: italic">And then I went and invented the null pointer. You either have to check every reference, or you risk disaster.</p>
+  <footer>&mdash; Tony Hoare, "Null References: The Billion Dollar Mistake"</footer>
+</blockquote>
+
+<p>Currently <code>string_view</code>'s converting constructor from <code>const char *</code> has a precondition (narrow contract):
+invoking it with a null pointer is undefined behavior. Paper P0903R1 proposes to widen the contract so that
+passing a null pointer is equivalent to calling the default constructor instead. The declared motivation for the change
+is to be able to migrate <code>const char*</code> interfaces to <code>std::string_view</code>. That proposal triggered a long discussion
+in the reflector. In this paper we provide the summary of the discussion. In particular, we describe the following:</p>
+
+<ol>
+<li>What is the purpose of <code>string_view</code>.</li>
+
+<li>Does/can/should <code>string_view</code> hold a not-a-string value, which is distinct from an zero-sized string value.</li>
+
+<li>Should <code>nullptr</code> passed as <code>const char *</code> indicate a not-a-string.</li>
+
+<li>Can <code>string_view</code> be used as a replacement for <code>const char *</code> in interfaces?</li>
+
+<li>How do C and C++ treat null pointers that are supposed to represent strings.</li>
+
+<li>The scope of the change: should it be only <code>string_view</code>'s constructor, or also <code>string</code>'s constructor.</li>
+
+<li>What is gained by keeping the contract narrow, and what is gained by making it wide.</li>
+</ol>
+
+<h2 id="0definitions">0. Definitions</h2>
+
+<p>In this document we use concept <em>String</em>. By this we mean a contiguous sequence of characters; in particular, a sequence may be of size zero. This concept is independent of any representation on a machine; in particular it does not depend on whether the representation requires a pointer to some remote data, or if the size of the string is denoted by a trailing null character. The only thing that the concept is concerned with is the number and the value of the characters that constitute the sequence.</p>
+
+<p>We do not use term "empty", as it turned out to be ambiguous and caused some confusion. Instead, we use two terms to denote two different values: a <em>zero-sized</em> string, and <em>not-a-string</em>. The not-a-string value is not part of concept String.</p>
+
+<h2 id="1thepurposeofstring_view">1. The purpose of <code>string_view</code></h2>
+
+<p>The purpose of <code>string_view</code> is indicated in <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3442.html">N3442</a>. Previously, a uniform way of accepting a string in any form (<code>std::string</code>, a string literal, <code>std::vector&lt;char&gt;</code>, array of characters of known size, pointer to a null-terminated array of characters), was to use signature:</p>
+
+
+<pre><code class="c++ language-c++">void f(const std::string&amp; s);
+</code></pre>
+
+<p>This often required the creation of a temporary object of type <code>std::string</code> which potentially allocated heap memory (both pre-C++11 and when the object does not fit into the small string optimization) and copied characters. This copying is not really necessary, given that the same sequence already exists somewhere. Now, <code>std::string_view</code> offers the ability to represent a string in all the above forms but without incurring any resource allocation or copying of characters.</p>
+
+<p>A second, similar motivation is that <code>string_view</code> allows to take its sub-strings cheaply, without the necessity to allocate a second buffer for storing a null-terminated substring.</p>
+
+<p>However, <code>string_view</code>'s interface is slightly different; in particular, <code>sv.data()</code> is not required to point a null-terminated sequence of characters:</p>
+
+<pre><code class="c++ language-c++">std::vector&lt;char&gt; v {'A', 'B', 'C'};
+std::string_view sv(v.data(), v.size());
+// no null in array under sv.data()
+</code></pre>
+
+<p>This is the goal and the motivation for <code>std::string_view</code>. But now that we have it, we can explore if it could fit other
+purposes as well, for instance as a replacement for interfaces that currently only accept pointers to null-terminated char
+sequences, or a replacement for interfaces that currently accept <code>const char *</code> with semantics slightly different than these
+of pointers to null-terminated char sequences. The motivation for P0903R1 is one such interface, which allows a null pointer as valid input. </p>
+
+<p>While the extension of the use cases for <code>std::string_view</code> are worth exploring, they should not compromise the first and primary goal: uniformly handle the cases previously handled by <code>const std::string &amp;</code> (but faster), without compromising the functionality, safety and performance features.</p>
+
+<h3 id="11string_viewscontract">1.1. <code>string_view</code>'s contract</h3>
+
+<p>The contents of <code>string_view</code> consist of a pointer to the beginning of the character sequence and the size of the sequence. This bears similarity to <code>pair&lt;const char*, size_t&gt;</code>. However, <code>string_view</code> cannot be thought of as <code>pair&lt;const char*, size_t&gt;</code>. The latter simply contains a pointer and a number, and assumes no connection between the two pieces of data: they are just two numbers; e.g., <code>{nullptr, 10}</code> is fine, or a random address and a random number is fine. This is reflected in <code>pair</code>'s <code>operator==</code>: two pairs compare equal if their corresponding members all compare equal.</p>
+
+<p>In contrast the intended usage of <code>string_view</code> is:</p>
+
+<pre><code class="c++ language-c++">for (char ch : sv)
+  process(ch);
+</code></pre>
+
+<p>Therefore the type has an <em>invariant</em>: the value of <code>sv.data()</code> is such that <code>sv.data()[0]</code>, <code>sv.data()[1]</code>, ..., <code>sv.data()[sv.size() - 1]</code> are valid references. Or, in other words, <code>{sv.data(), sv.size()}</code> should represent a valid counted range. Also, <code>operator==</code>, which defines the value of any type, takes into account only the values of these characters, not the addresses. Thus two <code>string_view</code>s can contain different pointers, but still compare equal. This also implies a precondition on the constructor taking a pointer and a size: these two shall represent a valid counted range.</p>
+
+<p>A zero-sized string is represented by a <code>string_view</code> object <code>sv</code> when <code>sv.size() == 0</code>, which includes objects created as follows: <code>string_view{nullptr, 0}</code> or <code>string_view{"A", 0}</code>. For zero-sized strings the pointer <code>sv.data()</code> need not be dereferenced to observe the value of the string. <code>string_view</code> objects cannot store a not-a-string value. This is discussed in detail in section 4.</p>
+
+<h2 id="2passingnullpointerasconstchar">2. Passing null pointer as <code>const char*</code></h2>
+
+<h3 id="21thecstringinterface">2.1. The C-string interface</h3>
+
+<p>In C and C++ special semantics are associated to single arguments of type <code>const char *</code> that are expected to represent values of concept String. We will refer to these semantics in this paper as the <em>C-string interface</em>. These semantics are:</p>
+
+<ul>
+<li>The pointer represents an address to an array of characters.</li>
+
+<li>While iterating through these characters we are guaranteed to observe a character of value <code>'\0'</code> at some point.</li>
+
+<li>The values of the characters up to but excluding the first observed character <code>'\0'</code> constitute the value of the string.</li>
+</ul>
+
+<p>This implies a number of things:</p>
+
+<ol>
+<li>The size/length of the string is the distance from the address denoted by the pointer to the address of the <code>'\0'</code> character. The size is determined by observing the values of the characters; not from the numeric value of the input pointer.</li>
+
+<li>An array represented by literal <code>""</code> represents a zero-sized string even though the array's size is 1. Similarly, a pointer obtained from expression <code>("A" + 1)</code> represents a zero-sized string. </li>
+</ol>
+
+<p>This also implies a precondition on the input:</p>
+
+<ul>
+<li>The pointer cannot be null (UB otherwise).</li>
+
+<li>The pointer must point to a valid array of characters, or a single character with value '\0' (UB otherwise).</li>
+
+<li>The array pointed to must contain a character with value '\0' (UB otherwise).</li>
+</ul>
+
+<p>Clearly, this constructor has a precondition, and even applying P0903R1 cannot remove it: it can only widen the precondition slightly.</p>
+
+<p>There are other ways to assign different semantics to type inputs of type <code>const char*</code> than the one described above. The <em>C-string interface</em> will be paid to the most attention in this paper.</p>
+
+<h3 id="22nullpointersasconstcharinc">2.2. Null pointers as <code>const char*</code> in C</h3>
+
+<p>Whenever functions in C want a single argument of type <code>const char*</code> to represent a string they use the C-string interface. This is reflected in the C Standard:</p>
+
+<p>7.1.1/1</p>
+
+<blockquote>
+  <p>A <em>string</em> is a contiguous sequence of characters terminated by and including the first null
+  character. [...] A <em>pointer to a string</em> is a pointer to its initial (lowest addressed)
+  character. The <em>length of a string</em> is the number of bytes preceding the null character and
+  the <em>value of a string</em> is the sequence of the values of the contained characters, in order.</p>
+</blockquote>
+
+<p>7.1.4/1</p>
+
+<blockquote>
+  <p>Each of the following statements applies unless explicitly stated otherwise in the detailed
+  descriptions that follow: If an argument to a function has an invalid value (such as [...]
+  a null pointer[...]) [...], the behavior is undefined.</p>
+</blockquote>
+
+<p>C functions with C-string interface include <code>atoi</code>, <code>puts</code>, <code>fprintf</code>, <code>fopen</code>, or string manipulating functions like <code>strcpy</code>, <code>strcat</code>.</p>
+
+<p>There are some exceptions to that rule. First, some functions do specify what happens when a null-pointer is passed and there are good reasons to pass one: <code>setlocale</code> (null pointer means "only get current locale, don't set anything"), <code>system</code> (null -> determine if command processor exists, non-null -> pass command to processor), <code>mblen</code> (not-null -> determine the number of bytes in multi-byte character, null -> determine if state-dependent encodings are supported). In all these cases passing null pointer simply triggers a different path in the functions. This is the C way of reducing the number of function names. In C++ we would probably have two functions per each null and non-null input.</p>
+
+<p>Second, functions with bounds-checking interfaces, such as <code>strcpy_s</code> do have a defensive check for null-pointer inputs. Such an input is considered an error and results in the call to a <em>constraint handler</em> function: it might call <code>abort()</code> or ignore the situation by default, or do whatever handler is installed by in the program.</p>
+
+<p>Third, functions like <code>strncpy</code> determine the length in a mixed way. An additional length <code>len</code> is provided, if <code>'\0'</code> cannot be found in the first <code>len</code> locations, value <code>len</code> is used as string length (and is not <code>'\0'</code>-terminated). This departs from the C-string interface, but still treats null-pointer input as invalid (UB).</p>
+
+<p>Fourth, functions like <code>memcpy</code> do not take <code>const char*</code>, but <code>const void*</code> arguments, but they are still relevant in the discussion. In this case the length of the sequences is provided separately by additional argument of type <code>size_t</code>. Passing null pointers is still UB.</p>
+
+<p>Fifth, this is a function output rather than input, but function <code>getenv()</code> returns the pointer to a found string, but if the string hasn't been found a null pointer is returned to indicate that. The return value is either a string or a not-a-string.</p>
+
+<h3 id="23nullpointersasconstcharinc">2.3. Null pointers as <code>const char*</code> in C++</h3>
+
+<p>C++ also follows C-string interface whenever it uses single <code>const char*</code> argument to represent a string. This includes constructors of <code>std::fstream</code>, <code>std::string</code>, <code>std::filesystem::path</code>, <code>std::regex</code>, or argument to <code>string::find_first_of()</code>, <code>std::char_traits::length()</code>, or <code>std::ostream::operator&lt;&lt;</code>. </p>
+
+<p>Occasionally, two <code>const char*</code> pointers are used to represent a string, in the same way as ranges are represented in STL by two iterators <code>[begin, end)</code>. This is the case for functions like <code>std::ctype::is</code>, <code>std::ctype::do_is</code> dealing with locales. These can be null pointers provided that <code>begin == end</code>. This is logical: because the length of the string can be determined without dereferencing the pointer, the pointer is allowed to be null.</p>
+
+<p>Some functions in <code>std::char_traits</code> take two pointers and the size: <code>ct::copy(s, p, n)</code>, <code>ct::move(s, p, n)</code>. In each case the string is represented by the pointer to the beginning of the string and the size: a <em>counted range</em>. Actually three arguments represent two  ranges: <code>[s, s + n)</code> and <code>[p, p + n)</code>. Again, because we do not need to dereference the pointer to determine the string's length, the pointers are allowed to be null.</p>
+
+<p>Another similar situation:</p>
+
+<pre><code class="c++ language-c++">template &lt;class InputIt, class OutputIt&gt;
+OutputIt copy(InputIt first, InputIt last, OutputIt d_first);
+</code></pre>
+
+<p>This algorithm can be instantiated with three <code>const char*</code> values. These three values represent two ranges: <code>[first, last)</code> and <code>[d_first, d_first + distance(first, last)]</code>. And again, all three pointers can be null (they would represent two zero-sized ranges), because the sizes of the underlying sequences can be determined without dereferencing the pointers.</p>
+
+<p>A question has been asked, if and how the Ranges TS handles the case of a null pointer passed as type <code>const char*</code>. The answer is, Ranges TS describes constraints on inputs representing <em>ranges</em> denoted by begin and end. The C-string interface is not a range in the sense of Ranges TS. If we want to talk about the analogy to ranges, passing a null pointer to a function with the C-string interface would be analogous to calling:</p>
+
+<pre><code class="c++ language-c++">std::for_each(v.begin(), fun); // no v.end()
+</code></pre>
+
+<p>and expecting that the algorithm will deduce that we intended a zero-sized range.</p>
+
+<h3 id="24otherpossiblesemanticsofconstchararguments">2.4. Other possible semantics of <code>const char*</code> arguments</h3>
+
+<p>The above are the semantics associated with type <code>const char*</code> in C-string interfaces. They are encouraged by the Standard library. But one can imagine functions in other libraries that interpret the value of type <code>const char*</code> differently, especially the null pointer value.</p>
+
+<p>First, you can treat the null pointer value as a zero-sized string  (<code>""</code>). Whenever you call <code>f(nullptr)</code> the effect is the same as if you called <code>f("")</code>.</p>
+
+<p>Second, you can treat the null pointer value as distinct from any sting, even zero-sized string. This implies that <code>const char *</code> is similar to <code>optional&lt;string&gt;</code>: <code>optstr == nullopt</code> is a different state than <code>optstr == ""s</code>, and calling <code>f(nullptr)</code> can give different results than calling <code>f("")</code>.</p>
+
+<p>Also, type <code>const char*</code> can be used for other purposes than representing a string: it can represent an address of a single character. Migrating such usage to <code>string_view</code> would be unwise. </p>
+
+<h3 id="25ispassinganullpointerwhereastringisexpectedfundamentallywrong">2.5. Is passing a null pointer where a string is expected fundamentally wrong?</h3>
+
+<p>Much of controversy around P0903R1 is about whether it is valid to pass a null pointer where <code>const char*</code> is expected to represent a string. If by a "string" we mean the String concept: a sequence of 0 or more characters, then clearly there is no need to intentionally use the null pointer value. Any value of String, including zero-sized string, can be represented by null-terminated byte sequence that the pointer needs to point to. Plus, it is a well established idiom in C and C++ Standard Library that passing null pointer in such case is illegal, and therefore is an indication of the programmer bug. When such bug is diagnosed the code is changed so that a non-null pointer is passed to function <code>f()</code> or function <code>f()</code> is not called at all. So, at least when dealing with the Standard Library functions, passing null pointer that is supposed to indicate a string happens only temporarily, and inadvertently, and is ideally corrected as soon as possible.</p>
+
+<p>But this is only the C-string interface. In custom libraries developers can associate other semantics with a single <code>const char *</code> parameters intended to represent strings. They will typically be similar to the C-string interface except that null pointer value is treated in a different manner, which can be one of:</p>
+
+<ol>
+<li>Null pointer represents the zero-length string.</li>
+
+<li>Null pointer represents a yet another value distinct from any sequence of characters. This is equivalent to <code>optional&lt;string&gt;</code> not containing a value, which is different even from a zero-sized string.</li>
+
+<li>Null pointer value is unwelcome and indicates a bug, but we want functions to accept it and deal with the bug internally at run-time, through defensive if statements or exceptions or something similar.</li>
+
+<li>Null pointer value is unwelcome and indicates a bug, but we expect the function to accept it and not cause language-level UB, but we have no further expectations of what happens.</li>
+</ol>
+
+<p>In a third-party library with lots of functions taking single <code>const char *</code> to indicate a string with semantics different than the C-string interface, different functions may have different answers to the above question. This means that one cannot automatically refactor all these functions to take <code>some_string_view</code> in place of <code>const char *</code>, Instead, for each of these functions the semantics need to be determined and only then an appropriate refactoring action can be taken.</p>
+
+<p>During the discussion we have witnessed people saying, "I have passed null pointer as <code>const char*</code> and it was always obvious that it indicates a zero-sized string", other said that in their code base null pointer always indicates a not-a-string. Other replies are that such string is empty (different opinions whether it means zero-sized or not-a-string, or if it matters at all), or is "null" (whatever that means for strings). Whatever answer you chose, you will serve one group, and surprise others, causing bugs.</p>
+
+<p>Whatever answer 1, 2, 3, 4 is chosen, the semantics are different than these for the C-string interface. C-string interface, being selected in the Standard Library of C and C++, is automatically a recommendation to the developers. Its UB cases (preconditions) are designed carefully to bring closer the concrete type <code>const char *</code> to the abstract notion of a string. Many libraries also adapt the C-string interface, and expect its preconditions as a safety feature. For instance Boost libraries like Lexical Cast, Regex, String Algo. For the programmers that choose to adapt the C-string interface, weakening its preconditions means that the concrete type <code>const char *</code> loses the connection with the concept of a string. This will be discussed later.</p>
+
+<h2 id="3canstring_viewbeusedtoreplaceconstcharinterfaces">3. Can <code>string_view</code> be used to replace <code>const char*</code> interfaces?</h2>
+
+<p>The question in the section title is ambiguous. This reflects the ambiguity in the discussions around P0903R1. An interface is not only a type alone, but also the semantics associated with the type. Type alone, especially a general purpose basic type like <code>const char*</code>, can be interpret by different functions in different ways.</p>
+
+<p>Here is one example:</p>
+
+<pre><code class="c++ language-c++">bool is_default_separator(const char * ch) { return *ch == '-'; }
+
+const char SEPARATOR = '/';
+return is_default_separator(&amp;SEPARATOR);
+</code></pre>
+
+<p>Type <code>const char *</code> is assumed to be a reference to a single character, here represented by the object's address. No terminating null character is assumed. Migrating this usage to <code>string_view</code> would be an error. There is no concept of string associated with this usage of type <code>const char *</code>.</p>
+
+<p>The above is a very obvious case, but consider migrating the C-string interface to <code>string_view</code>. We have a user-defined function with C-string interface which forwards to the Standard Library function with C-string interface:</p>
+
+<pre><code class="c++ language-c++">void display(const char* message)
+{
+  std::puts(message);
+}
+</code></pre>
+
+<p>If we change the interface of function <code>display()</code> to take <code>string_view</code> we need to answer the question what should be passed to function <code>std::puts()</code>. The only candidate matching by type is <code>message.data()</code>:</p>
+
+<pre><code class="c++ language-c++">void display2(string_view message)
+{
+  std::puts(message.data());
+}
+</code></pre>
+
+<p>But <code>message.data()</code> after refactoring has different semantics than pointer <code>message</code> before refactoring. Before refactoring we had guarantee that the pointed to array is null terminated. After refactoring this guarantee does not exist. Well, it exists only for a short time after refactoring because the only usages by the callers were through the C-string interface. But now that the type of the argument has changed, so has the contract: callers are sent a message that they can also pass strings that are not null-terminated:</p>
+
+<pre><code class="c++ language-c++">display2({"abcd", 2}); // supposedly allowed
+display2({vec.data(), vec.size()}); // supposedly allowed
+</code></pre>
+
+<p>Technically, to fix it one can add a precondition on <code>display2()</code>: "<code>message.data()</code> should point to a null-terminated sequence", but this is probably nobody's intention.</p>
+
+<p>This illustrates that a top-bottom approach to migrating C-string interfaces to <code>std::string_view</code> is impossible in general,
+unless you know that the argument is not passed down to another C-string interface. Bottom-up conversion is more generally possible and preferable.</p>
+
+<p>This also illustrates that it is not possible to mechanically migrate even C-string interfaces to <code>std::string_view</code>. At least not all of them. Regardless if we accept P0903R1 or not.</p>
+
+<p>Also, when changing the interfaces from <code>const char *</code> to <code>std::string_view</code> one needs to have a clear purpose: why was <code>const char*</code> bad? What is better after such change?</p>
+
+
+<p>One answer to this question is that we do not want to compute and recompute the string length time and again by iterating through the string, especially when the size is known statically: we want to store it directly. </p>
+
+<p>Another answer may be, "we do not want <code>const char*</code> because it allows the null pointer value which muddles the design: we want to avoid answering the question what to do on null pointer for every function." In this case, changing <code>std::string_view</code> modified by P0903R1 only moves the ambiguity to <code>std::string_view</code>. The null pointer from <code>const char*</code> can now be smuggled wherever <code>std::string_view</code> is used. We have deprived ourselves of the old narrow-contract <code>std::string_view</code> that was able to introduce clear semantics (string and nothing else) to the parts of program that got rid of unclear (maybe string, maybe not-a-string) semantics.</p>
+
+<h2 id="4holdingnotastringvalueinstdstring_view">4. Holding not-a-string value in <code>std::string_view</code></h2>
+
+<p>P0903R1 simply proposes to represent a <code>string_view</code> converted from null pointer as <code>{nullptr, 0}</code>, without going into details of what use would be made of this value. In the Standard Library component we have to answer a question: should a value in a <code>string_view</code> converted from null pointer be distinguishable from a zero-sized string?</p>
+
+<h3 id="41containersmayusenullptr0torepresentzerosizedstring">4.1. Containers may use <code>{nullptr, 0}</code> to represent zero-sized string</h3>
+
+<p>One thing that needs to be observed is that value <code>{nullptr, 0}</code> can be produced when constructing a <code>string_view</code> that point to a zero-sized string. This is because a <code>string_view</code> can be constructed from the contents of <code>vector&lt;char&gt;</code>, and the default constructed <code>vector&lt;char&gt;</code> is allowed to return <code>vec.data() == nullptr</code>. And in fact the libstdc++ implementation does this:</p>
+
+<pre><code class="c++ language-c++">std::vector&lt;char&gt; vec {};
+assert (vec.data() == nullptr); // on some implementations
+
+std::string_view sv {vec.data(), vec.size()};
+assert (sv.data() == nullptr); // on some implementations
+assert (sv.empty()); 
+</code></pre>
+
+<p>The specification of <code>std::vector</code> works under a correct assumption that null-pointer address can be used to mean "no heap memory allocated". P0903R1 works under another assumption that null-pointer address in <code>sv.data()</code> at different level of abstraction could mean "a not-a-string rather than a zero-sized string", but this is incorrect as it is incompatible with the lower-level meaning of a null-pointer address. <code>std::vector</code> is legally allowed (and even expected) not to allocate any memory to represent a zero-sized sequence. Thus you can have a zero-sized sequence and a null-pointer address indicating no heap memory.</p>
+
+<p>This means that if P0903R1 is adopted, inside functions taking <code>string_view</code> it will be impossible to tell if the argument was constructed from a zero-sized string or from a special not-a-string value. This precludes the usages of <code>string_view</code> in places where a distinction needs to be made between not-a-string value and zero-sized-string value. </p>
+
+<p>Worse still, because on different implementations <code>std::vector</code> may return a non-null-pointer upon default construction, program written in one implementation (where <code>vec.data()</code> returns null pointer) that uses P0903R1-like <code>string_view</code>s may be thoroughly unit-tested, but when compiled and run with a different implementation of the Standard Library will expose a different behavior.</p>
+
+<p>One could say that having UB in <code>std::string_view{static_cast&lt;const char*&gt;(nullptr)}</code> has the same problem (may pass tests on one implementation, but fail on another). But it does not: the problem is similar but different in one important aspect. In UB-friendly <code>string_view</code> when someone (like a tester or an end user) observes a bug, it is consistent with the developer's perception; a developer will say, "yes, this code caused an UB, there is something wrong with it, we need to fix it". Therefore programmers are compelled to track and fix the same things that testers and end users consider a bug. In contrast, in P0903R1-like <code>string_view</code>s, when a tester or an end user observes a bug, the programmer at a corresponding place sees a well defined behavior and an if-statement, especially put for this condition, and he says, "no, I am 'handling' this case; there must be something wrong with the user's expectations or a platform or something else". In this attitude, detecting and removing bugs is impeded. This is discussed in more detail in section 6.</p>
+
+<p>Also, one could ask if the same problem does not already occur in the current <code>std::string_view</code> when it is default-constructed. The answer is <em>no</em>. In the current model, <code>std::string_view</code>'s default constructor simply refers to a zero-sized string. No not-a-string value exists. No one should have any need to observe the numeric value of address <code>sv.data()</code> alone. This makes <code>string_view</code> compatible with <code>std::string</code> which also represents a zero-sized string when default-constructed.</p>
+
+<h3 id="42reliableimplementationofnotastring">4.2. Reliable implementation of not-a-string</h3>
+
+<p>Holding a distinct not-a-string value would be possible if another value, different than <code>{nullptr, 0}</code> is chosen. For instance:</p>
+
+<pre><code class="c++ language-c++">inline const char private_global = '\0';
+
+string_view::string_view(const char* s)
+  : _data(s ? s : &amp;private_global)
+  , _size(traits::length(_data))
+{}
+</code></pre>
+
+<p>But it is not clear if anyone wants this. </p>
+
+<h3 id="43anonregularinterface">4.3. A non-regular interface</h3>
+
+<p>Also, even the implementation in section 4.2 has its problems. <code>operator==</code>, which traditionally defines the value of an object, compares the contents of the strings: number of and values of the characters. It is not able to distinguish not-a-string value from zero-sized string value. <code>std::hash&lt;std::string_view&gt;</code> does not distinguish not-a-string value from zero-sized string value. This will make any function that tries to test for special not-a -string value not regular: functions that attempt to distinguish the special not-a-string state and trigger a different control path will give different results for equal inputs (as defined by <code>hash</code>, <code>operator&lt;</code>, <code>operator==</code>). Putting results of such functions to maps, sets, doing memoization, marshalling-unmarshalling, all these will break.</p>
+
+<p>Of course, this is all acceptable if the requirement is, "anything else than immediate language-level UB". But we will not pursue that path in this document.</p>
+
+<p>This above discussion implies that, unless more extensive changes are made to <code>string_view</code>, there is only one self-consistent conceptual model for <code>string_view</code> that accepts null pointer as <code>const char *</code>.</p>
+
+<p>Just treat it as any other zero-sized string. This is acceptable in programs where people want to have two ways of saying zero-sized string: <code>f("")</code> and <code>f(nullptr)</code>. This is also acceptable in programs that already treat a zero-sized string as unacceptable value: when all functions have a defensive if up front for the zero-sized string:</p>
+
+<pre><code class="c++ language-c++">X* foo(const char* p) // desired: p != nullptr &amp;&amp; p is not ""
+{
+  if (p == nullptr || *p == '\0') {
+    log_error();
+    return nullptr;
+  }
+
+  return process(p);
+}
+</code></pre>
+
+<pre><code class="c++ language-c++">X* bar(const char* p) // nullptr is fine
+{
+  if (p == nullptr)
+    p = "";
+
+  return foo(p);
+}
+</code></pre>
+
+<p>In this case conflating not-a-string with a zero-sized string is acceptable.</p>
+
+<p>There is another model, which is self-consistent provided that no attempt at memoization is made. (This includes the attempts of storing the results of functions discriminating <code>sv.data() == nullptr</code> in maps.)</p>
+
+<p>The not-a-string state is never expected to occur, but if it occurs it is treated as a bug in the program and functions that obtain it should immediately stop execution, e.g. by calling <code>std::terminate()</code>, throwing an exception, or performing a comparable evasive action. In such case departing from regular/value semantics does not matter, as the program or a part thereof will be shut down anyway.</p>
+
+<pre><code class="c++ language-c++">X* baz(const char* p) // desired: p != nullptr
+{
+  if (p == nullptr) {
+    SIGNAL_BUG();
+    return nullptr;   // may still be needed!!
+  }
+
+  return process(p);
+}
+</code></pre>
+
+<p>This second model can still break memoization: a function that discriminates <code>sv.data() == nullptr</code> might want to signal the bug and terminate the program, but the value of <code>sv</code> (measured with <code>std::hash&lt;&gt;</code> or <code>operator&lt;</code> but not <code>sv.data() == nullptr</code>) has been previously memoized, but at that time the state had not been <code>sv.data() == nullptr</code>.</p>
+
+<h2 id="5interchangeabilityofstdstringandstdstring_view">5. Interchangeability of <code>std::string</code> and <code>std::string_view</code></h2>
+
+<p>Given that <code>std::string_view</code> is intended to be a faster replacement for <code>const std::string&amp;</code> a question need to be answered whether we can change the interface of one without changing the interface of the other.</p>
+
+<p>P0903R1 proposes to widen the contract of <code>std::string_view</code>'s converting constructor. According to the theory of <em>design by contract</em>, in a correct (i.e., bug-free) program, a function with a narrower precondition <code>f1()</code> can be replaced by a function with a wider precondition <code>f2()</code> and it does not affect program correctness (measured by function inputs satisfying their preconditions). But you cannot replace <code>f2()</code> back with <code>f1()</code>, because then the contract gets narrower. The only case when you can change from <code>f1()</code> to <code>f2()</code> and back is when both functions have identical contract.</p>
+
+<p>This is relevant in practice when dealing with functions with <code>std::string</code> as parameters. There are situations where you need to change the signature from <code>void f(std::string)</code> to <code>void f(const std::string&amp;)</code> for performance reasons; and sometimes you have to change the signature from <code>void f(const std::string&amp;)</code> to <code>void f(std::string)</code>: also for performance reasons, depending on the situation (in case you need to make a copy of the argument inside the function). Contract-wise both these changes are correct: both signatures have the same contract.</p>
+
+<p>Similarly, now that we have <code>std::string_view</code>, one may need to change the signature from <code>void f(const std::string&amp;)</code> to <code>void f(std::string_view)</code>, and sometimes from <code>void f(std::string_view)</code> to <code>void f(std::string)</code>. Now, if both <code>std::string</code> and <code>std::string_view</code> have the same narrow contract in constructors (null pointer disallowed in both), the change in either direction is correct contract-wise. (Technically, <code>std::string</code> and <code>std::string_view</code> have different set of member functions, so mechanically replacing one type with the other may result in a program that does not compile. But in most of the cases we are only interested in the sequence as a whole and the only members that are used are <code>.begin()</code> and <code>.end()</code>.) But if <code>std::string_view</code> had a wider contract in constructor (null pointer is a valid input), migrating from <code>void f(std::string_view)</code> to <code>void f(std::string)</code> might introduce bugs if someone has started passing null pointers to function <code>f()</code>.</p>
+
+<p>Widening the contract for <code>std::string_view</code>'s constructor breaks the interchangeability of <code>std::string</code> and <code>std::string_view</code> in function arguments.</p>
+
+<p>Also, the theory of <em>design by contract</em>, which was described for the purpose of Eiffel programming language, does not take into account specifics of C++, where UB is in fact a guarantee that the programmers (at least some of them) rely on. For instance, specifying UB for conversion from null pointer to <code>std::string</code> is a guarantee that I can agree with the vendor of libstdc++ that the said conversion will throw an exception, and that the Standard will not try to compromise my agreement with the vendor. This will be considered in more detail later. </p>
+
+<p>If widening the contract of <code>std::string</code>'s converting constructor is considered, one should answer another question. Should the same widening be applied to other types, such as <code>std::filesystem::path</code>? Should other member functions of <code>std::string</code> be also widened their contract? For instance, <code>string::find_first_of(nullptr)</code> is currently UB.</p>
+
+<p>And there is still the issue that <code>std::string_view::data()</code> is not guaranteed to return a <code>'\0'</code>-terminated string while <code>std::string::data()</code> is, so a purely mechanical replacement from <code>string</code> to <code>string_view</code> may have erroneous run-time behavior.</p>
+
+<p>However, it should be noted that currently <code>std::string_view</code> is not fully interchangeable with <code>std::string</code>. This is because the latter has a precondition in constructor taking a pointer and a length: the pointer cannot be null even if size is zero. The corresponding constructor in <code>std::string_view</code> does not have this preconsition.</p>
+
+<h2 id="6whatisgainedbykeepingthecontractnarrow">6. What is gained by keeping the contract narrow</h2>
+
+<h3 id="61simplerconceptualmodel">6.1. Simpler conceptual model</h3>
+
+<p>Preconditions bring C++ types closer to the real-life concepts that they describe. Consider a function that takes a range of integer values indicated by the lower and upper bounds:</p>
+
+<pre><code class="c++ language-c++">bool indicator::is_in_range(int lo, int hi) const
+// precondition: lo &lt;= hi
+{
+  return lo &lt;= _value &amp;&amp; _value &lt;= hi;
+}
+</code></pre>
+
+<p>Two values of type <code>int</code> are a concept in the C++ type-system. A <em>range</em> is a concept from the problem domain. Two types of type <code>int</code> can represent a range only to some extent. It is denoted by the precondition. If <code>lo</code> passed is greater than <code>hi</code> there is no way to think of them as a range. The abstraction breaks. One could say, "but let's make <code>lo &gt; hi</code> nonetheless a valid input", but then what do you do with this input? One option:</p>
+
+<pre><code class="c++ language-c++">bool indicator::is_in_range(int lo, int hi) const
+// no precondition
+{
+  if (lo &gt; hi) return false;
+  return lo &lt;= _value &amp;&amp; _value &lt;= hi;
+}
+</code></pre>
+
+<p>Whatever you do, you are not dealing with a range now, but with two objects of type <code>int</code>. There is no notion of being <em>in range</em> for two arbitrary <code>int</code> values, and the value in the additional return statement is probably wrong, because there is no good answer. The logic of this function has descended from dealing with abstract ranges to performing operations on C++ type-system objects. Reasoning at this level is harder and more bug prone. Intuition fails, and code reviews are less effective.</p>
+
+<p>One could say, given that we have to accept <code>lo &gt; hi</code> let's make it useful. Say, in such case change the check form "in range" to "outside range":</p>
+
+<pre><code class="c++ language-c++">bool indicator::is_in_range(int lo, int hi) const
+// no precondition
+{
+  if (lo &gt; hi) return _value &lt;= hi || lo &lt;= _value;
+  else         return lo &lt;= _value &amp;&amp; _value &lt;= hi;
+}
+</code></pre>
+
+<p>This is similar to what C functions like <code>setenv()</code> do. Now every combination of values triggers a useful output. But now we have completely departed form the notion of a range. We have conflated two concepts into one interface. We have created an unintuitive abstraction. Thinking about it is hard, and bugs very likely to occur.  </p>
+
+<p>Similarly, a null pointer value does not represent a string, not even a zero-sized string. Once it is accepted as valid input to <code>string_view</code> something has to be done with it: maybe call it a zero-sized string, maybe call it a distinct value from any string value. In either case the abstraction is weakened. We cannot safely think in terms of strings, character sequences, but one level down: about the numeric value of address <code>sv.data()</code>.</p>
+
+<h3 id="62betterbugdetectionwithtools">6.2. Better bug detection with tools</h3>
+
+<h4 id="621thedifferencebetweenbugsandpreconditionviolations">6.2.1. The difference between bugs and precondition violations</h4>
+
+<p>A <em>Bug</em> (like a type-o, or misunderstanding of the interface, or reading one variable instead of another) is an inadvertent logic in the code that makes the program do something else than what we intended. We cannot define it formally. But we definitely do not want them in our source code. Bugs make programs misbehave and crash. Bugs may cause injuries and fatalities.</p>
+
+<p>An <em>precondition violation</em> is a very formal situation. A function (or expression) has a <em>precondition</em>: a constraint on the set of values/states. This condition can be specified quite formally, e.g. "<code>[b, e)</code> represent a valid range"; sometimes the precondition can be expressed as a c++ expression, e.g. <code>i &gt;= 0</code>. An <em>precondition violation</em> is a situation when a function has a precondition (a constraint on input values) and yet it is passed a value/state that does not meet the constraint. This is so formal that we can communicate unambiguously using these terms. Even tools like compilers and static analyzers can understand the notion of precondition violations. Here, we are not talking about bad things that can happen to the outside world, or human intentions. The notion of <em>precondition violation</em> is in a different level of abstraction than the notion of a <em>bug</em>. Tools are not concerned with potential injuries, but tools can diagnose precondition violations in functions.</p>
+
+<p>A precondition violation is a symptom of a bug; but it is not a bug on itself. By specifying preconditions and making the contracts narrow, you build a connection between the two notions: a precondition violation can now indicate a bug. This is possible only when there are some input values disallowed by the function. The notion of <em>undefined behavior</em> or <em>invalid input</em> also come close to the notion of precondition violation.</p>
+
+<p>Now, sometimes people are concerned with precondition violations (and invalid inputs) more than with bugs. They claim that if you get rid of preconditions (invalid inputs), you get rid of precondition violations; and when you get rid of precondition violations, you get rid of the problems. In consequence, they postulate to design function interfaces so that any input is "valid", i.e. have no preconditions. </p>
+
+<p>The first part of that claim is actually true: if you get rid of preconditions, you get rid of potential precondition violations. But with this you are only curing the symptoms and let the disease (the bug) spoil your system: and now that you have one symptom less, it will be more difficult to detect it. You simply loosen the connection between the technical notion of "precondition violation" and human notion of "bug". Consider this example containing a bug, where we inadvertently pass a null pointer, whereas we intended to pass a different value:</p>
+
+<pre><code class="c++ language-c++">const char * p = "contents.txt";
+const char * q = 0;
+f(q); // BUG: intended to call f(p);
+</code></pre>
+
+<p>That is, we pass a different pointer than we intended, but the types accidentally match, which forms a well-formed C++ program. First, suppose that function <code>f()</code> has a precondition: the argument cannot be a null pointer. If you plant this bug you are violating a precondition. Automatic tools, like static analyzers, do not know our intentions, they cannot recognize such things as "you wanted to pass different argument" or "you confused this name with that one", or "you wanted to pass that value instead", "you have a type-o". But they are good at detecting precondition violations, or illegal values. Invalid input is not a bug itself, but an indication of a bug (in our case: confusing pointers), but if this is reported it is enough for the programmer to kick in and correct it. Static analyzer has <em>helped</em> find the bug, but didn't actually find it: the programmer found it based on the information from static analyzer.</p>
+
+<p>Now, consider what happens when you widen the contract. The bug is still there, the pointers are still confused, but there is no precondition violation anymore. Static analyzer is blind and cannot help you detect the bug.</p>
+
+<p>To summarize. The goal is to detect bugs (early, statically). The notion of "precondition violation" or "invalid input" is only a tool that helps detect bugs (or, assert program correctness). The goal is not to detect invalid inputs: it is only a means to the real goal. By widening contracts you render the notion of invalid input unhelpful (or less helpful) in achieving the goal of detecting bugs.</p>
+
+<p>Sometimes people worry more about hitting language-level UB than about bugs in their code. But bugs actually have the same dangerous characteristic as UB: if you hit them, the results are unpredictable. A bug can be thought of as UB at business logic level.</p>
+
+<h4 id="622nullpointerasasymptomofabug">6.2.2. Null pointer as a symptom of a bug</h4>
+
+<p>Many commercial programs and online services will give you a "null pointer dereference" error message and fail to process your
+task. This problem is quite popular even nowadays, not limited to C++. The ability to detect this problem and remove it in time 
+is important. In such cases dereferencing a null pointer is not the source of the problem, it is just a symptom of one. The source of the problem is that we are passing a null pointer value where we are not supposed to. This happens due to omission of the programmer, for instance:</p>
+
+<pre><code class="c++ language-c++">void Display::output(std::string_view s); 
+
+class Controller
+{
+  const char * _name = nullptr;
+
+public:
+  void display() { Display::output(_name); }
+  void setName(const char * n) { _name = n; }
+}
+</code></pre>
+
+<p>Function <code>display()</code> was called before function <code>setNumber()</code> was able to overwrite the null pointer value. In the current version
+of <code>std::string_view</code> this causes a null pointer dereference, and null pointer dereference can be easily detected by various tools today. But this can only be detected if passing null pointer value to <code>std::string_view</code>s constructor is UB.</p>
+
+<h4 id="623improvedstaticanalysis">6.2.3. Improved static analysis</h4>
+
+<p>Some tools, like static analyzers, in order to detect bugs, need help from the programmer and the libraries: this help is provided via UB.</p>
+
+<p>Any portion of code is suspicious and could technically contain a bug. In order for static analyzers not to produce too many false positive warnings, they need to be certain that a given piece of C++-conformant code does not reflect programmer's intentions. How does the static analyzer know what the programmer's intentions are? It doesn't in general, but sometimes the answer is clear: it is <em>never</em> the programmers intention to hit an UB. So, when a static analyzer can find an execution path in the program that triggers an UB, it can with certainty report a bug. But for this to work one needs a <em>potential</em> to hit an UB. Making a non-null pointer a precondition is such potential to hit an UB: a good one, because dereferencing a null pointer is well explored and tool-friendly type of UB. As explained above, this does not introduce a potential for bugs: it only makes bugs more visible.</p>
+
+<p>UB is close in nature to a <a href="https://en.wikipedia.org/wiki/Checksum">checksum</a>: checksum is redundant, increases the size of the message, and creates the potential for producing invalid messages (where the payload doesn't match the checksum), so someone might say, "remove it, and there will be no way to send an invalid message". But we still want to use checksums, and we all know why.</p>
+
+<h4 id="624flexibilityinhandlingthebugatruntime">6.2.4. Flexibility in handling the bug at run-time</h4>
+
+<p>When the standard says that the behavior of some operation is undefined, especially in the case of UB as easily diagnosable as dereferencing a null pointer or precondition violation, vendors are allowed to define their guaranteed behavior. Vendors and programmers may use this opportunity to settle on an error reporting scheme for invalid inputs that is best suited for a given program. Ideally, bugs should be removed from the code rather than being responded to at run-time. There is no good universal way to respond to them. A solution good for one project would be detrimental in another. Therefore the best the Standard can do is to leave the decision to engineers that assemble the program from the components, that know the environment that the program will be executed in, and that are best equipped to make the right decision. Such decision might be:</p>
+
+<ol>
+<li>Compile the program with UB sanitizer. If null pointer dereference is encountered a message will be logged and the program halted.</li>
+
+<li>When the function is evaluated in the <code>constexpr</code> context, a compiler error is reported.</li>
+
+<li>The vendor's implementation of the library component may throw an exception upon invalid (null pointer) argument to the constructor. In fact, libstdc++ implementation of <code>std::string</code> throws an exception when you construct it from null pointer.</li>
+
+<li>The vendor's implementation of the library component may use a replacement value which is valid when an original value is invalid. This is what the libstdc++ implementation of <code>std::string_view</code> does when you pass null pointer to the constructor: it initializes to <code>{nullptr, 0}</code>.</li>
+
+<li>You can switch between any of the above based on compiler switches and macro definitions. Vendors can offer different modes in which their implementation of the Standard library operates. In particular for unit-test builds you can configure the <code>std::string_view</code>'s constructor to report unit-test as failed, and then proceed with the zero-sized string value.</li>
+</ol>
+
+<p>These all options are possible only because the Standard leaves undefined what happens. They may not sound like an option if one thinks, "the Standard is my ally, the compiler vendor is my enemy", but if you trust your platform and tools the picture is completely different. In particular, this flexibility means that if Abseil Authors want to implement "go with default-constructed <code>string_view</code> upon null pointer" in their implementation of <code>std::string_view</code>, that is also a standard-conformant implementation. </p>
+
+<p>But all these options will suddenly be gone if the Standard suddenly defines the behavior to only one right solution. Such one solution cannot serve the entire community.</p>
+
+<p>This illustrates that UB in well designed places is a feature offered to the programmers. Not an omission. Not something to be defined in the future releases of the Standard.</p>
+
+<h3 id="63noneedfordefensivechecksorpreconditions">6.3. No need for defensive checks or preconditions</h3>
+
+<p>This subsection assumes that the intention of P0903R1 is to modify <code>std::string_view</code> so that it can unambiguously store both not-a-string value and a zero-sized string value, and that the callees can later retrieve the information which of the two values was intended. In section 4 we already showed that this is not doable with state <code>{nullptr, 0}</code> as proposed by P0903R1. </p>
+
+<p>If <code>std::string_view</code> is altered to additionally store the not-a-string value, then in each function taking <code>std::string_view</code> needs to make a conscious decision, what the function should do if it receives not-a-string value. Programmers often forget about it, which causes bugs. If they do not forget and they do not want the not-a-string value even to be passed to the function (because in a given context it makes no sense), they have two options:</p>
+
+<ol>
+<li>Put a defensive if-statement in the beginning (and there is no good choice as to what to do inside).</li>
+
+<li>Put an explicit precondition in the function.</li>
+</ol>
+
+<p>In either case the logic becomes more complicated. In the first case we have an additional branch which is useless in correct programs (that do not pass unintended values). In the second case we have a precondition that anyone needs to be aware of. A precondition is superior to defensive if-statement, but is inferior to strong types that encode the same condition in their <em>invariants</em>. Currently in <code>std::string_view</code> without P0903R1 we have a <em>strong invariant</em>: object of type <code>std::string_view</code>, if constructed correctly, and lifetime issues observed, <em>always</em> represents a reference to a string. There is no question of "what to do with a not-a-string". Even its default constructor creates a reference to a globally accessible zero-sized string. Everyone who uses type <code>std::string_view</code> knows that it deals with strings of different sizes and nothing else. A strong invariant is similar in nature to RAII: if an object managing a resource is in its lifetime, you get the guarantee that the resource is available to you and you do not have to check for anything.</p>
+
+<h3 id="64performance">6.4. Performance</h3>
+
+<p>In the extension proposed in P0903R1 the constructor taking <code>const char *</code> has to perform a test whether the value of the pointer is null before trying to dereference it. When the compiler cannot track how the value of the pointer is obtained, it has to actually perform this check in run-time. In contrast, when the constructor in question adheres to the C-string interface, this check can be skipped. (Admittedly, this is a non-memory-dereferencing <code>O(1)</code> check in an <code>O(n)</code> interface and the performance difference is more theoretical than practical.)</p>
+
+<h3 id="65consistencywithstdstring">6.5. Consistency with std::string</h3>
+
+<p>While some consider <code>std::string_view</code> to have a muddled interface both because a default constructed <code>std::string_view</code> is required that <code>data() == nullptr</code> as well as having reference semantics instead of value semantics (comparison operators do a deep comparison while copying is shallow), <code>std::string</code> is not muddled.  While there was not consensus the first time around to change <code>std::string</code> to match this change to <code>std::string_view</code>, the question may come up again.  Once an interface is muddled, the tendency is to try and muddle it more (or we would not be having this conversation about <code>std::string_view</code> in the first place).</p>
+
+<h2 id="7whatisgainedbywideningthecontract">7. What is gained by widening the contract</h2>
+
+<h3 id="71handlecaseswherenotastringisconflatedwithzerosizedstring">7.1. Handle cases where not-a-string is conflated with zero-sized string</h3>
+
+<p>The application of P0903R1 could be helpful in situations where the callers produce null pointer values that indicate not-a-string, which have different semantics than zero-sized strings, and the callees conflate the two values. The following is a motivating example.</p>
+
+<pre><code class="c++ language-c++">// caller:
+can_compress_ = CheckCompressionType(
+  input_headers().GetHeader("User-agent"),       // can be null
+  input_headers().GetHeader("Accept-encoding"),  // can be null
+  output_headers().GetHeader("Content-type"));   // can be null
+
+// callee:
+bool CheckCompressionType(const char *agent,
+                          const char *encoding,
+                          const char *content_type) {
+  if (use_permissive_policy) {
+    return SafeToCompressForBlacklist(user_agent, accept_encoding,
+                                      content_type);
+  }
+  return SafeToCompressForWhitelist(user_agent, accept_encoding,
+                                    content_type);
+}
+
+bool SafeToCompressForWhitelist(const char *user_agent,
+                                const char *accept_encoding,
+                                const char *content_type) const {
+  // If they don't let us know the 3 things we need, we bail
+  if (!user_agent || !accept_encoding || !content_type) return false;
+
+  if (!strprefix(accept_encoding, "gzip") &amp;&amp;     // starts with "gzip"
+      !strstr(accept_encoding, " gzip") &amp;&amp;       // gzip is a word
+      !strstr(accept_encoding, ",gzip")) {
+    return false;
+  }
+
+  // more logic
+  return true;
+}
+</code></pre>
+
+<p>Functions <code>CheckCompressionType()</code> and <code>SafeToCompressForWhitelist()</code> both accept null pointer values; the meaning is, "this piece of data did not come in the request". Unlike a zero-sized string, which means this data came in request and was a zero-sized string.</p>
+
+<p>The goal is to change the interface of function <code>SafeToCompressForWhitelist()</code> to take values of type <code>string_view</code>. This is because it is easier to describe the logic of the function (inspecting substrings) using the interface of <code>string_view</code>. Also, if wee needed to produce a substring at some point, it would be a costly operation on <code>const char*</code>. Inside function <code>SafeToCompressForWhitelist()</code> not-a-sting value and zero-sized string value are treated uniformly, so conflating both values is acceptable.</p>
+
+<p>If <code>string_view</code> is modified as per P0903R1, the refactoring of function <code>SafeToCompressForWhitelist</code> becomes simple:</p>
+
+<pre><code class="c++ language-c++">bool SafeToCompressForWhitelist(string_view user_agent,
+                                string_view accept_encoding,
+                                string_view content_type) const {
+  // If they don't let us know the 3 things we need, we bail
+  if (user_agent.empty() || accept_encoding.empty() || content_type.empty()) return false;
+
+  if (!accept_encoding.starts_with("gzip") &amp;&amp; 
+      accept_encoding.find(" gzip") == string_view::npos &amp;&amp;
+      accept_encoding.find(",gzip") == string_view::npos) {
+    return false;
+  }
+
+  // more logic
+  return true;
+}
+</code></pre>
+
+<p>And nothing needs to be changed in the callers. And there can be hundreds of callers.</p>
+
+<p>A special case of this use case is in programs or their modules where a zero-sized string is already being treated as an invalid value. In such cases when we conflate the invalid null-pointer input with an invalid zero-sized string input, this will not affect the semantics as they will be processed uniformly with defensive checks of the form <code>sv.empty()</code>.</p>
+
+<h3 id="72inabilitytoenforcenarrowcontracts">7.2. Inability to enforce narrow contracts</h3>
+
+<p>Sometimes it is acknowledged that having narrow contracts is desirable, and helps in asserting program correctness. But for economical reasons it is infeasible to migrate a large code-base of a program which previously did not make a distinction into narrow and wide contracts, given the resources that the development team has to spare. In those cases leaving the wide contracts as they are and manually trying address the unexpected input in each function may be the only option within economical reach. In this case one expects every new type to have a wide contract.</p>
+
+<h2 id="8alternatives">8. Alternatives</h2>
+
+<p>In this chapter we explore how the use cases of the proponents of P0903R1 can be addressed without changing <code>std::string_view</code>,
+and how the use cases of the opponents of P0903R1 can be addressed once <code>std::string_view</code> is changed.    </p>
+
+<h3 id="81whatcanbeofferedtoprogrammersthatwanttopassnullpointerstostring_view">8.1. What can be offered to programmers that want to pass null pointers to <code>string_view</code>?</h3>
+
+<p>First, make sure if you really need to migrate the argument of type <code>const char *</code> to type <code>std::string_view</code>. <code>std::string_view</code> represents a reference to a string, <code>const char *</code> does not necessarily represent a string. Also it might represent the string but with different semantics than you think.</p>
+
+<p>Second, if the goal of the function input is to represent either a string or not-a-string value, use the Standard Library type that is designed to represent this notion of not-a-value: <code>std::optional&lt;std::string_view&gt;&gt;</code>. You can use it in interfaces where not-a-string is allowed, and you can still use <code>std::sting_view</code> where not-a-string is incorrect. The additional benefit is that your interfaces will clearly indicate for which functions it is correct to pass not-a-string and for which it is an error. But this will require a change in the callee.</p>
+
+<p>Third, if the size of <code>std::optional&lt;std::string_view&gt;&gt;</code> or its set of constructors does not match your use case, define your own type that implements semantics in P0903R1:</p>
+
+<pre><code class="c++ language-c++">class conflating_string_view : std::string_view
+{
+  using super = std::string_view;
+  constexpr super as_super() const noexcept { return static_cast&lt;super&gt;(*this); }
+
+public:
+  using super::super;
+  constexpr conflating_string_view (const char * p) noexcept
+    : super(p, p ? std::char_traits&lt;char&gt;::length(p) : 0) {}
+
+  // modify the interface of functions taking string_view:
+  constexpr size_type find_first_of(conflating_string_view sv, size_type pos = 0) const noexcept {
+    return super::find_first_of(sv.as_super(), pos);
+  }
+
+  // just redeclare other members as public:
+  using super::empty;
+};
+</code></pre>
+
+<p>Different semantics require a different type. And you are offering a different semantics. True, programmers will have to learn a new type. But the alternative is, they will use only one type and will not be aware that at different places the same type has different semantics. And they will only learn it when a bug is found. Similarly here, we encourage to use this type only when you want to provide semantics, "I accept not-a-string value, I conflate it with zero-sized string value". In other cases go with <code>std::string_view</code> which has stronger contract.</p>
+
+<p>(Note: it has been previously suggested that such implementation can be written in 5 lines, but these suggestions did not take into consideration that member functions like <code>find_first_of()</code> also need the change in contract.)</p>
+
+<p>Fourth, choose the Standard Library implementation that already implements the semantics of P0903R1. The Standard Specifies the behavior as UB, so this is legal for Standard-conforming implementation to implement your desired semantics. If this is not already the case influence your library vendor to implement the behavior of P0903R1, or give you the option to configure the library to do what you want.</p>
+
+<p>Fifth, change the callers, so that they decide how they want to treat the not-a-string value. For instance define function <code>null_as_empty()</code> which takes a <code>const char*</code> argument interpreted as "either a string or not-a-string" and returns a <code>const char*</code> value interpreted as String:</p>
+
+<pre><code class="c++ language-c++">constexpr const char * null_as_empty(const char * s) noexcept {
+  return s ? s : "";
+}
+</code></pre>
+
+<p>Or you can have <code>null_as_empty</code> return a dedicated type which can convert to either <code>const char*</code> interpreted as string or to <code>conflating_string_view</code>. When applying this solution the caller from the example in 8.1 has to be changed to:</p>
+
+<pre><code class="c++ language-c++">// caller:
+can_compress_ = CheckCompressionType(
+  null_as_empty(input_headers().GetHeader("User-agent")),
+  null_as_empty(input_headers().GetHeader("Accept-encoding")),
+  null_as_empty(output_headers().GetHeader("Content-type")));
+</code></pre>
+
+<p>This requires the change in the caller (which can be considered a disadvantage in its own right), but at the same time it makes the intentions and the logic of the program more clear and penetrable: "from this point we treat not-a-string value and the zero-sized string value in the same way".</p>
+
+<p>Sixth, if the goal is to enable a more convenient/idiomatic implementation of the body of the function, like in section 7.1, this can be addressed by conversion from <code>const char *</code> to <code>string_view</code> not in the interface but inside the implementation:</p>
+
+<pre><code class="c++ language-c++">// this handles strings:
+bool private_SafeToCompressForWhitelist(string_view user_agent,
+                                        string_view accept_encoding,
+                                        string_view content_type) const {
+  if (!accept_encoding.starts_with("gzip") &amp;&amp; 
+      accept_encoding.find(" gzip") == string_view::npos &amp;&amp;
+      accept_encoding.find(",gzip") == string_view::npos) {
+    return false;
+  }
+
+  // more logic
+  return true;
+}
+
+// this handles the null cases:
+bool SafeToCompressForWhitelist(const char *user_agent,
+                                const char *accept_encoding,
+                                const char *content_type) const {
+  // If they don't let us know the 3 things we need, we bail
+  if (!user_agent || !accept_encoding || !content_type) return false;
+
+  return private_SafeToCompressForWhitelist(string_view{user_agent},
+                                            string_view{accept_encoding},
+                                            string_view{content_type};
+}
+</code></pre>
+
+<p>Finally, even if it is not economically possible to prepare the large source code base for migration to narrow-contract components, as described in section 7.2, it may still be possible to identify some smaller components within the source code base, where declaring and enforcing narrow contracts is possible. In those cases the recommendation would be to adapt the narrow-contract <code>std::string_view</code> in these components, so at least in these components the correctness of the code can be better asserted.</p>
+
+<h3 id="82whatcanbeofferedtoprogrammersthatwantnullpointerspassedtostring_viewtoremainub">8.2. What can be offered to programmers that want null pointers passed to <code>string_view</code> to remain UB?</h3>
+
+<p>Write your own type that handles strings your way, and do not use <code>std::string_view</code> <em>anywhere</em> in your code. Or derive from the altered <code>std::string_view</code> and implement UB in the constructor yourself:</p>
+
+<pre><code class="c++ language-c++">class ub_string_view : std::string_view
+{
+  using super = std::string_view;
+  constexpr super as_super() const noexcept { return static_cast&lt;super&gt;(*this); }
+
+public:
+  using super::super;
+  constexpr ub_string_view(const char * s) noexcept 
+    : super{s, std::char_traits&lt;char&gt;::length(s)} {} // assuming that length() has narrow contract
+
+  // modify the interface of functions taking string_view:
+  constexpr size_type find_first_of(ub_string_view sv, size_type pos = 0) const noexcept {
+    return super::find_first_of(sv.as_super(), pos);
+  }
+
+  // just redeclare other members as public:
+  using super::empty;
+};
+</code></pre>
+
+<p>Unlike in 8.1. You need to use <code>ub_string_view</code> <em>everywhere</em> and (the modified) <code>std::string_view</code> is rendered useless (because for optional strings you use <code>optional&lt;ub_string_view&gt;</code> anyway). </p>
+
+<h2 id="9acknowledgements">9. Acknowledgements</h2>
+
+<p>Ashley Hedberg and Jorg Brown devoted their time to explain in detail the use cases for null-aware <code>string_view</code>, which helped improve the discussion in this paper.</p>
+
+<p>Tomasz Kamiński, Titus Winters and Jorg Brown have reviewed the paper and offered number of useful suggestions that improved the quality of the paper.</p>
+
+
+<h2 id="10references">10. References</h2>
+
+<ol>
+<li>Ashley Hedberg, <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p0903r1.pdf">"Define <code>basic_string_view(nullptr)</code>"</a>.</li>
+
+<li>Jeffrey Yasskin, <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3442.html">"string_ref: a non-owning reference to a string"</a>.</li>
+
+<li>Lawrence Crowl, <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/p0147r0.html">"The Use and Implementation of Contracts"</a>.</li>
+
+<li>Alisdair Meredith, John Lakos, <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2011/n3248.pdf">"<code>noexcept</code> Prevents Library Validation"</a>.</li>
+
+<li>John Lakos, <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2479.pdf">"Normative Language to Describe Value Copy Semantics"</a>.</li>
+
+<li>Andrzej Krzemieński, <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n4160.html">"Value constraints"</a>.</li>
+
+<li>G. Dos Reis, J. D. Garcia, J. Lakos, A. Meredith, N. Myers, B. Stroustrup, <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0380r1.pdf">" A Contract Design "</a>.</li>
+
+<li>Tony Hoare, <a href="https://www.infoq.com/presentations/Null-References-The-Billion-Dollar-Mistake-Tony-Hoare">"Null References: The Billion Dollar Mistake"</a>.</li>
+</ol>
+
+
+</body>
+</html>

@@ -1,0 +1,341 @@
+<html>
+<head>
+<title>Networking TS enhancement to enable custom I/O executors</title>
+<style>
+ins {color:#00A000}
+ins p code {color:#00A000}
+p ins code {color:#00A000}
+del {color:#A00000}
+del p code {color:#A00000}
+p del code {color:#A00000}
+</style>
+</head>
+<body>
+
+<pre>
+Document number: P1322R0
+Date:            2018-10-08
+Project:         Programming Language C++
+Audience:        SG1 - Concurrency and Parallelism, LEWG
+Reply-to:        Christopher Kohlhoff &lt;chris&#x40;kohlhoff.com&gt;
+</pre>
+
+<h1>Networking TS enhancement to enable custom I/O executors</h1>
+
+<h2>1. Introduction</h2>
+
+<p>At present, the Networking TS's I/O objects -- sockets, acceptors, resolvers, and timers -- can be associated only with concrete execution contexts of type <code>io_context</code>. This paper proposes a minor change to the specification to permit the construction of these objects with arbitrary I/O executors and execution contexts. This would:</p>
+
+<ul>
+<li>allow implementers to support multiple "native" execution contexts, with different design and performance trade-offs; and</li>
+<li>simplify some use cases, by allowing users to specify their preferred executor once, at construction, rather than on each operation.</li>
+</ul>
+
+<h2>2. Rationale</h2>
+
+<h3>Construction with arbitrary execution contexts</h3>
+
+<p>Users and third-party libraries may implement their own execution contexts, for example to provide different scheduling guarantees, or to natively support other types of I/O objects, such as files. This proposal would allow users to create the standard I/O objects, such as sockets, to be associated with these custom execution contexts. However, although constructing the socket with a custom execution context will provide the correct, expected behaviour, there is no guarantee that it will operate as efficiently as a socket associated with a native execution context.</p>
+
+<h3>Support for multiple native execution contexts</h3>
+
+<p>Some operating systems have multiple potential implementation strategies for the I/O objects, like sockets. For example, on Windows we can choose to have asynchronous notifications delivered via a completion port to a user-created thread, or we can have them delivered directly to the system thread pool. An implementer may want to make both of these strategies available, via the <code>io_context</code> and <code>system_context</code> execution contexts, respectively. For example:</p>
+
+<pre>
+  io_context my_context;
+  tcp::socket my_socket_1(my_context); // Implementation uses a completion port.
+
+  // ...
+
+  tcp::socket my_socket_2(system_executor{}); // Implementation uses the system thread pool.
+</pre>
+
+<p>Libraries can also provide additional native execution contexts as implementation-specific extensions.</p>
+
+<h3>Convenient construction with a preferred executor</h3>
+
+<p>In some use cases, all asynchronous operations on a given I/O object are performed using the same executor. One common example of this is when using a strand. This proposal allows this executor to be specified once, when the I/O object is constructed. For example:</p>
+
+<pre>
+  io_context my_context;
+
+  // ...
+
+  strand&lt;io_context::executor_type&gt; my_strand(my_context.get_executor());
+  tcp::socket my_socket(my_strand);
+
+  // ...
+
+  my_socket.async_receive(my_buffer, my_handler); // my_handler is invoked in the strand
+</pre>
+
+<h2>3. Overview of changes to specification</h2>
+
+<h3>Addition of Executor template parameter</h3>
+
+<p>A new <code>Executor</code> template parameter is added to the following templates:</p>
+
+<ul>
+<li><code>basic_waitable_timer</code></li>
+<li><code>basic_socket</code></li>
+<li><code>basic_datagram_socket</code></li>
+<li><code>basic_stream_socket</code></li>
+<li><code>basic_socket_acceptor</code></li>
+<li><code>basic_socket_streambuf</code></li>
+<li><code>basic_socket_iostream</code></li>
+<li><code>ip::basic_resolver</code></li>
+</ul>
+
+<p>To enable convenient interoperability with arbitrary executors and execution contexts, the template parameter is defaulted to the <code>executor</code> polymorphic wrapper. For example:</p>
+
+<pre>
+  template &lt;class Protocol<ins>, class Executor = executor</ins>&gt;
+    class basic_socket;
+</pre>
+
+<p>For each of these classes, the nested type <code>executor_type</code> is altered to refer to the <code>Executor</code> type:</p>
+
+<pre>
+  template &lt;class Protocol, class Executor&gt;
+  class basic_socket : public socket_base
+  {
+  public:
+    using executor_type = <del>io_context::executor_type</del><ins>Executor</ins>;
+    // ...
+  };
+</pre>
+
+<h3>Modification of I/O objects' constructors</h3>
+
+<p>For each of the following templates:</p>
+
+<ul>
+<li><code>basic_waitable_timer</code></li>
+<li><code>basic_socket</code></li>
+<li><code>basic_datagram_socket</code></li>
+<li><code>basic_stream_socket</code></li>
+<li><code>basic_socket_acceptor</code></li>
+<li><code>ip::basic_resolver</code></li>
+</ul>
+
+<p>every constructor with an <code>io_context&amp;</code> parameter is replaced with two constructors:</p>
+
+<pre>
+  template&lt;class Protocol, class Executor&gt;
+  class basic_socket : public socket_base
+  {
+    // ...
+    <del>basic_socket(io_context&amp; ctx, const protocol_type&amp; protocol);</del>
+    <ins>basic_socket(const executor_type&amp; ex, const protocol_type&amp; protocol);</ins>
+    <ins>template&lt;class ExecutionContext&gt;</ins>
+      <ins>basic_socket(ExecutionContext&amp; ctx, const protocol_type&amp; protocol);</ins>
+    // ...
+  };
+</pre>
+
+<p>The second of these constructors shall not participate in overload resolution unless <code>is_convertible&lt;ExecutionContext&amp;, execution_context&amp;&gt;::value</code> is <code>true</code>, and <code>is_constructible&lt;executor_type, typename ExecutionContext::executor_type&gt;::value</code> is <code>true</code>.</p>
+
+<h3>Modification of I/O objects' converting constructors</h3>
+
+<p>An <code>OtherExecutor</code> template parameter is added as required to the converting move constructors of the following classes:</p>
+
+<ul>
+<li><code>basic_socket</code></li>
+<li><code>basic_datagram_socket</code></li>
+<li><code>basic_stream_socket</code></li>
+<li><code>basic_socket_acceptor</code></li>
+</ul>
+
+<p>For example:</p>
+
+<pre>
+  template&lt;class Protocol, class Executor&gt;
+  class basic_socket : public socket_base
+  {
+    // ...
+    template&lt;class OtherProtocol<ins>, class OtherExecutor</ins>&gt;
+      basic_socket(basic_socket&lt;OtherProtocol<ins>, OtherExecutor</ins>&gt;&amp;&amp; rhs);
+    // ...
+  };
+</pre>
+
+<p>This constructor shall not participate in overload resolution unless <code>OtherProtocol</code> is implicitly convertible to <code>Protocol</code>, and <code>OtherExecutor</code> is implicitly convertible to <code>Executor</code>.</p>
+
+<h3>Modification of I/O objects' converting assignment operators</h3>
+
+<p>An <code>OtherExecutor</code> template parameter is added as required to the converting move assignment operators of the following classes:</p>
+
+<ul>
+<li><code>basic_socket</code></li>
+<li><code>basic_datagram_socket</code></li>
+<li><code>basic_stream_socket</code></li>
+<li><code>basic_socket_acceptor</code></li>
+</ul>
+
+<p>For example:</p>
+
+<pre>
+  template&lt;class Protocol, class Executor&gt;
+  class basic_socket : public socket_base
+  {
+    // ...
+    template&lt;class OtherProtocol<ins>, class OtherExecutor</ins>&gt;
+      basic_socket&amp; operator=(basic_socket&lt;OtherProtocol<ins>, OtherExecutor</ins>&gt;&amp;&amp; rhs);
+    // ...
+  };
+</pre>
+
+<p>This assignment operator shall not participate in overload resolution unless <code>OtherProtocol</code> is implicitly convertible to <code>Protocol</code>, and <code>OtherExecutor</code> is implicitly convertible to <code>Executor</code>.</p>
+
+<h3>Modification of basic_socket_acceptor member functions</h3>
+
+<p>Every overload of member functions <code>accept</code> and <code>async_accept</code> with an <code>io_context&amp;</code> parameter is replaced with two overloads:</p>
+
+<pre>
+  template&lt;class AcceptableProtocol, class Executor&gt;
+  class basic_socket_acceptor : public socket_base
+  {
+    // ...
+    <del>socket_type accept(io_context&amp; ctx);</del>
+    <ins>socket_type accept(const executor_type&amp; ex);</ins>
+    <ins>template&lt;class ExecutionContext&gt;</ins>
+      <ins>socket_type accept(ExecutionContext&amp; ctx);</ins>
+    // ...
+  };
+</pre>
+
+<p>The second of these overloads shall not participate in overload resolution unless <code>is_convertible&lt;ExecutionContext&amp;, execution_context&amp;&gt;::value</code> is <code>true</code>, and <code>is_constructible&lt;executor_type, typename ExecutionContext::executor_type&gt;::value</code> is <code>true</code>.</p>
+
+<h3>Modification of connect and async_connect functions</h3>
+
+<p>An <code>Executor</code> template parameter is added as required to the <code>connect</code> and <code>async_connect</code> functions. For example:</p>
+
+<pre>
+  template&lt;class Protocol<ins>, class Executor</ins>, class EndpointSequence&gt;
+    typename Protocol::endpoint connect(basic_socket&lt;Protocol<ins>, Executor</ins>&gt;&amp; s,
+                                        const EndpointSequence&amp; endpoints);
+</pre>
+
+<h3>Modification of basic_socket_streambuf</h3>
+
+<p>The <code>basic_socket_streambuf</code> default constructor is modified so that it shall not participate in overload resolution unless <code>is_constructible&lt;executor_type, io_context::executor_type&gt;::value</code> is <code>true</code>.</p>
+
+<h3>Modification of basic_socket_iostream</h3>
+
+<p>The <code>basic_socket_iostream</code> specification is modified so that the <code>executor_type</code> type is passed to all uses of <code>basic_socket_streambuf</code>, as required. The <code>basic_socket_iostream</code> default constructor is modified so that it shall not participate in overload resolution unless <code>is_default_constructible&lt;basic_socket_streambuf&lt;protocol_type, clock_type, wait_traits_type, executor_type&gt;&gt;::value</code> is <code>true</code>.</p>
+
+<h2>4. Possible implementation approach</h2>
+
+<p>This section is intended to provide implementation suggestions only, and is not intended to be prescriptive or exhaustive.</p>
+
+<h3>Provision of default implementation</h3>
+
+<p>Implementations may use an execution context service as a container for the backend implementation.</p>
+
+<pre>
+  class __socket_backend : public execution_context::service
+  {
+    // ...
+  };
+</pre>
+
+<p>This service would be "used" by an I/O object implementation, and is automatically created on first use:</p>
+
+<pre>
+  template &lt;class Protocol, class Executor&gt;
+  class basic_socket : public socket_base
+  {
+  public:
+    using executor_type = Executor;
+
+    // ...
+
+    explicit basic_socket(const executor_type&amp; ex)
+    {
+      auto&amp; backend = use_service&lt;__socket_backend&gt;(ex.context());
+      // ...
+    }
+
+    // ...
+  };
+</pre>
+
+<p>This allows the I/O object to be used with arbitrary execution contexts.</p>
+
+<h3>Native implementations</h3>
+
+<p>A native execution context preemptively performs service creation by calling <code>make_service</code>. It can use this opportunity to pass additional constructor arguments that initialise the backend in the native mode, rather than the default:</p>
+
+<pre>
+  class io_context : public execution_context
+  {
+  public:
+    // ...
+
+    io_context()
+    {
+      make_service&lt;__socket_backend&gt;(*this, __io_context_backend_tag{});
+    }
+
+    // ...
+  };
+</pre>
+
+<p>Alternatively, implementations may use a class hierarchy of services, and virtual functions, to select the desired behaviour:</p>
+
+<pre>
+  class __socket_backend : public execution_context::service
+  {
+  public:
+    using key_type =  __socket_backend;
+
+    // ...
+
+    virtual void backend_function(/* ... */);
+
+    // ...
+  };
+
+  class __io_socket_backend : public __socket_backend
+  {
+  public:
+    // ...
+
+    void backend_function(/* ... */) override;
+
+    // ...
+  };
+
+  class io_context : public execution_context
+  {
+  public:
+    // ...
+
+    io_context()
+    {
+      make_service&lt;__io_socket_backend&gt;(*this);
+    }
+
+    // ...
+  };
+</pre>
+
+<p>In both approaches, the existing service, with its native backend, is obtained by the I/O object constructor.</p>
+
+<h3>Performance impact</h3>
+
+<p>Specification of the polymorphic executor as the default I/O executor, while improving usability, has a non-zero impact on performance. This impact can be mitigated by having an I/O object's constructor detect its own well-known native executor types (e.g. by using <code>executor::target_type</code>). With this information, the overhead can then be limited to simple branching, rather than the memory allocations and virtual functions that would likely be required for the type-erased function objects.</p>
+
+<p>Users can avoid this overhead completely by explicitly specifying the I/O executor type:</p>
+
+<pre>
+  io_context my_context;
+  basic_stream_socket&lt;tcp, io_context::executor_type&gt; my_socket(my_context);
+</pre>
+
+<h2>5. Implementation experience</h2>
+
+<p>This design change has been implemented in an experimental branch of Asio, for a subset of its available I/O objects.</p>
+
+</body>
+</html>

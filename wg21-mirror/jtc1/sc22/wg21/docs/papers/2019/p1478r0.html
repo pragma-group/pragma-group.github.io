@@ -1,0 +1,215 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+ "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8">
+<title>P1478: Byte-wise atomic memcpy</title>
+<style type="text/css">
+html { line-height: 135%; }
+ins { background-color: #DFD; }
+del { background-color: #FDD; }
+</style>
+</head>
+<body>
+<table>
+        <tr>
+                <th>Doc. No.:</th>
+                <td>WG21/P1478R0</td>
+        </tr>
+        <tr>
+                <th>Date:</th>
+                <td>2019-01-20</td>
+        </tr>
+        <tr>
+                <th>Reply-to:</th>
+                <td>Hans-J. Boehm</td>
+        </tr>
+        <tr>
+                <th>Email:</th>
+                <td><a href="mailto:hboehm@google.com">hboehm@google.com</a></td>
+        </tr>
+        <tr>
+                <th>Authors:</th>
+                <td>Hans-J. Boehm</td>
+        </tr>
+        <tr>
+                <th>Audience:</th>
+                <td>SG1</td>
+        </tr>
+</table>
+
+<h1>P1478R0: Byte-wise atomic memcpy</h1>
+<p>
+Several prior papers have suggested mechanisms that allow for nonatomic accesses that behave
+like atomics in some way. There are several possible use cases. Here we focus on
+seqlocks which, in our experience, seem to generate the strongest demand for such a feature.
+<p>
+This prposal is intended to be as simple as possible. It is in principle a pure
+library facility that can be implemented without compiler support.
+We expect that practical implementations will implement the new facilities as
+aliases for existing <code>memcpy</code> implementations.
+<p>
+There have been a number of prior proposals in this space.
+Most recently <a href="http://wg21.link/p0690">P0690</a>
+suggested "tearable atomics". Other solutions were proposed in
+<a href="http://wg21.link/n3710">N3710</a>, which suggested more complex handling for
+speculative nonatomics loads.
+This proposal is closest in title to <a href="http://wg21.link/p0603">P0603</a>.
+This is arguably the simplest and narrowest proposal.
+
+<h2>Seqlocks</h2>
+<p>
+A fairly common technique to implement low cost read-mostly synchronization is
+to protect a block of data with an atomic version or sequence number.
+The writer increments the sequence number to an odd value, updates the data,
+and then updates the sequence number again, restoring it to an even value.
+The reader checks the sequence number before and after reading the data;
+if the two sequence number values read either differ, or are odd,
+the data is discarded and the operation retried.
+<p>
+This has the advantage that data can be updated without allocation, and that
+readers do not modify memory, and thus don't risk cache contention. It seems
+to also be a popular technique for protecting data in memory shared between
+processes.
+<p>
+Seqlock readers typically execute code along the following lines:
+<blockquote>
+<pre>
+do {
+  seq1 = seq_no.load(memory_order_acquire);
+  data = shared_data;
+  atomic_thread_fence(memory_order_acquire);
+  int seq2 =  seq_no.load(memory_order_relaxed);
+} while (seq1 != seq2 || seq1 &amp; 1);
+use data;
+</pre>
+</blockquote>
+<p>
+For details, see <a href="https://dl.acm.org/citation.cfm?doid=2247684.2247688">
+Boehm, Can seqlocks get along with progrmming language memory models</a>.
+<p>
+It is important that the sequence number reads not be reordered with the data reads.
+That is ensured by the initial <code>memory_order_acquire</code> load, and by the
+explicit fence. But fences only order atomic accesses, and the read of
+<code>shared_data</code> still races with updates. Thus for the fence to be
+effective, and to avoid the data race, the accesses access to <code>shared_data</code>
+must be atomic <em>in spite of the fact that any data read while a write is
+occurring will be discarded</em>.
+<p>
+In the general case, there are good semantic reasons to require that all data
+accesses inside such a seqlock "critical section" must be atomic.
+If we read a pointer <code>p</code> as part of reading the data, and then
+read <code>*p</code> as well, the code inside the critical section may
+read from a bad address if the read of <code>p</code> happened to see
+a half-updated pointer value.
+In such cases, there is probably no way to avoid reading the pointer with a
+conventional atomic load, and that's exactly what's desired.
+<p>
+However, in many cases, particularly in the multiple process case,
+seqlock data consists of a single trivially copyable object, and the
+seqlock "critical section" consists of a simple copy operation.
+Under normal circumstances, this could have been written using <code>memcpy</code>.
+But that's unacceptable here, since <code>memcpy</code> does not generate atomic accesses,
+and is (according to our specification anyway) susceptable to data races.
+<p>
+Currently to write such code correctly, we need to basically decompose such
+data into many small lock-free atomic subobjects, and copy them a piece at a time.
+Treating the data as a single large atomic object would defeat the purpose
+of the seqlock, since the atomic copy operation would acquire a conventional
+lock. Our proposal essentially adds a convenient library facility to
+automate this decomposition into small objects.
+<p>
+We propose that both the copy from <code>shared_data</code>, and the following
+fence be replaced by a new <code>atomic_source_memcpy</code> call.
+
+<h2>The proposal</h2>
+<p>
+We propose to introduce two additional versions of <code>memcpy</code> to
+resolve the above issue:
+<p>
+<code>atomic_source_memcpy(void* dest, void* source, size_t count, memory_order order)</code>
+directly addresses the seqlock reader problem. Like <code>memcpy</code>, it
+requires that the source and destination ranges do not overlap. It also requires that
+<code>order</code> is <code>memory_order_seq_cst</code>, <code>memory_order_acquire</code>
+or <code>memory_order_relaxed</code>. (<code>Memory_order_seq_cst</code>
+barely makes sense here; we do not propose it as a default.)
+<p>
+This behaves as if:
+<blockquote>
+<pre>
+for (size_t i = 0; i &lt; count; ++i) {
+  reinterpret_cast&lt;char*&gt;(dest)[i] =
+      atomic_ref&lt;char&gt;(reinterpret_cast&lt;char*&gt;(source)[i]).load(memory_order_relaxed);
+}
+atomic_thread_fence(order);
+</pre>
+</blockquote>
+<p>
+Note that on standard hardware, it should be OK to actually perform the copy at larger
+than byte granularity. Copying multiple bytes as part of one operation is
+indistinguishable from running them so quickly that the intermediate state
+is not observed. In fact, we expect that existing assembly memcpy implementations
+will suffice when suffixed with the required fence.
+<p>
+The <code>atomic_source_memcpy</code> operation would introduce a data race and hence
+undefined behavior if the source where simultaneously updated by an ordinary
+<code>memcpy</code>. Similarly, we would expect undefined behavior if the
+writer updates the source using atomic operations of a different granularity.
+To facilitate correct use, we need to also provide a corresponding version of
+<code>memcpy</code> that updates memory using atomic byte stores.
+<p>
+We thus also propose
+<code>atomic_dest_memcpy(void* dest, void* source, size_t count, memory_order order)</code>,
+where <code>order</code> is <code>memory_order_seq_cst</code>, <code>memory_order_release</code>
+or <code>memory_order_relaxed</code>. (<code>Memory_order_seq_cst</code> again barely makes
+sense.)
+It behaves as if:
+<blockquote>
+<pre>
+atomic_thread_fence(order);
+for (size_t i = 0; i &lt; count; ++i) {
+  atomic_ref&lt;char&gt;(reinterpret_cast&lt;char*&gt;(dest)[i]).store(
+      reinterpret_cast&lt;char*&gt;(source)[i], memory_order_relaxed);
+}
+</pre>
+</blockquote>
+
+<h2>Open questions</h2>
+<p>
+There is a question as to whether the <code>order</code> argument should be part of the
+interface, and if so, whether this is the right way to handle it.
+<p>
+Excluding the <code>order</code> argument, and requiring the programmer to explicitly
+write the fence simplifies this proposal further. But I believe there are
+convincning reasons to include it:
+<ol>
+<li> I believe it conveys the right intuition. The combination of
+<code>atomic_dest_memcpy(..., memory_order_release)</code> and an
+<code>atomic_source_memcpy(..., memory_order_acquire)</code> that reads the resulting values
+establishes a synchronizes_with relationship, as expected.
+<li> The explicit fence in the current seqlock idiom is confusing; this
+will usually eliminate it.
+<li> It is immediately clear that <code>atomic_source_memcpy(..., memory_order_acquire)</code>
+cannot contribute to an out-of-thin-air result, and hence there is no need to add
+overhead to prevent that.
+</ol>
+<p>
+Unfortunately, defining this construct in terms of an explicit fence overconstrains the
+hardware a bit; if the block being copied is short enough to be copied e.g. by a single
+ARMv8 load-acquire instruction, this would disallow that implementation, since the
+fence can also establish ordering in conjunction with other earlier atomic loads,
+while the load-acquire instruction cannot.
+<p>
+An alternative would be to include the <code>order</code> argument, but not
+to define it in terms of a fence. This is slightly more complex, but would allow
+the above load-acquire implementation.
+<p>
+The facility here is fundamentally a C level facility, making it potentially
+possible to include it in C as well. This would raise the same namespace issues
+that P0943 is trying to address, but compatability should be possible.
+<p>
+It is clearly possible to put a higher-level type-safe layer on top of this
+that copies trivially copyable objects rather than bytes. It is not completely
+clear which level we should standardize.
+</body>
+</html>

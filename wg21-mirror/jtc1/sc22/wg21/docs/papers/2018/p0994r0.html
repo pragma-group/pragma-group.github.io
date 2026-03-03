@@ -1,0 +1,252 @@
+<html><body>
+<h1>String View Conversion for Function Arguments</h1>
+<p>ISO/IEC JTC1 SC22 WG21 P0994R0</p>
+<pre><code>ADAM David Alan Martin  (adam@recursive.engineer)
+                        (adam.recursive.engineer@gmail.com)
+                        (adam.martin@mongodb.com)
+Jason Carey             (jason.carey@mongodb.com)
+</code></pre>
+<h2>Abstract</h2>
+<p>Code wishing to call a function with a <code>std::string_view</code> parameter is unable to do so presently with
+a type that has a user-defined conversion to <code>std::string</code> or <code>const char *</code>.  This was discussed in
+EWG at Jacksonville during a session discussing pain points in modern C++.  (P0922r0)  I (ADAM Martin)
+proposed that this is an easy to solve problem with current C++ library design techniques, and it does
+not require any new features be added to the language.  This paper codifies that proposal.</p>
+<p>We propose adding a new implicit conversion constructor to <code>std::basic_string_view&lt; CharT &gt;</code> which
+facilitates user defined conversions from any type to <code>std::basic_string&lt; CharT &gt;</code>, <code>const CharT *</code>,
+and <code>const std::basic_string&lt; CharT &gt; &amp;</code>.  This constructor will be invoked as an implicit conversion
+construction of <code>std::basic_string_view&lt; CharT &gt;</code>, adapting to any user defined object with a user
+defined &quot;classical&quot; string conversion operator.  This constructor also includes a facility to extend
+the lifetime of any ephemeral <code>std::basic_string&lt; CharT &gt;</code> object created in the process of adapting a
+<code>std::basic_string_view&lt; CharT &gt;</code>, in a manner similar to builtin lifetime extension.</p>
+<h2>Proposal</h2>
+<p>We propose to add a new constructor to the <code>std::basic_string_view</code> family which solves this problem.  This constructor
+must be an implicit constructor which is templatized and controlled with <code>std::enable_if</code>.</p>
+<p>This constructor uses a technique similar to the &quot;forwarding constructor&quot; technique used in C++17's <code>std::optional&lt; T &gt;</code>
+conversion constructors.  Essentially the technique uses an implicit conversion constructor which is controlled by an
+<code>std::enable_if</code> gate which prevents the instantiation of the function in certain circumstances.  In the case of
+<code>std::optional&lt; T &gt;</code>, there exists a ctor, <code>template&lt; typename U, ... &gt; optional&lt; T &gt;::optional( U &amp;&amp;u )</code>.  The
+elided code in elipses is a <code>std::enable_if</code> expression which, as described earlier, prevents the consideration of this
+ctor when the specified <code>U</code> type is not implicitly convertible to <code>T</code>.</p>
+<p>For the case of the constructor we propose adding to <code>std::basic_string_view&lt; CharT &gt;</code>, it should have a similar <code>enable_if</code>
+constructor, <code>template&lt; typename CharT &gt; template&lt; typename U, ... &gt; basic_string_view&lt; CharT &gt;::basic_string_view( U &amp;&amp;u )</code>
+which is considered only when the type <code>U</code> is convertible to one of the &quot;classical&quot; string types -- <code>std::string</code>,
+<code>const char *</code>, <code>const std::string &amp;</code>.</p>
+<p>Some commonly expected use cases are:</p>
+<h3>Example 1</h3>
+<pre><code>namespace UserCode
+{
+    struct Case1
+    {
+        std::string s= &quot;Hello&quot;;
+        operator const char *() const { return s.c_str(); }
+    };
+}
+
+void function( std::string_view view ) {}
+
+void
+usage()
+{
+    using namespace UserCode;
+
+    // Ephemeral usage
+    function( Case1() );
+    
+    // Local usage
+    Case1 c1;
+    function( c1 );
+}
+</code></pre>
+<p>In this case, the object <code>Case1</code> is responsible for the storage of the string being returned, so an anonymous temporary
+string view object has no issue with respect to the lifetime of the string storage returned by <code>Case1</code>'s conversion operator.</p>
+<h3>Example 2</h3>
+<p>Things become a bit more complicated in the case when a <code>const std::basic_string&lt; CharT &gt; &amp;</code> is returned by the conversion
+operator of a type, but not significantly so:</p>
+<pre><code>namespace UserCode
+{
+    struct Case2
+    {
+        std::string s= &quot;Hello&quot;;
+        operator const std::string &amp;() const { return s; }
+    };
+}
+
+void function( std::string_view view ) {}
+
+void
+usage()
+{
+    using namespace UserCode;
+
+    // Ephemeral usage
+    function( Case2() );
+    
+    // Local usage
+    Case2 c2;
+    function( c2 );
+}
+</code></pre>
+<p>In this case, a user-defined conversion involves a type which has lifetime extension issues, but the type returned by
+the user-defined conversion is a reference, thus indicating that the user defined type is responsible for the lifetime
+of the string data storage.  A <code>std::basic_string_view&lt; CharT &gt;</code> constructor which accepts types with user-defined
+<code>const std::string &amp;</code> operators must also decline to be eligible to convert from a temporary <code>std::string</code>, as the
+string's storage is ephemeral.</p>
+<h3>Example 3</h3>
+<p>Care needs to be taken when implementing some kind of magical conversion operator between a user defined type and a
+reference-like type (pointers, string_view, etc) when there is an intermediate step through a type which owns
+the resources being referenced.  The C++ language has some intrinsic forms of lifetime extension, but for this
+kind of case, there is no facility for transitive propagation of a requirement for lifetime extension.</p>
+<p>An example which could be at risk of this issue is:</p>
+<pre><code>namespace UserCode
+{
+    struct Case3
+    {
+        operator std::string () const { return &quot;Hello&quot;; }
+    };
+}
+
+void function( std::string_view view ) {}
+
+void
+usage()
+{
+    using namespace UserCode;
+
+    // Ephemeral usage
+    function( Case3() );
+    
+    // Local usage
+    Case3 c3;
+    function( c3 );
+}
+</code></pre>
+<h2>Issues with any implementation attempt</h2>
+<p>In the final example above, the ephemeral <code>std::string</code> object would have its lifetime expire in a &quot;forwarding constructor&quot;
+using the <code>template&lt; typename T &gt; template&lt; typename U &gt; std::optional&lt; T &gt;::optional( U &amp;&amp;u )</code> case.  The forwarding constructor's
+scope would end, thus ending the lifetime of the ephemeral string.  A naive constructor with an implementation as detailed below
+would cause dangling pointers to expired storage:</p>
+<pre><code>namespace std
+{
+    template&lt; typename CharT &gt;
+    class basic_string_view
+    {
+        public:
+            template&lt; typename U &gt;
+            basic_string_view( const U &amp;u )
+                : basic_string_view( static_cast&lt; const std::basic_string&lt; CharT &gt; &amp; &gt;( u ) ) {}
+    };
+}
+</code></pre>
+<p>The temporary <code>std::string</code> would be created in the scope of the ctor for <code>basic_string_view</code> rather than in the calling
+scope, and therefore its lifetime would end before the ctor returns.  We require a mechanism to extend the lifetime of temporaries
+created in the course of making invisible multi-stage conversions.  Although this mechanism <em>could</em> be a language mechanism,
+it is actually possible to make such lifetime-preserving constructors in C++ today:</p>
+<h3>Introducing a trick to provide some user-controlled lifetime extension in the present C++ language.</h3>
+<pre><code>namespace std
+{
+    template&lt; typename CharT &gt;
+    class basic_string_view
+    {
+        public:
+            template&lt; typename U &gt;
+            basic_string_view( const U &amp;u, std::string &amp;&amp;storage= {} )
+            {
+                storage= u;
+                *this= basic_string_view( u );
+            }
+    };
+}
+</code></pre>
+<p>In the above technique, the lifetime of <code>storage</code>, if relying upon the default argument initialization, is until the end of
+the line which invoked the constructor.  This is because the temporary object <code>std::string</code> created at the calling site
+is going to live that long, and the <code>storage</code> name is a reference to that object.  Because of this, the lifetime of
+the string that we assign to <code>storage</code> is equivalent to the necessary lifetime.  The lambda in the constructor invocation
+captures the <code>storage</code> variable which permits us to gain access to modify the storage for which we wish to extend the lifetime.</p>
+<h2>Proposed Implementation</h2>
+<pre><code>namespace std
+{
+    template&lt; typename T, typename = void &gt;
+    struct is_temp_string_convertible : std::false_type {};
+
+    template&lt; typename T &gt;
+    struct is_temp_string_convertible&lt; T, std::void_t&lt; decltype( std::declval&lt; T &gt;().operator std::string () ) &gt; &gt;
+            : std::true_type {};
+
+    template&lt; typename T &gt;
+    struct is_temp_string_convertible&lt; T, std::void_t&lt; decltype( std::as_const( std::declval&lt; T &gt;() ).operator std::string () ) &gt; &gt;
+            : std::true_type {};
+
+    template&lt; typename CharT &gt;
+    class basic_string_view
+    {
+            // ...
+        public:
+            class prevent_abuse { friend basic_string_view; abuse()= default; };
+
+            template
+            &lt;
+                typename AlienType
+                typename= std::enable_if
+                &lt;
+                    std::is_convertible&lt; AlienType, const char * &gt;::value
+                    || std::is_convertible&lt; AlienType, std::string &gt;::value
+                    || std::is_convertible&lt; AlienType, const std::string &amp; &gt;::value,
+                    void
+                &gt;::type,
+            &gt;
+            basic_string_view( const AlienType &amp;a, prevent_abuse= {}, std::string &amp;&amp;lifetime_extension= &quot;&quot; )
+                    : basic_string_view
+                        (
+                            [&amp;a, &amp;lifetime_extension] () -&gt; basic_string_view
+                            {
+                                if constexpr( is_temp_string_convertible&lt; AlienType &gt;::value )
+                                {
+                                    // The assignment to `lifetime_extension` preserves the storage
+                                    // of the string we will reference.
+                                    lifetime_extension= a.operator std::string();
+                                    return lifetime_extension;
+                                }
+                                else if constexpr( std::is_convertible&lt; AlienType, const char * &gt;::value )
+                                {
+                                    return static_cast&lt; const char * &gt;( a );
+                                }
+                                else
+                                {
+                                    return static_cast&lt; const std::string &amp; &gt;( a );
+                                }
+                            }()
+                        )
+            {}
+            // ...
+    };
+}
+</code></pre>
+<p>The above multiply-constrained template constructor is able to work as a conversion constructor only when the <code>AlienType</code>
+has a conversion to at least one of the &quot;classical&quot; string types.  If-constexpr is used to select among 3 possible implementations,
+where each variation is used to select the correct conversion target type.  It is important to use a <code>const char *</code> conversion
+as preferred over a <code>const std::string &amp;</code> conversion, since the <code>const std::string &amp;</code> would wind up creating a temporary, when
+used as a conversion target for a <code>const char *</code> targetting conversion.  The first variation in the <code>if constexpr</code> uses the
+earlier discussed lifetime extension trick to preserve the storage for the ephemeral string returned by the user-defined
+conversion for the <code>AlienType</code>.</p>
+<p>The purpose of the <code>prevent_abuse</code> structure as a parameter is to guard this new augmented constructor against direct call
+by a user.  The <code>prevent_abuse</code> ctor is private and thus not callable outside of the class; however, C++ rules dictate that
+the protection and lookup rules for a default parameter are to use the permissions of the context of the definition of the
+defaulted parameter.  What this means is that the ctor is permitted to construct <code>prevent_abuse</code> as part of its default arguments,
+but a user cannot directly call that constructor on his or her own.  Thus this constructor is ONLY a conversion operation, and
+it is only accessible if the user has defined a &quot;classical string&quot; conversion.</p>
+<h2>Avenues for Further Research</h2>
+<p>There are a few techniques explored in this paper, which may have general applications in the future, and they should be
+researched more thoroughly:</p>
+<ul>
+<li>Disabling direct user access to default arguments in constructors through privileged tag classes</li>
+<li>Synthetic lifetime extension, through defaulted constructor rvalue-reference parameters</li>
+<li>Generalization of the <code>std::optional&lt; T &gt;::optional( U &amp;&amp;u )</code> &quot;invisible&quot; conversion forwarding constructor technique,
+if P0892R0 (&quot;Constexpr(bool)&quot;) is not approved.</li>
+</ul>
+<h2>Conclusion</h2>
+<p>We have presented a functional constructor for <code>std::string_view</code> implemented in the C++17 language which solves the stated
+problem.  Our implementation experience is presently limited to a standalone limited reimplementation of the C++17 <code>string_view</code>
+type in a non-<code>std</code> namespace.  Several testing types are included in our demonstration, which exercise every <code>if-constexpr</code>
+branch.  We propose that this constructor be considered for inclusion as part of <code>std::basic_string_view</code> in the next C++
+standard.</p>

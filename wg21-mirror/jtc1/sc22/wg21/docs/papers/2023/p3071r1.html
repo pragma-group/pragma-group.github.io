@@ -1,0 +1,187 @@
+<html>
+<head>
+<title>P3071R1: Protection against modifications in contracts</title>
+
+<style type="text/css">
+  ins { text-decoration:none; font-weight:bold; background-color:#A0FFA0 }
+  .new { text-decoration:none; font-weight:bold; background-color:#D0FFD0 }
+  del { text-decoration:line-through; background-color:#FFA0A0 }  
+  strong { font-weight: inherit; color: #2020ff }
+  table, td, th { border: 1px solid black; border-collapse:collapse; padding: 5px }
+</style>
+</head>
+
+<body>
+ISO/IEC JTC1 SC22 WG21 P3071R1<br/>
+Jens Maurer &lt;Jens.Maurer@gmx.net><br/>
+Target audience: SG21<br/>
+2023-12-17<br/>
+
+<h1>P3071R1: Protection against modifications in contracts</h1>
+
+<h2>Introduction</h2>
+
+<p>
+The expression that is checked for a <TT>true</TT> result in a
+contract annotation is supposed to observe the state of the program,
+but not change that state, exceptions such as logging notwithstanding.
+The current state of discussion of the contracts facility in SG21
+offers little compile-time protections against accidental
+modifications.  This paper proposes to add those by
+making <I>id-expression</I>s referring to local variables and
+parameters be const lvalues.  Also, implicit or explicit references
+to <TT>this</TT> are as-if inside a const member function.
+</p>
+
+<p>Example (only the lines marked "proposal" would change):</p>
+
+<pre>
+int global = 0;
+
+int f(int x, int y, char *p, int& ref)
+  pre((x = 0) == 0)            // proposal: ill-formed assignment to const lvalue
+  pre((*p = 5))                // OK
+  pre((ref = 5))               // proposal: ill-formed assignment to const lvalue
+  pre(std::same_as_v&lt;decltype(ref), int&amp;&gt;)  // OK; yields true
+  pre((global = 2))            // OK
+  pre([x] { return x = 2; }())           // error: x is const
+  pre([x] mutable { return x = 2; }())   // OK, modifies the copy of the parameter
+  pre([&amp;x] { return x = 2; }())          // proposal: ill-formed assignment to const lvalue
+  pre([&amp;x] mutable { return x = 2; }())  // proposal: ill-formed assignment to const lvalue
+  post(r: y = r)               // error: y is not declared const
+{
+  contract_assert((x = 0));    // proposal: ill-formed assignment to const lvalue
+  int var = 42;
+  contract_assert((var = 42)); // proposal: ill-formed assignment to const lvalue
+
+  static int svar = 1;
+  contract_assert((svar = 1)); // OK
+  return y;
+}
+
+struct S {
+  int dm;
+  void mf() /* not const */
+    pre((dm = 1))                         // proposal: ill-formed assignment to const lvalue
+    pre([this]{ dm = 1; }())              // proposal: ill-formed assignment to const lvalue
+    pre([this] () mutable { dm = 1; }())  // proposal: ill-formed assignment to const lvalue
+    pre([*this]{ dm = 1; }())             // error: ill-formed assignment to const lvalue
+    pre([*this] () mutable { dm = 1; }()) // OK, modifies the copy of *this
+  {}
+};
+</pre>
+
+<h2>History</h2>
+
+<ul>
+<li>R1: Added const treatment for lambda captures of <TT>this</TT>. R1
+was approved by SG21 on 2023-12-14.</li>
+</ul>
+
+<h2>Proposal</h2>
+
+<p>Specifically, this paper proposes:</p>
+
+<p>A <I>contract context</I> is the <I>conditional-expression</I> of
+a <I>contract-condition</I>, where the grammar non-terminals are as
+defined in P2961R2 (A natural syntax for Contracts).</p>
+
+<ol>
+<li>An <I>id-expression</I> that is a subexpression of a contract
+context and names a variable with automatic storage duration of object
+type <TT>T</TT>, or a structured binding of type <TT>T</TT> whose
+corresponding variable has automatic storage duration, is an lvalue of
+type <TT>const T</TT>.</li>
+
+<li>An <I>id-expression</i> that is a subexpression of a contract
+context and names a variable with automatic storage duration of type
+"reference to <TT>T</TT>" is an lvalue of type <TT>const T</TT>.</li>
+
+<li>When a <I>lambda-expression</I> that is a subexpression of a
+contract context captures a non-function entity by copy, the type of
+the implicitly declared data member is <TT>T</TT>, but (as usual)
+naming such a data member in the <I>compound-statement</I> of
+the <I>lambda-expression</I> yields a const lvalue unless the lambda
+is declared <TT>mutable</TT>.  When a <I>lambda-expression</I>
+captures such an entity by reference, the type of an expression naming
+the reference is <TT>const T</TT>.</li>
+
+<li>The <I>primary-expression</I> <TT>this</TT>, when appearing as a
+subexpression of a contract context (including as the result of the
+implicit transformation in the body of a non-static member function),
+is a prvalue of type "pointer to cv X", where cv is the combination
+of <TT>const</TT> and the <I>cv-qualifier-seq</I> of the enclosing
+member function (if any).</li>
+
+<li>When a <I>lambda-expression</I> that is a subexpression of
+a contract context captures <TT>this</TT> of type "pointer to T", the
+type of the implicitly declared data member is "pointer to const
+T".
+</ol>
+
+
+<h2>Discussion</h2>
+
+The following lists arguments in favor of the proposed change and
+those against, as a summary of earlier e-mail exchanges.
+
+<ul>
+<li>Modifications inside contract conditions are discouraged.  This
+change will enforce this rule at the outer level, because the type
+system of C++ prevents modifications through const lvalues.</li>
+
+<li>The const amendments are shallow (on the level of the lvalue
+only); attempting to invent "deep const" rules would make raw pointers
+and smart pointers likely behave differently, which is not
+desirable.</li>
+
+<li>The change enhances the bug resistance posture of C++.  Typos such
+as <TT>=</TT> instead of <TT>==</TT> are caught more easily.</li>
+
+<li>If modifications are needed, <TT>const_cast</TT> can be applied,
+except that modifications of const objects continue to be undefined
+behavior (see [dcl.type.cv] p4).  This includes parameters required to
+be declared const because they are used in a postcondition.</li>
+
+<li>Class members declared mutable can be modified as before; this is
+consistent with their behavior in const member functions.</li>
+
+<li>The type of lvalues referring to namespace-scope or local static
+variables is not changed; such accesses are more likely to be
+intentionally modifying, e.g. for logging or counting.</li>
+
+<li>The result of <TT>decltype(x)</TT> is not changed; aligned with
+const member functions, this yields the declared type of <TT>x</TT>.
+In contrast, <TT>decltype((x))</TT> yields <TT>const T&amp;</TT>,
+where <TT>T</TT> is the type of the expression <TT>x</TT>.</li>
+
+<li>Expressions that are not lexically part of the contract condition
+are not changed.  Overload resolution results (and thus, semantics)
+may change if code is hoisted from a contract condition into a
+separate function.</li>
+
+<li>Mechanically changing existing uses of <TT>assert</TT> to
+use <TT>contract_assert</TT> (e.g. by redefining a macro) might cause
+compilation failures because the argument of <TT>assert</TT> might not
+be const-correct.  On the other hand, these compilation failures might
+indicate real bugs where program state is accidentally changed.</li>
+
+<li>Invoking a const member function may have different effects
+compared to invoking a non-const member function.  Having source code
+with the same sequence of tokens in immediate proximity (inside
+vs. outside of contract_assert, for example) mean different things is
+confusing.</li>
+
+<li>If this paper is adopted, it is expected that
+an <I>id-expression</I> naming a return value identifier in a
+postcondition is also a const lvalue.  This is not part of this
+proposal, though.</li>
+
+<li>A future extension might add contract captures.  The behavior of
+such captures should be consistent with lambda captures in a contract
+context.</li>
+
+</ul>
+
+</body>
+</html>

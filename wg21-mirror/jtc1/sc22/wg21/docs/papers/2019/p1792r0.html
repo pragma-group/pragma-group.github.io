@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>Simplifying and generalising Sender/Receiver for asynchronous operations</title>
+  <style type="text/css">
+      code{white-space: pre-wrap;}
+      span.smallcaps{font-variant: small-caps;}
+      span.underline{text-decoration: underline;}
+      div.column{display: inline-block; vertical-align: top; width: 50%;}
+  </style>
+  <!--[if lt IE 9]>
+    <script src="//cdnjs.cloudflare.com/ajax/libs/html5shiv/3.7.3/html5shiv-printshiv.min.js"></script>
+  <![endif]-->
+  <style type="text/css">
+      h1.title {display:none}
+      ins {color:#00A000}
+      ins p code {color:#00A000}
+      p ins code {color:#00A000}
+      del {color:#A00000}
+      del p code {color:#A00000}
+      p del code {color:#A00000}
+      blockquote {border-left:0.4em solid #C0C0C0; padding-left:0.2em}
+      table, th, td {border:1px solid #C0C0C0}
+  </style>
+</head>
+<body>
+<header>
+<h1 class="title">Simplifying and generalising Sender/Receiver for asynchronous operations</h1>
+</header>
+<pre>
+Document number: D1792R0
+Date:            2019-06-16
+Project:         Programming Language C++
+Audience:        SG1
+Reply-to:        Christopher Kohlhoff &lt;chris&#x40;kohlhoff.com&gt;
+</pre>
+<h1 id="simplifying-and-generalising-senderreceiver-for-asynchronous-operations">Simplifying and generalising Sender/Receiver for asynchronous operations</h1>
+<h2 id="introduction">Introduction</h2>
+<p><a href="http://wg21.link/P1341">P1341, Unifying Asynchronous APIs in C++ Standard Library</a> presents an API design approach where Sender/Receivers are used to, notionally, unify sources of asynchronicity. Unfortunately, this approach represents a significant backward step in flexibility, usability, and efficiency when compared to existing practice. This is primarily a consequence of P1341’s design being tightly coupled to a lazy evaluation model.</p>
+<p>This paper introduces a simpler, more general foundation for expressing the relationship between sender and receiver. This foundation enables efficient support for not just eager and lazy concurrency, but also for models that lie somewhere in-between, such as fibers.</p>
+<h2 id="problems-with-an-exclusively-lazy-approach">Problems with an exclusively lazy approach</h2>
+<p>An exclusively lazy approach to asynchronicity has the following issues:</p>
+<ul>
+<li><p>Inefficiency: It requires that arguments to an asynchronous operation be copied (possibly in some repackaged form) so that they are still available when lazy evaluation triggers initiation of the underlying operation.</p></li>
+<li><p>Reduced safety: Composition techniques such as coroutines and fibers provide the tools to safely manage object lifetime in asynchronous contexts, but an exclusively lazy approach requires greater programmer attention and discipline, even when using these techniques.</p></li>
+</ul>
+<h2 id="other-problems-with-the-p1341-chosen-design">Other problems with the P1341 chosen design</h2>
+<ul>
+<li><p>Lack of flexibility: The lazy design used in P1341 makes it difficult to generically customise the behaviour of senders in the context of particular composition techniques. For example, we may wish to construct algorithms as senders that are generic across fibers and other similar synchronous contexts.</p></li>
+<li><p>Forced conflation of unrelated concepts: P1341 appears to conflate two disjoint concepts (Awaitable and Sender) in order to create a new concept, Task, that can support both coroutines and lazy chaining of Sender/Receiver objects. A better approach would be to adopt a more fundamental representation that can support both compositional techniques (and indeed others).</p></li>
+</ul>
+<h2 id="a-better-way">A better way</h2>
+<p>The CompletionToken mechanism was first described in <a href="http://wg21.link/N3747">N3747, A Universal Model for Asynchronous Operations</a>, and its revisions <a href="http://wg21.link/N3964">N3964</a> and <a href="http://wg21.link/N4045">N4045</a> introduced a way to decouple asynchronous operations from the mechanisms used to compose them. This technique garnered in widespread, positive field experience in Boost.Asio (starting with the Asio 1.10.0 / Boost 1.54 release) which later formed the basis of the Networking TS (<a href="http://wg21.link/N4771">N4771, working draft</a>).</p>
+<p>However, one disadvantage of the CompletionToken mechanism at that time was that it required eager initiation of the underlying asynchronous operations. This shortcoming was corrected in Asio 1.14.0 / Boost 1.70 with a small enhancement to the design to also allow lazy initiation.</p>
+<p>A key realisation during executor discussion was that the CompletionToken mechanism could represent the same foundational concepts as the Sender/Receiver model. By combining and evolving these approaches, we enable a generalised Sender/Receiver model for asynchronous operations that supports eager, lazy, as well as hybrid models of concurrency such as fibers.</p>
+<h2 id="key-design-elements-of-a-generalised-senderreceiver-model">Key design elements of a generalised Sender/Receiver model</h2>
+<ul>
+<li><p><em>Sender</em>: A function (or function object) that takes a Receiver as one of its arguments.</p></li>
+<li><p><em>Receiver</em>: An object that determines how and where the results of a Sender will be received.</p></li>
+<li><p><em>Signals</em> and <em>Signatures</em>: Communication between Sender and Receiver is unidirectional and consists of a set of Signals, where each Signal has a Signature. The set of possible Signals for a particular Sender/Receiver pairing is expressed as a variadic parameter pack of Signatures.</p></li>
+<li><p><em><code>receiver_traits&lt;&gt;</code></em>: A traits type used to determine concretely how a Receiver handles a given set of Signals, specified as Signatures.</p></li>
+<li><p><em>Handler</em>: A function object, produced by a Receiver, to concretely handle the set of signals generated by a Sender. It is callable with each of the given Signatures. By default, a Handler is also a Receiver, and when used as one causes the operation to be eagerly initiated.</p></li>
+<li><p><em>SenderLauncher</em>: - An object used to launch the underlying asynchronous operation associated with a Sender.</p></li>
+<li><p><em>receiver_traits&lt;&gt;::connect()</em>: Called by a Sender to establish its relationship with a Receiver. Passed the SenderLauncher, the Receiver, and an optional list of arguments to be passed back to the SenderLauncher. The Receiver is responsible for calling the SenderLauncher with its Handler and the optional arguments. The Receiver gets to choose when the SenderLauncher is called, which allows the model to support eager, lazy, and other hybrid models of execution.</p></li>
+<li><p><em><code>connect&lt;&gt;()</code></em>: A helper function used by a Sender to simplify the call to <code>receiver_traits&lt;&gt;::connect()</code>.</p></li>
+</ul>
+<h2 id="example-an-asynchronous-operation-as-a-sender">Example: An asynchronous operation as a Sender</h2>
+<p>As a simple example, let’s implement an asynchronous operation that performs <code>std::accumulate</code> in a background thread. This operation is presented to the user as a sender:</p>
+<pre><code>template &lt;
+    class InputIt,
+    class T,
+    Receiver&lt;void(T)&gt; R               // #1
+  &gt;
+auto async_accumulate(
+    InputIt first,
+    InputIt last,
+    T init,
+    R&amp;&amp; receiver
+  )
+{
+  return connect&lt;void(T)&gt;(            // #2
+      [](                             // #3
+          Handler&lt;void(T)&gt; h,         // #4
+          InputIt first,
+          InputIt last,
+          T init
+        )
+      {
+        std::thread(
+            [h = std::move(h), first, last, init]() mutable
+            {
+              h(std::accumulate(first, last, init));
+            }
+          ).detach();
+      },
+      std::forward&lt;R&gt;(receiver),
+      first,                          // #5
+      last,
+      init
+    );
+}</code></pre>
+<p>The key design elements of the simplified Sender/Receiver model are used in this example as follows:</p>
+<ol type="1">
+<li><p>The Sender’s API boundary specifies the set of signals that will be sent to the receiver.</p></li>
+<li><p>The Sender establishes the connection to the Receiver, and in doing so communicates the set of signals that will be generated. The Receiver may use this opportunity to customise the function return type and value, as well as choose when the underlying asynchronous operation is launched.</p></li>
+<li><p>The SenderLauncher object is passed to <code>connect</code> to encapsulate how the underlying asynchronous operation is actually launched.</p></li>
+<li><p>The SenderLauncher object receives a concrete Handler that will process the signals generated by the operation.</p></li>
+<li><p>Additional arguments to the SenderLauncher are passed separately, rather than being captured in the SenderLauncher lambda. This allows the Receiver to customise how these arguments will be forwarded to the SenderLauncher. For example, in eager evaluation the arguments are simply passed straight through. In lazy evaluation, they need to be captured and stored.</p></li>
+</ol>
+<p>This function can now be used eagerly by simply specifying a Handler as the Receiver:</p>
+<pre><code>async_accumulate(
+    vec.begin(), vec.end(), 0,
+    [](int result)
+    {
+      /*...*/
+    }
+  );</code></pre>
+<p>However, the framework supports an infinitely extensible set of receiver types enabling operations to be used with many different compositional techniques, such as futures:</p>
+<pre><code>future&lt;int&gt; f = async_accumulate(vec.begin(), vec.end(), 0, use_future);
+
+/* ... */
+
+int result = f.get();</code></pre>
+<p>coroutines:</p>
+<pre><code>int result = co_await async_accumulate(vec.begin(), vec.end(), 0, use_await);</code></pre>
+<p>fibers (or stackful coroutines):</p>
+<pre><code>int result = async_accumulate(vec.begin(), vec.end(), 0, use_fiber);</code></pre>
+<p>all in addition to the lazy evaluation model described in P1341:</p>
+<pre><code>auto lazy_eval = async_accumulate(vec.begin(), vec.end(), 0, lazy);
+
+/* ... */
+
+future&lt;int&gt; f = lazy_eval(use_future);
+// or any other type of receiver, as desired</code></pre>
+<p>Furthermore, we are able implement algorithms that are generic across categories of Receiver that behave a certain way, such as so-called synchronous Receivers that represent fiber-like and thread-like behaviour that blocks the calling execution agent. Once a vocabulary of well-known Receiver categories is established, algorithms may be overloaded to allow for further, tailored optimisations.</p>
+<h2 id="appendix-possible-implementation-of-a-simplified-generalised-senderreceiver">Appendix: Possible implementation of a simplified, generalised Sender/Receiver</h2>
+<pre><code>//------------------------------------------------------------------------------
+
+namespace detail {
+
+template &lt;class F, class... Args&gt;
+concept bool Invocable = requires(F&amp;&amp; f, Args&amp;&amp;... args)
+{
+  std::invoke(std::forward&lt;F&gt;(f), std::forward&lt;Args&gt;(args)...);
+};
+
+template &lt;class F, class Sig&gt;
+constexpr bool invocable_as_v = false;
+
+template &lt;class F, class R, class... Args&gt;
+constexpr bool invocable_as_v&lt;F, R(Args...)&gt; = Invocable&lt;F, Args...&gt;;
+
+template &lt;class T&gt;
+inline constexpr bool is_signature_v = false;
+
+template &lt;class R, class... Args&gt;
+inline constexpr bool is_signature_v&lt;R(Args...)&gt;  = true;
+
+template &lt;class T, class... Sigs&gt;
+inline constexpr bool is_handler_v = (... &amp;&amp; invocable_as_v&lt;T, Sigs&gt;);
+
+template &lt;class T, class... Sigs&gt;
+struct receiver_traits_base;
+
+template &lt;class T, class... Sigs&gt; requires is_handler_v&lt;T, Sigs...&gt;
+struct receiver_traits_base&lt;T, Sigs...&gt;
+{
+  using receiver_type = T;
+
+  template &lt;class SenderLauncher, class Receiver, class... Args&gt;
+  static void connect(SenderLauncher&amp;&amp; s, Receiver&amp;&amp; r, Args&amp;&amp;... args)
+  {
+    std::invoke(
+        std::forward&lt;SenderLauncher&gt;(s),
+        std::forward&lt;Receiver&gt;(r),
+        std::forward&lt;Args&gt;(args)...);
+  }
+};
+
+} // namespace detail
+
+//------------------------------------------------------------------------------
+
+template &lt;class T&gt;
+concept bool Signature = detail::is_signature_v&lt;T&gt;;
+
+//------------------------------------------------------------------------------
+
+template &lt;class T, Signature... Sigs&gt;
+concept bool Handler = detail::is_handler_v&lt;T, Sigs...&gt;;
+
+//------------------------------------------------------------------------------
+
+template &lt;class T, Signature... Sigs&gt;
+struct receiver_traits : detail::receiver_traits_base&lt;T, Sigs...&gt; {};
+
+//------------------------------------------------------------------------------
+
+template &lt;class T, Signature... Sigs&gt;
+concept bool Receiver = requires(T&amp;&amp;)
+{
+  typename receiver_traits&lt;std::decay_t&lt;T&gt;, Sigs...&gt;::receiver_type;
+};
+
+//------------------------------------------------------------------------------
+
+template &lt;
+    Signature... Sigs,
+    class SenderLauncher,
+    Receiver&lt;Sigs...&gt; R,
+    class... Args
+  &gt;
+auto connect(SenderLauncher&amp;&amp; s, R&amp;&amp; r, Args&amp;&amp;... args)
+{
+  return receiver_traits&lt;std::decay_t&lt;R&gt;, Sigs...&gt;::connect(
+      std::forward&lt;SenderLauncher&gt;(s),
+      std::forward&lt;R&gt;(r),
+      std::forward&lt;Args&gt;(args)...);
+}
+
+//------------------------------------------------------------------------------</code></pre>
+</body>
+</html>

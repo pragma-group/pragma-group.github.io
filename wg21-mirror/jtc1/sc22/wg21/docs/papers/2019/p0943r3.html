@@ -1,0 +1,388 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+ "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8">
+<title>P0943R3: Support C atomics in C++</title>
+<style type="text/css">
+html { line-height: 135%; }
+ins { background-color: #DFD; }
+del { background-color: #FDD; }
+</style>
+</head>
+<body>
+<table>
+        <tr>
+                <th>Doc. No.:</th>
+                <td>WG21/P0943R3</td>
+        </tr>
+        <tr>
+                <th>Date:</th>
+                <td>2019-06-14</td>
+        </tr>
+        <tr>
+                <th>Reply-to:</th>
+                <td>Hans-J. Boehm</td>
+        </tr>
+        <tr>
+                <th>Email:</th>
+                <td><a href="mailto:hboehm@google.com">hboehm@google.com</a></td>
+        </tr>
+        <tr>
+                <th>Authors:</th>
+                <td>Hans-J. Boehm</td>
+        </tr>
+        <tr>
+                <th>Audience:</th>
+                <td>LEWG, SG1</td>
+        </tr>
+</table>
+
+<h1>P0943R3: Support C atomics in C++</h1>
+<h2>Abstract</h2>
+<p>
+We propose to define what it means to include the C &lt;stdatomic.h&gt; header from
+C++ code. The goal is to enable "shared" headers that use atomics, and can be included
+from either C or C++ code.
+<h2>Introduction</h2>
+<p>
+As we previously suggested in
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/p0063r0.html">P0063R0</a>,
+it would be nice to have a real interoperability story for C atomics and C++ atomics.
+In the interest of time, and since it appeared to be less essential and more controversial
+than the rest of that proposal, this suggestion was not pursued further in later revisions
+of that paper. Nonetheless, it remains a gaping hole in the interoperability story between
+C and C++. The solution proposed here is based on one that has been used by Android
+for several years.
+<h2>The Problem</h2>
+<p>
+It is desirable to make C language header files directly usable by C++ code.
+It is increasingly common for such header files to include declarations that
+rely on atomics.
+<p>
+For example, a header may wish to declare a function that provides saturating
+("clamped") addition on atomic integers. This can easily be implemented in the
+common subset of C and C++, except that we have no convenient and portable way to
+include the definition of names such as <code>atomic_int</code>, that are
+defined in <code>&lt;atomic&gt;</code> in C++ and
+in <code>&lt;stdatomic.h&gt;</code> in C.
+<p>
+The best we can currently
+do in portable code is to use an explicit preprocessor test followed by conditional
+inclusion of either <code>&lt;atomic&gt;</code> or <code>&lt;stdatomic.h&gt;</code>.
+In the former case, we then have
+to add <code>using</code> declarations to inject the required types and functions
+into the global namespace. Thus we end up with something like
+<blockquote>
+<p>
+<pre><code>
+#ifdef __cplusplus
+  #include &lt;atomic&gt;
+  using std::atomic_int;
+  using std::memory_order;
+  using std::memory_order_acquire;
+  ...
+#else /* not __cplusplus */
+  #include &lt;stdatomic.h&gt;
+#endif /* __cplusplus */
+...
+int saturated_fetch_add(atomic_int *loc, int value, memory_order order);
+</code></pre>
+</blockquote>
+<p>
+This approach relies on
+the currently implicit assumption or wish that the representation of C and C++
+atomics are compatible.
+<p>
+Although certainly possible, this is very clumsy compared to the level of
+interoperability we normally provide; for other language features we commonly
+provide a C header file that can be included from C++, and provides
+the necessary declarations. Here we propose to do the same for atomics.
+<p>
+The story here is somewhat confused by the fact that most of
+the other <code>.h</code> compatibility headers currently only appear in
+the deprecated features section under D.5 C standard library headers [depr.c.headers].
+A recent paper,
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/p0619r2.html">P0619</a>
+proposes to undeprecate them. We strongly agree with this paper that the
+current deprecation of these headers does not reflect reality.
+Many of them are widely used and heavily relied upon.
+This proposal assumes that at least some of those headers will be preserved.
+
+<h2>History</h2>
+<p>
+C and C++ atomics were originally designed together. The original design ensured that the
+non-generic pieces of the C++ atomics library were usable as a C library. This interoperability
+story became less clear as a result of several later decisions:
+<ul>
+<li> WG14 adopted, in addition to the non-generic parts of the C++ library, a
+more generic facility, relying on the <code>_Atomic</code> type qualifier,
+and the <code>_Atomic(T)</code> type specifier. This happened late enough in the
+C++11 standardization cycle that there wasn't much of an opportunity for C++
+adjustments.
+<li> C++ has never defined what it means to include <code>stdatomic.h</code> in a
+C++ program.
+</ul>
+<p>
+Shortly before finalizing C++11, we briefly discussed making <code>_Atomic</code>
+usable from C++ by defining a macro <code>_Atomic(T)</code> as
+<code>std::atomic&lt;T&gt;</code>.
+An earlier version of this proposal, approved by SG1, did the same.
+However LEWG did not appear to approve of defining an implementer-namespace
+name like <code>_Atomic(T)</code> in a C++ header. (See below for details.)
+Hence this version of the proposal uses a different name, on the
+assuption that WG14 would be willing to introduce a corresponding name for
+C.
+<p>
+The latter idea was floated on the WG14 reflector, and not immediately shot
+down. That clearly does not yet amount to approval. But so far we have a weak
+indication that it may be preferred over the alternative of simply dropping
+anything like <code>_Atomic</code> from the C and C++ common subset.
+
+
+<h2>Proposal</h2>
+<p>
+We propose to add a header <code>stdatomic.h</code> to the C++ standard. This would
+mirror the identically named C header, and provide comparable functionality.
+However, instead of defining it in terms of the C header, we propose that it have
+the following effects:
+<ol>
+<li> Include the <code>&lt;atomic&gt;</code> header.
+<li> Define a macro such as <code>atomic_generic_type(T)</code> as <code>std::atomic&lt;T&gt;</code>.
+This assumes that C would correspondingly define <code>atomic_generic_type(T)</code> as
+<code>_Atomic(T)</code>.
+<li> Promote all <code>atomic_</code>... and <code>memory_order</code>...
+identifiers introduced by the <code>&lt;atomic&gt;</code> header into the global name space.
+</ol>
+<p>
+Although this provides functionality very similar to the C header, it is unlikely
+that it will be exactly the same. As usual, it is the responsibility of the author
+of a C and C++ shared header to ensure that the code is correct in both languages.
+<p>
+This proposal makes no effort to support an equivalent of
+the C <code>_Atomic</code> type qualifier,
+as opposed to the type <i>specifier</i> (which is spelled with parentheses).
+This is intentional; accommodating the qualifier would be a major language
+change, particularly since it is the only type qualifier that can affect
+alignment.
+<p>
+We believe this is the minimum required to conveniently use atomics in shared
+headers.
+
+<h2>Implementation compatibility</h2>
+<p>
+Aside from the renaminc of <code>_Atomic</code>,
+this proposal reflects current practice in Android since the Android Lollipop release in 2014.
+(See <a href="https://android.googlesource.com/platform/bionic/+/lollipop-release/libc/include/stdatomic.h">
+https://android.googlesource.com/platform/bionic/+/lollipop-release/libc/include/stdatomic.h</a>.
+That uses a single include file shared between C and C++, which may not be the optimal
+implementation strategy.)
+<p>
+In an ideal world, this would be easy to support in various compiler environments.
+The main requirement is is that C and C++ atomics should be implemented identically
+and use the same ABI conventions. There is no fundamental reason to do anything
+differently.
+Implementing ordering constraints in incompatible ways is already greatly
+undesirable, in that mixed language programs with <code>memory_order</code>
+annotations would no longer be sequentially consistent. Using incompatible
+locking schemes for large atomics would generally double the amount of space
+required for the lock table, and complicate ABI conventions, with no
+benefit.
+<p>
+Our preliminary experiments with gcc-4.9 found no differences
+on x86-64, though it did find some seeminly gratuitous alignment differences
+om ARMv7. Unfortunately later information from Jonathan Wakely and David Goldblatt
+points out that gcc in fact relies on two separate mechanisms for determining
+atomics alignment in C and C++, and these differ in some corner cases,
+since alignment decisions are made by the compiler in one case and the library the
+other. Although this is nontrivial to change, and requires C++ ABI
+changes in those corner cases, those changes appear desirable, even
+independent of this proposal.
+Some applications already assume compatible C++ and C ABIs for atomics, and those
+will currently break. And the current approach appears to preclude
+a consistent ABI between e.g. gcc and clang.
+There appears to be general agreement that this should be fixed in any case.
+More discussion can be found at
+<a href="https://gcc.gnu.org/bugzilla/show_bug.cgi?id=71660">https://gcc.gnu.org/bugzilla/show_bug.cgi?id=71660</a> .
+<p>
+Thus the implementation effort for meaningful conformance to this proposal
+will vary between adding a simple header file on one hand,
+and appreciable changes to the existing atomics alignment logic in either C or C++
+on the other.
+The implementation effort for minimal conformance consists of only the header file,
+since we can't normatively say anything about C and C++ consistency.
+
+<h2>Should there be a <code>&lt;cstdatomic&gt;</code>?</h2>
+<p>
+We do not believe there is a strong need to introduce a <code>&lt;cstdatomic&gt;</code>
+that only introduces names into the <code>std::</code> namespace. The
+justification for <code>&lt;stdatomic.h&gt;</code> is entirely to support
+headers shared between C and C++, not to import a C facility into C++.
+A shared header will not be able to take advantage of names introduced into the
+<code>std::</code> namespace.
+<p>
+There is an argument that <code>&lt;cstdatomic&gt;</code> should be provided
+anyway for uniformity. It's not clear that this outweighs the cost of introducing
+a header that we expect to get essentially no use. There did not appear to be sentiment
+in SG1 for adding <code>&lt;cstdatomic&gt;</code>.
+
+<h2>Wording</h2>
+<p>
+Placement and details of the wording are heavily dependent on the outcome of the
+P0619 discussion, and whether use of <code>.h</code> headers should remain
+deprecated. We expect something along the following lines:
+<blockquote>
+<ins>The header <code>&lt;stdatomic.h&gt;</code> behaves as if it consisted of:</ins>
+<pre><code><ins>
+#include &lt;atomic&gt;
+#define atomic_generic_type(T) std::atomic&lt;T&gt;  // Name to be agreed upon with WG14
+
+using std::memory_order;
+using std::memory_order_relaxed;
+using std::memory_order_consume;
+using std::memory_order_acquire;
+using std::memory_order_release;
+using std::memory_order_acq_rel;
+using std::memory_order_seq_cst;
+
+using std::atomic_flag;
+
+using std::atomic_bool;
+using std::atomic_char;
+using std::atomic_schar;
+using std::atomic_uchar;
+using std::atomic_short;
+using std::atomic_ushort;
+using std::atomic_int;
+using std::atomic_uint;
+using std::atomic_long;
+using std::atomic_ulong;
+using std::atomic_llong;
+using std::atomic_ullong;
+using std::atomic_char16_t;
+using std::atomic_char32_t;
+using std::atomic_wchar_t;
+using std::atomic_int8_t;
+using std::atomic_uint8_t;
+using std::atomic_int16_t;
+using std::atomic_uint16_t;
+using std::atomic_int32_t;
+using std::atomic_uint32_t;
+using std::atomic_int64_t;
+using std::atomic_uint64_t;
+using std::atomic_int_least8_t;
+using std::atomic_uint_least8_t;
+using std::atomic_int_least16_t;
+using std::atomic_uint_least16_t;
+using std::atomic_int_least32_t;
+using std::atomic_uint_least32_t;
+using std::atomic_int_least64_t;
+using std::atomic_uint_least64_t;
+using std::atomic_int_fast8_t;
+using std::atomic_uint_fast8_t;
+using std::atomic_int_fast16_t;
+using std::atomic_uint_fast16_t;
+using std::atomic_int_fast32_t;
+using std::atomic_uint_fast32_t;
+using std::atomic_int_fast64_t;
+using std::atomic_uint_fast64_t;
+using std::atomic_intptr_t;
+using std::atomic_uintptr_t;
+using std::atomic_size_t;
+using std::atomic_ptrdiff_t;
+using std::atomic_intmax_t;
+using std::atomic_uintmax_t;
+</ins></code></pre>
+<p>
+<ins>The <code>using</code> declarations for int<i>N</i>_t, uint<i>N</i>_t, intptr_t, and uintptr_t
+are included only if the corresponding types are defined in the <code>&lt;atomic&gt;</code>
+header.</ins>
+<p>
+<ins>[Note: In order to make <code>atomic_generic_type(T)</code> accessible
+from both C and C++, implementations should ensure that C and C++ representations of atomic
+objects are compatible, so that the same object can be safely accessed as both
+an <code>_Atomic(T)</code> from C code and <code>atomic&lt;T&gt;</code> from C++ code. The
+representations should be the same, and the mechanisms used to ensure atomicity
+and memory ordering should be compatible. --end note]</ins>
+</blockquote>
+<p>
+The above is close to a verbatim reflection of the part of the Android
+<code>&lt;stdatomic.h&gt;</code> header that is used when compiling C++.
+
+<h2>Discussion so far and open issues</h2>
+<p>
+R0, with changes that were incorporated into R1, was approved by SG1 in
+Jacksonville, 6/17/4/10/0. R1 was not discussed in Rapperswil, since LEWG was
+bandwidth-constrained.
+<p>
+R1 was briefly discussed by LEWG in San Diego. LEWG voted mildly against
+putting "_Atomic(T) ... in the set of tokens that are cross-language compatible" and,
+in a separate poll, mildly against forwarding to LWG. There was a consensus in favor of
+"Revise proposal along the lines of `effects equivalent to (the goals of this paper)'".
+<p>
+The concerns I heard, both during the meeting, and during a later discussion with
+Titus Winters were:
+<ol>
+<li> LEWG doesn't like to encourage programming with identifiers
+starting with &lt;underscore&gt;&lt;capital&gt;, i.e. identifiers in the system namespace.</li>
+<li> Clang already assigns a meaning to <code>_Atomic</code> in C++.</li>
+<li> <code>_Atomic(T)</code> and <code>atomic_int</code> in C++ would yield objects that
+have member functions, which differs from C.
+</ol>
+<p>
+These unfortunately raise some new questions, which we did not have a chance to
+pursue during the initial discussion:
+<ol>
+<li> An obvious solution to all objections except (3) would be to drop the definition
+of <code>_Atomic</code>. (Since the identifier is in the system namespace, implementations
+could choose to keep it anyway.) Would this resolve LEWG concerns? Would it reduce
+SG1 consensus? There is weak evidence that this is unpopular in WG14.</li>
+<li> The other possible resolution to the first point
+would be to introduce a new alias for <code>_Atomic</code> in C, as proposed in R2.
+Is this satisfactory for SG1? LEWG? WG14?</li>
+<li> It would be nice to get clarification of the concern about <code>_Atomic</code>
+in clang.
+It is true that clang already assigns a meaning to <code>_Atomic</code>. But it is not
+clear that this breaks anything, since we would effectively be replacing that
+with a presumed compatible implementation if <code>stdatomic.h</code> is included
+in C++ code.</li>
+<li> Similarly, I don't understand the last concern, and the extent to which
+it's important to LEWG.
+<code>atomic_int</code> in C++ already contains member functions in C++,
+which does differ from C. But this seems entirely unavoidable, and was part of the original
+C/C++ atomics design, which was intended to support the kind of compatibility we're looking
+for here. Furthermore, we clearly want the standalone C++ atomics functions to be applicable
+to C-compatible atomics. That requires that C atomics be convertible to
+<code>atomic&lt;T&gt;</code>, which makes
+it hard to see how <code>atomic_int</code>, or <code>_Atomic(int)</code>, if we keep it,
+could not have member functions in C++.</li>
+</ol>
+
+
+<h2>History</h2>
+<h3>Changed in R1</h3>
+<p>Changes made to reflect SG1 discussion Jacksonville. SG1 voted 6/17/4/1/0 to advance to
+to LEWG, but suggested a few changes:
+<ul>
+	<li>Removed false claim in discussion that this is always easy to implement.</li>
+	<li>Promote only types to global name space, and let ADL take care of the rest.
+		Android promotes all of them, but this now seems suboptimal.</li>
+	<li>Explicitly list all <code>using</code> declarations required for the
+		namespace promotion.</li>
+</ul>
+<p> Note that the SG1 discussion was slightly incorrect in that it overlooked the recent change
+of <code>memory_oder</code> to an <code>enum class</code>. But in retrospect it's not at
+all clear that this affects our proposal. It simply adds one more easily avoidable
+incompatibility between C and C++ usages of the header.
+<h3>Added in R2</h3>
+<p>
+Revised the proposal to define <code>atomic_generic_type</code> (placeholder name)
+instead of <code>_Atomic</code>
+Added the last section about the LEWG discussion in San Diego.
+<h3>Changed in R3</h3>
+<p>
+Corrected angle brackets to parentheses in the wording of the note. (Pointed out on the reflector
+by Jonathan Wakely.) Added abstract.
+
+</body>
+</html>

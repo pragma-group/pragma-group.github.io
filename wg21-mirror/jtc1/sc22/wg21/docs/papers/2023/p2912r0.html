@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>p2912r0&colon; Concurrent queues and sender&sol;receivers</title>
+        <style>
+/* From extension vscode.github */
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.vscode-dark img[src$=\#gh-light-mode-only],
+.vscode-light img[src$=\#gh-dark-mode-only] {
+	display: none;
+}
+
+</style>
+        
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/markdown.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/highlight.css">
+<style>
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe WPC', 'Segoe UI', system-ui, 'Ubuntu', 'Droid Sans', sans-serif;
+                font-size: 14px;
+                line-height: 1.6;
+            }
+        </style>
+        <style>
+.task-list-item {
+    list-style-type: none;
+}
+
+.task-list-item-checkbox {
+    margin-left: -20px;
+    vertical-align: middle;
+    pointer-events: none;
+}
+</style>
+        
+    </head>
+    <body class="vscode-body vscode-light">
+        <table>
+<thead>
+<tr>
+<th>Document Number:</th>
+<th>p2912r0</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Date:</td>
+<td>2023-06-13</td>
+</tr>
+<tr>
+<td>Target:</td>
+<td>SG1, LEWG</td>
+</tr>
+<tr>
+<td>Reply to:</td>
+<td><a href="mailto:gorn@microsoft.com">gorn@microsoft.com</a></td>
+</tr>
+</tbody>
+</table>
+<h1 id="p2912r0-concurrent-queues-and-senderreceivers">p2912r0: Concurrent queues and sender/receivers</h1>
+<p>This paper explores extending interface of Buffered Queue (<a href="https://wg21.link/p1958r0">https://wg21.link/p1958r0</a>) with async APIs
+conforming to Sender/Receiver model according to <a href="https://wg21.link/p2300">https://wg21.link/p2300</a>. It also makes stylistic API
+changes to be more consistent with existing library facilities.</p>
+<p>Additionally, we report on implementation experience (<a href="https://github.com/GorNishanov/conqueue">https://github.com/GorNishanov/conqueue</a>)
+addressing the concern that supporting
+both synchronous and asynchronous push/pop in the same queue is a challenge (<a href="https://wg21.link/p2882r0">https://wg21.link/p2882r0</a>).
+The answer based on the implementation is that it is no challenge at all.</p>
+<h2 id="changes-to-buffer_queue">Changes to buffer_queue</h2>
+<p>By following an example of <code>std::future</code>, enum <code>queue_op_status</code> was renamed to <code>conqueue_errc</code> and we
+introduced an exception <code>conqueue_error</code> that will be thrown to carry the <code>conqueue_errc</code>.</p>
+<pre><code class="language-c++"><span class="hljs-keyword">enum class</span> <span class="hljs-title class_">conqueue_errc</span> { success = <span class="hljs-number">0</span>, empty, full, closed };
+<span class="hljs-keyword">class</span> <span class="hljs-title class_">conqueue_error</span> : system_error { ... };
+... make_error_code, make_error_condition, conqueue_category, ...
+</code></pre>
+<p>The member functions <code>wait_pop</code> and <code>wait_push</code> were used as non-throwing versions of a blocking <code>pop</code> and <code>push</code>. By analogy with how
+<code>&lt;filesystem&gt;</code> deals with this case, we restyled them as follows:</p>
+<pre><code class="language-c++"><span class="hljs-function">T <span class="hljs-title">pop</span><span class="hljs-params">()</span></span>; <span class="hljs-comment">// used to be pop_value</span>
+<span class="hljs-function">std::optional&lt;T&gt; <span class="hljs-title">pop</span><span class="hljs-params">(std::error_code &amp;ec)</span></span>; <span class="hljs-comment">// used to be wait_pop</span>
+<span class="hljs-function">std::optional&lt;T&gt; <span class="hljs-title">try_pop</span><span class="hljs-params">(std::error_code &amp;ec)</span></span>;
+</code></pre>
+<pre><code class="language-c++"><span class="hljs-function"><span class="hljs-type">void</span> <span class="hljs-title">push</span><span class="hljs-params">(<span class="hljs-type">const</span> T&amp; x)</span></span>;
+<span class="hljs-function"><span class="hljs-type">bool</span> <span class="hljs-title">push</span><span class="hljs-params">(<span class="hljs-type">const</span> T&amp; x, error_code &amp;ec)</span></span>; <span class="hljs-comment">// used to be wait_push</span>
+<span class="hljs-function"><span class="hljs-type">bool</span> <span class="hljs-title">try_push</span><span class="hljs-params">(<span class="hljs-type">const</span> T&amp; x, error_code &amp;ec)</span></span>;
+
+<span class="hljs-function"><span class="hljs-type">void</span> <span class="hljs-title">push</span><span class="hljs-params">(T&amp;&amp; x)</span></span>;
+<span class="hljs-function"><span class="hljs-type">bool</span> <span class="hljs-title">push</span><span class="hljs-params">(T&amp;&amp; x, error_code &amp;ec)</span></span>; <span class="hljs-comment">// used to be wait_push</span>
+<span class="hljs-function"><span class="hljs-type">bool</span> <span class="hljs-title">try_push</span><span class="hljs-params">(T&amp;&amp; x, error_code &amp;ec)</span></span>;
+</code></pre>
+<p>Finally, to support async push and pop, we added</p>
+<pre><code class="language-c++"><span class="hljs-function">sender <span class="hljs-keyword">auto</span> <span class="hljs-title">async_push</span><span class="hljs-params">(<span class="hljs-type">const</span> T&amp; x)</span> <span class="hljs-title">noexcept</span><span class="hljs-params">(is_nothrow_copy_constructible_v&lt;T&gt;)</span></span>;
+<span class="hljs-function">sender <span class="hljs-keyword">auto</span> <span class="hljs-title">async_push</span><span class="hljs-params">(T&amp;&amp; x)</span> <span class="hljs-title">noexcept</span><span class="hljs-params">(is_nothrow_move_constructible_v&lt;T&gt;)</span></span>;
+<span class="hljs-function">sender <span class="hljs-keyword">auto</span> <span class="hljs-title">async_pop</span><span class="hljs-params">()</span> <span class="hljs-keyword">noexcept</span></span>;
+</code></pre>
+<p>Based on usage experience, we can consider adding asynchronous equivalents of other flavors of push and pop as needed.</p>
+<h2 id="implementation-experience">Implementation experience</h2>
+<p>A demonstration implementation is available in <a href="https://github.com/GorNishanov/conqueue">https://github.com/GorNishanov/conqueue</a>.</p>
+<p>An implementation only requires some kind of
+critical section to be able to
+change several related values atomically.
+For example, a spinlock is sufficient.</p>
+<p>Additionally, to implement blocking for
+synchronous push and pop, it is sufficient to use
+C++20's <code>std::atomic_flag</code> wait facilities.</p>
+<p>The highlights of one possible implementation are:</p>
+<pre><code class="language-c++"><span class="hljs-keyword">class</span> <span class="hljs-title class_">buffer_queue</span> {
+  ...
+<span class="hljs-keyword">private</span>:
+  std::mutex mutex; <span class="hljs-comment">// or spinlock of some sort</span>
+  detail::ring_buffer buffer;
+  detail::intrusive_list&lt;&amp;pop_waiter::prev, &amp;pop_waiter::next&gt; pop_waiters;
+  detail::intrusive_list&lt;&amp;push_waiter::prev, &amp;push_waiter::next&gt; push_waiters;
+  <span class="hljs-type">bool</span> closed{};
+};
+</code></pre>
+<p>Common base for both synchronous and asynchronous waiters stores:</p>
+<pre><code class="language-c++"><span class="hljs-keyword">struct</span> <span class="hljs-title class_">waiter_base</span> {
+  waiter_base* next{};
+  waiter_base* next{};
+  <span class="hljs-comment">// For push case, we store the pointer to the value to be pushed.</span>
+  <span class="hljs-comment">// For pop case, we store the value popped from the queue.</span>
+  variant&lt;monostate, conqueue_errc, T, <span class="hljs-type">const</span> T*, T*&gt; value;
+  <span class="hljs-built_in">void</span> (*complete)(waiter_base*) <span class="hljs-keyword">noexcept</span>;
+};
+</code></pre>
+<p>And a concrete implementation for a synchronous waiter:</p>
+<pre><code class="language-c++"><span class="hljs-keyword">template</span> &lt;<span class="hljs-keyword">typename</span> T&gt; <span class="hljs-keyword">struct</span> <span class="hljs-title class_">buffer_queue</span>&lt;T&gt;::blocking_waiter : waiter_base {
+  std::atomic_flag flag;
+
+  <span class="hljs-built_in">blocking_waiter</span>() <span class="hljs-keyword">noexcept</span> {
+    <span class="hljs-keyword">this</span>-&gt;complete = [](waiter_base* w) <span class="hljs-keyword">noexcept</span> {
+      <span class="hljs-keyword">auto</span> *self = <span class="hljs-built_in">static_cast</span>&lt;blocking_waiter*&gt;(w);
+      <span class="hljs-comment">// Notifying sync waiter.</span>
+      self-&gt;flag.<span class="hljs-built_in">test_and_set</span>();
+      self-&gt;flag.<span class="hljs-built_in">notify_one</span>();
+    };
+  }
+
+  <span class="hljs-built_in">blocking_waiter</span>(T&amp; x) <span class="hljs-keyword">noexcept</span> : <span class="hljs-built_in">blocking_waiter</span>() {
+    <span class="hljs-keyword">this</span>-&gt;value = std::<span class="hljs-built_in">addressof</span>(x);
+  }
+
+  <span class="hljs-function"><span class="hljs-type">void</span> <span class="hljs-title">wait</span><span class="hljs-params">()</span> <span class="hljs-keyword">noexcept</span> </span>{ flag.<span class="hljs-built_in">wait</span>(<span class="hljs-literal">false</span>); }
+};
+</code></pre>
+<p>Sender/receiver implementation is a bit more involved (as usual with sender/receivers unrelated to the task at hand), so
+here we are only showing the completion routine:</p>
+<pre><code class="language-c++"><span class="hljs-keyword">this</span>-&gt;complete = [](waiter_base* w) <span class="hljs-keyword">noexcept</span> {
+  <span class="hljs-keyword">auto</span>* self = <span class="hljs-built_in">static_cast</span>&lt;operation*&gt;(w);
+  <span class="hljs-keyword">if</span> (<span class="hljs-keyword">auto</span>* errc = <span class="hljs-built_in">get_if</span>&lt;conqueue_errc&gt;(&amp;self-&gt;value))
+    stdexec::<span class="hljs-built_in">set_error</span>((Receiver&amp;&amp;)self-&gt;receiver,
+                        <span class="hljs-built_in">make_exception_ptr</span>(<span class="hljs-built_in">conqueue_error</span>(*errc)));
+  <span class="hljs-keyword">else</span>
+    stdexec::<span class="hljs-built_in">set_value</span>((Receiver&amp;&amp;)self-&gt;receiver);
+};
+</code></pre>
+<p>Processing of the waiters is performed uniformly by interacting with waiter_base by
+setting or reading error or value from the variant and invoking <code>complete</code> to resume the
+sender or synchronous waiter. Having the queue support both synchronous and asynchronous APIs does not present a challenge.</p>
+<h2 id="t-pop-vs-void-popt">T pop() vs void pop(T&amp;)</h2>
+<p>In the original paper <a href="https://wg21.link/p1958r0">buffer_queue paper</a>, the pop function
+had signature <code>T pop_value()</code>. Subsequently, it was changed to <code>void pop(T&amp;)</code> due to
+concern about the problem of loosing elements.</p>
+<p>Unlike STL's combinations of <code>void pop()</code> and <code>T&amp; front()</code> that are possible for synchronous cases, such a solution does not work for concurrent queues, where we
+cannot observe the value before popping it from the queue.</p>
+<p>Comparing <code>T pop()</code> and <code>void pop(T&amp;)</code> we believe that they are equivalent from
+exception safety standpoint and <code>T pop()</code> wins on ergonomics of usage.</p>
+<p>Naming wise, we chose <code>T pop()</code> rather than <code>T pop_value()</code> for consistency with the rest
+of the APIs and due to <code>[[nodiscard]]</code> guarding against misuse (thus if a user imagined that pop API is <code>void pop()</code> by analogy with <code>std::stack</code>, for example, a compiler error
+will quickly bring them to their senses).</p>
+<h2 id="try_pusht-vs-try_pusht-t">try_push(T&amp;&amp;) vs try_push(T&amp;&amp;, T&amp;)</h2>
+<p>In the original buffer queue paper [<a href="https://wg21.link/p1958r0">p1958r0</a>], the try_push was:</p>
+<pre><code class="language-c++"><span class="hljs-function">queue_op_status <span class="hljs-title">try_push</span><span class="hljs-params">(Value&amp;&amp; x)</span></span>;
+</code></pre>
+<p>in the later paper [<a href="https://wg21.link/p0260r5">p0260r5</a>], it was changed to:</p>
+<pre><code class="language-c++"><span class="hljs-function">queue_op_status <span class="hljs-title">try_push</span><span class="hljs-params">(Value&amp;&amp; x, Value&amp; x)</span></span>;
+</code></pre>
+<p>with the rule:</p>
+<blockquote>
+<p>If the queue is full or closed, return the respective status and move the element into the second parameter. Otherwise, push the element onto the queue and return <code>queue_op_status::success</code>.</p>
+</blockquote>
+<p>The rationale is likely was to have an ability not
+to lose a temporary value if push operation did not succeed.</p>
+<p>It seems that it is possible in both versions:</p>
+<pre><code class="language-c++">T x = <span class="hljs-built_in">get_something</span>();
+<span class="hljs-keyword">if</span> (<span class="hljs-built_in">try_push</span>(std::<span class="hljs-built_in">move</span>(x))) ...
+</code></pre>
+<p>With two parameter version:</p>
+<pre><code class="language-c++">T x;
+<span class="hljs-keyword">if</span> (<span class="hljs-built_in">try_push</span>(<span class="hljs-built_in">get_something</span>(), x)) ...
+</code></pre>
+<p>Ergonomically they are roughly identical. API is slightly simpler with one argument version, therefore, we reverted to original one argument version.</p>
+<h2 id="varna-update">Varna update</h2>
+<p>This paper was seen by SG1 in Varna and recommendation was to merge proposed
+changes into the next revision of <a href="https://wg21.link/p0260">https://wg21.link/p0260</a>.</p>
+<h2 id="references">References</h2>
+<ol>
+<li><a href="https://wg21.link/p1958r0">p1958r0: C++ Concurrent Buffer Queue</a></li>
+<li><a href="https://wg21.link/p0260r5">p0260r5: A proposal to add a concurrent queue
+to the standard library</a></li>
+<li><a href="https://wg21.link/p2882r0">p2882r0: An Event Model for C++ Executors</a></li>
+<li><a href="https://wg21.link/p2300r7">p2300r7: std::execution</a></li>
+</ol>
+
+        
+        
+    </body>
+    </html>

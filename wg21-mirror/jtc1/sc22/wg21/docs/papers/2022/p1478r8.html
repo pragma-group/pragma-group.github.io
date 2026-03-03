@@ -1,0 +1,479 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+ "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8">
+<title>P1478R8: Byte-wise atomic memcpy</title>
+<style type="text/css">
+html { line-height: 135%; }
+ins { background-color: #DFD; }
+del { background-color: #FDD; }
+</style>
+</head>
+<body>
+<table>
+        <tr>
+                <th>Doc. No.:</th>
+                <td>WG21/P1478R8</td>
+        </tr>
+        <tr>
+                <th>Date:</th>
+                <td>2022-11-9</td>
+        </tr>
+        <tr>
+                <th>Reply-to:</th>
+                <td>Hans-J. Boehm</td>
+        </tr>
+        <tr>
+                <th>Email:</th>
+                <td><a href="mailto:hboehm@google.com">hboehm@google.com</a></td>
+        </tr>
+        <tr>
+                <th>Authors:</th>
+                <td>Hans-J. Boehm</td>
+        </tr>
+        <tr>
+                <th>Audience:</th>
+                <td>LWG</td>
+        </tr>
+        <tr>
+                <th>Target:</th>
+                <td>Concurrency TS 2</td>
+        </tr>
+</table>
+
+<h1>P1478R8: Byte-wise atomic memcpy</h1>
+<p>
+Several prior papers have suggested mechanisms that allow for nonatomic accesses that behave
+like atomics in some way. There are several possible use cases. Here we focus on
+seqlocks which, in our experience, seem to generate the strongest demand for such a feature.
+<p>
+This proposal is intended to be as simple as possible. It is in theory, but only in theory,
+a pure library facility that can be implemented without compiler support.
+We expect that practical implementations will implement the new facilities as
+aliases for existing <code>memcpy</code> implementations. This cannot be done
+by the user in portable code, since it requires additional assumptions about
+the memcpy implementation. Hence there is a strong argument for including it
+in the standard library.
+<p>
+There have been a number of prior proposals in this space.
+Most recently <a href="http://wg21.link/p0690">P0690</a>
+suggested "tearable atomics". Other solutions were proposed in
+<a href="http://wg21.link/n3710">N3710</a>, which suggested more complex handling for
+speculative nonatomics loads.
+This proposal is closest in title to <a href="http://wg21.link/p0603">P0603</a>.
+In a sense this returns to the original intent of that proposal,
+and is arguably the simplest and narrowest proposal.
+
+<h2>Seqlocks</h2>
+<p>
+A fairly common technique to implement low cost read-mostly synchronization is
+to protect a block of data with an atomic version or sequence number.
+The writer increments the sequence number to an odd value, updates the data,
+and then updates the sequence number again, restoring it to an even value.
+The reader checks the sequence number before and after reading the data;
+if the two sequence number values read either differ, or are odd,
+the data is discarded and the operation retried.
+<p>
+This has the advantage that data can be updated without allocation, and that
+readers do not modify memory, and thus don't risk cache contention. It seems
+to also be a popular technique for protecting data in memory shared between
+processes.
+<p>
+Seqlock readers typically execute code along the following lines:
+<blockquote>
+<pre>
+do {
+  seq1 = seq_no.load(memory_order::acquire);
+  data = shared_data;
+  atomic_thread_fence(memory_order::acquire);
+  int seq2 =  seq_no.load(memory_order::relaxed);
+} while (seq1 != seq2 || seq1 &amp; 1);
+use data;
+</pre>
+</blockquote>
+<p>
+For details, see <a href="https://dl.acm.org/citation.cfm?doid=2247684.2247688">
+Boehm, Can seqlocks get along with progrmming language memory models</a>.
+<p>
+It is important that the sequence number reads not be reordered with the data reads.
+That is ensured by the initial <code>memory_order::acquire</code> load, and by the
+explicit fence. But fences only order atomic accesses, and the read of
+<code>shared_data</code> still races with updates. Thus for the fence to be
+effective, and to avoid the data race, the accesses access to <code>shared_data</code>
+must be atomic <em>in spite of the fact that any data read while a write is
+occurring will be discarded</em>.
+<p>
+In the general case, there are good semantic reasons to require that all data
+accesses inside such a seqlock "critical section" must be atomic.
+If we read a pointer <code>p</code> as part of reading the data, and then
+read <code>*p</code> as well, the code inside the critical section may
+read from a bad address if the read of <code>p</code> happened to see
+a half-updated pointer value.
+In such cases, there is probably no way to avoid reading the pointer with a
+conventional atomic load, and that's exactly what's desired.
+<p>
+However, in many cases, particularly in the multiple process case,
+seqlock data consists of a single trivially copyable object, and the
+seqlock "critical section" consists of a simple copy operation.
+Under normal circumstances, this could have been written using <code>memcpy</code>.
+But that's unacceptable here, since <code>memcpy</code> does not generate atomic accesses,
+and is (according to our specification anyway) susceptable to data races.
+<p>
+Currently to write such code correctly, we need to basically decompose such
+data into many small lock-free atomic subobjects, and copy them a piece at a time.
+Treating the data as a single large atomic object would defeat the purpose
+of the seqlock, since the atomic copy operation would acquire a conventional
+lock. Our proposal essentially adds a convenient library facility to
+automate this decomposition into small objects.
+<p>
+We propose that both the copy from <code>shared_data</code>, and the following
+fence be replaced by a new <code>atomic_load_per_byte_memcpy</code> call.
+
+<h2>The proposal</h2>
+<p>
+We propose to introduce two additional versions of <code>memcpy</code> to
+resolve the above issues. They guarantee that either source or destination
+accesses are byte-wise atomic:
+<p>
+<code>atomic_load_per_byte_memcpy(void* dest, void* source, size_t count, memory_order order)</code>
+directly addresses the seqlock reader problem. Like <code>memcpy</code>, it
+requires that the source and destination ranges do not overlap. It also requires that
+<code>order</code> is <code>memory_order::acquire</code>
+or <code>memory_order::relaxed</code>. (It is unclear that <code>memory_order::seq_cst</code>
+makes sense here since much of the point here is to allow reordering of the
+byte reads. Though we originally proposed to allow it, there was no support for it
+in SG1, and we are unwilling to defend it.)
+<p>
+This behaves roughly as if:
+<blockquote>
+<pre>
+for (size_t i = 0; i &lt; count; ++i) {
+  reinterpret_cast&lt;char*&gt;(dest)[i] =
+      atomic_ref&lt;char&gt;(reinterpret_cast&lt;char*&gt;(source)[i]).load(memory_order::relaxed);
+}
+atomic_thread_fence(order);
+</pre>
+</blockquote>
+<p>
+Note that on standard hardware, it should be OK to actually perform the copy at larger
+than byte granularity. Copying multiple bytes as part of one operation is
+indistinguishable from running them so quickly that the intermediate state
+is not observed. In fact, we expect that existing assembly memcpy implementations
+will suffice when suffixed with the required fence.
+<p>
+With <code>atomic_load_per_byte_memcpy</code>, the canonical seqlock reader code
+becomes:
+<blockquote>
+<pre>
+Foo data;  // Trivially copyable.
+do {
+  seq1 = seq_no.load(memory_order::acquire);
+  atomic_load_per_byte_memcpy(&amp;data, &amp;shared_data, sizeof(Foo), memory_order::acquire);
+  int seq2 =  seq_no.load(memory_order::relaxed);
+} while (seq1 != seq2 || seq1 &amp; 1);
+use data;
+</pre>
+</blockquote>
+<p>
+Note that for purposes of reasoning about memory ordering, treating the
+memcpy as a single <code>memory_order::acquire</code> operation conveys the correct
+intuition; the memcpy operation is effectively ordered before the second sequence
+number read.
+<p>
+The <code>atomic_load_per_byte_memcpy</code> operation would introduce a data race and hence
+undefined behavior if the source where simultaneously updated by an ordinary
+<code>memcpy</code>. Similarly, we would expect undefined behavior if the
+writer updates the source using atomic operations of a different granularity.
+To facilitate correct use, we need to also provide a corresponding version of
+<code>memcpy</code> that updates memory using atomic byte stores.
+<p>
+We thus also propose
+<code>atomic_store_per_byte_memcpy(void* dest, void* source, size_t count, memory_order order)</code>,
+where <code>order</code> is <code>memory_order::release</code>
+or <code>memory_order::relaxed</code>. (<code>Memory_order::seq_cst</code> again barely makes
+sense.)
+It behaves roughly as if:
+<blockquote>
+<pre>
+atomic_thread_fence(order);
+for (size_t i = 0; i &lt; count; ++i) {
+  atomic_ref&lt;char&gt;(reinterpret_cast&lt;char*&gt;(dest)[i]).store(
+      reinterpret_cast&lt;char*&gt;(source)[i], memory_order::relaxed);
+}
+</pre>
+</blockquote>
+
+<h2>Questions discussed in SG1</h2>
+<p>
+There is a question as to whether the <code>order</code> argument should be part of the
+interface, and if so, whether this is the right way to handle it.
+<p>
+Excluding the <code>order</code> argument, and requiring the programmer to explicitly
+write the fence simplifies this proposal further. But I believe there are
+convincing reasons to include it:
+<ol>
+<li> I believe it conveys the right intuition. The combination of
+<code>atomic_store_per_byte_memcpy(..., memory_order::release)</code> and an
+<code>atomic_load_per_byte_memcpy(..., memory_order::acquire)</code> that reads the resulting values
+establishes a synchronizes_with relationship, as expected.
+<li> The explicit fence in the current seqlock idiom is confusing; this
+will usually eliminate it.
+<li> It is immediately clear that <code>atomic_load_per_byte_memcpy(..., memory_order::acquire)</code>
+cannot contribute to an out-of-thin-air result, and hence there is no need to add
+overhead to prevent that.
+</ol>
+<p>
+Resolution: Include the memory order argument.
+<p>
+Unfortunately, defining this construct in terms of an explicit fence overconstrains the
+hardware a bit; if the block being copied is short enough to be copied e.g. by a single
+ARMv8 load-acquire instruction, this would disallow that implementation, since the
+fence can also establish ordering in conjunction with other earlier atomic loads,
+while the load-acquire instruction cannot.
+<p>
+An alternative is to include the <code>order</code> argument, but not
+to define it in terms of a fence. This is slightly more complex, but allows
+the above load-acquire implementation. Resolution:
+Do not define it in terms of a fence. The wording below uses a different
+formulation that provides weaker guarantees.
+<p>
+There were discussions in Cologne and Belfast as to whether
+<code>memory_order::seq_cst</code> is a reasonable memory order argument.
+We concluded, at least for now, that it isn't. Reasonable interpretations
+may be possible, but the fact that individual byte operations can still be
+reordered makes it confusing.
+<p>
+The issue was resurrected in Prague, with <a href="wg21.link/p2061">P2061</a>.
+The conclusion this time was more ambiguous, with no strong opinion on either
+side. The final poll was 0/5/6/2/0 .
+<p>
+I think it's safe to summarize the consensus as: We now believe
+<code>memory_order::seq_cst</code> works. But the wording would have to explicitly
+state that the individual operations are unsequenced. That's basically
+true for <code>memcpy</code> anyway, but it's unclear the typical user realizes that.
+So we would end up with a <code>memory_order::seq_cst</code> operation
+with at least somewhat subtle ordering properties. There was uncertainty about
+whether that's a net benefit.
+<p>
+This version does not support
+<code>memory_order::seq_cst</code>, but we may want to revisit when
+considering for the standard, especialy if a good use case appears.
+<p>
+There has been a good deal of discussion about function naming. SG1
+preferred the verbose names we currently have, because the shorter ones we could think of are
+prone to misinterpretation. In particular earlier proposals (recently repeated on
+the LEWG reflector) can mislead the user inot thinking that we provide atomicity
+at a larger level than bytes.
+<p>
+The facility here is fundamentally a C level facility, making it potentially
+possible to include it in C as well. This would raise the same namespace issues
+that P0943 is trying to address, but compatibility should be possible.
+<p>
+It is clearly possible to put a higher-level type-safe layer on top of this
+that copies trivially copyable objects rather than bytes. It is not completely
+clear which level we should standardize. Preliminary resolution in SG1: Standardize
+the low-level primitive first; it's relatively easy for the user to
+implement the type-safe version. There was controversy in LEWG about the
+efficiency of a typed layer add on top of the C level layer. A straw poll about adding
+it at the same time was 1/3/8/2/1. We did not add it in this version of the paper.
+
+<h2>Wording</h2>
+
+<p>
+Add the following to the atomics section and <code>&lt;experimental/bytewise_atomic_memcpy&gt;</code>
+header in Concurrency TS 2.
+The eventual goal is to move
+this into C++26, probably in the <code>&lt;atomic&gt;</code> header,
+if we do not include a more general facility in the meantime.
+
+<p><ins><strong>Header <code>&lt;experimental/bytewise_atomic_memcpy&gt;</code> synopsis</strong></ins>
+
+<blockquote>
+
+<p>
+<ins><code>
+namespace std::experimental::inline concurrency_v2 {<br>
+<br>
+&nbsp;&nbsp;void* atomic_load_per_byte_memcpy(void* dest, const void* source, size_t count, memory_order order);<br>
+<br>
+&nbsp;&nbsp;void* atomic_store_per_byte_memcpy(void* dest, const void* source, size_t count, memory_order order);<br>
+<br>
+&nbsp;&nbsp;#define __cpp_lib_experimental_bytewise_atomic_memcpy  202XYYL<br>
+}</code></ins>
+
+<p><ins>
+The <code>atomic_load_per_byte_memcpy()</code> and <code>atomic_store_per_byte_memcpy()</code>
+functions support concurrent programming idioms in which values may be read while being written,
+but the value is trusted only when it can be determined after the fact that a race did not
+occur. [Note: So-called "seqlocks" are the
+canonical example of such an idiom. --end note]</ins>
+<p><ins>The <code>atomic_load_per_byte_memcpy</code> / <code>atomic_store_per_byte_memcpy</code>
+functions behave as if the <code>source</code> and <code>dest</code>
+bytes respectively were individual atomic objects.
+</ins>
+<p>
+<ins><strong><code>void* atomic_load_per_byte_memcpy(void* dest, const void* source, size_t count, memory_order order);
+</code></strong></ins>
+
+<dl>
+<dt><ins>Preconditions:</ins></dt>
+<dd><ins><code>order</code> is <code>memory_order::acquire</code>
+or <code>memory_order::relaxed</code>.
+<code>(char*)dest + [0, count)</code> and <code>(const char*)source + [0, count)</code>
+are valid ranges that do not overlap.
+</ins></dd>
+
+<dt><ins>Effects:</ins></dt>
+<dd><ins> Copies <code>count</code> consecutive bytes pointed to by
+<code>source</code> into consecutive bytes pointed to by <code>dest</code>.
+Each individual load operation from a source byte is atomic with memory order <code>order</code>.
+These individual loads are unsequenced with respect to each other.
+The function implicitly creates objects ([intro.object]) in the destination
+region of storage immediately prior to copying the sequence of bytes to the
+destination.
+[Note: There is no requirement that the individual bytes be copied in order,
+or that the implementation must operate on individual bytes. -- end note]</ins></dd>
+
+<dt><ins>Returns:</ins><dt>
+<dd><ins><code>dest</code>.</ins></dd>
+</dl>
+
+<p>
+<ins><strong><code>void* atomic_store_per_byte_memcpy(void* dest, const void* source, size_t count, memory_order order);
+</code></strong></ins>
+
+<dl>
+<dt><ins>Preconditions:</ins></dt>
+<dd><ins><code>order</code> is <code>memory_order::release</code>
+or <code>memory_order::relaxed</code>.
+<code>(char*)dest + [0, count)</code> and <code>(const char*)source + [0, count)</code>
+are valid ranges that do not overlap.
+</ins></dd>
+
+<dt><ins>Effects:</ins></dt>
+<dd><ins>Copies <code>count</code> consecutive bytes pointed to by
+<code>source</code> into consecutive bytes pointed to by <code>dest</code>.
+Each individual store operation to a destination byte is atomic with memory order <code>order</code>.
+These individual stores are unsequenced with respect to each other.
+The function implicitly creates objects ([intro.object]) in the destination
+region of storage immediately prior to copying the sequence of bytes to the
+destination.
+</ins></dd>
+
+
+<dt><ins>Returns:</ins><dt>
+<dd><ins><code>dest</code>.</ins></dd>
+</dl>
+
+<ins>
+[Note: If any of the atomic byte loads performed by an <code>atomic_load_per_byte_memcpy()</code> call A with
+<code>memory_order::acquire</code> argument
+take their value from an atomic byte store performed by <code>atomic_store_per_byte_memcpy()</code> call B with
+<code>memory_order::release</code> argument,
+then the start of B strongly happens before the completion of A. --end note]</ins>
+
+</blockquote>
+
+<h2>Open questions about wording</h2>
+<p>
+The specification for <code>memcpy</code> appears to require that <code>source</code>
+and <code>dest</code> should be valid and not null even if <code>count == 0</code>.
+Do we need to state that here? Is it even intended? Are there implementations that
+leverage it?
+<p>
+To me, the wording in the C standard seems unnatural. In particular, since <code>malloc</code> can return
+<code>nullptr</code> for a zero argument, it implies that some code unexpectedly requires special cases for zero.
+As an oversimplified example, <code>memcpy(malloc(n), source, n)</code> is undefined for <code>n == 0</code>.
+I would not have expected this before investigating this issue.
+But if the current <code>memcpy</code> wording is intended, we may want to mirror it here.
+<p>
+It is not completely clear to me whether the implicit object creation wording is
+necessary for  <code>atomic_store_per_byte_memcpy()</code>. We expect that the destination object
+will only be accesseed by <code>atomic_load_per_byte_memcpy()</code>, but based
+on a discussion with Jens Maurer, it appeared that it would be safer to include
+it anyway. Jens also raised the question of whether the footnote in [basic.types] p3
+should be expanded to mention these functions.
+
+
+<h2>Wording discussion</h2>
+<p>
+Note that the naming is intentionally C/WG14-compatible, in that it starts with
+<code>atomic_</code>. This is enough of an esoteric and experts-only facility
+that long names should be OK.
+<p>
+This provides the minimal ordering guarantee require by seqlocks and the like.
+It does not promise synchronization with other atomic operations. We could later
+strengthen this. It is unclear to me that we want to promise more without a use case.
+<p>
+The current wording for <code>memcpy</code> is inherited from C and talks about
+copying characters instead of bytes. We attempted to update the wording.
+
+<h2>Questions for TS</h2>
+<p>
+These are the questions we would ideally like to answer as a result of
+experience with a Technical Specification:
+
+<ul>
+<li>Does this cover enough of the use cases for speculative concurrent accesses?
+Or should we wait for, or expand this into, a more comprehensive solution?</li>
+<li>Is this as cheap to implement as we hope?
+We expect that on many platforms this can be implemented as an alias for
+<code>memcpy</code>, since at least the non-inlined version already satisfies our
+requirements. Should we allow redundant copies of the same byte to accommodate
+implementations that copy the same byte more than once? Those are detectable,
+and currently disallowed, though probably tolerated by most algorithms of interest.</li>
+<li>This is a low-level construct that is inherently error-prone. Will it
+be misused in unexpected ways that we could easily prevent?</li>
+<li>Would it be useful to add an element size argument as in
+<a href="http://reviews.llvm.org/D79279">http://reviews.llvm.org/D79279</a>?</li>
+<li>Will this generate any interest among C users? Is C compatibility a worthwhile goal?
+(A reflector inquiry to WG14 received no reaction, either positive or negative.
+But this addresses concurrent
+programming techniques that are normally limited to a few important low-level libraries,
+and unfamiliar to many committee members.)
+</ul>
+ 
+<h2>History</h2>
+<p>
+R0 was the initial proposal. Recommended specifications in terms of leading and
+trailing fences. This was intended to be in the pre-Kona 2019 mailing, but didn't
+make it due to a technical glitch and the author's failure to notice the technical
+glitch. SG1 had a preliminary discussion in Kona anyway, which informed R1.
+<p>
+R1 is the first attempt at wording. This is no longer based on leading or trailing
+fences, thus potentially allowing <code>memory_order::acquire</code> /
+<code>memory_order::release</code> operations with a small constant size argument to
+be compiled to a single instruction on ARMv8 and similar architectures.
+<p>
+Various parts of the paper were also updated to reflect the preliminary
+discussion in Kona.
+<p>
+R2 tweaked the wording, largely in response to SG1 discussion in Cologne.
+We now talk about bytes rather than characters. Both functions were
+renamed. The synchronization clause was slightly tweaked.
+Added introductory paragraph to wording.
+Explicitly target Concurency TS 2
+for now, since there was concern about preempting a more general facility.
+<p>
+R3 modified the wording to disallow overlapping source and destination ranges,
+as instructed by SG1. Updated some explanatory text in preparation for LEWG review.
+<p>
+R4 summarized prior SG1 discussion about naming and support of
+<code>memory_order::seq_cst</code>. The former was requested by LEWG.
+R4 also fixed a number of wording issues (return type, const qualification, implicit object creation)
+in response to LEWG telecon discussion.
+<p>
+R5 added questions to be answered by Technical Specification and feature test macro.
+<p>
+R6 contains a few more wording fixes, mostly again at LEWG request or based on discussion with
+Tomasz Kamiński. <code>Memory_order_x</code> was
+changed to <code>memory_order::x</code>. Added "Open questions about wording" section.
+<p>
+R7 updated the wording to reflect LEWG desires in connection with
+<a href="http://wg21.link/p2396">P2396</a>.
+
+
+</body>
+</html>
+

@@ -1,0 +1,134 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <meta http-equiv="Content-Style-Type" content="text/css" />
+  <meta name="generator" content="pandoc" />
+  <title>P1782R0: Local contract restrictions</title>
+  <style type="text/css">code{white-space: pre;}</style>
+  <style type="text/css">
+table.sourceCode, tr.sourceCode, td.lineNumbers, td.sourceCode {
+  margin: 0; padding: 0; vertical-align: baseline; border: none; }
+table.sourceCode { width: 100%; line-height: 100%; }
+td.lineNumbers { text-align: right; padding-right: 4px; padding-left: 4px; color: #aaaaaa; border-right: 1px solid #aaaaaa; }
+td.sourceCode { padding-left: 5px; }
+code > span.kw { color: #007020; font-weight: bold; }
+code > span.dt { color: #902000; }
+code > span.dv { color: #40a070; }
+code > span.bn { color: #40a070; }
+code > span.fl { color: #40a070; }
+code > span.ch { color: #4070a0; }
+code > span.st { color: #4070a0; }
+code > span.co { color: #60a0b0; font-style: italic; }
+code > span.ot { color: #007020; }
+code > span.al { color: #ff0000; font-weight: bold; }
+code > span.fu { color: #06287e; }
+code > span.er { color: #ff0000; font-weight: bold; }
+  </style>
+  <style type="text/css">
+  s, .del { background: #ff8888; }
+  u, .ins { background: #88ff88; }
+  /* from https://stackoverflow.com/a/32456613 */
+  body > blockquote {
+      display: list-item;
+      list-style-type: "- ";
+  }
+  pre {
+  		margin-left: 1.2em;
+  }
+  </style>
+</head>
+<body>
+<div id="header">
+<h1 class="title">P1782R0: Local contract restrictions<!-- -*- c++-md -*- --></h1>
+</div>
+<p><em>Audience</em>: EWG<br />S. Davis Herring &lt;<script type="text/javascript">
+<!--
+h='&#108;&#x61;&#110;&#108;&#46;&#x67;&#x6f;&#118;';a='&#64;';n='&#104;&#x65;&#114;&#114;&#x69;&#110;&#x67;';e=n+a+h;
+document.write('<a h'+'ref'+'="ma'+'ilto'+':'+e+'">'+e+'<\/'+'a'+'>');
+// -->
+</script><noscript>&#104;&#x65;&#114;&#114;&#x69;&#110;&#x67;&#32;&#x61;&#116;&#32;&#108;&#x61;&#110;&#108;&#32;&#100;&#x6f;&#116;&#32;&#x67;&#x6f;&#118;</noscript>&gt;<br />Los Alamos National Laboratory<br />June 17, 2019</p>
+<h1 id="introduction">Introduction</h1>
+<p>Discussion of the mechanisms for controlling contract evaluation and assumption continues; see my <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1494r0.html">P1494R0</a> as well as <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1490r0.html">P1490R0</a> for a review of some recent concerns involving optimization. Papers like <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p1332r0.txt">P1332R0</a> have also proposed significant extensions to those mechanisms for the purposes of better control and scalability.</p>
+<p>Fundamentally, a contract (that is, a <em>contract-attribute-specifier</em>) is a boolean expression whose evaluation and significance can be controlled non-locally (by, <em>e.g.</em>, the continuation mode). The common protocol (across many files of diverse authorship) for such control is the principal reason that that contracts exist as a language feature. The alternative, per-library approach is of course already available:</p>
+<pre class="sourceCode cpp"><code class="sourceCode cpp"><span class="kw">namespace</span> my_lib {
+  <span class="kw">struct</span> Stuff {<span class="co">/*...*/</span>};
+
+  <span class="dt">bool</span> check_expensive(),keep_going();
+  <span class="dt">bool</span> bad_news(<span class="dt">const</span> Stuff&amp;);
+
+  <span class="dt">void</span> do_stuff(<span class="dt">const</span> Stuff &amp;s) {
+    <span class="kw">if</span>(check_expensive() &amp;&amp; bad_news(s))
+      <span class="kw">if</span>(keep_going()) std::fprintf(<span class="co">/*...*/</span>);
+      <span class="kw">else</span> <span class="kw">throw</span> <span class="co">/*...*/</span>;
+    s.do_it();
+  }
+}</code></pre>
+<p>It is also worth noting that concerns about optimization and assumptions in particular are subject to the normal implementation-supplied control over such analyses (<code>-fno-assume-contracts</code> wouldn’t surprise anyone and would be implied by <code>-O0</code>). All that being said, the usability concerns raised for C++20 and for the future are very real.</p>
+<p>This paper proposes, as a bug fix to address these issues, to replace the current <em>contract-level</em> with a set of <em>restrictions</em> that limit the effect of the global controls, to be applied when local conditions (including the recency of a contract’s introduction) make it unsafe to take full advantage of the consistent control. The local restrictions only reduce the set of behaviors available via the global controls for a construct; the only direct control (along the lines of <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p1334r0.txt">P1334R0</a>) provided is a guaranteed check. The proposal also stops well short of an extensible roles system as proposed (though not for C++20) by P1332R0. One additional global control is also proposed.</p>
+<h1 id="proposal">Proposal</h1>
+<h2 id="global">Global</h2>
+<p>Augment the build level and violation continuation mode with one additional global control, the <em>assumption mode</em>, that when <em>off</em> restricts contract condition evaluation to those that are guaranteed to be evaluated. That is, it suppresses the controversial passage from [dcl.attr.contract.check]/4:</p>
+<blockquote>
+<p>it is unspecified whether the predicate for a contract that is not checked under the current build level is evaluated; if the predicate of such a contract would evaluate to <code>false</code>, the behavior is undefined.</p>
+</blockquote>
+<h2 id="local">Local</h2>
+<p>In the place where one of <code>default</code>, <code>audit</code>, or <code>axiom</code> may currently appear, allow any combination of the following modifiers with the given semantics:</p>
+<table><tr>
+<td style="width: 6em">
+<code>tentative</code>
+</td>
+<td>
+the expression may not be assumed if it is not evaluated
+</td>
+</tr><tr>
+<td>
+<code>halt</code>
+</td>
+<td>
+the continuation mode is taken to be <em>off</em> for this contract
+</td>
+</tr><tr>
+<td>
+<code>static</code>
+</td>
+<td>
+the expression is never evaluated
+</td>
+</tr><tr>
+<td>
+<code>audit</code>
+</td>
+<td>
+the expression may not be evaluated if the build level is not <em>audit</em>
+</td>
+</tr><tr>
+<td>
+<code>always</code>
+</td>
+<td>
+the expression is always evaluated at all build levels
+</td>
+</tr>
+</table>
+
+<p>A new contract may be introduced with the <code>tentative</code> restriction to avoid adding undefined behavior to existing interfaces; this is similar to the <code>continue</code> proposed in <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1290r1.pdf">P1290R1</a>. Note that the contract condition may still be assumed in code that <em>follows</em> it if it is checked and the continuation mode is <em>off</em>.</p>
+<p>If the global assumption mode and continuation mode are <em>on</em>, a <code>halt</code> contract may still be assumed in code that follows it. The <code>static</code> restriction replaces the use of <code>axiom</code> for static analysis, removing the overloading with its use for assumptions for optimization. The role played by <code>audit</code> is much the same as in the current draft. The principal purpose of <code>always</code> is to allow the contract syntax to be used with no global control at all (in which case the only reasonable behavior is checking).</p>
+<h2 id="use-cases">Use cases</h2>
+<p>P1332R0 proposes several features to satisfy its extensive set of use cases. Several of these are covered by this simpler proposal:</p>
+<ol style="list-style-type: decimal">
+<li>The <code>ignore</code> semantic as a choice for a contract level is provided by the global assumption mode.</li>
+<li>The use of the <code>%review</code> tag is addressed by the <code>tentative</code> restriction, perhaps used in conjunction with a throwing handler.</li>
+<li>The manual choice of semantics is supported by the <code>always</code> modifier (in the case where it is not trivially equivalent to certain <code>if</code> statements).</li>
+<li>The mixed treatment of <code>audit</code> and normal contracts is supported by generally using a continuation mode of <em>on</em> and adding <code>halt</code> to checks past which it is known to be unsafe to continue.</li>
+</ol>
+<p>Most of the others may be addressed elsewhere:</p>
+<ol style="list-style-type: decimal">
+<li>The modes per-library may be much easier to realize as per-module (since per-translation-unit doesn’t mix well with <code>#include</code>).</li>
+<li>The <code>check_maybe_continue</code> optimization barrier is realized more generally by <code>std::observable</code> from P1494R0.</li>
+</ol>
+<p><code>check_always_continue</code> is not addressed, but it appears to be outside the scope of the language to restrict optimization in such a fashion.</p>
+<h1 id="wording">Wording</h1>
+<p>Wording to be provided (post-haste) in case of EWG approval.</p>
+</body>
+</html>

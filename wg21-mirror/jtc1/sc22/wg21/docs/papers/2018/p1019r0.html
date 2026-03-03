@@ -1,0 +1,451 @@
+<pre><code>Document Number: P1019R0
+Date:            2018-05-07
+Audience:        SG1
+Project:         Programming Language C++
+Reply-to:        Jared Hoberock
+                 NVIDIA Corporation
+                 jhoberock@nvidia.com</code></pre>
+<h1 id="integrating-executors-with-parallel-algorithms"><span class="header-section-number">1</span> Integrating Executors with Parallel Algorithms</h1>
+<p><a href="https://wg21.link/N3554">Execution policies</a> allow programmers to impose requirements on how parallel algorithms are allowed to execute. For example, <code>std::execution::par</code> allows algorithms to execute in parallel, possibly on multiple implementation-created threads:</p>
+<pre><code>using namespace std::execution;
+
+// execute a parallel reduction using implementation-defined resources
+auto sum = std::reduce(par, data.begin(), data.end());</code></pre>
+<p>However, the parallel algorithms currently provide no mechanism for controlling <em>where</em> execution is allowed to occur. For example, there is currently no mechanism for a programmer to communicate that a parallel algorithm should execute by submitting work to an externally-provided thread pool.</p>
+<p><a href="https://wg21.link/P0443">P0443</a> proposes <em>executors</em> as a general mechanism for programmatic control over execution-creating library interfaces, and others (<a href="https://wg21.link/N4406">N4406</a>, <a href="https://wg21.link/P0761">P0761</a>) have suggested a <code>policy.on(executor)</code> syntax for composing with parallel algorithms. With the introduction of executors and <code>.on()</code>, our previous example becomes flexible:</p>
+<pre><code>using namespace std::execution;
+
+// execute a parallel reduction using implementation-defined resources
+auto sum = std::reduce(par, data.begin(), data.end());
+
+// NEW: execute a parallel reduction on a user-created thread pool with 4 threads
+static_thread_pool pool(4);
+sum = std::reduce(par.on(pool.executor()), data.begin(), data.end());
+
+// NEW: execute a parallel reduction on a user-defined executor
+my_executor_type my_executor;
+sum = std::reduce(par.on(my_executor), data.begin(), data.end());</code></pre>
+<p>This paper is a sketch of the likely additions necessary to incorporate P0443's executor model into parallel algorithms by</p>
+<ol style="list-style-type: decimal">
+<li>associating an executor with each standard execution policy, and</li>
+<li>allowing such an associated executor to be rebound via <code>.on()</code>.</li>
+</ol>
+<h2 id="proposal-summary"><span class="header-section-number">1.1</span> Proposal summary</h2>
+<ol style="list-style-type: decimal">
+<li>For each standard policy, introduce a <code>.executor()</code> member function to return an execution policy's associated executor.</li>
+<li>For each standard, named policy, introduce a <code>.on(ex)</code> member function to create a new execution policy with an adaptation of <code>ex</code> bound as its associated executor.</li>
+<li>For each standard policy, introduce a <code>::execution_requirement</code> member variable to advertise an execution policy's bulk execution requirement.</li>
+<li>Refactor existing wording to describe execution policy guarantees in terms of the guarantees provided by their associated executors.</li>
+<li>Introduce a new execution mapping property value, <code>execution::mapping.this_thread</code>, to capture <code>seq</code>'s requirement to execute on the calling thread.</li>
+</ol>
+<p>These additions should merge with the Working Paper at the same time as executors. Depending on timing, an earlier shipping vehicle may also be possible; for example, a new Parallelism Technical Specification.</p>
+<h2 id="implementation-experience"><span class="header-section-number">1.2</span> Implementation Experience</h2>
+<p>The <code>.on()</code> syntax is inspired by a long-standing feature within <a href="https://thrust.github.io">Thrust</a> which provides the means to specify that parallel algorithm execution should occur &quot;on&quot; a particular CUDA stream. We have elaborated and generalized that syntax within <a href="https://agency-library.github.io">Agency</a> to support the P0443 executor model. After years of deployment experience, we are convinced that this syntax provides an clear and concise expression of the programmer's intent to create a binding between an algorithm's execution ordering requirements (the policy) with a particular resource (the executor).</p>
+<h2 id="proposed-additions-to-execution-policies"><span class="header-section-number">1.3</span> Proposed additions to execution policies</h2>
+<p>The most significant changes will be to &quot;modularize&quot; portions of <strong>[algorithms.parallel.exec]</strong> and <strong>[algorithms.parallel.exceptions]</strong>. They are currently &quot;hard-coded&quot; to describe only <code>sequenced_policy</code>, <code>parallel_policy</code>, and <code>parallel_unsequenced_policy</code>. They should instead make general statements in terms of the associated executors of execution policies.</p>
+<h3 id="definitions"><span class="header-section-number">1.3.1</span> Definitions</h3>
+<ol style="list-style-type: decimal">
+<li>The presence of a member function <code>.executor()</code> indicates that an execution policy has an <em>associated executor</em>, and the value returned by that function is a copy of the associated executor.</li>
+</ol>
+<p>[<em>Editorial note:</em> We should find a way to word this such that the associated executor exists iff <code>.executor()</code> exists. <em>--end note</em>]</p>
+<ol start="2" style="list-style-type: decimal">
+<li><p>During parallel algorithm execution, execution policies may invoke element access functions on the thread which invoked the parallel algorithm, or on execution agents created by their associated executor, if an associated executor exists. Otherwise, element access functions may be invoked on execution policy-defined threads.</p></li>
+<li><p>Execution policies have a <em>bulk execution requirement</em>, described by the member variable <code>execution_requirement</code>, if present. If absent, the execution policy's bulk execution requirement is <code>execution::bulk_guarantee.unsequenced</code>.</p></li>
+<li><p>The bulk execution guarantee of an execution policy's associated executor satisfies the policy's bulk execution requirement.</p></li>
+</ol>
+<p>[<em>Editorial note:</em> The intention of these paragraphs is to allow refactoring <strong>[algorithms.parallel.exec]</strong> p4, p5, and p6 to state them in terms of the execution policy's <code>execution_requirement</code>. The idea would be to eliminate p4, p5, &amp; p6 in favor of something like these paragraphs. <em>--end note</em>]</p>
+<h3 id="new-execution-policy-members"><span class="header-section-number">1.3.2</span> New execution policy members</h3>
+<p>We propose one new static member variable and two new member functions for each standard execution policy type. <code>::execution_requirement</code> allows observation of an execution policy's requirements on parallel algorithm execution. <code>.executor()</code> allows observation of an execution policy type's associated executor. <code>.on()</code> allows a client to &quot;rebind&quot; a policy's associated executor. Rather than mutating the existing policy, a new policy is returned as a result. The given executor must be able to guarantee the original policy's execution requirement via an <code>execution::require</code> expression. Otherwise, the call to <code>.on()</code> will not compile.</p>
+<h4 id="advertising-the-bulk-execution-requirement"><span class="header-section-number">1.3.2.1</span> Advertising the bulk execution requirement</h4>
+<p>For each standard execution policy type, introduce a <code>static constexpr</code> member <code>::execution_requirement</code>:</p>
+<table>
+<thead>
+<tr class="header">
+<th align="left">Execution policy type</th>
+<th align="left">Type of <code>::execution_requirement</code></th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left"><code>sequenced_policy</code></td>
+<td align="left"><code>execution::bulk_guarantee_t::sequenced_t</code></td>
+</tr>
+<tr class="even">
+<td align="left"><code>parallel_policy</code></td>
+<td align="left"><code>execution::bulk_guarantee_t::parallel_t</code></td>
+</tr>
+<tr class="odd">
+<td align="left"><code>parallel_unsequenced_policy</code></td>
+<td align="left"><code>execution::bulk_guarantee_t::unsequenced_t</code></td>
+</tr>
+</tbody>
+</table>
+<h4 id="observing-the-associated-executor"><span class="header-section-number">1.3.2.2</span> Observing the associated executor</h4>
+<p>Introduce a member function <code>sequenced_policy::executor()</code>:</p>
+<pre><code>see-below executor() const;</code></pre>
+<p><em>Returns:</em> A copy <code>ex</code> of this execution policy's associated executor. <code>can_require_v&lt;decltype(ex), execution::bulk_t, decltype(execution_requirement), execution::mapping_t::this_thread_t&gt;</code> is true.</p>
+<p>For each of the other standard execution policy types, introduce a member function <code>.executor()</code>:</p>
+<pre><code>see-below executor() const;</code></pre>
+<p><em>Returns:</em> A copy <code>ex</code> of this execution policy's associated executor. <code>can_require_v&lt;decltype(ex), execution::bulk_t, decltype(execution_requirement), execution::mapping_t::thread_t&gt;</code> is true.</p>
+<h4 id="rebinding-the-associated-executor"><span class="header-section-number">1.3.2.3</span> Rebinding the associated executor</h4>
+<p>For each standard, named execution policy type, introduce a member function <code>.on()</code>:</p>
+<pre><code>template&lt;class OtherExecutor&gt;
+see-below on(const OtherExecutor&amp; ex) const;</code></pre>
+<p><em>Returns:</em> An execution policy object <code>policy</code> identical to <code>*this</code> with the exception that the returned execution policy's associated executor is a copy of <code>ex</code>. [<em>Editorial note:</em> This wording is probably not quite correct. Its use of &quot;identical&quot; is inspired by P0443's specification of <code>require</code> expressions. <em>--end note</em>] <code>is_execution_policy&lt;decltype(policy)&gt;::value</code> is true.</p>
+<p><em>Remarks:</em> This function shall not participate in overload resolution unless <code>execution::can_require_v&lt;OtherExecutor, execution::bulk, decltype(execution_requirement)&gt;</code> is true.</p>
+<h4 id="introducing-executionmapping.this_thread"><span class="header-section-number">1.3.2.4</span> Introducing <code>execution::mapping.this_thread</code></h4>
+<p>Supplement <code>execution::mapping_t</code> with an additional nested property type:</p>
+<table style="width:96%;">
+<colgroup>
+<col width="33%" />
+<col width="41%" />
+<col width="20%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th align="left">Nested Property Type</th>
+<th align="left">Nested Property Object Name</th>
+<th align="left">Requirements</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left"><code>mapping_t::this_thread_t</code></td>
+<td align="left"><code>mapping::this_thread</code></td>
+<td align="left">Each execution agent created by the executor is mapped onto the thread on which the originating execution function was invoked.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="notes"><span class="header-section-number">1.3.3</span> Notes</h3>
+<ol style="list-style-type: decimal">
+<li><p>This proposal associates an executor with each standard execution policy type, namely <code>sequenced_policy</code>, <code>parallel_policy</code>, <code>parallel_unsequenced_policy</code>, and execution policies returned by those policies' <code>.on()</code> functions. However, we do not propose a general requirement for <em>all</em> execution policies to have an associated executor because future user-defined execution policy types may not have an associated executor. For example, an execution policy targeting an ASIC specialized for accelerated sorting need not have an associated executor capable of executing arbitrary user-defined functions.</p></li>
+<li><p>The return type of <code>.executor()</code> and <code>.on()</code> is not concretely specified in order to allow us to decide what those types should be later, if we decide to do so. Presumably, the associated executor of <code>par</code> and <code>par_unseq</code> will be an adaptation of an executor associated with some system thread pool.</p></li>
+<li><p><code>.on()</code> does not require e.g. <code>can_require_v&lt;Execution, twoway_t&gt;</code> to give parallel algorithm authors implementation freedom to choose which bulk execution functions they use.</p></li>
+<li><p>This proposal does not introduce new constructors for the execution policies because it is currently unclear what additional state these policies might carry in the future.</p></li>
+<li><p>Rebinding an executor may have applications beyond execution policies, and it is possible that a general purpose mechanism for executor rebinding will emerge. We envision <code>.on()</code> to be syntactic sugar for such a general purpose mechanism, should one eventually exist.</p></li>
+<li><p>The execution policy returned by e.g. <code>execution::par.on(my_exec)</code> is not guaranteed to have a <code>.on()</code> member because we intend for <code>.on()</code> to be a syntactic convenience provided by the standard named policies. It is unclear that <code>.on()</code> should be a requirement for all <code>ExecutionPolicy</code> types; for example, user-defined <code>ExecutionPolicy</code> types.</p></li>
+<li><p>For convenience, <code>.on()</code> could be extended in the future to receive types which are not executors, but which do have an associated executor; for example, thread pools.</p></li>
+<li><p>Whether or not <code>.on()</code> eagerly adapts the given executor via a <code>execution::require</code> call is an implementation detail.</p></li>
+<li><p>With the appropriate executor exception handling properties, <strong>[algorithms.parallel.exceptions]</strong> could be reformulated in terms of general statements about the properties of the execution policy's associated executor. See <a href="wg21.link/P0797">P0797</a> for possible approaches to executor exception handling properties.</p></li>
+</ol>
+<h2 id="possible-implementation"><span class="header-section-number">1.4</span> Possible Implementation</h2>
+<pre><code>namespace execution {
+
+template&lt;class ExecutionRequirement, class Executor&gt;
+class __basic_execution_policy
+{
+  public:
+    static_assert(execution::can_require_v&lt;Executor, execution::bulk_t, ExecutionRequirement&gt;::value);
+
+    static constexpr ExecutionRequirement execution_requirement{};
+
+    Executor executor() const
+    {
+      return executor_;
+    }
+
+  private:
+    template&lt;class ER, class E&gt;
+    friend __basic_execution_policy&lt;ER, E&gt; __make_basic_execution_policy(const E&amp; ex)
+    {
+      return __basic_execution_policy&lt;ER, E&gt;{ex};
+    }
+
+    Executor executor_;
+};
+
+class parallel_policy
+{
+  private:
+    __parallel_executor executor_;
+
+    parallel_policy(const __parallel_executor&amp; ex) : executor_(ex) {}
+
+  public:
+    static constexpr execution_requirement = execution::bulk_guarantee.parallel;
+
+    parallel_policy() = default;
+
+    __parallel_executor executor() const
+    {
+      return executor_;
+    }
+
+    template&lt;class OtherExecutor,
+             class = enable_if_t&lt;
+               execution::can_require_v&lt;
+                 execution::bulk_t, decltype(execution_requirement)
+            &gt;&gt;&gt;
+    __basic_execution_policy&lt;decltype(execution_requirement), OtherExecutor&gt;
+      on(const OtherExecutor&amp; ex) const
+    {
+      return __make_basic_execution_policy(ex);
+    }
+};
+
+} // end execution
+
+template&lt;class ExecutionRequirement, class Executor&gt;
+struct is_execution_policy&lt;execution::__basic_execution_policy&lt;ExecutionRequirement,Executor&gt;&gt; : true_type {};
+
+template&lt;&gt;
+struct is_execution_policy&lt;execution::parallel_policy&gt; : true_type {};
+
+template&lt;class P, class I, class F,
+         class = enable_if_t&lt;
+           is_execution_policy_v&lt;decay_t&lt;P&gt;&gt;
+        &gt;&gt;
+void for_each(P&amp;&amp; policy, I first, I last, F f)
+{
+  auto ex_ = execution::require(policy.executor(),
+    execution::bulk,
+    policy.execution_requirement,
+    execution::bulk_twoway
+  );
+
+  // prefer blocking, because we will immediately call .wait();
+  auto ex = execution::prefer(ex_, execution::blocking.always);
+
+  try
+  {
+    // try to execute via the executor
+    ex.bulk_twoway_execute(
+      [=](auto idx, auto&amp;, auto&amp;)
+      {
+        f(first[idx]);
+      },
+      distance(first, last),
+      []{ return ignore; },
+      []{ return ignore; }
+    ).wait();
+  }
+  catch(bad_alloc)
+  {
+    try
+    {
+      // try again on this thread
+      for_each(first, last, f);
+    }
+    catch(...)
+    {
+      terminate();
+    }
+  }
+}</code></pre>
+<h2 id="proposed-wording"><span class="header-section-number">1.5</span> Proposed Wording</h2>
+<h3 id="changes-to-execpol.general"><span class="header-section-number">1.5.1</span> Changes to <strong>[execpol.general]</strong></h3>
+<p>Introduce these paragraphs:</p>
+<blockquote>
+<ins style="color:green">
+The presence of a member function <code>.executor()</code> indicates that an execution policy has an <em>associated executor</em>, and the value returned by that function is a copy of the associated executor.
+</ins>
+</blockquote>
+<blockquote>
+<ins style="color:green">
+Execution policies have a <em>bulk execution requirement</em>, described by the member variable <code>execution_requirement</code>, if present. If absent, the execution policy's bulk execution requirement is <code>execution::bulk_guarantee.unsequenced</code>.
+</ins>
+</blockquote>
+<blockquote>
+<ins style="color:green">
+The bulk execution guarantee of an execution policy's associated executor satisfies the policy's bulk execution requirement.
+</ins>
+</blockquote>
+<h3 id="changes-to-execpol.seq"><span class="header-section-number">1.5.2</span> Changes to <strong>[execpol.seq]</strong></h3>
+<p>Replace <code>execution::sequenced_policy</code> class definition:</p>
+<del style="color:red">
+<pre><code>class execution::sequenced_policy { unspecified };</code></pre>
+</del>
+<p>with</p>
+<ins style="color:green">
+<pre><code>class execution::sequenced_policy
+{
+public:
+  constexpr static auto execution_requirement = execution::bulk_guarantee.sequenced;
+
+  see below executor() const;
+
+  template&lt;class OtherExecutor&gt;
+    see below on(const OtherExecutor&amp; ex) const;
+};</code></pre>
+</ins>
+<p>Introduce a member function <code>sequenced_policy::executor()</code>:</p>
+<ins style="color:green">
+<pre><code>see below executor() const;</code></pre>
+<em>Returns:</em> A copy <code>ex</code> of this execution policy's associated executor. <code>execution::can_require_v&lt;decltype(ex), execution::bulk_t, decltype(execution_requirement), execution::mapping_t::this_thread_t&gt;</code> is true.
+</ins>
+<p>Introduce a member function <code>sequenced_policy::on()</code>:</p>
+<ins style="color:green">
+<pre><code>template&lt;class OtherExecutor&gt;
+  see below on(const OtherExecutor&amp; ex) const;</code></pre>
+<p><em>Returns:</em> An execution policy object <code>policy</code> identical to <code>*this</code> with the exception that the returned execution policy's associated executor is a copy of <code>ex</code>. <code>execution::is_execution_policy&lt;decltype(policy)&gt;::value</code> is true.</p>
+<em>Remarks:</em> This function shall not participate in overload resolution unless <code>execution::can_require_v&lt;OtherExecutor, execution::bulk, decltype(execution_requirement)&gt;</code> is true.
+</ins>
+<h3 id="changes-to-execpol.par"><span class="header-section-number">1.5.3</span> Changes to <strong>[execpol.par]</strong></h3>
+<p>Replace <code>execution::parallel_policy</code> class definition:</p>
+<del style="color:red">
+<pre><code>class execution::parallel_policy { unspecified };</code></pre>
+</del>
+<p>with</p>
+<ins style="color:green">
+<pre><code>class execution::parallel_policy
+{
+public:
+  constexpr static auto execution_requirement = execution::bulk_guarantee.parallel;
+
+  see below executor() const;
+
+  template&lt;class OtherExecutor&gt;
+    see below on(const OtherExecutor&amp; ex) const;
+};</code></pre>
+</ins>
+<p>Introduce a member function <code>parallel_policy::executor()</code>:</p>
+<ins style="color:green">
+<pre><code>see below executor() const;</code></pre>
+<em>Returns:</em> A copy <code>ex</code> of this execution policy's associated executor. <code>execution::can_require_v&lt;decltype(ex), execution::bulk_t, decltype(execution_requirement), execution::mapping_t::thread_t&gt;</code> is true.
+</ins>
+<p>Introduce a member function <code>sequenced_policy::on()</code>:</p>
+<ins style="color:green">
+<pre><code>template&lt;class OtherExecutor&gt;
+  see below on(const OtherExecutor&amp; ex) const;</code></pre>
+<p><em>Returns:</em> An execution policy object <code>policy</code> identical to <code>*this</code> with the exception that the returned execution policy's associated executor is a copy of <code>ex</code>. <code>execution::is_execution_policy&lt;decltype(policy)&gt;::value</code> is true.</p>
+<em>Remarks:</em> This function shall not participate in overload resolution unless <code>execution::can_require_v&lt;OtherExecutor, execution::bulk, decltype(execution_requirement)&gt;</code> is true.
+</ins>
+<h3 id="changes-to-execpol.parunseq"><span class="header-section-number">1.5.4</span> Changes to <strong>[execpol.parunseq]</strong></h3>
+<p>Replace <code>execution::parallel_unsequenced_policy</code> class definition:</p>
+<del style="color:red">
+<pre><code>class execution::parallel_unsequenced_policy { unspecified };</code></pre>
+</del>
+<p>with</p>
+<ins style="color:green">
+<pre><code>class execution::parallel_unsequenced_policy
+{
+public:
+  constexpr static auto execution_requirement = execution::bulk_guarantee.unsequenced;
+
+  see below executor() const;
+
+  template&lt;class OtherExecutor&gt;
+    see below on(const OtherExecutor&amp; ex) const;
+};</code></pre>
+</ins>
+<p>Introduce a member function <code>parallel_unsequenced_policy::executor()</code>:</p>
+<ins style="color:green">
+<pre><code>see below executor() const;</code></pre>
+<p><em>Returns:</em> A copy <code>ex</code> of this execution policy's associated executor. <code>execution::can_require_v&lt;decltype(ex), execution::bulk_t, decltype(execution_requirement), execution::mapping_t::thread_t&gt;</code> is true.</p>
+<em>Remarks:</em> This function shall not participate in overload resolution unless <code>execution::can_require_v&lt;OtherExecutor, execution::bulk, decltype(execution_requirement)&gt;</code> is true.
+</ins>
+<p>Introduce a member function <code>sequenced_policy::on()</code>:</p>
+<ins style="color:green">
+<pre><code>template&lt;class OtherExecutor&gt;
+  see below on(const OtherExecutor&amp; ex) const;</code></pre>
+<em>Returns:</em> An execution policy object <code>policy</code> identical to <code>*this</code> with the exception that the returned execution policy's associated executor is a copy of <code>ex</code>. <code>execution::is_execution_policy&lt;decltype(policy)&gt;::value</code> is true.
+</ins>
+<h3 id="changes-to-algorithms.parallel.exec"><span class="header-section-number">1.5.5</span> Changes to <strong>[algorithms.parallel.exec]</strong></h3>
+<p>Replace <strong>[algorithms.parallel.exec]</strong> p4, p5, and p6 with the following paragraph:</p>
+<del style="color:red">
+<ol start="4" style="list-style-type: decimal">
+<li><p>The invocations of element access functions in parallel algorithms invoked with an execution policy object of type <code>execution::sequenced_policy</code> all occur in the calling thread of execution. [<em>Note:</em> The invocations are not interleaved; see 6.8.1. <em>--end note</em>]</p></li>
+<li>The invocations of element access functions in parallel algorithms invoked with an execution policy object of type <code>execution::parallel_policy</code> are permitted to execute in either the invoking thread of execution or in a thread of execution implicitly created by the library to support parallel algorithm execution. If the threads of execution created by thread (33.3.2) provide concurrent forward progress guarantees (6.8.2.2), then a thread of execution implicitly created by the library will provide parallel forward progress guarantees; otherwise, the provided forward progress guarantee is implementation-defined. Any such invocations executing in the same thread of execution are indeterminately sequenced with respect to each other. [<em>Note:</em> It is the caller’s responsibility to ensure that the invocation does not introduce data races or deadlocks. <em>--end note</em>]
+</del>
+<p>[<em>Example:</em></p>
+<pre><code>  int a[] = {0,1};
+  std::vector&lt;int&gt; v;
+  std::for_each(std::execution::par, std::begin(a), std::end(a), [&amp;](int) {
+    v.push_back(i*2+1); // incorrect: data race
+  });</code></pre>
+<p>The program above has a data race because of the unsynchronized access to the container <code>v</code>.<em>--end example</em>]</p>
+<p>[<em>Example:</em></p>
+<pre><code>  std::atomic&lt;int&gt; x{0};
+  int a[] = {1,2};
+  std::for_each(std::execution::par, std::begin(a), std::end(a), [&amp;](int) {
+    x.fetch_add(1, std::memory_order::relaxed);
+    // spin wait for another iteration to change the value of x
+    while (x.load(std::memory_order::relaxed) == 1) { } // incorrect: assumes execution order
+  });</code></pre>
+<p>The above example depends on the order of execution of the iterations, and will not terminate if both iterations are executed sequentially on the same thread of execution. <em>--end example</em>]</p>
+<p>[<em>Example:</em></p>
+<pre><code>  int x = 0;
+  std::mutex m;
+  int a[] = {1,2};
+  std::for_each(std::execution::par, std::begin(a), std::end(a), [&amp;](int) {
+    std::lock_guard&lt;mutex&gt; guard(m);
+    ++x;
+  });</code></pre>
+<p>The above example synchronizes access to the object <code>x</code> ensuring that it is incremented correctly. <em>--end example</em>]</p></li>
+<li><p>The invocations of element access functions in parallel algorithms invoked with an execution policy of type <code>execution::parallel_unsequenced_policy</code> are permitted to execute in an unordered fashion in unspecified threads of execution, and unsequenced with respect to one another within each thread of execution. These threads of execution are either the invoking thread of execution or threads of execution implicitly created by the library; the latter will provide weakly parallel forward progress guarantees. [<em>Note:</em> This means that multiple function object invocations may be interleaved on a single thread of execution, which overrides the usual guarantee from 6.8.1 that function executions do not interleave with one another. <em>--end note</em>] Since <code>execution::parallel_unsequenced_policy</code> allows the execution of element access functions to be interleaved on a single thread of execution, blocking synchronization, including the use of mutexes, risks deadlock. Thus, the synchronization with <code>execution::parallel_unsequenced_policy</code> is restricted as follows: A standard library function is <em>vectorization-unsafe</em> if it is specified to synchronize with another function invocation, or another function invocation is specified to synchronize with it, and if it is not a memory allocation or deallocation function. Vectorization-unsafe standard library functions may not be invoked by user code called from <code>execution::parallel_unsequenced_policy</code> algorithms. [<em>Note:</em> Implementations must ensure that internal synchronization inside standard library functions does not prevent forward progress when those functions are executed by threads of execution with weakly parallel forward progress guarantees. <em>--end note</em>] [<em>Example</em>:</p>
+<pre><code>  int x = 0;
+  std::mutex m;
+  int a[] = {1,2};
+  std::for_each(std::execution::par_unseq, std::begin(a), std::end(a), [&amp;](int) {
+    std::lock_guard&lt;mutex&gt; guard(m); // incorrect: lock_guard constructor calls m.lock()
+    ++x;
+  });</code></pre>
+The above program may result in two consecutive calls to <code>m.lock()</code> on the same thread of execution (which may deadlock), because the applications of the function object are not guaranteed to run on different threads of execution. <em>--end example</em>] [<em>Note:</em> The semantics of the <code>execution::parallel_policy</code> or the <code>execution::parallel_unsequenced_policy</code> invocation allow the implementation to fall back to sequential execution if the system cannot parallelize an algorithm invocation due to lack of resources. <em>--end note</em>]</li>
+</ol>
+</del>
+<ins style="color:green">
+<ol start="4" style="list-style-type: decimal">
+<li><p>During parallel algorithm execution, execution policies may invoke element access functions on the thread which invoked the parallel algorithm, or on execution agents created by their associated executor, if an associated executor exists. Otherwise, element access functions may be invoked on execution policy-defined threads. [<em>Note:</em> It is the caller’s responsibility to ensure that the invocation does not introduce data races or deadlocks. <em>--end note</em>]</p>
+<p>[<em>Example:</em></p>
+<pre><code>  int a[] = {0,1};
+  std::vector&lt;int&gt; v;
+  std::for_each(std::execution::par, std::begin(a), std::end(a), [&amp;](int) {
+    v.push_back(i*2+1); // incorrect: data race
+  });</code></pre>
+<p>The program above has a data race because of the unsynchronized access to the container <code>v</code>.<em>--end example</em>]</p>
+<p>[<em>Example:</em></p>
+<pre><code>  std::atomic&lt;int&gt; x{0};
+  int a[] = {1,2};
+  std::for_each(std::execution::par, std::begin(a), std::end(a), [&amp;](int) {
+    x.fetch_add(1, std::memory_order::relaxed);
+    // spin wait for another iteration to change the value of x
+    while (x.load(std::memory_order::relaxed) == 1) { } // incorrect: assumes execution order
+  });</code></pre>
+<p>The above example depends on the order of execution of the iterations, and will not terminate if both iterations are executed sequentially on the same thread of execution. <em>--end example</em>]</p>
+<p>[<em>Example:</em></p>
+<pre><code>  int x = 0;
+  std::mutex m;
+  int a[] = {1,2};
+  std::for_each(std::execution::par, std::begin(a), std::end(a), [&amp;](int) {
+    std::lock_guard&lt;mutex&gt; guard(m);
+    ++x;
+  });</code></pre>
+<p>The above example synchronizes access to the object <code>x</code> ensuring that it is incremented correctly. <em>--end example</em>]</p>
+<p>[<em>Example:</em></p>
+<pre><code>  int x = 0;
+  std::mutex m;
+  int a[] = {1,2};
+  std::for_each(std::execution::par_unseq, std::begin(a), std::end(a), [&amp;](int) {
+    std::lock_guard&lt;mutex&gt; guard(m); // incorrect: lock_guard constructor calls m.lock()
+    ++x;
+  });</code></pre>
+The above program may result in two consecutive calls to <code>m.lock()</code> on the same thread of execution (which may deadlock), because the applications of the function object are not guaranteed to run on different threads of execution. <em>--end example</em>] [<em>Note:</em> The semantics of the <code>execution::parallel_policy</code> or the <code>execution::parallel_unsequenced_policy</code> invocation allow the implementation to fall back to sequential execution if the system cannot parallelize an algorithm invocation due to lack of resources. <em>--end note</em>]</li>
+</ol>
+</ins>
+<h3 id="additions-to-executor-properties"><span class="header-section-number">1.5.6</span> Additions to Executor Properties</h3>
+<p>Add a row to <a href="wg21.inl/P0443">P0443</a>'s <code>execution::mapping_t</code> table:</p>
+<ins style="color:green">
+<table style="width:96%;">
+<colgroup>
+<col width="33%" />
+<col width="41%" />
+<col width="20%" />
+</colgroup>
+<thead>
+<tr class="header">
+<th align="left">Nested Property Type</th>
+<th align="left">Nested Property Object Name</th>
+<th align="left">Requirements</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left"><code>mapping_t::this_thread_t</code></td>
+<td align="left"><code>mapping::this_thread</code></td>
+<td align="left">Each execution agent created by the executor is mapped onto the thread on which the originating execution function was invoked.</td>
+</tr>
+</tbody>
+</table>
+</ins>
+<h2 id="acknowledgements"><span class="header-section-number">1.6</span> Acknowledgements</h2>
+<p>Thanks to Michael Garland, Carter Edwards, Olivier Giroux, and Bryce Lelbach for reviewing this paper and suggesting improvements.</p>

@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>Deleting variable templates</title>
+        
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/markdown.css">
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/highlight.css">
+        
+        <style>
+.task-list-item { list-style-type: none; } .task-list-item-checkbox { margin-left: -20px; vertical-align: middle; }
+</style>
+        <style>
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe WPC', 'Segoe UI', 'Ubuntu', 'Droid Sans', sans-serif;
+                font-size: 14px;
+                line-height: 1.6;
+            }
+        </style>
+        
+        
+    </head>
+    <body class="vscode-light">
+        <h1 id="deleting-variable-templates">Deleting variable templates</h1>
+<pre>Document Number: P2041R0
+Date: 2020-01-11
+Author: David Stone (david.stone@uber.com, david@doublewise.net)
+Audience: Evolution Working Group (EWG)</pre>
+<h2 id="motivating-example">Motivating example</h2>
+<pre><code><code><div>template&lt;typename T&gt;
+auto max_value = delete;
+
+template&lt;std::unsigned_integral T&gt;
+constexpr auto max_value&lt;T&gt; = T(-1);
+
+template&lt;&gt;
+constexpr std::int8_t max_value&lt;std::int8_t&gt; = 127;
+
+template&lt;&gt;
+constexpr std::int8_t max_value&lt;std::int16_t&gt; = 32767;
+
+template&lt;&gt;
+constexpr std::int8_t max_value&lt;std::int32_t&gt; = 2147483647;
+
+template&lt;&gt;
+constexpr std::int8_t max_value&lt;std::int64_t&gt; = 9223372036854775807;
+
+template&lt;typename T&gt;
+concept maxable = requires { max_value&lt;T&gt;; };
+
+static_assert(maxable&lt;int&gt;);
+static_assert(!maxable&lt;std::string&gt;);
+</div></code></code></pre>
+<h2 id="recommended-solution">Recommended solution</h2>
+<p>Variable templates are the natural way to define a value trait: it is explicitly a value templated on some type. The alternative is the more old-school approach of defining a trait in terms of a class template with a <code>static constexpr auto value</code> member, and then define a variable template that removes the boilerplate. This ends up duplicating your API and leads to natural questions of which version a user wants for reading the value vs. specializing the value. A SFINAE-friendly approach to removing the primary template of a variable template is the last missing piece to making variable templates a direct expression of users' intent, and using the syntax <code>= delete</code> is the natural way to express this intent.</p>
+<h2 id="attempt-to-do-this-today-constraints">Attempt to do this today: constraints</h2>
+<p>A first attempt to do this today might look like this:</p>
+<pre><code><code><div>template&lt;typename T&gt; requires false
+int max_value;
+
+template&lt;std::unsigned_integral T&gt;
+constexpr auto max_value&lt;T&gt; = T(-1);
+
+template&lt;&gt;
+constexpr std::int8_t max_value&lt;std::int8_t&gt; = 127;
+
+</div></code></code></pre>
+<p>This immediately runs into a few compiler errors:</p>
+<pre><code><code><div>&lt;source&gt;:14:15: error: type constraint differs in template redeclaration
+
+template&lt;std::unsigned_integral T&gt;
+
+              ^
+
+&lt;source&gt;:11:10: note: previous template declaration is here
+
+template&lt;typename T&gt; requires false
+
+         ^
+
+&lt;source&gt;:18:23: error: constraints not satisfied for variable template 'max_value' [with T = signed char]
+
+constexpr std::int8_t max_value&lt;std::int8_t&gt; = 127;
+
+                      ^~~~~~~~~~~~~~~~~~~~~~
+
+&lt;source&gt;:11:31: note: because 'false' evaluated to false
+
+template&lt;typename T&gt; requires false
+
+                              ^
+
+2 errors generated.
+
+Compiler returned: 1
+</div></code></code></pre>
+<h2 id="attempt-to-do-this-today-always-invalid-expression">Attempt to do this today: always invalid expression</h2>
+<pre><code><code><div>template&lt;typename T&gt;
+auto max_value = not defined(max_value&lt;T&gt;);
+// Silly code credit to Richard Smith; note that this is equivalent to
+// auto max_value = sdghdfksljadslfkjdslfk&lt;T&gt;();
+
+template&lt;std::unsigned_integral T&gt;
+constexpr auto max_value&lt;T&gt; = T(-1);
+
+template&lt;&gt;
+constexpr std::int8_t max_value&lt;std::int8_t&gt; = 127;
+
+template&lt;typename T&gt;
+concept maxable = requires { max_value&lt;T&gt;; };
+
+static_assert(!maxable&lt;void&gt;);
+</div></code></code></pre>
+<p>Rather than evaluating to <code>false</code>, the <code>maxable&lt;void&gt;</code> expression is a hard error.</p>
+<pre><code><code><div>&lt;source&gt;:12:22: error: use of undeclared identifier 'defined'
+
+auto max_value = not defined(max_value&lt;T&gt;);
+
+                     ^
+
+&lt;source&gt;:23:30: note: in instantiation of variable template specialization 'max_value' requested here
+
+concept maxable = requires { max_value&lt;T&gt;; };
+
+                             ^
+
+&lt;source&gt;:23:30: note: in instantiation of requirement here
+
+concept maxable = requires { max_value&lt;T&gt;; };
+
+                             ^~~~~~~~~~~~
+
+&lt;source&gt;:23:19: note: while substituting template arguments into constraint expression here
+
+concept maxable = requires { max_value&lt;T&gt;; };
+
+                  ^~~~~~~~~~~~~~~~~~~~~~~~~~
+
+&lt;source&gt;:25:16: note: while checking the satisfaction of concept 'maxable&lt;void&gt;' requested here
+
+static_assert(!maxable&lt;void&gt;);
+
+               ^~~~~~~~~~~~~
+
+1 error generated.
+
+Compiler returned: 1
+</div></code></code></pre>
+<h2 id="attempt-to-do-this-today-extern-incomplete">Attempt to do this today: extern incomplete</h2>
+<pre><code><code><div>struct incomplete;
+
+template&lt;typename&gt;
+extern incomplete max_value;
+
+template&lt;std::unsigned_integral T&gt;
+constexpr auto max_value&lt;T&gt; = T(-1);
+
+template&lt;&gt;
+constexpr std::int8_t max_value&lt;std::int8_t&gt; = 127;
+
+template&lt;typename T&gt;
+concept maxable = !std::is_same_v&lt;decltype(max_value&lt;T&gt;), incomplete&gt;;
+
+static_assert(!maxable&lt;void&gt;);
+</div></code></code></pre>
+<p>This all works correctly. Unfortunately, this, too, has drawbacks. Users of this variable template need to know that they cannot just rely on normal substitution failures and thus they cannot use it directly in a requires clause as part of a larger test for expression validity. Instead, all users need to do a test with <code>is_same_v</code>. Moreover, there does not appear to be a way to prevent users from passing around a reference or pointer to an instantiation of the primary template. This appears to be the best we can do under current rules.</p>
+<h2 id="chosen-syntax">Chosen syntax</h2>
+<p>We can delete functions, including the primary template of a function, with the behavior needed for variable templates. The following code is valid today:</p>
+<pre><code><code><div>template&lt;typename T&gt;
+void foo() = delete;
+
+template&lt;std::unsigned_integral T&gt;
+void foo() {
+}
+
+template&lt;&gt;
+void foo&lt;int&gt;() {
+}
+
+template&lt;typename T&gt;
+concept fooable = requires { foo&lt;T&gt;(); };
+
+static_assert(fooable&lt;unsigned&gt;);
+static_assert(fooable&lt;int&gt;);
+static_assert(!fooable&lt;void&gt;);
+</div></code></code></pre>
+<p>The <code>= delete</code> syntax has become an intuitive way for users to say that some portion of an otherwise generated interface should not actually be considered valid code, and that using a deleted overloads or specializations should be a substitution failure and interact usefully with SFINAE. Deleting a variable template (either the primary template or an explicit specialization) is a natural evolution.</p>
+<p>Another possible concern is that this syntax could possibly be ambiguous with operator delete, but this does not appear to be the case. Existing code that would look most like this falls into one of two forms:</p>
+<pre><code><code><div>template&lt;typename T&gt;
+T thing = operator delete;
+// Requires that T is something like void(*)(void *)
+</div></code></code></pre>
+<p>and</p>
+<pre><code><code><div>template&lt;typename T&gt;
+T thing = (delete ptr, T());
+</div></code></code></pre>
+<p>In other words, using <code>delete</code> as a pointer to function requires the <code>operator</code> keyword before it, and using <code>delete</code> as an expression requires an operand after it.</p>
+<h2 id="what-about-class-templates">What about class templates?</h2>
+<p>Once we can delete a variable template in addition to our current ability to delete functions and function templates, the next obvious extension is to be able to delete a class template. This would be similar to declaring but not defining the class (&quot;defining&quot; it as incomplete) except that users could not even form a pointer or reference to such a type. I am aware of no major use cases for this feature, and as such, I am not proposing it at this time.</p>
+
+    </body>
+    </html>

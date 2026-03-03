@@ -1,0 +1,88 @@
+<html content="text/html;charset=ISO-8859-1">
+<head>
+<style type="text/css">
+h1 { line-height: 1; }
+h2 { line-height: 1; }
+h3 { line-height: 1; }
+h4 { line-height: 1; }
+</style>
+<title>Callsite Based Inlining Hints: [[always_inline]] and [[never_inline]]</title>
+ </head>
+ <div>
+<b>Document Number:</b> P1669R0<br/>
+<b>Date:</b> 2019-06-10<br/>
+<b>Audience:</b> Evolution Working Group, Evolution Working Group Incubator (SG17)<br/>
+<b>Reply-to:</b> Erich Keane &lt;<a href="mailto:erich.keane@intel.com">>erich.keane@intel.com</a>&gt;<br/>
+</div>
+
+<h2>Callsite Based Inlining Hints: <code>[[always_inline]]</code> and <code>[[never_inline]]</code></h2>
+
+<h3>Revision History:</h3>
+R0: Initial Version.
+
+<h3>Motivation:</h3>
+<p>
+While compiler implementations typically do a fantastic job with optimization particularly when it comes to inlining decisions, a sufficiently motivated developer may be able to properly benchmark their application find individual cases where they believe the compiler's decision does not provide optimal performance.  Allowing the programmer to express their research in source as a hint to the optimizer is an oft-used feature.  
+</p>
+<p>
+P1465R0 proposes the commonly used function level annotation for <code>[[always_inline]]</code> and <code>[[never_inline]]</code>. However, these attributes tend to be a "big hammer" and frequently result in reduced performance. Function level attributes end up applying to all uses of a function, not just the uses that the programmer analyzed. This results in other code having interrupted vectorization, inlining of other functions, and cache-problems or enlarged functions on cold paths.</p>
+<p>For example, one might benchmark their application and discover that the function <code>CloseConnection</code> is typically used in a case where inlining would be helpful, so they tag it with <code>[[always_inline]]</code>. However in lesser used functions, it might end up causing performance regressions, such as with the early-exit pattern:
+</p>
+<code>
+&emsp;bool SomethingHappened(Handle *ConnectionHandle, const Action &ThingThatHappened) {<br/>
+&emsp;&emsp;if (ThingThatHappened.isFatalToConnection()) { // this path is rare.<br/>
+&emsp;&emsp;&emsp;ConnectionHandle->CloseConnection(ThingThatHappened.reason());<br/>
+&emsp;&emsp;&emsp;return false;<br/>
+&emsp;&emsp;}<br/>
+&emsp;&emsp;// Handle that SomethingHappened here...<br/>
+&emsp;}
+</code>
+<p>Since the branch is a rarely used path, inlining this is typically a bad idea. Every invocation of this function is now going to pay the price for this, as it would possibly cause code further down to end up outside of the cache.  Another example where inlining might be a bad idea is in loops:</p>
+<code>
+&emsp;template&lt;class Fun&gt;<br/>
+&emsp;void ForEachConnection(vector<Handle*>ConnectionHandles, Fun Operation) {<br/>
+&emsp;&emsp;for (auto H : ConnectionHandles) {<br/>
+&emsp;&emsp;&emsp;if (H-&gt;isBroken()) H-&gt;CloseConnection(IsBroken); <br/>
+&emsp;&emsp;&emsp;Fun(H);<br/>
+&emsp;&emsp;}<br/>
+&emsp;}
+</code>
+<p>This is another case where inlining this rarely used branch result in a significant performance regression.  However, if the originally analyzed function was the following function, the programmer would have no way (or at least, no non-clunky way) to express the need to inline in one case, but not the other:
+</p>
+<code>
+&emsp;void CloseEachConnection(vector<Handle*>ConnectionHandle) {<br/>
+&emsp;&emsp;for (auto H : ConnectionHandles) {<br/>
+&emsp;&emsp;&emsp;H-&gt;CloseConnection(IsBroken); <br/>
+&emsp;&emsp;}<br/>
+&emsp;}
+</code>
+<p>This function would obviously benefit strongly from inlining the call to <code>CloseConnection</code>. Yet the performance hit from <code>ForEachConnection</code> would be difficult to avoid if one were to mark the function <code>[[always_inline]]</code>.  The same problem exists in the reverse, marking this <code>[[never_inline]]</code> would result in worse performance for <code>CloseEachConnection</code>.  This paper proposes the solution encouraged in EWGI at the Kona 2019 meeting:
+</p>
+<p>
+<b>We support future call site annotation work</b><br/>
+ <code><b>SF F N A SA</b><br/>
+ 1&emsp;6&emsp;3&ensp;0&ensp;0</code>
+</p>
+
+<h3>Proposal:</h3>
+<p>This paper proposes an extension to P1465R0 to permit the inlining hint attributes to appear at the statement level, where it would operate only on the calls contained in that statement. The statement level hint would override the funciton level attribute, permitting the programmer to better control their inlining hints. This would permit (at least) three different ways of solving the <code>ForEachConnection</code> vs <code>CloseEachConnection</code> problem listed above. The programmer could annotate <code>CloseConnection</code> with <code>[[always_inline]]</code>, then use the statement level <code>[[never_inline]]</code> on the call in ForEachConnection.  The programmer could alternatively mark <code>CloseConnection</code> with <code>[[never_inline]]</code> and the call in <code>CloseEachConnection</code> with <code>[[always_inline]]</code>.  Finally, the programmer could simply annotate all call sites with the proper attribute.
+</p>
+<p>While this proposal is new to the C++ committee, it is not a novel idea, the Intel C++ Compiler[INTC_INLINE] implements this feature with an additional option.  ICC provides an option for <code>recursive</code> as an option to instruct the compiler to either inline all calls down the callgraph of that call instruction. </p>
+<p>
+Implementation experience and user feedback has lead the author to come to the conclusion that this is an overly general of a solution to the problem, and instead requests feedback on having the two take a <code>depth</code> parameter.  Said parameter would instead be a positive (non-zero) integer that instructs the compiler to inline up to a certain depth. Controlling the depth exactly isn't implementable, since the callee may have already had inlining done, however having this be a minimum depth is possible since further inlining can be done on the top-most caller.</p>
+<p>
+While this is implementable in ICC since it can do top-down inlining, the author is unsure whether GCC/Clang/MSVC can be configured with that inliner approach.</p>
+
+<h3>Requested Guidance</h3>
+<ol>
+<li>Do we approve of this direction?</li>
+<li>Should this attribute apply to only the first call in the statement, or all?  Meaning, what does <code>[[always_inline]]foo(bar());</code> do?  Should <code>always_inline</code> only apply to the call to <code>foo</code>, or also the call to <code>bar?</code></li>
+<li>What do we think of the <code>depth</code> parameter?</li>
+</ol>
+<h3>References:</h3>
+<div>
+[P1465R0] "Function optimization hint attributes <code>[[always_inline]]</code>, <code>[[never_inline]]</code>, <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1465r0.pdf">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1465r0.pdf</a>
+</div>
+<div>
+[INTC_INLINE] "Intel C++ Compiler Developer Guide and Reference inline noinline forceinline", <a href="https://software.intel.com/en-us/cpp-compiler-developer-guide-and-reference-inline-noinline-forceinline">https://software.intel.com/en-us/cpp-compiler-developer-guide-and-reference-inline-noinline-forceinline</a>
+</div>

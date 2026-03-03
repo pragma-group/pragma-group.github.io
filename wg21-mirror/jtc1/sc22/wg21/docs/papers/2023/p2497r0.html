@@ -1,0 +1,225 @@
+<html><head><meta charset="UTF-8">
+<title>Testing for success or failure of &lt;charconv&gt; functions</title>
+  <style type='text/css'>
+  body {font-variant-ligatures: none;}
+  p {text-align:justify}
+  li {text-align:justify}
+  blockquote.note, div.note
+  {
+          background-color:#E0E0E0;
+          padding-left: 15px;
+          padding-right: 15px;
+          padding-top: 1px;
+          padding-bottom: 1px;
+  }
+  p code {color:navy}
+  ins p code {color:#00A000}
+  p ins code {color:#00A000}
+  p del code {color:#A00000}
+  ins {color:#00A000}
+  del {color:#A00000}
+  table#boilerplate { border:0 }
+  table#boilerplate td { padding-left: 2em }
+  table.bordered, table.bordered th, table.bordered td {
+    border: 1px solid;
+    text-align: center;
+  }
+  ins.block {color:#00A000; text-decoration: none}
+  del.block {color:#A00000; text-decoration: none}
+  #hidedel:checked ~ * del, #hidedel:checked ~ * del * { display:none; visibility:hidden }
+  </style>
+</head><body>
+<table id="boilerplate">
+<tr><td>Document number</td><td>P2497R0</td></tr>
+<tr><td>Date</td><td>2023-01-24</td></tr>
+<tr><td>Audience</td><td>LEWG</td></tr>
+<tr><td>Reply-to</td><td>Jonathan Wakely &lt;cxx&#x40;kayari.org&gt;</td></tr>
+</table><hr>
+<h1>Testing for success or failure of &lt;charconv&gt; functions</h1>
+<ul>
+  <li><a href="#Introduction">Introduction</a></li>
+  <li><a href="#Background">Background</a></li>
+  <li><a href="#Proposed-solution">Proposed solution</a></li>
+  <li><a href="#Alternatives">Alternatives</a>
+  <ul>
+   <li><a href="#Do-nothing">Do nothing</a></li>
+   <li><a href="#Overloaded--3c-code-3e-operator-21--28-errc-29--3c--2f-code-3e-">Overloaded <code>operator!(errc)</code></a></li>
+   <li><a href="#Named-function--3c-code-3e-ok-28-errc-29--3c--2f-code-3e-">Named function <code>ok(errc)</code></a></li>
+   <li><a href="#Named-member-functions">Named member functions</a></li>
+   <li><a href="#Something-something--3c-code-3e-std::expected-3c--2f-code-3e-">Something something <code>std::expected</code></a></li>
+  </ul>
+  </li>
+  <li><a href="#Proposed-wording">Proposed wording</a></li>
+</ul>
+<a name="Introduction"></a>
+<h2>Introduction</h2>
+
+<p>Every time I use <code>to_chars</code> or <code>from_chars</code> I find checking
+<code>res.ec == std::errc{}</code> really clunky.
+Doing <code>!static_cast&lt;bool&gt;(res.ec)</code> isn't any better.
+For <code>std::error_code</code> we have an explicit conversion to <code>bool</code>,
+so you can do <code>if (ec)</code> but that doesn't work for the low-level <code>std::errc</code>.</p>
+
+<p>Can we improve it?</p>
+
+<p>This proposal addresses
+<a href="https://github.com/cplusplus/nbballot/issues/455">C++23 NB comment GB-083</a>.</p>
+
+<a name="Background"></a>
+<h2>Background</h2>
+
+<p>When <code>to_chars</code> and <code>from_chars</code> were first added to the C++17 draft, by
+<a href="../2016/p0067r5.html">P0067R5 ("Elementary string conversions")</a>,
+errors were reported via a data member, <code>ec</code>, of type <code>std::error_code</code>.</p>
+
+<p>To resolve
+<a href="https://cplusplus.github.io/LWG/issue2955">LWG 2955 ("<code>to_chars</code> / <code>from_chars</code> depend on <code>std::string</code>")</a>,
+the type of the <code>ec</code> member was changed to <code>std::errc</code> by
+<a href="../2017/p0682r1.html">P0682R1 ("Repairing elementary string conversions")</a>.
+As noted in the paper, "the usage pattern of the functions deteriorates".
+To check for errors requires comparing against <code>std::errc{}</code>
+(because there is no <code>errc</code> constant with that value)
+or explicitly casting to bool:</p>
+
+<pre><code>    auto [ptr, ec] = std::to_chars(p, last, 42);
+    if (ec == std::errc{}) // or !static_cast&lt;bool&gt;(ec)
+      ...
+</code></pre>
+
+<p>Neither option is very readable in my opinion.
+Unfortunately, the P0682 API change made those functions less ergonomic,
+and that was never repaired. I would like to address that now.</p>
+
+<a name="Proposed-solution"></a>
+<h2>Proposed solution</h2>
+
+<p>When I wrote
+<a href="https://github.com/cplusplus/nbballot/issues/455">C++23 NB comment GB-083</a>
+on this topic I suggested overloading <code>operator!</code> for <code>std::errc</code>.
+That would allow testing the <code>to_chars_result::ec</code> member directly.
+However, that would be novel for standard library enumeration types,
+and the conversion would be valid for any <code>std::errc</code> value,
+which is not actually necessary if all we want is to improve the
+<code>to_chars</code> and <code>from_chars</code> APIs.</p>
+
+<p>The other downside of overloading <code>operator!</code> for <code>errc</code> is that you would
+be able to check for an error easily, with <code>if (!ec)</code>. But to check for
+no error you would need to do <code>if (!!ec)</code>. This asymmetry would be annoying.</p>
+
+<p>Additionally, testing "error is false" seems less direct and less expressive
+than "result is true". I want to know if the function was successful,
+not if the result's error is false.</p>
+
+<p>In Kona, LEWG expressed a preference (which I agreed with) for adding
+<code>explicit operator bool()</code> to <code>to_chars_result</code> and <code>from_chars_result</code>.
+That makes it much more convenient to check for a successful result:</p>
+
+<pre><code>if (auto res = std::to_chars(p, last, 42))
+  ...
+</code></pre>
+
+<p>It doesn't help when structured bindings are used though, because in that
+case there is no <code>to_chars_result</code> that can be converted to <code>bool</code>:</p>
+
+<pre><code>auto [ptr, ec] = std::to_chars(p, last, 42);
+if (???)
+</code></pre>
+
+<p>This would mean either you have to choose between using structured bindings
+or using the conversion operator, or you have to have an extra variable
+to be able to use both:</p>
+
+<pre><code>if (auto res = std::to_chars(p, last, 42)
+{
+  auto [ptr, _] = res;
+  ...
+}
+</code></pre>
+
+<p>This is unfortunate, but I think it's still an improvement on what we
+have in C++20 today.</p>
+
+<a name="Alternatives"></a>
+<h2>Alternatives</h2>
+
+<a name="Do-nothing"></a>
+<h3>Do nothing</h3>
+
+<p>We've lived with it since C++17, so we could reject the NB comment and do
+nothing. Personally, I haven't been happy living with it since C++17 so
+I don't want to continue with that.</p>
+
+<a name="Overloaded--3c-code-3e-operator-21--28-errc-29--3c--2f-code-3e-"></a>
+<h3>Overloaded <code>operator!(errc)</code></h3>
+
+<p>Drawbacks discussed above.</p>
+
+<a name="Named-function--3c-code-3e-ok-28-errc-29--3c--2f-code-3e-"></a>
+<h3>Named function <code>ok(errc)</code></h3>
+
+<p>A named function for checking an <code>errc</code> value, such as <code>bool ok(errc)</code>,
+has few benefits over the overloaded operator, except for not requiring
+<code>!!</code> to test for truthiness.</p>
+
+<a name="Named-member-functions"></a>
+<h3>Named member functions</h3>
+
+<p>Instead of adding <code>to_chars_result::operaror bool() const</code> we could add
+<code>bool to_chars_result::ok() const</code>. This would be consistent with the
+calendar types in <code>&lt;chrono&gt;</code>, so isn't entirely novel. However, those
+are value types and they still contain a value even if it isn't "OK".
+It doesn't really make sense to convert a <code>chrono::month</code> to true or false,
+so a named function to check for a valid value is appropriate there.</p>
+
+<p>For <code>to_chars_result</code> and <code>from_chars_result</code> we're talking about results
+of a function, and there's a much more obvious mapping to a boolean value.
+If the function was successful, the result should be "true",
+and if the function failed, the result should be "false".
+I don't think a named function has any advantage here.</p>
+
+<a name="Something-something--3c-code-3e-std::expected-3c--2f-code-3e-"></a>
+<h3>Something something <code>std::expected</code></h3>
+
+<p>It might seem like we could use <code>std::expected&lt;char*, std::errc&gt;</code> for
+<code>to_chars_result</code>, or at least add a conversion to that <code>std::expected</code> type.
+If we'd had <code>std::expected</code> in C++17 maybe that's what we'd have done.
+However it's not true that the result is <em>either</em> a pointer <em>or</em> an error.
+The <code>ptr</code> member has a defined value in the error cases, and for <code>from_chars</code>
+it has a different value depending on the specific type of error.</p>
+
+<p>We could still choose to add a conversion to <code>std::expected</code> which would
+work for the most common cases (certainly for the success case),
+and if you care about the specific value of <code>ptr</code> in the failure cases,
+just don't use the conversion. That might be something to consider as an
+extension later, but I don't think it is a <em>better</em> choice than the bool
+conversion being proposed here.</p>
+
+<a name="Proposed-wording"></a>
+<h2>Proposed wording</h2>
+
+<p>This wording is relative to
+<a href="../2022/n4917.pdf">N4917</a>.</p>
+
+<p>Update the value of the <code>__cpp_lib_to_chars</code> macro in [version.syn].</p>
+
+<p>Modify [charconv.syn] as indicated:</p>
+
+<pre><code>    // 22.13.2, primitive numerical output conversion
+    struct to_chars_result {
+      char* ptr;
+      errc ec;
+      friend bool operator==(const to_chars_result&amp;, const to_chars_result&amp;) = default;
+      <ins>constexpr explicit operator bool() const noexcept { return ec == errc{}; }</ins>
+    };
+
+    ...
+
+    // 22.13.3, primitive numerical input conversion
+    struct from_chars_result {
+      const char* ptr;
+      errc ec;
+      friend bool operator==(const from_chars_result&amp;, const from_chars_result&amp;) = default;
+      <ins>constexpr explicit operator bool() const noexcept { return ec == errc{}; }</ins>
+    };
+</code></pre>
+</body></html>

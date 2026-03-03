@@ -1,0 +1,1858 @@
+
+                          Document Number: P1332R0
+
+              Contract Checking in C++: A (long-term) Road Map
+
+                    Joshua Berne -  jberne4@Bloomberg.net
+                  Nathan Burgers - nburgers@Bloomberg.net
+                     Hyman Rosen -  hrosen4@bloomberg.net
+                      John Lakos -   jlakos@Bloomberg.net
+
+                     Revised Monday, November 26, 2018
+
+
+                                 ABSTRACT
+                                 ========
+
+              DISCLAIMER: This is NOT a proposal for C++20!
+
+        Adding a language-based contract-checking capability to C++
+        requires a thorough understanding of the nuanced semantics
+        that are available to each user-specified contract-checking
+        statement.  In this document, we first present an eclectic
+        collection of representative potential use case (independently
+        of any particular implementation), and then offer a minimal
+        set of essential refinements to the original contract-checking
+        facility described in P0542R5 (and adopted in Rapperswil, 2018)
+        with the aim of standardizing a minimal viable initial release
+        for C++20 (e.g., see P1290R0, P1333R0, and P1334R0), while
+        preserving our ability to make anticipated future extensions.
+
+        We encourage interested members of the committee to review
+        this document in its entirety, and then select from it only
+        that which is needed to make a first release successful.
+
+
+                            Table of Contents
+                            =================
+  0. Motivation
+   0.1. Basic Contract Checking (What We've Got Now)
+   0.2. Enabling Previously Inactive Contract-Checking Statements (CCSs)
+   0.3. Adding Contract Checking to Legacy Code (The Need for Roles)
+   0.4. Staging Contract-Checking Statements (CCSs) for Peer Review
+   0.5. Contract-Checking Statements (CCSs) Used for Debugging
+   0.6. Interoperability Across Enterprises (Playing Well With Others)
+
+  1. ("Proposed") *Augmented* Contract-Checking Facility
+   1.1. Enhanced Contract-Checking Statement (CCS) Syntax
+   1.2. The CCS Mode
+   1.3. The CCS Predicate ('<conditional-expression>')
+
+  2. Violation Handler
+   2.1. Violation Handler Specification
+   2.2. Configuring the Violation Handler
+   2.3. Multiple Violation Handlers
+   2.4. Never-Returning Violation Handlers
+
+  3. Concrete CCS Semantics
+   3.1. The 'ignore' Semantic
+   3.2. The 'assume' Semantic
+   3.3. The 'check_never_continue' Semantic
+   3.4. The 'check_maybe_continue' Semantic
+   3.5. The 'check_always_continue' Semantic
+
+
+  4. Standard Roles and Default Semantics for Configurable Categories
+   4.1. Contract-Checking Levels
+    4.1.1. The 'default' Contract-Checking Level
+    4.1.2. The 'audit' Contract-Checking Level
+    4.1.2.1. 'audit' may always be 'ignore'.
+    4.1.2.2. 'default' and 'audit' can always be set to the same semantic.
+    4.1.2.3. If 'default' never continues on violation, 'audit' can be anything.
+    4.1.2.4. Final Unified Allowable Levels for 'audit'
+    4.1.3. The 'axiom' Contract-Checking Level
+   4.2. Configurability of Roles
+   4.3. Configuration Options
+
+  5. Notes and Further Discussion
+   5.1. Compile-Time Evaluation
+   5.2. Relationship to Existing Papers
+    5.2.1. Support for Contract-Based Programming in C++ [P0542R5]
+     5.2.1.1. Unchanged Parts from P0542R5
+     5.2.1.2. Comparison of Concrete Semantics to Features of P0542R5
+    5.2.2. UB in Contract Violations [P1321R0]
+    5.2.3. Allowing Contract Predicates on Non-First Declarations [P1320R0]
+    5.2.4. Access Control in Contract-Checking Conditions [P1289R0]
+    5.2.5. Contract Postconditions and Return-Type Deduction [P1323R0]
+    5.2.6. Contract Assertions as an Alternate Spelling of 'restrict' [P1296R0]
+   5.3. Roles
+    5.3.1. Do We Need to Support Roles in C++20?
+    5.3.2. (Future?) Additional Standard ("Built-In") Roles
+    5.3.3. (Future!) Support for User-Extensible ("Dynamic") Roles
+    5.3.4. Do we want standard or implementation-defined category defaults?
+   5.4. Bikeshedding
+    5.4.1. Do we really need '%' to identify roles?
+    5.4.2. Are we really OK having a "naked" 'return'-identifier for 'ensures'?
+    5.4.3. How do we feel about default category names: 'default' & '%default'?
+
+0. Motivation
+=============
+Our C++ Contract-Checking facility appears to have a wider variety of
+applications than was originally anticipated.  This document aims to refine
+the original proposal [P0542R5] to (1) explain the nuanced semantic differences
+possible at call sites -- especially for runtime-checked contracts -- and (2)
+introduce "roles" as means to enable better, more fine-grained control
+over common themes of intended usage for our enhanced Contract-Checking
+facility.
+
+Terminology is important, especially the terminology that pertains to
+contracts.  A *contract* is NOT runnable code; it is (typically) English text
+and ALWAYS intended for a human being to read to understand what is expected of
+him/her and what he or she can expect when invoking a function.  A CCS
+(Contract-Checking Statement) IS code.  It is primarily intended for compiler
+consumption, and should be treated as part of the implementation.
+
+We will start by introducing a representative sample of users that might come
+to C++ with use cases for our contract-checking facility, and what we might
+need to provide for those use cases.  The common uses cases we've collected
+in section 0 are ordered to facilitate exposition rather than in order of
+importance or frequency of occurrence.  In particular, the third usage
+scenario -- section 0.3: "Adding Contract Checking to Legacy Code (The Need for
+Roles)" -- is probably the most important use case after section 0.1, which
+illustrates basic usage.  Throughout these examples, we have made a concerted
+effort to describe intent without employing any specific names or syntax needed
+to implement additional features proposed later in this document.  The goal is
+to understand the needs before mapping them on to our (now well-reasoned)
+integrated solution.
+
+Sections 1 through 4 describe in detail the syntax, semantics, and build
+configurations that we propose for this facility.  The proposed syntax is
+deliberately a pure extension on what was previously proposed and accepted,
+though the semantics are more concretely defined, and the build modes are
+separated conceptually from the specific semantics.
+
+Section 5 contains a number of notes, and identifies several points that
+should be considered "intended for discussion" above and beyond the more
+stable content discussed earlier in this document.
+
+Finally, the purpose of this document is ultimately to first engender a
+shared understanding for what a new C++ contract-checking facility needs to
+provide, and only then help to facilitate consensus as to how this facility
+should ultimately be implemented.  To that end, we have striven to separate
+"what" from "how."  In the six real-world usage examples presented throughout
+this section, we have deliberately avoided introducing any new implementation
+decisions, focusing only on needs, facts, and proposed capabilities of an
+augmented contract-checking facility.  It is a fairly long section, so we did
+our level best to keep this essential introductory pedagogy light-hearted.
+
+
+                     <><><> FURTHER DISCLAIMER <><><>
+
+Although this document represents a complete and thorough analysis of how our
+C++ contract-checking facility might some day be used, it is not intended to
+give license to make incompatible changes or substantial additions to the
+currently adopted wording targeted for C++20.  After discussing the matter, we
+expect the committee to adopt the minimal subset of changes that it deems
+necessary to make the initial release of contract-checking in C++ viable,
+leaving the door open to future extensions if and when demonstrated to be
+needed through actual use.
+
+0.1. Basic Contract Checking (What We've Got Now)
+-------------------------------------------------
+"Hi, I'm a developer writing new code, perhaps a library or a whole
+application, and I want to put contract checks in my code and get the most
+benefit from them that I can.  What should I do?"
+
+"Here are my requirements:
+ 1. In my normal release builds, my simpler checks (which don't alter my basic
+    performance expectations) should be enabled and logged if they are
+    violated.
+ 2. I have some more elaborate conditions that I think should be stated in the
+    code, but these are sufficiently expensive (e.g., have a greater "big-O"
+    algorithmic complexity than the useful work being done) that I won't
+    (typically) want them executed in my released applications.
+ 3. Some conditions I can express in words or pseudo-functions, but they are
+    not necessarily able to be validated at runtime -- things like checking
+    that an object hasn't been deleted, or that iterator ranges are valid, etc.
+    I'd like to codify these somehow for readability and possibly for the
+    compiler (or other static analysis tools) to take advantage of, but they
+    can't ever really be checked at run time.
+ 4. I need to be able to build my unit tests so that they can verify that my
+    contract-checking statements are properly checking contract violations, and
+    catch these invalid inputs using a testing framework built around expecting
+    exceptions from certain control paths.
+ 5. Sometimes, I suspect my contract checks might be causing problems (due to
+    unexpected code elision or some profiling results that point to my
+    contract checks as having a high runtime cost), so I want to turn them all
+    off completely, but still continue to have them checked syntactically to
+    maintain their correctness, so I can turn them right back on again later.
+ 6. Sometimes, I want to deploy a build (perhaps to most, but not all, of my
+    production machines) that is as efficient and optimized as possible.  I
+    trust that my contracts are all being followed, so I certainly don't want
+    to bother checking them; moreover, I'd like the compiler to be aware
+    that I trust that they are always true, and want it to optimize with that
+    in mind.
+ 7. Sometimes, I can't afford to check my assumptions, but I don't trust them
+    enough to want them to be treated by the compiler as always true.  I'd like
+    to just turn off any impact these things have on my compiled program."
+
+Great!  Welcome to the wonderful word of programming with contract-checking
+statements (CCSs).
+
+Before we get started, its worth (re)emphasizing that contracts are agreements
+between two (or more) parties, typically written in English.  Contract-checking
+statements are C++ statements usable in various places in C++ code that are
+intended to codify the representable and checkable parts of those English
+contracts, and to provide facilities that let us check the validity of that
+code, and potentially act on it at run time or compile time.  Whenever we say
+"contract" we mean the English contract between all parties involved in a piece
+of code (users, implementers, builders, etc.), and when we say
+"contract-checking statement", or "CCS", we mean the new type of statement
+being proposed for inclusion within the C++ language.
+
+Here's how you can use the C++ language's basic contract-checking facility to
+satisfy your various requirements:
+
+ 1. Most contract checks are not especially expensive.  In our experience,
+    only 1-2 percent of typical checks are sufficiently expensive (e.g.,
+    alter the big-O complexity of a function) that they warrant special
+    treatment.  Hence, almost all of your checks will probably not be overly
+    expensive, and therefore we can use the default checking level to
+    implement the contract-checking statements (CCS).
+
+    These statements can go into your code in a number of (different kinds of)
+    places, with the underlying (behavioral) semantic being the same regardless
+    of whether the contract being checked is a precondition, a postcondition,
+    or the validation of other state in the middle of a function body.
+
+      int sqrt(int x)
+          [[ expects : x >= 0 ]] ;
+              // This is a "precondition" checking statement.
+
+          [[ ensures r : r >= 0 ]] ;
+              // This is a "postcondition" checking statement.
+        {
+          [[ assert : x >= 0 ]] ; // Duplicate check, but here we're showing
+                                  // that contract-checking statements can be
+                                  // put anywhere in a function body as well.
+          int r = ...; // compute 'r'
+          return r;
+        }
+
+    In normal build modes, these checks should all be enabled to get evaluated
+    at runtime.  If any of these predicates are false, details of what failed
+    should be "logged", and the program should abort.  The details are
+    implementation dependent, but in general will (likely) include a stack
+    trace and the location of the particular check that failed.
+
+ 2. Now let's say you want to add checks on your return value that involve
+    more computation.  Actually executing these checks will alter your runtime
+    performance (i.e., the algorithmic or big-O performance of your function)
+    too much to be usable generally.  To the function above, you might want to
+    add two contract-checking statements before your return statement:
+
+         [[ assert audit : r * r <= x ]] ;
+         [[ assert audit : (r+1)*(r+1) > x ]] ;
+
+    Now you have two more contract-checking statements (CCSs) that specify a
+    contract-checking level of 'audit'.  Depending on the build configuration,
+    these checks might not be performed at runtime, but you might at some point
+    want to be able to turn on the ability for the compiler to assume they are
+    true for the purposes of code elision or other performance optimizations.
+
+ 3. When you want to say something about the program that cannot necessarily
+    be checked at runtime, you probably want to consider using the 'axiom'
+    assertion level.  Axiom level checks are NEVER executed, and so we don't
+    need to define all of the functions they might reference.  This
+    contract-checking level lets us state things like this:
+
+       bool is_not_deleted(const T *ptr); // declaration of unimplementable
+                                          // function
+       [[ assert axiom : is_not_deleted(*ptr) ]] ;
+
+    Even better, compilers might begin to provide intrinsics for common cases
+    like this so that they can reason about these axioms when directed to
+    assume them to be true.  In optimized builds, compilers *will*
+    typically be directed to treat axioms as true, but you can explicitly
+    override that default interpretation at build time.
+
+ 4. For unit tests, you'll want to register a custom violation handler that
+    throws an exception.  All that is needed to install your handler is to
+    link it in having the correct name and signature.  This violation handler,
+    combined with setting the semantic of each contract-checking statement
+    to perform its check at runtime, will enable you to test all of your
+    contract-checking statements to ensure they are performing as intended.
+
+ 5. When we feel we don't need a CCS to be active, any CCS (e.g., at any
+    level) can also be set to do nothing other than validate that its predicate
+    compiles.  When a CCS is placed in such a mode, it doesn't evaluate the
+    predicate nor does it assume it to be true.  In other words, the CCS has
+    absolutely no effect on (e.g., the binary representation of) the
+    resulting program.
+
+ 6. For mature programs, where we are confident that checks are never
+    violated, we can disable the runtime checks and avoid superfluous
+    checking overhead.  If performance is at a premium, we may even direct the
+    compiler to assume that these checks would evaluate to true, and pass
+    that information along to the optimizer to enable it to elide "dead
+    code", or otherwise realize useful (e.g., runtime) performance
+    optimizations.
+
+ 7. For programs having dubious CCSs in them, disabling of checks is
+    accomplished by choosing a semantic where the checks are not executed or
+    even assumed to be true, but nonetheless requires that your checks remain
+    syntactically valid (so they won't drift into being uncompilable if you
+    leave them in this configuration for a long while).  A CCS imbued with this
+    "no-op" semantic won't actually do anything.  That is, no assumptions will
+    be made, no side effects will occur, and no code will be generated
+    (or generated differently) as a result of that CCS.
+
+
+0.2. Enabling Previously Inactive Contract-Checking Statements (CCSs)
+---------------------------------------------------------------------
+"Hi, I have a library I'm providing to users and they love it, but as a company
+we've decided that we want to spend more on computing power to reduce the risk
+of any of our code running out of contract.  We have regular contract-checking
+statements scattered throughout our systems that we want to turn on, but we've
+been running for years now with our code deployed at the most optimized level
+and all of our contract-checking statements are set not to perform any runtime
+checks at all, but merely assume that the specified predicate is true and feed
+that information to the optimizer.  We're afraid that some contracts are
+technically being violated, but any side effects so far seem benign.  How do
+we safely turn on all of these checks without destroying our lovely profitable
+business in the process?"
+
+Congratulations, you're well into the lifecycle of your company's product.
+Your code is running great and you want to maximize system stability for the
+future by turning on all those (dormant) checks that you have.  For users like
+you, you can deploy a build that explicitly sets a previously ignored (or
+assumed) contract-checking level into one that will now check its predicate
+(at run time) and notify you of any cases where the predicate is false, but
+still allow program execution to continue as it did before with no other
+semantic alterations.  This behavioral semantic will have the least possible
+impact on the code generated around it -- any optimizations that previously
+were available should still work the same way, and overall program behavior
+should see no visible changes.
+
+The only risk is that if this check is in front of some other hard (language)
+undefined behavior (UB), and the path to that UB was previously optimized out,
+this check will also be elided.  That's why this particular (behavioral)
+semantic is a good choice for this specific usage scenario, but is by no means
+the only one.
+
+The salient addition you get when enabling these checks is that your code will
+validate your contract-checking statement predicates as they execute, and any
+that are false will (likely) result in invoking the currently installed
+violation handler and produce a useful (human readable) "log" message.  You can
+now deploy that build to your production systems and monitor log files for a
+while, cleaning up any situations where CCSs are violated.  Once you have run
+without any violations logged for a sufficiently comfortable amount of time,
+you can go ahead and change the build mode you deploy to make all of the CCSs
+have the normal (default) semantic.  Now, any future violations introduced by
+new code will be caught, reported, and handled immediately (and without ever
+allowing flow of control to continue normally) -- i.e., before they can risk
+your company's time and money.
+
+
+0.3. Adding Contract Checking to Legacy Code (The Need for Roles)
+-----------------------------------------------------------------
+"Excuse me, I have a running production system with a bunch of enabled contract
+checks across many components and libraries.  I came across some old code that
+was written "in the dawn of time" before contracts were even in the language!
+It's running and no problems seem to be reported, but the functions this
+library provides have narrow contracts (i.e., contracts having preconditions)
+that should be documented (in English) and checked (in code).  How do I get
+those checks installed safely when I'm not sure these functions are actually
+being called properly (within their contract) never mind correctly?  Maybe the
+out-of-contract behavior doesn't actually crash and is just going unnoticed.
+If I add checks that don't continue and therefore bring down the entire system
+for no good reason, I could get fired, never find a job again, lose my home,
+and my children will go hungry!"
+
+Welcome, you've encountered the orthogonal problem to our previous visitor.
+You have basic (default role) Contract-Checking statements (CCSs) enabled, so
+you can't just add more CCSs and set the behavior of all CCSs to "check and
+report, but continue anyway" -- you'd be turning off lots of other protections
+that you and the rest of your company depend on!
+
+You've stumbled on the reason for having more than one *role* for CCSs in a
+program!
+
+Consistent with the original contracts proposal, if you don't specify a *role*
+in your CCS, you get the default one.  What we are bringing to the table here
+is a new concept, which we call a *role*, that allows us to assign more
+fine-grained categories of configurable behaviors than just the
+contract-checking level alone.  Now, in addition to assigning a semantic to
+each assertion level (for just the default role), we can assign it per level
+per role.
+
+Without getting into syntactic details, imagine that we were somehow able
+to distinguish contract-checking statements (CCSs) depending on the intended
+usage pattern or *role* that the developer perceives that a particular CCS
+will have in their library software.  In other words, there is currently only
+one default role (that's what we have now) and it has three separate (atomic)
+categories ('default', 'axiom', and 'audit') of (enumerated) concrete
+behaviors.  What we are proposing is to enable (at least) one other (named)
+role having its own, separately configurable 'default', 'axiom', and 'audit'
+level behavior categories, and some syntactic way to explicitly associate a
+given CCS with that named role.  Let's further assume that, after much
+bikeshedding (and perhaps some mayhem) we settle on the name, say "review"
+(for now), to be the one new separate (named) role (there could potentially be
+more added later).  How does this new feature help us?
+
+The effect is remarkable.  Now, instead of having just a single instance of
+this facility, we -- in effect -- have two!  As new CCSs are added in the new
+"review" role, existing CCSs in the default role remain unchanged (in the
+source code), as do the concrete behaviors (a.k.a. *semantics*) associated
+with their respective assertion-checking levels -- i.e., each *semantic*
+associated (at build time) with the default role's 'default', 'axiom', and
+'audit' level behavior categories are preserved.
+
+What's more, we now have three new categories of behavior to configure --
+namely those for the 'default', 'axiom', and 'audit' level behaviors in the
+new ("review") role.  (Note that the three "review" level behavioral categories
+will likely come with defaults that are different from (and more suited for
+the intended purpose of the new "review" role than) those presumed appropriate
+for the more general default role.)
+
+Having a separate, named (e.g., "review") role would be a way to capture
+developer intent about whether or not a particular check can be trusted and
+how its respective behavioral categories are best configured (at compile time)
+when deployed in different ways.  In other words, this new ("review") role
+provides an alternate set of configurable behavior categories corresponding to
+the three assertion checking levels (i.e., 'default', 'audit', 'axiom') that
+can be configured (at build time) independently of those associated with the
+default role.
+
+Now, by default, CCSs in this new ("review") role will check the
+predicates at run time, and if false, log a useful message and continue.  This
+behavior is intended to allow you to begin monitoring your code at run time to
+see if any of the contracts you want to assume correct are being violated, yet
+continue the normal flow of execution -- even if an error is detected; it also
+minimizes the possibility of altering the flow of control within your program
+(e.g., due to compiler optimizations such as code elision) as a result of the
+addition of these new ("review") CCSs.  Even better, when performing unit
+testing you can still set the semantic for both runtime-checking levels
+('default' and 'audit') in this new ("review") role to check and NOT continue
+on failure, so that you can readily test your new ("review"-role) CCSs the
+same way you would test your normal (default-role) ones.
+
+Finally, once you've deployed code with your CCSs in the review role, and you
+validate that they are not logging violations, you can simply remove that
+role from the CCSs and, voila, your CCSs move immediately into the default
+role with no more source code changes needed!
+
+
+0.4. Staging Contract-Checking Statements (CCSs) for Peer Review
+----------------------------------------------------------------
+"Hi, I've heard so many great things about contracts, but I've just joined a
+new team that doesn't really believe in them.  I'd like to put in some contract
+checks for people to see in the code, and hopefully later convince my team lead
+that they'd be okay to enable -- but for now, I don't think they'll let me do
+anything that might alter how our software behaves.  How do I stage my work in
+a more useful and maintainable way than just shoving it into comments?"
+
+When you specify a concrete semantic explicitly, the behavior of the CCS is not
+configurable.  Hence, it isn't part of any contract-checking *level* or *role*.
+(Note that *level* and *role* together identify a configurable *category* of
+behavior that can be supplied at compile-time by the build system.)  By
+specifying this particular (concrete) semantic (directly in code), you are
+stating that this CCS is to be parsed for syntactic correctness by the
+compiler, but otherwise have absolutely no effect on the program (i.e., as if
+it simply wasn't there).
+
+In other words, you are making sure your expression compiles, and is
+documenting for readers something you think is true, but the compiler is going
+to do nothing else with this expression beyond that, regardless of build mode.
+Put these sorts of CCSs into the program, make sure it compiles, then discuss
+with your team lead how to move them to, say, the "review" role, and then
+eventually to the default one (or potentially one even more suited to
+production, depending on your team's standards).
+
+
+0.5. Contract-Checking Statements (CCSs) Used for Debugging
+-----------------------------------------------------------
+"Hello Sir or Madam, I am taking a course in C++ and my program doesn't work at
+all.  I want to use contract checks for debugging, but I don't know where to
+start.  My classmates told me my code is being optimized away into nothing
+because it's undefined behavior, but that doesn't help me fix it!  They seem so
+excited about how fast it is, but for me it's only failing really fast.  Please
+help.
+   - Lost in Optimization Land"
+
+Hello LIOL, we feel your pain.  The optimizer in C++ is enabled to do a great
+many things, which has a huge potential for good, and a huge potential for
+confusion and pain.  Contract checks can be a great help to you.
+
+You have a couple of options.  If you add a basic (default-role) CCS to
+your code, your program will check (at runtime) that the predicate expression
+is true and, if not, abort with a log message telling you where it first
+failed.  With this approach, you may, however, need to pass through multiple
+failure iterations before you see the case that you are looking for, or
+perhaps you want to do 'printf'-style debugging, but you're finding that your
+debug statements are optimized away (who knew?).  Here is where you want your
+check to be active at run time and to continue (either way), but you don't
+want the compiler to be able to assume that you will always continue, lest it
+might see UB behind your "printing" CCS and (because it can) optimize that
+entire code path away including your means for debugging!
+
+Well, do we have the behavioral semantic for you!  We'll tell the compiler that
+we are going to check the predicate at runtime, but we simply haven't yet made
+up our mind as to whether we plan to continue or not.  Now the evil compiler is
+at last thwarted -- it cannot optimize your "debugging" check statements away
+even if one could otherwise tell that you're about to go over a cliff.  :)
+
+There are, again, a couple of ways you could proceed.  The first is you could
+simply specify the concrete semantics that you want (i.e., "check at run time,
+but don't tell the compiler what you are going to do when the predicate
+evaluates to false") directly in the CCS.  The other alternative would
+would be to create a CCS in the new ("review") role, but set the
+behavioral semantic for the runtime-checking levels in that role to be the
+more furtive "check and maybe continue" one (just described) when you compile
+your code.
+
+Now your checks will "log" whenever they detect a failure, and your CCSs will
+not get elided when your code might do badly broken things after those checks.
+Find your bugs and fix them, then remove the checks and submit your code to get
+an A+ in C++.
+
+
+0.6. Interoperability Across Enterprises (Playing Well With Others)
+-------------------------------------------------------------------
+"Hi, this is great and contract-checking statements (CCSs) are everywhere and
+all my vendors are now providing libraries with contracts on their interfaces
+and CCSs in their code.  I just have one tiny problem.  Let me explain...  One
+of my vendors (call them "GreatVendor") is great; they write correct and
+awesome CCSs that catch my bugs, which helps me a lot.  Another of my vendors,
+call them "BadVendor", is not so great (in fact, I think this vendor is just my
+boss's kid who's a mediocre sophomore at the local high school, but please
+don't tell my boss I said that).  Anyway, this second vendor writes a lot of
+bogus CCSs that make it practically impossible to use their library with CCSs
+enabled in any way, shape, or form.  I want to enjoy the defensive-checking
+benefit I derive when using the libraries from GreatVendor, but I need to
+guard against the quality issues I'm experiencing when I'm forced to use
+libraries from BadVendor.  What can I do?  What can they do to help me do it?"
+
+Dear Sir or Madam, we're very sorry that working within the wild and varied C++
+ecosystem is causing you grief as you try to integrate all the wonderful tools
+that others are providing to you.  Depending on how much of our proposal goes
+through, you might have more than one option when dealing with the disparate
+quality of code produced by these two library vendors:
+
+ 1. Since this is C++, different translation units (TUs) and libraries built
+    with different build options can nonetheless be linked together.  The ODR
+    has some impact on this approach, but nothing says that all translation
+    units linked together need to have the same configured semantics for all
+    contract levels and roles.  What this means is that you can take a library
+    from GoodVendor compiled with CCSs fully enabled and runtime checked or
+    even assumed true, a library from BadVendor with all CCSs set to be
+    ignored, and link them together with your code to get some of the
+    functionality that you need.
+
+    Unfortunately, conventional TUs have the limitation that 'assert' CCSs in
+    inline functions and function templates whose implementations reside in
+    header files will be compiled in the contract-checking build mode of the
+    client, as will all CCSs, such as 'expects' and 'ensures', that are affixed
+    to the client-facing declarations of any functions -- irrespective of
+    where their bodies are defined.  The good news is that, some day, we'll
+    have modules, which will be able to capture the contract-checking build
+    modes within the module itself, and thereby fully address this issue
+    (assuming, of course, that your vendors provide you with module libraries
+    built in these modes or, equivalently, the source code, which would allow
+    you to do so yourself).
+
+ 2. You've also stumbled on the best argument for dynamic roles.  By opening up
+    the world of roles to allow for any role to be used beyond just the ones on
+    the short list the standard provides, each vendor's libraries can use their
+    own vendor-specific roles, thereby allowing you to configure their
+    contract-checking statements (CCSs) differently based on your needs (that
+    is, assuming you can get at least one of your vendors to agree to that).
+
+    Ideally, GoodVendor might put all of the precondition checks into their
+    functions in a dynamic role called, say, "GV_production", while
+    BadVendor places their checks into a role such as "BV_production".
+    Then, when building, you would be able to configure the behaviors for the
+    'default', 'audit', and 'axiom' levels for the "GV_production" role to
+    actively check at runtime, while setting the behaviors for those same
+    contract-checking levels for the "BV_production" role to be ignored.  In
+    this way, you get the safety and performance you want from the good
+    vendor, and aren't subject to the wild whims of the bad one.
+
+    FWIW, creating your own enterprise-wide dynamic roles is yet another way
+    of ensuring that you retain full control over your own roles independently
+    of any coming from other (e.g., open-source or third-party) libraries.
+    Moreover, even if BadVendor fails to provide their own custom roles,
+    you can still disable the default role, enable both GoodVendor's and
+    your own, and -- voila! -- problem solved.
+
+
+1. ("Proposed") *Augmented* Contract-Checking Facility
+======================================================
+This section begins the implementation portion of a minimal suite of potential
+augmentations to the existing contract-checking facility already adopted into
+the C++20 working paper.  We have made every effort to keep what is there
+without change, and merely add minimal (optional) capability where needed to
+satisfy common "business requirements" such as those elucidated in section 0.
+
+IMPORTANT: Note that not all of these changes are necessary for language-based
+checking to be a successful addition to C++20.  After considering this
+"centrist" proposal, the committee may reasonably chose to go with a more
+"conservative" (reduced) specification in which, say, adoption of built-in
+support for roles is deferred (see section 5.3.1).
+
+1.1. Enhanced Contract-Checking Statement (CCS) Syntax
+------------------------------------------------------
+As originally specified, the syntax for checking statements in the currently
+adopted contract-checking facility are straightforward:
+
+   '[[' contract-attribute [level] identifier ':' conditional-expression ']]'
+
+where:
+
+   'contract-attribute' is one of { 'expects', 'ensures', 'assert' };
+                'level' is one of { 'default', 'audit',   'axiom'  };
+   'identifier' is any C-style identifier (valid for 'ensures' only);
+   'conditional-expression' is any expression usable in a boolean context.
+
+Our refined baseline Contract-Checking Statement (CCS) syntax offers just two
+new backward-compatible extensions over what is already available in the
+C++20 working paper:
+
+  The ability to specify, directly in each CCS,
+    (1) a concrete *semantic* (there are exactly five, see section 3), and
+    (2) an alternative *role* (see sections 1.2, 4, and 5.3)
+  directly in the CCS.
+
+In this new syntax, the only syntactic change is that 'mode' replaces 'level':
+
+   '[[' contract-attribute mode identifier ':' conditional-expression ']]'
+
+where 'mode' is either (1) a concrete semantic, or (2) a level and possibly
+a role (either or both of which may be omitted to indicate their respective
+defaults:
+
+   <contract_checking_statement> := '[[' <contract_attribute> <mode>
+                                    [<return_identifier>] ':' <expression> ']]'
+
+   <contract_attribute> := 'expects' | 'ensures' | 'assert'
+
+   <mode> := <non_configurable_behavior> | <configurable_behavior>
+
+   <non_configurable_behavior> := <concrete_semantic>
+
+   <concrete_semantic> := 'ignore' | 'assume' | 'check_never_continue'
+                        | 'check_maybe_continue' | 'check_always_continue'
+
+   <configurable_behavior> := <behavior_category>
+
+   <behavior_category> := [<level>] [<role>]
+
+   <level> := 'default' | 'audit'| 'axiom'
+
+   <role> := '%' ( 'default' | 'review' )                 // (See section 5.3.)
+
+   <return_identifier> := <identifier>
+
+   <identifier> := a valid C++ identifier to be associated with the 'return'
+                   value of the function (valid only when
+                   '<contract_attribute>' is 'ensures') // (See section 5.4.2.)
+
+   <expression> := a valid expression usable in an unspecified boolean context
+
+All references for where contract-checking statements may occur remain the same
+as in the original proposal.  That is, '[[expects]]' and '[[ensures]]'
+attributes can be placed on function declarations and definitions; '[[assert]]'
+may be placed only within a function body.  Note that these reference would
+naturally extend to any additional form of function declaration (e.g.,
+see [P1320R0].
+
+
+1.2. The CCS Mode
+-----------------
+The *mode* is the collective term used to refer to the configurable behavior
+associated with a given Contract-Checking Statement (CCS).  The mode can be
+specified as either (I) having an explicit (concrete) *semantic* (of which
+there are exactly five, see section 3), or (II) a configurable behavior
+associated with a particular level of a particular role -- either or both of
+which can be defaulted.
+
+We'll first discuss (II) configurable behavior (in terms of levels, and then
+also the newly proposed roles).  After that, we'll consider the other new
+aspect, (I) specifying (non-configurable) concrete semantics directly in the
+CCS.
+
+For concreteness, let's consider a function such as:
+
+  int sqrt(int x);
+
+As with the current proposal, there is no need to specify anything for mode.
+
+  int sqrt(int x) [[ expects: x >= 0 ]] ;
+
+If nothing is specified, the default contract-checking level ('default') is
+assumed, but, just as with 'audit' or 'axiom', could be specified explicitly:
+
+  int sqrt(int x); [[ expects default: x >= 0 ]] ;
+
+Also consistent with the status quo, if no role is specified, the default role
+(which we might choose to indicate explicitly using '%default') is assumed:
+
+  int sqrt(int x); [[ expects %default: x >= 0 ]] ;
+
+If a configurable mode is specified (and for now the only one under serious
+consideration is '%review'), then we could use it to associate this CCS with
+the behavior category corresponding to, say, the 'audit' contract-checking
+level for that role:
+
+  int sqrt(int x); [[ expects audit %review : x >= 0 ]] ;
+
+And again, with no level specified explicitly, the 'default' contract-checking
+level (currently named 'default', see section 5.4.3) is assumed:
+
+  int sqrt(int x); [[ expects %review : x >= 0 ]] ;
+
+Hence, each of following explicit configurable modes can be specified, with
+equivalent modes grouped on a single line:
+
+     Shortest          Explicit            Explicit         Explicit Defaults
+  Representation    'default' Level     '%default' Role     For Role & Level
+  --------------   -----------------   ------------------   ------------------
+  ""               "default"                   "%default"   "default %default"
+  "audit"                                "audit %default"
+  "axiom"                                "axiom %default"
+        "%review"  "default %review"
+  "audit %review"
+  "axiom %review"
+
+The (contract-checking) level and (intended-usage) role (whether specified
+or implied) in a CCS identify a configurable (behavior) category that will be
+mapped onto a concrete (behavior) semantic at build time, based on the
+assertion-level build mode and the user-assignable mappings (see section 4).
+
+There are exactly five concrete behaviors (or *semantics*) for CCSs; each
+of these semantics is identified by one of the following five enumerators --
+'ignore', 'assume', 'check_never_continue', 'check_maybe_continue',
+'check_always_continue' -- and each has a well-defined behavior, the precise
+semantics of which are delineated in section 3.
+
+In addition to being able to associate these semantics with configurable
+categories (identified by level and role), our augmented CCS syntax also
+permits us to specify one of these semantics directly in the CCS.  When
+a specific semantic is used for the mode, the CCS is not considered part of
+any level (or role), and in any event is not externally configurable.
+
+Recall (from section 0.3) that the intended purpose of having alternative roles
+is to allow library developers to distinguish among CCSs serving different
+purposes and perhaps having independent lifecycles.
+
+ *  The '%default' role represents the global or generic role and is intended
+    to be the one for general use -- i.e., the one you use when you don't
+    know about roles!  Its default behavior is best modeled after a 'cassert'
+    in that, when enabled, it doesn't allow a buggy program to continue, nor
+    does it (by default) allow the compiler to assume that what would have been
+    checked at runtime is now true merely by virtue of its not being checked
+    (see sections 0.1 and 0.2).
+
+ *  The '%review' role represents a very particular usage pattern where the
+    intent is explicitly NOT to have a CCS prevent a program from continuing
+    when its predicate is determined to be false, but rather to detect and
+    report the failure, and then continue execution with an eye toward fixing
+    the program and then, perhaps, subsequently promoting the check to a more
+    aggressive role (see section 0.3).
+
+Also recall (from sections 0.4 and 0.5) that hard-coding a specific semantic
+directly in the CCS can be useful when the purpose (e.g., peer review or
+debugging, respectively) differs from those in currently defined roles
+(e.g., '%review'):
+
+  int sqrt(int x); [[ expects ignore: x >= 0 ]] ;            // See section 0.4
+
+and:
+
+  int sqrt(int x); [[ expects check_maybe_continue: x >= 0 ]] ;
+                                                             // See section 0.5
+
+
+To recap: The purpose of the mode is to associate, with a given CCS, its
+intended behavioral semantics.  These semantics, whether specified explicitly
+or inferred from an implied level and role, determine the compile-time and
+runtime behavior of that CCS.
+
+
+1.3. The CCS Predicate ('<conditional-expression>')
+---------------------------------------------------
+In all cases, the predicate (a.k.a. 'conditional-expression') for each CCS must
+be a syntactically valid expression that is usable in an unspecified-boolean
+context at the location of that CCS.  Access control discussions from other
+papers, such as [P12889R0], would also apply for this expression.
+
+
+2. Violation Handler
+--------------------
+The violation handler proposed here itself remains largely unchanged from that
+in the original proposal except that there will be some additional
+context (e.g., the explicit semantic or role associated with the mode of
+the CCS that invoked it):
+
+   void f(const std::contract_violation&);
+
+Any concrete semantic that causes the CCS to evaluate its predicate at
+runtime can invoke the handler, and any (configurable) category
+(except AXIOMS) can be mapped to such a semantic.  The default violation
+handler should just somehow "log" (e.g., to 'stderr') the details of the
+violation in a readable way.  The specifics are implementation defined, but
+the source location information and ideally a stack trace should be included.
+
+A new 'enum', 'std::contract_violation_continuation_mode', should be defined
+with three values, 'ALWAYS_CONTINUE', 'MAYBE_CONTINUE', and 'NEVER_CONTINUE'.
+'std::contract_violation' remains mostly identical to the currently proposed
+version, with the addition of two new members:
+
+   string_view assert_role() const noexcept;
+   contract_violation_continuation_mode continuation_mode() const noexcept;
+
+The 'assert_role' will be a textual representation of the role that was
+specified in the CCS.  If a concrete semantic was specified, this should be
+an empty string.
+
+The 'continuation_mode' attribute of the 'contract_violation' object will be
+provided based on the concrete semantic of the CCS that triggered the
+violation.  For a particular CCS, this value can vary (at compile-time)
+based on the mode specified to the compiler.
+
+The level (and role) of the 'contract_violation' object will be based on the
+level (and role) of the CCS that triggered the violation -- irrespective of
+how those values were specified (or defaulted) -- or to "null" values, if
+the CCS was set to a specific (i.e., non-configurable) concrete semantic
+explicitly.
+
+
+2.1. Violation Handler Specification
+- - - - - - - - - - - - - - - - - -
+The requirements on a violation handler are very minimal.  The wording we have
+put in for the semantics controls how the contract checking statement is
+expected to flow when checking is enabled, but that is not done via direct
+assumptions on the violation handler behavior, or via introducing any undefined
+behavior if the violation handler does not behave in that way.
+
+Because the actual semantics are taken care of by the language itself, the
+primary responsibility of the violation handler in most situations is just to
+log and return.  The recommended default violation handler should do just that
+- ideally with a stack trace using the newly accepted stack trace facility and
+any other additional useful context that will help in diagnosing problems.
+
+
+2.2. Configuring the Violation Handler
+- - - - - - - - - - - - - - - - - - -
+The standard explicitly precludes allowing the violation handler from being
+dynamically settable at runtime.  It is expected that most compiler vendors
+will provide a way to link in a user-defined violation handler, and many of our
+workflows (testing, etc.) depend on that.  Compilers for more restricted
+(embedded or 'high security') platforms might choose not to allow this
+dimension of configurability, which is manifestly limiting in one's ability to
+readily test individual contract checks, but might be considered an acceptable
+(i.e., conforming) implementation nonetheless.
+
+2.3. Multiple Violation Handlers
+- - - - - - - - - - - - - - - -
+With the clarification of multiple runtime-checking semantics (and perhaps
+someday even roles), it might seem desirable to allow developers to supply
+multiple violation handlers that can be applied in different situations.
+Considering that some vendors have expressed a strong reluctance to support
+even one user-definable violation handler, incorporating an even more complex
+facility for violation handler specification into the language itself seems to
+have little chance of acceptance, nor does it provide any real concrete benefit.
+
+In situations where the violation handler is user-definable, and users want to
+have different behavior for different contracts, the 'contract_violation'
+object passed to the handler provides ample context (e.g., source location,
+semantic, level, role, expression) for a user-defined violation handler to
+dispatch to any number of different behaviors, based on which contract was
+violated.
+
+Nothing in the standard _precludes_ a user-defined violation handler from
+exposing an interface with arbitrarily dynamically "pluggable" behaviors.  For
+users who need that level of granular control, supplying a "dispatching"
+handler is the generally viable solution.
+
+
+2.4. Never-Returning Violation Handlers
+- - - - - - - - - - - - - - - - - - - -
+Many groups want to have a guarantee that a contract check that fails is never
+allowed to continue into undefined behavior.  One way to accomplish this is to
+provide a user-defined violation handler that wraps the normal violation
+handler and simply calls 'std::terminate' after invoking the 'real' handler.
+On any platform that supports user-specifiable violation handlers this
+"never-return" fiat should be simple to implement thereby satisfying this
+desire.
+
+A simpler solution is to configure any checking levels that should be checked
+to the 'check_never_continue" semantic (see section 3).  As part of a coding
+standard, the other semantics can be disallowed.  This leaves open the option
+for using those semantics for roles like %review (see section 4) while still
+preventing execution of undefined behavior on %default role contract checks.
+
+An alternate approach to ensuring that a program never continue normally after
+a failed contract-checking predicate is detected would be to support
+program-wide (link-time) build flag that unilaterally stops (via an explicit
+call to std::terminate after invocation) a returning contract-violation handler
+from actually returning.
+
+Although there is no ("logical") semantic need for such an overarching
+b(link-time) build flag, there are arguably practical ("physical") engineering
+reasons or having one. The strongest argument for such having such and
+overriding build option is that it doesn't require recompiling (or even having
+access to) all of the source to prevent continuation after a returning handler
+(without otherwise altering contract-checking semantics), nor does it require
+hunting through the source code to determine if any sub-handlers (called from
+a general-purpose "pluggable" handler) might return after being invoked.
+
+In other words, by re-linking with a single build-flag option enabled, a
+developer (or build manager) could ensure unilaterally that no runtime contract
+check ever returns after a false predicate is detected, independently of any
+other observable differences or compile-time optimizations. Mandating a build
+option that, if enabled, unconditionally calls (from a single location)
+'std::terminate' directly after the handler is invoked  would, however, involve
+new wording specific to build modes; alternatively we could easily just leave
+the provision of such a link-time "override" entirely for vendors to supply
+(or not) as part of their QoI.
+
+
+3. Concrete CCS Semantics
+-------------------------
+One of the critically important aspects missing from the original proposal was
+a precise statement of what kinds of behaviors are possible in a C++ runtime,
+and how we identify them.  After deep reflection, we've determined that there
+are exactly five (5) concrete behaviors that a Contract-Checking Statement
+(CCS) might have -- irrespective of how they come to be associated with it:
+
+                        Runtime    Assumed True   Assumed to continue
+                        Checked?   AFTER check?   after false predicate
+                        ========   ============   =====================
+  ignore                   NO          NO               YES
+
+  assume                   NO          YES        Undefined Behavior*
+
+  check_never_continue     YES         YES              NO
+
+  check_maybe_continue     YES         NO               NO
+
+  check_always_continue    YES         NO               YES
+
+  * The generated code may treat any situation where the condition is false
+    as though it was language (hard) undefined behavior (UB).
+
+A CCS having one of the three semantics that enable runtime checking will
+evaluate its predicate (at run time) and, if false, the violation handler will
+be invoked (with all relevant context pertinent to that CCS).  If (and to what
+extent) the flow of control is expected (by the compiler) to return after the
+handler is called will depend on which of the three runtime-checking semantics
+is employed.
+
+Examples in the five sub-sections that follow illustrate how a particular CCS
+
+    [[ assert <mode> : <expression> ]] ;
+
+might map to an existing C++ contract check within an arbitrary function.
+Comments detail what the compiler might (or might not) conclude in each
+section of the code.
+
+Places where the violation handler is invoked will be indicated using
+'__invoke_violation_handler(mode)'.  This function is assumed to be an
+intrinsic that, in turn, calls the violation handler with an
+'std::contract_violation' populated with the source location, information from
+the CCS, and the specified continuation 'mode'.
+
+
+3.1. The 'ignore' Semantic
+--------------------------
+Contract checks in this mode do nothing at runtime.  As with all modes, the
+expression must be syntactically valid, but no code will be generated, and no
+undefined behavior can be extrapolated from the existence of such a check.
+
+This mode might be explicitly specified directly in the CCS when someone is,
+say, adding a contract check that is intended to be activated at some future
+date (see section 0.4).  The syntax of the expression should be checked, but
+nothing whatsoever contributes to the behavior of the program.
+
+The following:
+
+   void f()
+   {
+     [[ assert ignore : <expression> ]] ;
+   }
+
+will be functionally equivalent to:
+
+   void f()
+   {
+     // No assumptions about the result of the expression can have an effect,
+     // but all the code after the check WILL be reached and the results of
+     // that fact may be applied.
+
+     (void)sizeof((<expression>)?true:false);
+
+     // The contract check has no impact on the code generated after the check.
+   }
+
+
+3.2. The 'assume' Semantic
+--------------------------
+Contract checks in this mode are not checked at runtime, but do act as a
+promise to the compiler that the contract-check predicate is true.  Such
+contract checks declare that any invocation of the check where the expression
+is false can be treated as language undefined behavior (a.k.a. hard UB).
+
+The expression is NOT expected to be evaluated.  Any assumptions that follow
+from the expression being true can be applied in any valid way by the compiler.
+
+This is the preferred mode when, say, a binding contract check has been
+demonstrated over time to have been satisfied, and it is now desired that the
+predicate be assumed to be true, and that fact be used as input to the
+optimizer to elide code and otherwise improve performance (see sections 0.1 and
+0.2).
+
+This is the one mode not currently implementable without direct support from
+the language.  Conceptually, the following:
+
+   void f()
+   {
+     [[ assert assume : <expression> ]] ;
+   }
+
+would be equivalent to:
+
+   void f()
+   {
+      // The compiler is allowed to assume that the expression will be true
+      // when the contract check is reached.
+
+      __intrinsic_assume_true_but_dont_evaluate( <expression> );
+
+      // The compiler is allowed to assume that the expression is true after
+      // the contract check.
+   }
+
+
+3.3. The 'check_never_continue' Semantic
+----------------------------------------
+Contract checks in this mode are checked at runtime, the violation handler will
+be invoked if the expression is false, and the compiler will assume that
+control flow does not continue after the check if the expression is false.
+
+This mode is the preferred mode for viable assertions -- they are checked and
+the rest of the function will not be executed when the expression is false
+(see section 0.1 and 0.2).
+
+One would use this mode when, say, a developer has established a binding
+contract and now wants to actively check (at runtime) that the contract is not
+violated, and if it is, address the violation without continuing.  As another
+specific example, this is the preferred mode during unit testing, or in
+risk-averse deployments where additional checks are deemed worth the additional
+computing expense.
+
+The following:
+
+   void f()
+   {
+     [[ assert check_never_continue: <expression> ]] ;
+   }
+
+would be equivalent to:
+
+   void f()
+   {
+     // The compiler cannot make assumptions about the truth of the expression.
+
+     if (!(<expression>)) {
+       __invoke_violation_handler(NEVER_CONTINUE);
+         // The handler is not expected to return control normally in this
+         // case.
+       std::terminate(); // Even if the handler returned, 'terminate' will
+                         // still be called.
+     }
+
+     // The compiler may naturally make the assumption that the expression is
+     // true here because this block is not reachable with the expression
+     // false.
+   }
+
+Note that in this mode, 'ignore' and 'assume' might all be part of the same
+lifecycle for a CCS in a production role.
+
+
+3.4. The 'check_maybe_continue' Semantic
+----------------------------------------
+Contract checks in this mode are checked at runtime, the violation handler will
+be invoked if the expression is false, and the compiler is not allowed to
+assume that control flow will continue past the check.
+
+This mode exists to allow the violation handler to decide (possibly at runtime)
+if control flow should continue or not.  This mode also explicitly prevents the
+elision of code before the contract check, as the compiler cannot assume that
+undefined behavior after the check is reachable from before the check.
+
+This is the preferred mode when, say, a developer wants to treat the assertion
+like a debug statement that prints and continues (even if continuing into
+related hard UB) when the predicate is false.  In other words, this mode
+doesn't allow the contract check itself to be elided when the compiler could
+otherwise deduce that the program will encounter UB later in the function
+(see section 0.5).
+
+The following:
+
+   void f()
+   {
+     [[ assert check_maybe_continue: <expression> ]] ;
+   }
+
+would be equivalent to:
+
+   void f()
+   {
+      // The compiler cannot make assumptions about the truth of the expression
+      // OR about reachability of the code after the contract check.
+
+      if (!(<expression>)) {
+        __invoke_violation_handler(MAYBE_CONTINUE);
+            // In this mode the handler is allowed to decide arbitrarily if it
+            // is going to return or not.
+        if (__access_unknowable_volatile_bool()) std::terminate();
+            // The compiler must act as though continuation past this
+            // invocation is not guaranteed, even in cases where the handler is
+            // completely known and does continue.
+      }
+
+      // The compiler may make no assumptions about the truth of the
+      // expression.
+   }
+
+Considering the example from 'check_always_continue' again, but now in
+'check_maybe_continue' mode:
+
+  int a[10];
+  void f(int i)
+  {
+    [[ assert check_maybe_continue: 0 <= i && i < 10 ]] ;
+    a[i] = 7;
+  }
+
+Now the compiler can no longer assume that the undefined behavior after the
+check will be reached if the condition is false, so the check is no longer
+eligible for elision, and the violation handler will always be called if the
+corresponding contract check is violated.
+
+
+3.5. The 'check_always_continue' Semantic
+-----------------------------------------
+Contract checks in this mode are checked at runtime and the violation handler
+will be invoked if the expression is false, but the compiler is allowed to
+assume that control flow will *always* continue beyond the check.
+
+The intent of this mode is to provide the ability to insert a contract check
+that does not alter the code generated or meaning of the compiled function in
+any way.  Assumptions the compiler can make based on the code after the check
+can be applied to code before the check exactly as if the check were not there.
+
+This is the preferred mode when, say, a developer is first attempting to
+instrument production code -- typically in anticipation of eventually making
+the check a binding one, i.e., one that will never continue normally when the
+predicate is false (see section 0.3).
+
+The following:
+
+   void f()
+   {
+     [[ assert check_always_continue: <expression> ]] ;
+   }
+
+would be equivalent to:
+
+   void f()
+   {
+     // The compiler cannot make assumptions based on the truth or falsehood of
+     // the expression.
+
+     // The compiler CAN assume that control flow will continue past the
+     // contract check, and so any undefined behavior that will be reached can
+     // be leveraged to alter code generated before the expression.
+
+     if (!(<expression>)) {
+       __invoke_violation_handler(ALWAYS_CONTINUE); // In this mode the handler
+                                                    // is expected to ALWAYS
+                                                    // return.
+     }
+
+     // The compiler cannot make assumptions based on the truth or falsehood of
+     // the expression.
+
+     // Reachable undefined behavior here might impact code generated prior to
+     // the contract check.
+   }
+
+Note the importance of the compiler being able to assume control flow always
+continues past the contract check: It is this assumption that allows the
+compiler to do any optimizations that it would have been able to do prior to
+the addition of the contract check.  Any undefined behavior reached after the
+check is also freely able to impact and elide the check itself.  Consider the
+following example:
+
+  int a[10];
+  void f(int i)
+  {
+    [[ assert check_always_continue: 0 <= i && i < 10 ]] ;
+    a[i] = 7;
+  }
+
+In all cases where the condition is false the assignment after the check
+would result in undefined behavior, so in this case the compiler is free to
+elide the check and consequently the calling of the violation handler itself!
+
+
+4. Standard Roles and Default Semantics for Configurable Categories
+===================================================================
+There are six configurable categories with differing intended use cases and
+suggested default values.  The default values might, for example, depend on
+the level of optimization specified to the compiler.  Nothing precludes other
+user or compiler choices from altering these defaults (i.e., a "safe" compiler
+might enable all checking unless explicitly turned off; or when the
+implementation of this proposal is still being developed, the defaults might
+be ignored unless users explicitly opt-in).
+
+
+
+                                <------ Default Behavior ----->
+                                   Most     Normally     Not
+            Role      Level     Optimized  Optimized  Optimized
+           ========   =======   =========  =========  =========
+           %default   default   ignore     never      never
+           %default   audit     ignore     ignore     never
+           $default   axiom     assume     ignore     ignore
+
+           %review    default   ignore     always     maybe
+           %review    audit     ignore     ignore     maybe
+           %review    axiom     ignore     ignore     ignore
+
+                      never  = check_never_continue
+                      maybe  = check_maybe_continue
+                      always = check_always_continue
+
+Build flags should be provided to the compiler that set each of these 6 modes
+to a specific concrete behavior.  Restrictions on what these can be set to are
+described in the following sections.  Any violation of those restrictions makes
+a program ill-formed, diagnostic required.
+
+IMPORTANT: Any explicitly set build flag must take final priority over any
+implementation-defined defaults, regardless of any other options
+(optimization, etc.) provided to the compiler.
+
+For an alternative perspective suggesting standard, as opposed to
+implementation-defined, defaults for standard roles -- the 'default' role in
+particular -- see section 5.3.4.
+
+
+4.1. Contract-Checking Levels
+-----------------------------
+Each of the available contract-checking levels has unique expectations on what
+concrete semantics they can be configured to have, including some restrictions
+on how they can be configured with respect to each other.
+
+
+4.1.1. The 'default' Contract-Checking Level
+--------------------------------------------
+The 'default' level for any given role should be configurable for any of the
+five concrete contract-checking-statement (CCS) semantics.
+
+
+4.1.2. The 'audit' Contract-Checking Level
+------------------------------------------
+The 'audit' level for a role should be configurable to any of the five
+concrete semantics delineated in section 3.
+
+The open question is if there should be restrictions on those semantics --
+particularly in relation to the chosen semantic for the corresponding 'default'
+contract-checking level in the same role.
+
+One extreme would be to place no restrictions on the semantics that may be
+associated with any level category and, thereby, allow maximal flexibility
+(and also potentially surprising interactions among levels) to be entirely in
+the hands of the programmers.
+
+Another extreme would be to place draconian restrictions, such as insisting
+that audit-level runtime checks in a given role (when enabled) must be the
+identical concrete semantic (i.e., including continuation mode) as the
+'default'.  The idea being to ensure the reasonable presumption that
+'audit'-level checks are always (semantically) purely additive to
+'default'-level ones.  Such blind austerity would, however, preclude
+arguably important real-world use cases, such such as the ability to review
+'audit' level checks (e.g., using the 'check_always_continue' semantic) while
+enforcing 'default'-level ones (e.g., using the 'check_never_continue'
+semantic), or perhaps even assuming them (e.g., using the 'assume' semantic).
+
+If we provide restrictions, we think there are a number of pairs of chosen
+semantics that should always be allowed, and these restrictions should not
+preclude those pairs.  In future standards additional pairs can be allowed
+(or in "compiler extensions") with no loss, but allowing pairs now that turn
+out to be universally problematic cannot be as easily undone later.
+
+The moderately conservative approach (recommended) would be to restrict those
+possible pairs of semantics to allow people to reason better about the
+contract-checking statements (CCSs) that they write, and possibly also reduce
+the need for redundant checks to keep distinct checks at different levels
+orthogonal to one another.
+
+The guiding principles governing what we will propose as the allowable
+('default', 'audit') semantic pairs are described and motivated in the
+following three sections.  We will then conclude with a summary of the
+semantic configurations that we feel need to be permissible (initially) for
+any given role.
+
+
+4.1.2.1. 'audit' may always be 'ignore'.
+----------------------------------------
+The simplest rule is that audit checks or any resulting optimizations from
+those checks can always be opted out of:
+
+             'default'  <-----------'audit' mode--------->
+               mode     ignore assume never  maybe  always
+             ========   ------ ------ -----  -----  ------
+             ignore       OK
+             assume       OK
+             never        OK
+             maybe        OK
+             always       OK
+
+There are, however, combinations of 'default'-level and 'audit'-level semantics
+that could easily prove problematic in practice.  Suppose, for a moment, that
+there were relative restrictions.  As a concrete example, let's consider two
+consecutive CCSs -- the first at the 'default' contract-checking level, and
+the second at the 'audit' level (as ever, ordering is relevant):
+
+   [[ assert : ptr != nullptr ]] ;                               // *#1*
+   [[ assert audit : ptr->some_runtime_intensive_check() ]] ;    // *#2*
+
+If CCS *#1* were mapped (by setting the 'default' level) to the 'ignore'
+semantic then it would effectively disappear and CCS *#2* would be evaluated
+in isolation.  Now, unless CCS *#2* is also mapped to 'ignore' (by setting the
+'audit' level), the compiler would be free to legitimately infer that 'ptr'
+can never be null, which would entitle it to unceremoniously elide any code on
+a direct path to CCS *#2* if it could deduce (at compile time) that 'ptr' would
+be 0!
+
+In other words, while it might be a reasonable presumption that 'audit'-level
+checks may always depend on 'default'-level checks to somehow be usefully
+enabled, the reverse presumption (that 'default'-level checks can rely on
+'audit'-level ones) is certainly not reasonable.
+
+
+4.1.2.2. 'default' and 'audit' can always be set to the same semantic.
+----------------------------------------------------------------------
+In terms of reasoning about behaviors, if all checks at both levels have the
+same semantic then the unexpected undefined behaviors that might result
+when different semantics are present are significantly reduced, though not
+eliminated entirely.
+
+             'default'  <-----------'audit' mode--------->
+               mode     ignore assume never  maybe  always
+             ========   ------ ------ -----  -----  ------
+             ignore      OK
+             assume             OK
+             never                     OK
+             maybe                            OK
+             always                                  OK
+
+
+Again, the idea is that 'audit' is purely additive to 'default' (and we
+would expect no 'default'-level CCSs to depend on 'audit'-level CCSs).
+For consecutive CCSs, we would expect good style to dictate that all
+'default'-level CCSs precede all 'audit'-level CCSs in that sequence.
+
+
+4.1.2.3. If 'default' never continues on violation, 'audit' can be anything.
+----------------------------------------------------------------------------
+The need for having at least some restrictions on 'audit'-level semantics
+relative to a given role's 'default'-level one derives from a reasonable
+developer's presumption that whenever 'audit'-level checks are enabled for
+runtime checking and any of the CCSs at the 'audit' level depend on
+any others at the 'default'-level, the 'default'-level semantic will be
+sufficiently active to ensure that either its condition is true or the flow
+of control will never reach the 'audit'-level check.
+
+Let's consider again the two consecutive CCSs at differing contract-checking
+levels from section 4.1.2.1.:
+
+   [[ assert : ptr != nullptr ]] ;                               // *#1*
+   [[ assert audit : ptr->some_runtime_intensive_check() ]] ;    // *#2*
+
+If CCS *#1* were mapped (by setting the 'default' level) to the
+'check_always_continue' semantic then it would again effectively disappear
+and CCS *#2* would again be evaluated in effective isolation.  And, unless
+CCS *#2* is itself mapped to 'ignore', the compiler would again be free to
+elide any code on a direct path to CCS *#2* for which it could determine
+at compile time that 'ptr' would be 0!
+
+The library author would like to make sure that the second CCS does not become
+undefined behavior just by virtue of being set to something other than
+'ignore'.  If the 'default'-level checks could somehow be guaranteed never to
+continue when violated then 'audit'-level checks could be reasoned about more
+freely, and thus could be (reasonably) safely set to any desired
+contract-checking level.
+
+The good news is that, by setting the 'default'-level semantic
+'check_never_continue' (or if the level could legitimately be set to
+'assume'), 'audit'-level checks could be written in a context where they know
+the 'default'-level checks will have run first, and also implicitly makes sure
+that the 'default'-level CCSs do not get magically elided depending on how
+the 'audit'-level CCSs are configured:
+
+             'default'  <-----------'audit' mode--------->
+               mode     ignore assume never  maybe  always
+             ========   ------ ------ -----  -----  ------
+             ignore
+             assume      OK     OK     OK     OK     OK
+             never       OK     OK     OK     OK     OK
+             maybe
+             always
+
+
+By consistently putting the 'audit' checks after the 'default' checks, the
+library author can make use of them as assumptions when writing those checks,
+and leave the choice of their actual semantic up to the library client with
+less risk of unintentionally breaking them.
+
+The primary use-case motivating mixed-semantic roles like this one is to
+enable the 'default'='never', 'audit'='always' configuration.  This pair of
+semantics allows a developer to take a library that they know has working
+'default'-level checks and "carefully" turn on the 'audit'-level checks just
+for validating and logging without risking aborting if those checks are being
+violated (with currently "benign" effects).  This use-case is a very similar
+workflow to the one related to the '%review' role, but it allows a client to
+review checks in libraries that they don't own without needing to alter
+the source code of those libraries.
+
+4.1.2.4. Final Unified Allowable Levels for 'audit'
+---------------------------------------------------
+Given the three guiding principles elucidated in the preceding three
+subsections, we believe that if the valid configurations are to be restricted
+they should at least contain the union of what has previously been justified:
+
+             'default'  <-----------'audit' mode--------->
+               mode     ignore assume never  maybe  always
+             ========   ------ ------ -----  -----  ------
+             ignore      OK
+             assume      OK     OK     OK     OK     OK
+             never       OK     OK     OK     OK     OK
+             maybe       OK                   OK
+             always      OK                          OK
+
+
+4.1.3. The 'axiom' Contract-Checking Level
+------------------------------------------
+The 'axiom' level for a given role should never be configurable to be runtime
+checkable, because it is explicitly NOT malformed for an 'axiom' to use
+functions that are declared but not defined (and possibly are not definable).
+
+For example, a compiler could provide an intrinsic function called
+'__is_not_deleted' that it cannot implement, but recognizes and exploits it
+when used in an 'axiom':
+
+  void f()
+  {
+    int *p = new int(17);
+    delete p;
+
+    [[ assert axiom : __is_not_deleted(p) ]] ;
+  }
+
+In the example given above, the compiler could issue a diagnostic if the
+contract-checking statement is enabled.  (What specific intrinsics might be
+provided and how they get interpreted is left to compiler vendors.)
+
+Note that it is possible to consider a relationship between 'axiom' and 'audit'
+that is somewhat similar to that between 'audit' and 'default', but in
+effective uses 'axiom' is a sufficiently different tool that we think the
+choice to enable or disable axioms should be independent of the configuration
+of the other levels.
+
+
+4.2. Configurability of Roles
+-----------------------------
+There are no inherent restrictions on what behaviors are assigned to
+configurable modes across different roles.  Different deployments might
+require any combination of independently enabling or disabling the
+contract-checking statements (CCSs) in different roles:
+
+  1. When testing, it is ideal to configure both '%default' and '%review' to
+     'check_never_continue' with a throwing violation handler.
+
+  2. For "optimized" production builds, it is suggested to put the '%default'
+     checks at 'assume' while either setting the '%review' checks to
+     either 'ignore' (to disable them) or 'check_always_continue' (to allow
+     them to "log" violations).
+
+  3. For cases where '%review' checks have been added in a questionable
+     state, it might be prudent to set the '%review' checks to 'ignore'
+     while setting the '%default' checks to 'check_never_continue'.
+
+
+4.3. Configuration Options
+--------------------------
+The following 6 configuration options and their possible values should be
+available to be specified to the compiler:
+
+'contract_mode_default' -> ("ignore", "assume", "check_never_continue",
+                             "check_maybe_continue", "check_always_continue" )
+'contract_mode_audit' -> ("ignore", "assume", "check_never_continue",
+                             "check_maybe_continue", "check_always_continue" )
+'contract_mode_axiom' -> ("ignore", "assume" )
+
+'contract_mode_default_review' -> ("ignore", "assume", "check_never_continue",
+                                   "check_maybe_continue",
+                                   "check_always_continue" )
+'contract_mode_audit_review' -> ("ignore", "assume", "check_never_continue",
+                                "check_maybe_continue",
+                                "check_always_continue")
+'contract_mode_axiom_review' -> ("ignore", "assume" )
+
+Any specification of options that violates sections 4.1.-4.3. is to be
+considered ill-formed, diagnostic required.
+
+
+5. Notes and Further Discussion
+===============================
+This section includes assorted notes and topics for discussion.
+
+
+5.1. Compile-Time Evaluation
+----------------------------
+When predicate expressions are evaluated at compile time, all build-mode flags
+apply normally.  Any compile-time evaluation that would result in calling the
+violation handler if the expression were evaluated at runtime is ill-formed
+(and should be diagnosed as a compilation error).
+
+
+5.2. Relationship to Existing Papers
+------------------------------------
+There are a number of papers currently being proposed to WG21 related to
+contracts in C++.
+
+
+5.2.1. Support for Contract-Based Programming in C++ [P0542R5]
+--------------------------------------------------------------
+The original proposal, P0542R5, is available at:
+
+   http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p0542r5.html
+
+The majority of that document remains uncontested and forms the foundation of
+this supplementary proposal.  In particular, deciding on where exactly
+contract-checking statements (CCS) fit into the language as a whole we
+consider to be finally and conclusively settled.
+
+
+5.2.1.1. Unchanged Parts from P0542R5
+-------------------------------------
+Sections 2 and 3 of P0542R5 contain the bulk of the discussion of the features
+and motivation that will remain largely unchanged in our final proposal with
+the following notes:
+
+P0542R5.2.1. A new attributes syntax
+The motivation remains the same, but we have provided significant changes to
+the available syntax.
+
+P0542R5.2.2. Functions versus function types
+P0542R5.2.3. Contracts repetition
+P0542R5.2.4. Structured bindings and postconditions
+P0542R5.2.5. Information of contract_violation
+P0542R5.2.6. Name lookup of contracts
+P0542R5.2.7. Identical contracts
+Unchanged.
+
+P0542R5.2.8. Throwing violation handler
+Handlers may always choose to throw, though it is suggested that they throw
+only when invoked in the 'NEVER_CONTINUE' continuation mode.  The handler
+invocation process itself is not treated as 'noexcept'.
+
+P0542R5.2.9 Additional information in contract violation
+In addition to 'assert_level' added by P0542R5, we will add 'assert_role' and
+'continuation_mode' accessors to this value type.
+
+P0542R5.2.10. Invoking the handler
+Unchanged.
+
+P0542R5.2.11. Initialization of contract_violation objects
+Unchanged, with the exception of the new 'assert_role()' and
+'continuation_mode()' members proposed in section 2.
+
+P0542R5.2.12. Side effects in contracts
+P0542R5.2.13. Location of a violation
+P0542R5.3. Questions about contracts programming
+Unchanged.
+
+Section 3 of P0542R5 enumerates standard wording changes.  Much of this will
+also remain unchanged, with the removal of 'continuation mode' and the
+addition of the other changes proposed in this document.
+
+
+5.2.1.2. Comparison of Concrete Semantics to Features of P0542R5
+----------------------------------------------------------------
+The semantics we have proposed do mostly exist as possibilities within the
+existing proposal, though they are mutually exclusive within a single program.
+
+  'ignore' is unavailable, but is mostly the same as just commenting out the
+  contract check or manually putting it in an unevaluated context.
+
+  'assume' is the effect that contract checks have in the current proposal
+  whenever they are not enabled.
+
+  'check_maybe_continue' is the effect in the 'default' build mode with
+  'continuation mode' on.
+
+  'check_never_continue' is the effect in the 'default' build mode with the
+  'continuation mode' off.
+
+  'check_always_continue' does not have an analogous behavior in any of the
+  current proposals, although many people get confused and interpret some
+  build modes as having this behavior.
+
+Being able to (1) configure the categories independently, (2) choose 'ignore'
+instead of always getting the 'assume' behavior, and (3) explicitly state the
+semantics instead of the configurable levels is the major substance of this
+proposal.  Naming the levels allows reasoning about them, something that we
+have seen a great deal of confusion about in the voluminous prior public
+discourse on this subject.
+
+
+5.2.2. UB in Contract Violations [P1321R0]
+------------------------------------------
+The points discussed in this paper -- regarding undefined behavior introduced
+by contract-checking statements and the impacts it can have on other code and
+other statements -- are a large reason for the existence of this proposal.
+
+By splitting apart the semantics clearly, and stating them clearly in terms
+of how they relate to code that could (mostly) be written today, we believe the
+impact of undefined behavior both in contract-checking statements and
+surrounding code will be significantly easier to reason about and no new
+language constructs will be needed to deal with them.
+
+
+5.2.3. Allowing Contract Predicates on Non-First Declarations [P1320R0]
+-----------------------------------------------------------------------
+This proposal strongly recognizes that contract-checking statements (CCSs) are
+not the actual contract of a function, but rather an implementation detail of
+the function.
+
+
+5.2.4. Access Control in Contract-Checking Conditions [P1289R0]
+---------------------------------------------------------------
+This proposal strongly recognizes that contract-checking statements (CCSs) are
+not the actual contract of a function, but rather an implementation detail of
+the function.  Note that we advocate adoption of this paper, but ONLY if
+[P1320R] (see section 5.3.2) is as well.
+
+
+5.2.5. Contract Postconditions and Return-Type Deduction [P1323R0]
+------------------------------------------------------------------
+The points in [P1323R0] (regarding 'ensures' statements on functions with
+deduced return types) are orthogonal to any of the changes proposed in this
+paper and should be discussed independently.
+
+Note that this paper intersects with P1320R0, and the general understanding
+that a contract-checking statement (CCS) is an implementation detail of the
+function and not purely interface.  The treatment of a postcondition
+as a "template-like" statement that gets parsed at function definition time
+seems like an acceptable solution with no new limitations imposed on
+developers.
+
+
+5.2.6. Contract Assertions as an Alternate Spelling of 'restrict' [P1296R0]
+---------------------------------------------------------------------------
+The example function proposed in P1296R0, 'disjoint', is exactly the type
+of function compilers should understand and make use of when they are seen
+in an enabled contract-checking statement (CCS).  We agree that standardizing
+such a function would be useful, and that it would have the desired effects
+when used along with contract checks as they are proposed here (to provide a
+useful substitute for 'restrict' or '__restrict__').
+
+
+5.3. Roles
+----------
+Roles have been presented so far as an integral part of our proposal.  There
+are a number of variations that could be chosen for them, including NOT
+INCLUDING THEM AT ALL, which we will now discuss.
+
+
+5.3.1. Do We Need to Support Roles in C++20?
+--------------------------------------------
+Roles (i.e., their respective contract-checking-level behavior *categories*)
+map a given CCS to a developer-intended purpose.  Roles are a highly
+useful and relatively optional abstraction.  If not added with the rest of
+this proposal, roles could be emulated through the use of macros that map to
+the concrete semantics.
+
+Removing both the ability to specify the concrete behavioral semantics
+along with that of a role will significantly limit the ability to build
+additional abstractions for alternate workflows on top of this proposal.
+
+Should roles not be included in C++20, we believe that we will be able to get
+more implementation experience with them (we are already implementing them
+ourselves) and that it will be relatively easy to add them in as an extension
+in C++23 (or whatever the next standard might be).
+
+
+5.3.2. (Future?) Additional Standard ("Built-In") Roles
+-------------------------------------------------------
+Additional standard roles might be useful for some use-cases.  Some have
+suggested a desire for making a '%production' role explicit, so that by default
+a contract-checking statement isn't assumed to be production-ready until it is
+explicitly marked as such.  Given the functionality provided by the semantics,
+a role called '%debug' that usefully logs (at the 'check_maybe_continue'
+level), but is otherwise turned off, would be helpful to make 'printf'-style
+debugging easier (and less liable to be optimized away).
+
+We can easily imagine an initial proposal having exactly four standard roles:
+
+                              DEFAULT SEMANTICS
+    Standard           <--assertion-checking levels-->
+      Role             default       audit       axiom
+    --------           -------       -----       ------
+    %default           never         never       assume
+    %review            always        always      ignore
+    %production        assume        assume      assume
+    %debug             maybe         maybe       ignore
+
+
+5.3.3. (Future!) Support for User-Extensible ("Dynamic") Roles
+--------------------------------------------------------------
+We have proposed in this paper a simpler form of roles -- namely, only 2
+distinct roles, '%default' and '%review'.  Some have brought up a desire to
+allow developers to specify arbitrary roles -- for arbitrary purposes and needs
+beyond the scope we have considered.
+
+To support these, we would propose allowing scoped identifiers after the '%'
+that marks the role, where libraries, compiler vendors, or application
+developers may define the defaults for their roles and what roles are
+available.  There would need to be some discussion of what happens when
+the defaults for a user-defined role are not specified.
+
+In the simplest case, a user-defined role might initially be limited to
+just a single C-style identifier (perhaps surrounded by single quotes, to
+avoid misspellings of standard roles).
+
+As a more elaborate suggestion, a '<role>' becomes:
+
+  <role> := '%' ( 'review' | 'default' | <namespace> '::' <identifier> )
+
+We suggest not allowing for nested namespaces to enable defining how nested
+namespaces might be used in the future to specify a hierarchy.  A program that
+references roles that have no defined configuration in the given build mode
+should be considered ill-formed, diagnostic required.
+
+The use case of a client that wants to use multiple libraries with different
+semantics given to the contract checks in those libraries (perhaps due to the
+level of maturity of the code in those libraries) can then be satisfied by
+following a standard whereby each library defines its own contract-checking
+roles so that clients can toggle them independently.  (This use case can be
+supported by allowing for mixed builds as well, and there are upsides and
+downsides to both approaches.)
+
+
+5.3.4. Do we want standard or implementation-defined category defaults?
+-----------------------------------------------------------------------
+There is desire by some to make the default semantics for each standard
+category be completely standardized when not explicitly overridden.
+
+While there is always benefit in getting more standard behavior across
+platforms, the real question comes down to what should be the default behavior
+between letting the compiler assume that a runtime check, say, at the 'audit'
+level, can be *assumed* if the optimization level is made sufficiently high.
+Some feel that this would be irresponsible (or at least a bad idea) and not at
+all consistent with prior art: There is no optimization level where the
+compiler supplies, for example, an 'NDEBUG', let alone assumes that the
+predicate of a 'cassert' is true.
+
+The downside of such standardization is that it would limit the additional
+performance benefits that a compiler might provide in pre-selecting preferred
+semantics based on other choices the user has provided.  Developers are
+already used to choosing a compiler and specifying optimization levels, and a
+large amount of what type of behavior they might prefer can be inferred from
+those preferences.  Anyone who educates themselves on this feature will be
+able to make an informed choice.  (Opinions among the authors are mixed.)
+
+The most important question becomes, if you don't know anything at all, what
+should be the default semantics for the default contract-checking level in
+the default role?
+
+Is it:
+
+  A. { default = 'check_never_continue', audit = 'assume', axiom = 'assume' }
+
+or:
+
+  B. { default = 'check_never_continue', audit = 'ignore', axiom = 'assume' }
+
+Do we "audit = assume" or "audit = ignore"? ... that is the question!
+
+
+5.4. Bikeshedding
+-----------------
+To be consistent throughout this paper we have made some syntactic decisions
+up front that we believe some might find disagreeable on the assumption that,
+for any subjective decision, a subset of the community will find it
+distasteful.  These choices are all still clearly up for discussion, and
+whatever the committee decides has the most appeal would be entirely
+acceptable to us.
+
+
+5.4.1. Do we really need '%' to identify roles?
+-----------------------------------------------
+The percent token disambiguates roles from any future extensions of contract
+checks.  It is hideous and arguably not needed (but does serve as a visual
+queue and facilitates adding arbitrary standard roles in the future).
+Alternatives or suggestions to remove it are welcome.  We included it in this
+proposal primarily as a placeholder, awaiting another, better alternative.
+(Opinions among the authors are mixed.)
+
+
+5.4.2. Are we really OK having a "naked" 'return'-identifier for 'ensures'?
+---------------------------------------------------------------------------
+By expanding the contents of contract attributes to include potentially more
+information than previous proposals, the potential ambiguity of the return
+value identifier on an 'ensures' contract is greatly increased, and not calling
+that identifier out with additional syntax limits current and future
+extensibility of the syntax.  The syntax change we would propose for this would
+be to alter '<identifier>' to be:
+
+   <return_identifier> := '=' <identifier>
+
+This would require an explicit '=' in the postcondition, e.g.:
+
+   [[ ensures = r : r > 0 ]] ;
+
+Other suggestions for alternate syntax are welcome -- perhaps '->' or 'auto' --
+but allowing arbitrary identifiers with no delineation means that extending the
+valid identifiers for the mode (especially without the '%') in the future
+becomes highly limited.  (Opinions among the authors are mixed.)
+
+
+5.4.3. How do we feel about default category names: 'default' & '%default'?
+---------------------------------------------------------------------------
+In light of the expansion of behavior, the default level for contracts being
+named 'default' is confusing for discussion, as there are other values with
+defaults that might be involved in the same discussion.  Names like 'normal',
+'standard', or 'std' all seem acceptable.  What in particular to switch to can
+be decided by committee and has no fundamental impact on the rest of the
+discussion (this will still be the level that is assumed when no level is
+explicitly stated for a configurable behavior).
+
+Similar to the level, the default role being identified as just 'default' makes
+it difficult to discuss and carries no useful meaning.  Other names that have
+been suggested are 'production', 'normal', and 'standard'.  Considering that,
+in general, what will live the longest in any piece of code are the statements
+that are released to production, it seems to make sense to make those
+statements as uncluttered as possible, and so make the default role be
+'%production'.
+
+The counterargument is that these names will likely rarely if ever be used in
+practice, as defaulting them is shorter and easier.  The only reason to put
+them in explicitly is to make clear that the decision to use them was
+deliberate, and not an oversight.  (Opinions among the authors are mixed.)

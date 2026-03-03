@@ -1,0 +1,189 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"
+        "http://www.w3.org/TR/html4/loose.dtd">
+<html>
+<head>
+	<title>UB in contract violations</title>
+
+	<style>
+	p {text-align:justify}
+	li {text-align:justify}
+	blockquote.note
+	{
+		background-color:#E0E0E0;
+		padding-left: 15px;
+		padding-right: 15px;
+		padding-top: 1px;
+		padding-bottom: 1px;
+	}
+	ins {color:#00A000}
+	del {color:#A00000}
+	</style>
+</head>
+<body>
+
+<address align=right>
+Document number: P1321R0
+<br/>
+Audience: EWG, SG12
+<br/>
+<br/>
+<a href="mailto:ville.voutilainen@gmail.com">Ville Voutilainen</a><br/>
+2018-10-07<br/>
+</address>
+<hr/>
+<h1 align=center>UB in contract violations</h1>
+
+<h2>Abstract</h2>
+<p>
+[dcl.attr.contract.check]/4:
+<pre><blockquote>During constant expression evaluation (7.7), only predicates of
+checked contracts are evaluated. In other
+contexts, it is unspecified whether the predicate for a contract that
+is not checked under the current build
+level is evaluated; if the predicate of such a contract would evaluate
+to false, the behavior is undefined.
+</blockquote>
+</pre>
+</p>
+<p>
+  This seems like an open hunting license for optimization: A compiler
+  can probably assume that a predicate evaluates to true and optimize
+  based on that.
+  Perhaps even worse, a compiler can sometimes see that a predicate evaluates
+  to false (but is not evaluated in the current checking mode), and do anything.
+</p>
+
+<h2>Really?</h2>
+
+<p>
+  Well, this is courtesy of Peter Dimov:
+</p>
+<p>
+  <a href="https://godbolt.org/g/7TP7Mt">https://godbolt.org/g/7TP7Mt</a>
+</p>
+<p>Peter further explains:
+<pre><blockquote><code>test():
+  sub rsp, 8
+  call rand
+  mov esi, 2
+  mov edi, OFFSET FLAT:.LC0
+  xor eax, eax
+  call printf
+.L22:
+  call bar()
+  add rsp, 8
+  ret
+</code></blockquote></pre>
+Since the not-checked [[expects audit: x==2]] is assumed to pass, x is
+replaced with the constant 2 and all other checks are optimized out.
+</p>
+<p>Peter continues:</p>
+If you make `f`
+<pre><blockquote><code>void f(int x) [[expects audit: x>=1 && x<=2]]
+</code></blockquote></pre>
+and add `extern` to `a` in `g`
+
+<pre><blockquote><code>void g(int x) [[expects: x>=0 && x<3]]
+    {
+        extern int a[3];
+        a[x] = 42;
+    }
+</code></blockquote></pre>
+your (Herb's) point becomes clearer, as now `test` does write 42 to a random
+location:
+</p>
+<p>
+  <a href="https://godbolt.org/g/SfKWPu-2">https://godbolt.org/g/SfKWPu-2</a>
+</p>
+
+<p>
+  The background of that exploration is this write-up by Herb:
+</p>
+<p>
+  Since we now agree about my multi-level contract example this
+  morning about UB when only some contracts are enabled… carefully
+  coming back to my earlier example, which I agree did not allow
+  magic before, but now changing the first precondition to "audit" or "axiom":
+<pre><blockquote><code>// same as before, except now "XXX" contract level on f, see bullets below
+
+void f(int x) [[expects XXX: x==2]] { ... }
+
+void g(int x) [[expects: x>=0 && x<3]] { int a[3]; a[x] = 42; }
+
+void h(int x) [[expects: x>=1 && x<=3]] { switch(x) { case 1: foo(); case 2: bar(); case 3: baz(); } }
+</code></blockquote></pre>
+And we run them in series approximately like this:
+<pre><blockquote><code>int val = std::rand();
+
+try { f(val); /*...*/ } catch(...) { /*...*/ }
+
+try { g(val); /*...*/ } catch(...) { /*...*/ }
+
+try { h(val); /*...*/ } catch(...) { /*...*/ }
+</code></blockquote></pre>
+then if either of these two cases is true:
+
+<ul>
+  <li>if "XXX" is "audit", and the test harness enables "default" checks; or</li>
+  <li>if "XXX" is "axiom", and the test harness enables both "default" and "audit" checks (== "maximum checks" because I keep being assured that axioms are intended never to be checked);</li>
+</ul>
+then do we agree this allows all the magic and UB I enumerated before (wild write + wild branch), including that as before the two "enabled" checks on g and h can be elided and not fire?
+</p>
+
+<h2>Is this a problem?</h2>
+
+<p>
+  First of all, I'm not sure. Second, I don't know what we intend
+  with the UB in the specification of a contract check that is not
+  evaluated in the current checking mode but might be evaluated
+  anyway. What concerns me is that if Peter's contracts emulation
+  does what an actual contract implementation would do, I need
+  to be very VERY careful about never EVER writing a contract
+  that would evaluate to false unless I'm sure that it would evaluate
+  to false only in the current checking mode, and I also need to be
+  very careful about writing contracts that would evaluate to true
+  in any other mode than the current checking mode, because I wouldn't
+  want the non-current-mode contracts end up optimizing away
+  my contracts for the current-mode contracts I have. I'm not sure
+  whether those are the only things I need to be careful about.
+</p>
+<p>
+  I'm not sure I know how to be so careful, especially when I'm not sure
+  what I need to be careful about.
+</p>
+<p>
+  In an email discussion about this, here's what I wrote:
+</p>
+<p>
+  "It boils down to this: an unchecked predicate that evaluates to
+  false is UB, if the compiler decides to lay down code that evaluates
+  that
+  predicate in the mode that wouldn't otherwise evaluate it. So
+  combinations of different checking levels on the same function
+  or even the same translation unit (or in the same program, even) can
+  trigger magical powers. Using just one level of checking can do that
+  too without any problems; put just audit-level contracts into your
+  program, run in default mode. You can go boom, boom, *BOOM*."
+</p>
+
+<h2>If it is a problem, what should we do?</h2>
+
+<p>
+  Well, I would entertain some ideas:
+  <ol>
+    <li>I want to be able to expect (no pun intended) that
+      when I write a contract predicate, its evaluation
+      has no effect on the evaluation of other contracts predicates,
+      whether any of those predicates are evaluated or not.</li>
+    <li>I want to be able to expect that when I write a contract predicate
+      that is evaluated in some standard checking mode, its evaluation
+      doesn't cause UB in any standard checking mode just because
+      it ends up evaluating to false, and that its
+      evaluation doesn't affect the evaluation of other contract predicates.
+    </li>
+  </ol>
+</p>
+
+</body>
+
+</html>

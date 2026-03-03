@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+<title>unique_val</title>
+<meta name="description" content="Modern C++ typically requires writing RAII non-copyable classes at some point or another. In most cases, the class has to wrap a value of some kind (e.g. a pointer, handle, ID, descriptor...) that is meant to be unique and, therefore, needs to default to some value on move. The standard `unique_ptr` class template is the prime example of such a class. This proposal adds a `unique_val` class template to model unique, non-copyable, movable values, simplifying the writing of RAII classes by leveraging the Rule of Zero.">
+<meta name="author" content="Miguel Ojeda">
+<meta property="og:url" content="https://ojeda.io/cpp/unique_val">
+<meta property="og:type" content="website">
+<meta property="og:title" content="unique_val">
+<meta property="og:description" content="Modern C++ typically requires writing RAII non-copyable classes at some point or another. In most cases, the class has to wrap a value of some kind (e.g. a pointer, handle, ID, descriptor...) that is meant to be unique and, therefore, needs to default to some value on move. The standard `unique_ptr` class template is the prime example of such a class. This proposal adds a `unique_val` class template to model unique, non-copyable, movable values, simplifying the writing of RAII classes by leveraging the Rule of Zero.">
+<script type="application/ld+json">
+{
+    "@context": "http://schema.org",
+    "@type": "WebSite",
+    "name": "unique_val",
+    "description": "Modern C++ typically requires writing RAII non-copyable classes at some point or another. In most cases, the class has to wrap a value of some kind (e.g. a pointer, handle, ID, descriptor...) that is meant to be unique and, therefore, needs to default to some value on move. The standard `unique_ptr` class template is the prime example of such a class. This proposal adds a `unique_val` class template to model unique, non-copyable, movable values, simplifying the writing of RAII classes by leveraging the Rule of Zero.",
+    "url": "https://ojeda.io/cpp/unique_val",
+    "author": {
+        "@type": "Person",
+        "name": "Miguel Ojeda",
+        "description": "Software Engineer",
+        "jobTitle": "Software Engineer",
+        "url": "https://ojeda.io",
+        "email": "mailto:miguel@ojeda.io"
+    }
+}
+</script>
+<link rel="icon" href="/favicon.png">
+<link rel="apple-touch-icon-precomposed" href="/favicon-apple.png">
+<link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.1.3/css/bootstrap.min.css" integrity="sha384-MCw98/SFnGE8fJT3GXwEOngsV7Zt27NXFoaoApmYm81iuXoPkFOJwJ8ERdknLPMO" crossorigin="anonymous">
+<style>
+@media screen and (min-width: 992px) {
+    body {
+        background-color: #515558;
+    }
+
+    .container {
+        background-color: #ffffff;
+        box-shadow: 3px 3px 3px 1px rgba(0, 0, 0, 0.3);
+        max-width: 900px;
+        margin-top: 2.5rem;
+        margin-bottom: 2.5rem;
+        padding-top: 4rem;
+        padding-bottom: 4rem;
+    }
+}
+
+.col {
+    max-width: 600px;
+}
+
+h1 {
+    margin-top: 2rem;
+}
+
+pre {
+    background-color: #f5faff;
+    border-radius: 0.4em;
+    border-color: #c5c5c5;
+    border-width: 1px;
+    border-style: solid;
+    padding: 0.7em;
+}
+
+a {
+    word-break: break-word;
+}
+
+p, ul > li {
+    text-align: justify;
+}
+</style>
+</head>
+<body>
+<div class="container">
+    <div class="row justify-content-center">
+        <div class="col">
+            <h1><code>unique_val</code>: a default-on-move type</h1>
+<p>Document number: P1314R0 <a href="https://wg21.link/P1314">[latest]</a><br />
+Date: 2018-10-08<br />
+Author: Miguel Ojeda &lt;<a href="mailto:miguel@ojeda.io">miguel@ojeda.io</a>&gt;<br />
+Project: ISO JTC1/SC22/WG21: Programming Language C++<br />
+Audience: LWG, LEWG</p>
+<h2>Abstract</h2>
+<p>Modern C++ typically requires writing RAII non-copyable classes at some point or another. In most cases, the class has to wrap a value of some kind (e.g. a pointer, handle, ID, descriptor…) that is meant to be unique and, therefore, needs to default to some value on move. The standard <code>unique_ptr</code> class template is the prime example of such a class. This proposal adds a <code>unique_val</code> class template to model unique, non-copyable, movable values, simplifying the writing of RAII classes by leveraging the Rule of Zero.</p>
+<h2>Motivation</h2>
+<p>Modern C++ is typically written with RAII in mind while taking advantage of the benefits of move semantics brought by C++11. The Rule of Zero summarizes the idea of writing RAII classes that deal with ownership separately, so that the rest of the classes can avoid writing special functions. Therefore, everything that can be done to simplify the writing of resource-owning classes might be a potential improvement.</p>
+<p>A very well-known facility in the standard for doing so is <code>unique_ptr</code>. Managing heap-allocated memory with it is straightforward. On top of that, its ability to take a custom deleter makes it useful even for cases where a resource is not simply de-/allocated. However, it does not cover some cases:</p>
+<ul>
+<li>The handles/IDs/descriptors of some resources are not necessarily pointers:
+<ul>
+<li>The handle/ID/descriptor may not even be the size of a pointer.</li>
+<li>Members such as <code>operator*</code> are not appropriate.</li>
+<li>The <code>_ptr</code> part of its name may be misleading.</li>
+</ul>
+</li>
+<li>No way to specify a different “default”/“invalid” value on move other than <code>nullptr</code>.</li>
+<li>While it can be used for “opaque” pointer-type handles/IDs/descriptors, it is needed to assume the opaque type is actually a pointer and remove it from the type; making the code potentially confusing (e.g. <a href="https://stackoverflow.com/questions/14841396/stdunique-ptr-deleters-and-the-win32-api" title="std::unique_ptr, deleters and the Win32 API">[1]</a><a href="https://stackoverflow.com/questions/12184779/using-stdunique-ptr-for-windows-handles" title="Using std::unique_ptr for Windows HANDLEs">[2]</a>).</li>
+</ul>
+<p>Extracting both the move semantics and the default-to-<code>nullptr</code>-on-move parts of <code>unique_ptr</code> into a separate class template <code>unique_val</code> allows us:</p>
+<ul>
+<li>To model <strong>opaque pointer-type</strong> handles/IDs/descriptors without assuming they are a pointer (i.e. without having to remove the pointer from the handler type), like the <code>HWND</code> handles in the Win32 API.</li>
+<li>To model <strong>non-pointer-type</strong> handles/IDs/descriptors, like the <code>int</code> file/socket descriptors in POSIX.</li>
+<li>To model <strong>non-pointer-sized</strong> handles/IDs/descriptors, like <code>int16_t</code> IDs in most architectures, <code>int32_t</code> IDs in architectures with 64-bit pointers or <code>int64_t</code> IDs in architectures with 32-bit pointers.</li>
+<li>To model <strong>“unique” values</strong>, understanding “unique” the same way as <code>unique_ptr</code>, i.e. that are supposed to be held by a single owner and destroyed only once.</li>
+<li>To model <strong>values that default on move</strong> to some other value, outside of the scope of RAII classes; including enumerations (<code>enum</code> and <code>enum class</code>).</li>
+</ul>
+<p>Conceptually, <code>unique_val</code> can be seen as a more general subset of <code>unique_ptr</code>, in the sense that <code>unique_ptr&lt;T&gt;</code> can be thought of as a <code>unique_val&lt;T*&gt;</code> plus the heap-allocation features.</p>
+<p>It can also be used as a better alternative to custom deleters (e.g. <code>unique_ptr</code> and <code>unique_resource</code> <a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2018/p0052r8.pdf" title="P0052R8 - Generic Scope Guard and RAII Wrapper for the Standard Library">[3]</a>), in case the user prefers to write constructor/destructor pairs (see “Comparison to the proposed <code>unique_resource</code>”).</p>
+<p>In summary, <code>unique_val</code> enables us to model resource ownership with move semantics, both for pointer-types and non-pointer-types; being specially useful for those handles, IDs and descriptors which are supposed to be used as unique values (instead of as unique pointers).</p>
+<h2>Usage</h2>
+<p>Assume a C library provides an API like:</p>
+<pre><code>typedef int FooHandle;
+extern &quot;C&quot; FooHandle CreateFoo(/* ... */);
+extern &quot;C&quot; void DestroyFoo(FooHandle);
+// ...
+</code></pre>
+<p>Then <code>unique_val</code> can be used to write a non-copyable, movable RAII class like this:</p>
+<pre><code>class Foo
+{
+    std::unique_val&lt;FooHandle&gt; id_;
+
+public:
+    Foo() : id_(CreateFoo(/* ... */))
+    {
+        if (not id_)
+            throw std::runtime_error(&quot;CreateFoo() failed&quot;);
+    }
+
+    ~Foo()
+    {
+        if (id_)
+            DestroyFoo(id_.get());
+    }
+
+    // Foo is already non-copyable, thanks to id_
+
+    // Making Foo movable is not automatic in the current
+    // C++ standard, but it is trivial to do so,
+    // since id_ already knows how to move itself
+    Foo(Foo&amp;&amp;) = default;
+    Foo&amp; operator=(Foo&amp;&amp;) = default;
+};
+</code></pre>
+<p>Now we can trivially use <code>Foo</code> as a member of other classes, as usual:</p>
+<pre><code>class Widget
+{
+    Foo a_;
+    Foo b_;
+
+public:
+    Widget() {}
+
+    // Widget is movable and non-copyable, nothing else required
+};
+</code></pre>
+<h2>Comparison to the proposed <code>unique_resource</code></h2>
+<p>A natural extension to consider for <code>unique_val</code> is to add a custom “deleter” (or similar facility) so that an entire RAII class can be modeled directly with <code>unique_val</code>, the same way it is done with <code>unique_ptr</code> nowadays. In other words, to make <code>unique_val</code> the actual RAII class instead of having to write a wrapper class.</p>
+<p>This approach was independently taken by P0052 (“Generic Scope Guard and RAII Wrapper for the Standard Library”) <a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2018/p0052r8.pdf" title="P0052R8 - Generic Scope Guard and RAII Wrapper for the Standard Library">[3]</a>, which proposes a generic RAII wrapper called <code>unique_resource</code> which requires a deleter. It allows to write code such as:</p>
+<pre><code>auto foo = std::make_unique_resource(
+    CreateFoo(/* ... */),
+    [](FooHandle h) {
+        DestroyFoo(h);
+    }
+);
+</code></pre>
+<p>While this approach (using deleters) has its own merits, we argue that the <code>unique_val</code> approach (avoiding deleters) is more flexible and simpler at the same time:</p>
+<ul>
+<li>While <code>unique_resource</code> allows to quickly define a variable which models a single resource (as shown above), typically reusable RAII types are wanted anyway (to instantiate them in different parts of a project, to provide extra member functions, to contain other members, etc.); defeating that advantage.</li>
+<li>In many cases, it is anyhow needed to write extra logic (e.g. other operations, logging…) while constructing/destructing the RAII class. Using <code>unique_val</code> results in code that is arguably easier to follow in the <code>unique_val</code> case. In the <code>unique_resource</code> case, the code for the destruction of the resource would be in the deleter, while some code would remain in the destructor of the RAII class, separately. On top of that, running code <em>after</em> the deleter of the <code>unique_resource</code> requires another object being destroyed after the resource itself, e.g. another member variable in the RAII class with a non-trivial destructor; which makes the code even less local.</li>
+<li><code>unique_val</code> encourages writing “symmetrical” constructor/destructor pairs in the RAII class, i.e. the code for constructing the underlying value is in the constructor of the RAII class; and, similarly, the destructing code is in the destructor of the RAII class. In the <code>unique_resource</code> case, however, both would be in the constructor of the RAII class (which initializes the deleter).</li>
+<li><code>unique_val</code> is a simpler, “lower-level” primitive that may be used to implement <code>unique_ptr</code> and <code>unique_resource</code> themselves. In this sense, it makes sense to standardize it as a basic building block (“vocabulary type”).</li>
+</ul>
+<p>In summary, we believe <code>unique_val</code> is simpler to specify, implement, understand and use than <code>unique_resource</code>; while at the same time being more general and leading to easier-to-read application code.</p>
+<h2>Proposal</h2>
+<p>This proposal suggests adding a new header, <code>&lt;unique_val&gt;</code>, containing a <code>unique_val</code> class template and the <code>make_unique_val</code> function templates.</p>
+<h3><code>unique_val</code> class template</h3>
+<pre><code>namespace std {
+    template &lt;class T&gt;
+    class unique_val
+    {
+        T value_; // exposition only
+
+    public:
+        using value_type = T;
+
+        explicit unique_val(T = T()) noexcept;
+
+        unique_val(const unique_val&lt;T&gt;&amp;) = delete;
+        unique_val(unique_val&lt;T&gt;&amp;&amp;) noexcept;
+
+        unique_val&lt;T&gt;&amp; operator=(const unique_val&lt;T&gt;&amp;) = delete;
+        unique_val&lt;T&gt;&amp; operator=(unique_val&lt;T&gt;&amp;&amp;) noexcept;
+
+        auto operator&lt;=&gt;(const unique_val&lt;T&gt;&amp;) = default;
+
+        void swap(unique_val&lt;T&gt;&amp;) noexcept;
+
+        T release() noexcept;
+        void reset(T = T()) noexcept;
+
+        T get() const noexcept;
+        static constexpr T get_default() noexcept;
+
+        explicit operator bool() const noexcept;
+    };
+
+    template &lt;class T&gt;
+    void swap(unique_val&lt;T&gt;&amp;, unique_val&lt;T&gt;&amp;) noexcept;
+
+    template &lt;class T&gt;
+    struct hash&lt;unique_val&lt;T&gt;&gt;
+    {
+        std::size_t operator()(const unique_val&lt;T&gt;&amp;) const noexcept;
+    };
+
+    template &lt;class T&gt;
+    unique_val&lt;T&gt; make_unique_val(T&amp;&amp;) noexcept;
+
+    template &lt;class T, class... Args&gt;
+    unique_val&lt;T&gt; make_unique_val(Args&amp;&amp;...) noexcept;
+}
+</code></pre>
+<p>The <code>unique_val</code> class template is intended to represent a non-copyable, movable unique value. The interface follows that of <code>unique_ptr</code>. It provides the following behavior:</p>
+<ul>
+<li>On move assignment and move construction, the moved-from value is reset to the default value.</li>
+<li><code>release</code> resets the underlying value to the default one while returning a copy of the original one.</li>
+<li><code>reset</code> resets the underlying value to the provided one.</li>
+<li><code>get</code> returns a copy of the underlying value.</li>
+<li><code>get_default</code> returns a copy of the default value.</li>
+<li><code>operator bool</code> returns whether the value is different than the default, i.e. typically whether a unique value is contained.</li>
+</ul>
+<p>Here, <em>default value</em> refers to the default-constructed value of <code>T</code>, i.e. <code>T()</code>.</p>
+<p>Note: <code>unique_val&lt;T&gt;</code> will typically be used to wrap an integral, pointer or enumeration type <code>T</code>; although other more complex types are possible (e.g. a wrapped built-in type with a different default constructor for cases where <code>0</code> or <code>nullptr</code> are not the “empty” case).</p>
+<p>Note: <code>unique_val&lt;T&gt;</code> is intended to have zero runtime-time overhead (in both size and time) with respect to a <code>T</code>, except for the resetting operation on move.</p>
+<h2>Possible extensions</h2>
+<p>A “default value” template parameter could be added, e.g. <code>unique_val&lt;T, T DefaultValue&gt;</code>; so that users can easily specify different default values for built-in types without having to wrap them in another class. This should be implemented as another template with the same name; instead of using a defaulted second template parameter, in order to avoid restricting the usable types to non-type template parameters only.</p>
+<p>Some other possible extensions:</p>
+<ul>
+<li>Comparison functions to the naked type <code>T</code>.</li>
+<li><code>is_default</code> member function returning whether the value is the same as the default (i.e. the opposite to <code>operator bool</code>).</li>
+<li><code>operator&lt;&lt;</code> and <code>operator&gt;&gt;</code>.</li>
+<li><code>operator*</code> and <code>operator-&gt;</code> (like <code>unique_ptr</code>). However, they are not pointers.</li>
+<li>Checked vs. unchecked access (e.g. <code>value</code> vs <code>operator*</code> like <code>optional</code>).</li>
+<li>Another class template with runtime default values.</li>
+<li>Custom “deleter” (like <code>unique_ptr</code>). However, as explained, we believe it leads to arguably more complex code.</li>
+</ul>
+<h2>Naming</h2>
+<p>Several alternatives were considered for the <code>unique_val</code> class template:</p>
+<ul>
+<li><code>unique_val</code>: concise, follows <code>unique_ptr</code> (including its name length), reflects the most common use case, sounds different than “unique value” when spoken out-loud (which helps disambiguating).</li>
+<li><code>unique_value</code>: ditto, but more verbose and might be confusing when spoken out loud.</li>
+<li><code>unique_resource</code>: too specific, might be too verbose, conflicts with the <code>unique_resource</code> proposal <a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2018/p0052r8.pdf" title="P0052R8 - Generic Scope Guard and RAII Wrapper for the Standard Library">[3]</a>.</li>
+<li><code>unique_handle</code>: too specific, might be too verbose.</li>
+<li><code>handle</code>: too specific and general at the same time.</li>
+<li><code>movable</code>: too general.</li>
+<li><code>resettable</code>: too general.</li>
+<li><code>defaulting</code>: does not easily reflect the most common use case.</li>
+<li><code>default_on_move</code>: does not easily reflect the most common use case.</li>
+<li><code>defaulted</code>: does not easily reflect the most common use case.</li>
+</ul>
+<h2>Example implementation</h2>
+<p>An example implementation can be found at <a href="https://github.com/ojeda/unique_val/tree/master/proposal" title="Example implementation">[4]</a>.</p>
+<h2>Acknowledgements</h2>
+<p>Thanks to Scott Meters, Andrzej Krzemienski, Nevin Liber, Steven Watanabe, Brook Milligan, Richard Hodges, A. Joël Lamotte, Paul A. Bristow for their input!</p>
+<h2>References</h2>
+<ol>
+<li>std::unique_ptr, deleters and the Win32 API — <a href="https://stackoverflow.com/questions/14841396/stdunique-ptr-deleters-and-the-win32-api" title="std::unique_ptr, deleters and the Win32 API"><em>https://stackoverflow.com/questions/14841396/stdunique-ptr-deleters-and-the-win32-api</em></a></li>
+<li>Using std::unique_ptr for Windows HANDLEs — <a href="https://stackoverflow.com/questions/12184779/using-stdunique-ptr-for-windows-handles" title="Using std::unique_ptr for Windows HANDLEs"><em>https://stackoverflow.com/questions/12184779/using-stdunique-ptr-for-windows-handles</em></a></li>
+<li>P0052R8 - Generic Scope Guard and RAII Wrapper for the Standard Library — <a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2018/p0052r8.pdf" title="P0052R8 - Generic Scope Guard and RAII Wrapper for the Standard Library"><em>http://open-std.org/jtc1/sc22/wg21/docs/papers/2018/p0052r8.pdf</em></a></li>
+<li>Example implementation — <a href="https://github.com/ojeda/unique_val/tree/master/proposal" title="Example implementation"><em>https://github.com/ojeda/unique_val/tree/master/proposal</em></a></li>
+</ol>
+
+        </div>
+    </div>
+</div>
+<script src="https://cdn.rawgit.com/google/code-prettify/master/loader/run_prettify.js"></script>
+<script>
+var allCodeBlocks = document.getElementsByTagName("pre");
+for (var i = 0; i < allCodeBlocks.length; ++i)
+    allCodeBlocks[i].innerHTML = PR.prettyPrintOne(allCodeBlocks[i].innerHTML, "cpp");
+</script>
+</body>
+</html>

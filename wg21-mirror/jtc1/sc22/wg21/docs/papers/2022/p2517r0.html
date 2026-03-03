@@ -1,0 +1,165 @@
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+<title>Add a conditional noexcept specification to std::apply</title>
+  <style type="text/css">
+  body {font-variant-ligatures: none;}
+  p {text-align:justify}
+  li {text-align:justify}
+  blockquote.note, div.note
+  {
+          background-color:#E0E0E0;
+          padding-left: 15px;
+          padding-right: 15px;
+          padding-top: 1px;
+          padding-bottom: 1px;
+  }
+  p code {color:navy}
+  ins p code {color:#00A000}
+  p ins code {color:#00A000}
+  p del code {color:#A00000}
+  ins {color:#00A000}
+  del {color:#A00000}
+  table#boilerplate { border:0 }
+  table#boilerplate td { padding-left: 2em }
+  table.bordered, table.bordered th, table.bordered td {
+    border: 1px solid;
+    text-align: center;
+  }
+  ins.block {color:#00A000; text-decoration: none}
+  del.block {color:#A00000; text-decoration: none}
+  #hidedel:checked ~ * del, #hidedel:checked ~ * del * { display:none; visibility:hidden }
+  </style>
+</head><body data-new-gr-c-s-check-loaded="14.1043.0" data-gr-ext-installed="">
+<table id="boilerplate">
+<tbody><tr><td>Document number</td><td>P2517R0</td></tr>
+<tr><td>Date</td><td>2022-01-01</td></tr>
+<tr><td>Audience</td><td>LEWG</td></tr>
+<tr><td>Reply-to</td><td>Hewill Kang &lt;hewillk@gmail.com&gt;</td></tr>
+</tbody></table><hr>
+<h1>Add a conditional <code>noexcept</code> specification to <code>std::apply</code></h1>
+<ul>
+ <li>
+ <ul>
+  <li>Abstract</li>
+  <li>Discussion</li>
+  <li>Impact on the Standard</li>
+  <li>Implementation experience</li>
+  <li>Proposed change</li>
+  <li>References</li>
+ </ul>
+ </li>
+</ul>
+<a name="Abstract"></a>
+<h2>Abstract</h2>
+<p>This paper proposes to add a <code>noexcept</code>-specification to <code>std::apply</code>.</p>
+
+<a name="Discussion"></a>
+<h2>Discussion</h2>
+
+<p>With the introduction of the C++23 <code>zip</code> family, 
+<code>apply</code> is making a comeback and appeared in a lot of its function implementations.</p>
+
+<p>For example, in <a href="https://eel.is/c++draft/range.zip.transform#iterator-4">[range.zip.transform.iterator]</a>, 
+<code>zip_transform_view::iterator::operator*()</code>'s equivalent <em>Effect</em> is defined as:
+    <pre><code>  
+    return apply([&](const auto&... iters) -> decltype(auto) {
+      return invoke(*parent_->fun_, *iters...);
+    }, inner_.current_);
+    </code></pre>
+
+which uses <code>apply</code> to extract the elements of the iterator <code>tuple</code> and forwards them into the callable.</p>
+
+<p>However, strictly speaking, this <code>operator*()</code> should not be done through <code>apply</code>. 
+The reason is that it still has a <code>noexcept(<em>see below</em>)</code> specification which is equivalent to 
+<code>noexcept(invoke(*parent_­->fun_­, *std​::​get&lt;Is&gt;(inner_­.current_­)...))</code>, 
+where <code>Is</code> is the pack <code>0</code>, <code>1</code>, …, <code>(sizeof...(Views)-1)</code>.
+And in view of the fact that standard is very conservative with the <code>noexcept</code> specifications in the library specification, 
+this makes <code>apply</code> lacks the <code>noexcept</code> specification and becomes a non-<code>noexcept</code> function.
+Fortunately, the standard also defines the
+semantics of <code>apply</code> in terms of another equivalent-to <em>Effects</em>, this part constitutes the effective <code>noexcept</code> specification of <code>operator*()</code>.</p>
+
+<p>But if we look at <code>apply</code> closely, according to its <em>Effects</em> in <a href="https://eel.is/c++draft/tuple.apply#1">[tuple.apply]</a>:</p>
+
+    <pre><code>  
+    template&lt;class F, class Tuple, size_t... I&gt;
+    constexpr decltype(auto) <em>apply-impl</em>(F&& f, Tuple&& t, index_sequence&lt;I...&gt;) {
+                                                                          // exposition only
+      return <em>INVOKE</em>(std::forward&lt;F&gt;(f), get&lt;I&gt;(std::forward&lt;Tuple&gt;(t))...)
+    }
+    </code></pre>
+
+<p>It just simply uses <code>index_sequence</code> to expand <code>get</code> to extract the elements of <code>tuple</code>  
+and then forward them to <code><em>INVOKE</em></code> together with callable. And since <code>get</code> is a <code>noexcept</code> function 
+(except for the <code>subrange</code>-overload, but the standard does not specify whether <code>apply</code> can be applied to <code>subrange</code>) 
+and <code>invoke</code> is conditional <code>noexcept</code>, I think there is no reason not to make <code>apply</code> "transparently" become conditional <code>noexcept</code>.</p>
+
+<p>In my opinion, <code>invoke(f, args...)</code> should be completely equivalent to <code>apply(f, forward_as_tuple(args...))</code>, 
+adding <code>noexcept</code> to <code>apply</code> can easily achieve this and make it more consistent with <code>invoke</code>.</p>
+
+<a name="Impact on the Standard"></a>
+<h2>Impact on the Standard</h2>
+
+<p>Since it is a pure change for <code>apply</code>, there will be no impact.
+For the <code>zip</code> family, <code>apply</code> can "indeed" be used for its implementation. 
+This also allows users to freely add <code>noexcept</code> specification to the functions implemented through <code>apply</code> in the future.</p>
+
+<a name="Implementation experience"></a>
+<h2>Implementation experience</h2>
+
+This proposal has been implemented by
+<a href="https://github.com/llvm/llvm-project/blob/d2b0df35afb7184f5a68f67d6ed0c6230688df7f/libcxx/include/tuple#L1576">libstdc++</a>
+and <a href="https://github.com/gcc-mirror/gcc/blob/76c6be48b7841524974754f8ea7533b82c7de77e/libstdc%2B%2B-v3/include/std/tuple#L1858">libc++</a>, 
+and the libstdc++'s implementation is based on the premise that <code>std::get</code> never throws. 
+<a href="https://github.com/microsoft/STL/blob/205aed72533849619a6dadbef44eab541a75c549/stl/inc/tuple#L978">MSVC-STL</a> is consistent with standard and does not add <code>noexcept</code> specification to <code>apply</code>.
+
+<a name="Proposed-change"></a>
+<h2>Proposed change</h2>
+
+</div>
+<div>
+<ol>
+<ol>
+<li>
+<p>Edit 20.5.5 <a href="https://eel.is/c++draft/tuple.apply#1">[tuple.apply]</a> as indicated:</p>
+<pre>template&lt;class F, class Tuple&gt;
+  constexpr decltype(auto) apply(F&amp;&amp; f, Tuple&amp;&amp; t) <ins>noexcept(<em>see below</em>)</ins>;
+</pre>
+-1- <em>Effects:</em> Given the exposition-only function:
+<blockquote>
+<pre>
+namespace std {
+  template&lt;class F, class Tuple, size_t... I&gt;
+  constexpr decltype(auto) <em>apply-impl</em>(F&amp;&amp; f, Tuple&amp;&amp; t, index_sequence&lt;I...&gt;) {     
+                                                                        // exposition only
+    return <em>INVOKE</em>(std::forward&lt;F&gt;(f), get&lt;I&gt;(std::forward&lt;Tuple&gt;(t))<wbr>...);
+  }
+}
+</pre>
+Equivalent to:
+   <pre>
+   return <em>apply-impl</em>(std::forward&lt;F&gt;(f), std::forward&lt;Tuple&gt;(t),
+                     make_index_sequence&lt;tuple_<wbr>size_v&lt;remove_reference_t&lt;<wbr>Tuple&gt;&gt;&gt;{});
+</pre>
+</blockquote>
+<ins>
+-2- <em>Remarks</em>: Let <tt>I</tt> be the pack <tt>0</tt>, <tt>1</tt>, …, <tt>(tuple_size_v&lt;remove_<wbr>reference_t&lt;Tuple&gt;&gt;-1)</tt>. The exception specification is equivalent to: <tt>noexcept(invoke(std::forward&lt;<wbr>F&gt;(f), get&lt;I&gt;(std::forward&lt;Tuple&gt;(t))<wbr>...))</tt>.
+</ins>
+</li>
+</ol>
+</ol>
+</div>
+
+<a name="References"></a>
+<h2>References</h2>
+
+<dd>
+  <dt id="biblio-n4892">[N4901]
+  <dd>Thomas Köppe. Working Draft, Standard for Programming Language C++. URL: <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2021/n4901.pdf">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2021/n4901.pdf</a>
+  <dt id="biblio-p2321">[P2321]
+  <dd>Tim Song. <code>zip</code>. URL: <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2021/p2321r2.html">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2021/p2321r2.html</a>
+  <dt id="biblio-libc">[LIBC++]
+  <dd> <code>apply</code> implementation in libc++. URL: <a href="https://github.com/llvm/llvm-project/blob/d2b0df35afb7184f5a68f67d6ed0c6230688df7f/libcxx/include/tuple#L1576">https://github.com/llvm/llvm-project/blob/d2b0df35afb7184f5a68f67d6ed0c6230688df7f/libcxx/include/tuple#L1576</a>
+  <dt id="biblio-libstdc">[LIBSTDC++]
+  <dd> <code>apply</code> implementation in libstdc++. URL: <a href="https://github.com/gcc-mirror/gcc/blob/76c6be48b7841524974754f8ea7533b82c7de77e/libstdc%2B%2B-v3/include/std/tuple#L1858">https://github.com/llvm/llvm-project/blob/d2b0df35afb7184f5a68f67d6ed0c6230688df7f/libcxx/include/tuple#L1576</a>
+  <dt id="biblio-ms-stl">[MSVC-STL]
+  <dd><code>apply</code> implementation in Microsoft STL. URL: <a href="https://github.com/microsoft/STL/blob/205aed72533849619a6dadbef44eab541a75c549/stl/inc/tuple#L978">https://github.com/microsoft/STL/blob/205aed72533849619a6dadbef44eab541a75c549/stl/inc/tuple#L978</a>
+</body></html>

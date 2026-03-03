@@ -1,0 +1,658 @@
+
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+"http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta charset="utf-8">
+<title>Add coroutine task type</title>
+<style type="text/css">
+p {text-align:justify}
+li {text-align:justify}
+blockquote.note
+{
+background-color:#E0E0E0;
+padding-left: 15px;
+padding-right: 15px;
+padding-top: 1px;
+padding-bottom: 1px;
+}
+ins {background-color:#A0FFA0}
+del {background-color:#FFA0A0}
+table {border-collapse: collapse;}
+table, th, td {
+border: 1px solid black;
+border-collapse: collapse;
+} 
+</style>
+</head>
+<body>
+<table>
+<tr>
+<td align="left">Doc. no.</td>
+<td align="left">P1056R0</td>
+</tr>
+<tr>
+<td align="left">Revises</td>
+<td align="left">none</td>
+</tr>
+<tr>
+<td align="left">Date:</td>
+<td align="left">2018-05-05
+</td>
+</tr>
+<!--
+<tr>
+<td align="left">Project:</td>
+<td align="left">Programming Language C++</td>
+</tr>
+<tr>
+<td align="left">Reference:</td>
+<td align="left">ISO/IEC TS 22277, C++ Extensions for Coroutines</td>
+</tr>
+-->
+<tr>
+<td align="left">Audience:</td>
+<td align="left">SG1</td>
+</tr>
+<tr>
+<td align="left">Reply to:</td>
+<td align="left">Lewis Baker &lt;<a href="mailto:lewissbaker@gmail.com">lewissbaker@gmail.com</a>&gt;, Gor Nishanov &lt;<a href="mailto:gorn@microsoft.com">gorn@microsoft.com</a>&gt;</td>
+</tr>
+</table>
+<h1>Add coroutine task type</h1>
+<h2>Overview</h2>
+<p>
+The coroutines TS has introduced a language capability that allows functions to be
+suspended and later resumed. One of the key applications for this new feature is to make
+it easier to write asynchronous code. However, the coroutines TS itself does not (yet) 
+provide any types that directly support writing asynchronous code.
+</p>
+<p>
+This paper proposes adding a new type, std::task&lt;T&gt;, to the standard library
+to enable creation and composition of coroutines representing asynchronous computation. 
+
+<!-- 
+Similar to the std::future&gt;T&lt; type, the task&lt;T&gt; type represents an operation
+that produces a either a single value or an exception asynchronously.
+However, unlike std::future&gt;T&gt; that -->
+</p>
+<!--
+<p>
+Unlike std::future&lt;T&gt;, the std::task&lt;T&gt; type does not provide a 
+publicly accessible promise object that can be used to produce the result. 
+Instead, the result is produced by a coroutine function whose body eventually
+executes a co_return statement or that completes with an unhandled exception.
+</p>
+-->
+<pre>
+  #include &lt;experimental/task&gt;
+  #include &lt;string&gt;
+  
+  struct record
+  {
+    int id;
+    std::string name;
+    std::string description;
+  };
+  
+  std::task&lt;record&gt; load_record(int id);
+  std::task&lt;&gt; save_record(record r);
+  
+  std::task&lt;void&gt; modify_record()
+  {
+    record r = co_await load_record(123);
+    r.description = “Look, ma, no blocking!”;
+    co_await save_record(std::move(r));
+  }
+</pre>
+<p>
+  The interface of task is intentionally minimalistic and designed 
+  for efficiency. In fact, the only operation you can do with the task
+  is to await on it.
+  <pre>
+    template &lt;typename T&gt;
+    class [[nodiscard]] task {
+    public:
+      task(task&amp;&amp; rhs) noexcept;
+      ~task();
+      auto operator co_await(); <i>// exposition only</i>
+    };      
+  </pre>
+  While such small interface may seem unusual at first, subsequent
+  sections will clarify the rationale for this design.
+  <!--
+  In the following sections, we will go over some of the (possibly) unorthorox decisions at first, they were 
+  chosen to make using tasks safer and to guide us
+  -->
+</p>
+<h2>Why not use futures with future.then?</h2>
+<p>
+  The <code>std::future</code> type is inherently inefficient and cannot be used
+  for efficient composition of asynchronous operations. The unavoidable  overhead
+  of futures is due to:
+  <ul>
+    <li>allocation/deallocation of the shared state object</li>
+    <li>atomic increment/decrement for managing the lifetime of the shared state object</li>
+    <li>synchronization between setting of the result and getting the result</li>
+    <li>(with .then) scheduling overhead of starting execution of subscribers to .then</li>
+  </ul>
+</p>
+<p>
+   Consider the following example:
+   <pre>
+      task&lt;int&gt; coro() {
+        int result = 0;
+        while (int v = co_await async_read())
+          result += v;
+        co_return result;
+      }    
+  </pre>
+  where <code>async_read()</code> is some asynchronous operation that takes, say 4ns, to 
+  perform. We would like to factor out the logic into two    coroutines:
+  <pre>
+      task&lt;int&gt; subtask() { co_return co_await async_read(); }
+        
+      task&lt;int&gt; coro_refactored() {
+        int result = 0;
+        while (int v = co_await subtask())
+          result += v;
+        co_return result;
+      }    
+  </pre>
+  Though, in this example, breaking a single <code>co_await</code> into its own function may
+  seem silly, it is a technique that allows us to measure the overhead of composition of
+  tasks. With proposed task, our per operation cost grew from 4ns to 6ns and 
+  did not incur any heap allocations. Moreover, this overhead of 2ns is not 
+  inherent to the task and we can anticipate that with improved coroutine
+  optimization technologies we will be able to drive the overhead to be close to zero.
+</p>
+<p>To estimate the cost of composition with <code>std::future</code>, we used
+  the following code:
+  <pre>
+      int fut_test() {
+        int count = 1'000'000;
+        int result = 0;
+      
+        while (count > 0) {
+          promise<int> p;
+          auto fut = p.get_future();
+          p.set_value(count--);
+          result += fut.get();
+        }
+        return result;
+      }
+  </pre>
+  As measured on the same system (Linux, clang 6.0, libc++), we get <b>133ns</b> per operation!  
+Here is the visual illustration.
+<pre>
+          op cost: ****
+    task overhead: **
+  future overhead: **********************************************************************************************************************************
+</pre>
+</p>
+<p>
+  Being able to break apart bigger functions into a set of smaller ones and 
+  being able to compose software by putting together small pieces is 
+  fundamental requirement for a good software engineering since the 60s.
+  The overhead of <code>std::future</code> and types similar in behavior 
+  makes them unsuitable coroutine type.
+</p>
+
+<h2>Removing future overhead: Part 1. Memory Allocation</h2>
+
+<!-- 
+<p>A future and a promise share a reference to a heap allocated object that is
+  used for communication from the promise to the future. Let's imagine what
+  would it take to eliminate that heap allocation. We would need to 
+  colocate the state either with a future or the promise objects. Since they 
+  have independent lifetimes (and are movable), we would need a thread safe
+  protocol to 
+</p>
+-->
+<p>Consider the only operation that is available on a task, namely, awaiting on it.</p>
+<pre>
+  task&lt;X&gt; g();
+  task&lt;Y&gt; f() { .... X x = co_await g(); ... }  
+</pre>
+
+<p>The caller coroutine <code>f</code> owns the task object for <code>g</code>
+  that is created and destroyed at the end of the full expression containing
+  co_await. This allows
+  the compiler to determine the lifetime of the coroutine and apply
+  Heap Allocation Elision Optimization [P0981R0] that eliminates 
+  allocation of a coroutines state by making it a temporary variable
+  in its caller.
+</p>
+
+<!--
+The <code>task</code> object points directly at the coroutine state.
+It does not require 
+-->
+<h2>Removing future overhead: Part 2. Reference counting</h2>
+
+<p>The coroutine state is not shared. The task type only allows
+  moving pointer to a coroutine from one task object to another.
+  Lifetime of a coroutine is linked to its task object and
+  task object destructors destroys the coroutine, thus, 
+  no reference counting is required.
+</p>
+<p>
+  In a later section about Cancellation we will cover the implications of this
+  design decision.
+</p>
+
+<h2>Removing future overhead: Part 3. Set/Get synchronization</h2>
+<p>The task coroutine always starts suspended. This allows not
+  only to avoid synchronization when attaching a continuation, but 
+  also enables solving via composition how and where
+  coroutine needs to get executed and allows to implement advanced 
+  execution strategies like continuation stealing.</p>
+
+  <p>Consider this example:</p>
+
+<pre>
+  task&lt;int&gt; fib(int n) {
+    if (n &lt; 2)
+        return n;
+    auto xx = co_await cilk_spawn(fib(n-1)); // continuation stealing
+    auto yy = fib(n-2);
+    auto [x,y] = co_await cilk_sync(xx,yy);
+    co_return x + y;
+  }        
+</pre>
+
+In here, <code>fib(n-1)</code> returns a task in a suspended state.
+Awaiting on cilk_spawn adapter, queues the execution of the rest of the 
+function to a threadpool, and then resumes <code>f(n-1)</code>.
+Prior, this style of code was pioneered by Intel's cilk compiler and 
+now, C++ coroutines and proposed <code>task</code> type allows to solve
+the problem in a similar expressive style. (Note that we in no way
+advocating computing fibonacci sequence in this way, however, this
+seems to be a popular example demonstrating the benefits of 
+continuation stealing and we are following the trend. 
+Also we only sketched the abstraction required to implement
+cilk like scheduling, there may be even prettier way).
+
+<h2>Removing future overhead: Part 4. Scheduling overhead</h2>
+
+<p>
+  Consider the following code fragment:
+</p>
+<pre>
+    int result = 0;
+    while (int v = co_await async_read())
+      result += v;
+</pre>
+<p>
+Let's say that async_read returns a future.
+That future cannot resume directly the coroutine that 
+is awaiting on it as it will, in effect, transform
+the loop into unbounded recursion.
+</p>
+<p>
+  On the other hand, coroutines have built-in support for
+  symmetric coroutine to coroutine transfer [p0913r0]. Since
+  task object can only be created by a coroutine and
+  the only way to get the result from a coroutine is
+  by awaiting on it from another coroutine, the transfer of
+  control from completing coroutine to awaiting coroutine is
+  done in symmetric fashion, thus eliminating the need for extra
+  scheduling interactions.
+</p>
+
+<h2>Destruction and cancellation</h2>
+
+<p>
+Note that the <code>task</code> type unconditionally destroys 
+the coroutine in its destructor. It is safe to do, only if the coroutine
+has finished execution (at the final suspend point) 
+or it is in a suspended state (waiting for some operation)
+to complete, but, somehow, we know that the coroutine will never be 
+resumed by the entity which was supposed to resume the coroutine
+on behalf of the operation that coroutine is awaiting upon.
+That is only possible if the underlying asynchronous facility support cancellation.
+</p>
+
+<p>
+We strongly believe that support for cancellation is a required 
+facility for writing asynchronous code and we struggled for awhile trying to
+decide what is the source of the cancellation, whether it is the task, 
+that must initiate cancellation (and therefore every await in every coroutine
+needs to understand how to cancel a particular operation it is being awaited upon)
+or every async operation is tied to a particular lifetime and cancellation domain
+and operations are cancelled in bulk by cancellation of the entire cancellation domain 
+[P0399R0].
+</p>
+
+<p>
+We experimented with both approaches and reached the conclusion that 
+not performing cancellation from the task, but, pushing it to the cancellation
+domain leads to more efficient implementation and is a simpler model
+ for the users.
+</p>
+
+<h2>Why can't I put a task into a container</h2>
+
+<p>
+This is rather unorthodox decision and even authors of the paper did not completely
+agree on this topic. However, going with more restrictive model initially allows us to
+discover if the insight that lead to this decision was wrong.
+Initial design of the task, included move assignment, default constructor and swap.
+We removed them for two reasons.
+</p>
+<p>First, when observing how <code>task</code> was used, we noticed
+that whenever,
+a variable-size container of tasks was created, we later realized that
+it was a suboptimal choice and a better solution did not require
+a container of tasks.
+</p>
+<p>Second: move-assignment of a task is a ticking bomb. To make it safe,
+  we would need to introduce per task cancellation of associated 
+  coroutines and it is a very heavy-weight solution.
+</p>
+<p>At the moment we do not offer a move assignment, default constructor and swap.
+  If good use cases, for which there are no better ways to solve the same
+  problem are discovered, we can add them.
+</p>
+
+<h2>Interaction with allocators</h2>
+
+The implementation of coroutine bindings for <code>task</code> is required
+to treat the case where first parameter to a coroutine is of type
+<code>allocator_arg_t</code>. If that is the case, the coroutine needs to have
+at least two arguments and the second one shall satisfy the Allocator requirements 
+and if dynamic allocation required to store the coroutine state, 
+implementation should use provided allocator to allocate and deallocate
+the coroutine state.
+
+Examples:
+
+<pre>
+  task&lt;int&gt; f(int, float); // uses default allocator if needed
+  
+  task&lt;int&gt; f(allocator_arg_t, pmr::polymorphic_allocator&lt;&gt; a); // uses a to allocate, if needed
+  
+  template &lt;typename Alloc&gt;
+  task&lt;int&gt; f(allocator_arg_t, Alloc a); // uses allocator a to allocate. if needed
+</pre>
+
+<h2>Interaction with executors</h2>
+
+<p>Since coroutine starts suspended, it is upto the user to decide
+  how it needs to get executed and where continuation needs to be scheduled.
+</p>
+<p>Case 1: Starts in the current thread, resumes in the thread that triggered the completion of f().</p>
+<pre>
+  co_await f();
+</pre>
+
+<p>Case 2: Starts in the current thread, resumes on executor ex.</p>
+<pre>
+  co_await f().via(e);
+</pre>
+
+<p>Case 3: Starts by an executor ex, resumes in the thread that triggered the completion of f().</p>
+<pre>
+  co_await spawn(ex, f());
+</pre>
+
+<p>Case 4: Starts by an executor ex1, resumes on executor ex2.
+<pre>
+  co_await spawn(ex1, f()).via(ex2);
+</pre>
+The last case is only needed if f() cannot start executing in the current thread
+for some reason. We expect that this will not be a common case. Usually, 
+when a coroutine has unusual requirements on where it needs to be executed it
+can be encoded directly in f without forcing the callers of f, to do extra work.
+Typically, in this manner:
+<pre>
+  task&lt;T&gt; f() {
+    co_await make_sure_I_am_on_the_right_thread();
+    ...
+  }
+</pre>
+</p>
+
+<!-- ******************************************* -->
+<h2>But what about main?</h2>
+<!-- ******************************************* -->
+<p>
+  As we mentioned in the beginning, the only operation that one can do on a task
+  is to await on it (as if by `co_await` operator). Using an <em>await-expression</em>
+  in a function turns it into a coroutine. But, this cannot go on forever,
+  at some point, we have to interact with coroutine from a function that is not a 
+  coroutine itself, <code>main</code>, for example. What to do?
+</p>
+<p>
+  There could be several functions that can bridge the gap
+  between synchronous and asynchronous world. For example:
+</p>
+<pre>
+  template &lt;typename T&gt; T sync_await(task&lt;T&gt;);
+</pre>
+<p>
+  This function starts the task execution in the current thread, and, 
+  if it gets suspended, it blocks until the result is available. 
+  To simplify the signature, we show <code>sync_await</code> only taking objects of <code>task</code>
+  type. This function can be written generically to handle arbitrary awaitables.
+</p>
+<p> Another function could be a variant of <code>std::async</code> that
+launches execution of a <code>task</code> on a thread pool and 
+returns a <code>future</code> representing the result of the computation.
+<pre>
+  template &lt;typename T&gt; T async(task&lt;T&gt;);
+</pre>
+<!---
+One would use std::async if they need to launch 
+a task, do something else meanwhile without blocking the current thread
+before requesting  -->
+
+One would use this version of <code>std::async</code> 
+if blocking behavior of <code>sync_await</code> is undesirable.
+</p>
+
+<h2>Conclusion</h2>
+
+A version of proposed type has been used in shipping software that runs on hundreds of
+million devices in consumer hands. Also, a similar type has been implemented 
+by one of the authors of this paper in most extensive coroutine abstraction
+library (CppCoro). This proposed type is minimal and efficient and can be used
+to build higher level abstraction by composition.
+
+<h2>References</h2>
+
+[P0981R0]: <a href="https://wg21.link/P0981r0">Halo: Coroutine Heap Allocation eLision Optimization</a>
+<br>
+[P0913R0]: <a href="https://wg21.link/p0913r0">Symmetric coroutine control transfer</a>
+<br>
+[CppCoro]: <a href="https://github.com/lewissbaker/cppcoro">A library of C++ coroutine abstractions for the coroutines TS </a>
+<br>
+[P0399R0]: <a href="https://wg21.link/p0399r0">Networking TS &amp; Threadpools</a>
+
+<h2>Wording</h2>
+<h3>21.11 Coroutine support library [support.coroutine] </h3>
+Add the following concept definitions to synopsis of header &lt;experimental/coroutine&gt;
+
+<blockquote>
+<pre>
+  <em>// 21.11.6 Awaitable concepts</em>
+  template &lt;typename A&gt;
+  bool concept SimpleAwaitable = <em>see below</em>;
+  
+  template &lt;typename A&gt;
+  bool concept Awaitable = <em>see below</em>;
+</pre>
+</blockquote>
+
+<blockquote>
+<pre>
+</pre>  
+</blockquote>
+
+<h3>21.11.6 <code>Awaitable</code> concepts [support.awaitable.simple] </h3>
+
+<ol>
+<li>
+The <code>Awaitable</code> and <code>SimpleAwaitable</code> concepts specify 
+the requirements on a type that is usable in an <em>await-expression</em> (8.3.8).
+    
+<blockquote>
+<pre>
+template &lt;typename T&gt;
+bool concept __HasMemberOperatorCoawait = <em>// exposition only </em>
+  requires(T a) { requires SimpleAwaitable<decltype(a.operator co_await())>; };          
+
+template &lt;typename T&gt;
+bool concept __HasNonMemberOperatorCoawait = <em>// exposition only </em>
+  requires(T a) { requires SimpleAwaitable<decltype(operator co_await(a))>; };          
+
+template &lt;typename A&gt;
+bool concept SimpleAwaitable = requires(A a, coroutine_handle&lt;&gt; h) {
+  { a.await_ready() } -&gt; bool;
+  a.await_resume();
+  a.await_suspend(h);
+};          
+      
+template &lt;typename A&gt;
+bool concept Awaitable = __HasMemberOperatorCoawait&lt;A&gt;
+  || __HasNonMemberOperatorCoawait&lt;A&gt; || SimpleAwaitable&lt;A&gt;;
+</pre>  
+</blockquote>
+</li>
+<li>
+  If the type of an expression <em>E</em> satisfies the <code>Awaitable</code>
+  concept then the term <em>simple awaitable of E</em> refers to an object
+  satisfying <code>SimpleAwaitable</code> concept that is either the result 
+  of <em>E</em> or the result of an application of <code>operator co_await</code>
+  to the result of <em>E</em>.
+</li>
+</li>
+</ol>
+
+<h3>XX.1 Coroutines tasks [coroutine.task]</h3>
+<h4>XX.1.1 Overview [coroutine.task.overview]</h4>
+<ol><li>
+  This subclause describes components that a C++ program can use to create
+  coroutines representing asynchronous computations. 
+</li></ol>
+<h4>XX.1.2 Header <code>task</code> synopsis [coroutine.task.syn]</h4>
+<blockquote>
+<pre>
+namespace std::experimental {
+inline namespace coroutines_v1 {
+
+template&lt;typename T = void&gt; class task;
+template&lt;typename T&gt; class task&lt;T&amp;&gt;;
+template&lt;&gt; class task&lt;void&gt;;
+
+} <em>// namespace coroutines_v1</em>
+} <em>// namespace std::experimental</em>
+</pre>
+</blockquote>
+<ol><li>
+</li></ol>
+<h4>XX.1.3 Class template <code>task</code> [coroutine.task.task]</h4>
+<ol>
+  <pre>
+  template &lt;typename T&gt;
+  class [[nodiscard]] task {
+  public:
+    task(task&amp;&amp; rhs) noexcept;
+    ~task();
+    auto operator co_await(); <i>// exposition only</i>
+  private:
+    coroutine_handle&lt;<em>unspecified</em>&gt; h; <i>// exposition only</i>
+  };      
+</pre>
+    <li>
+    The class template <code>task</code> defines a type for a 
+    <em>coroutine task object</em> that can be associated with a
+    coroutine which return type is <code>task&lt;<em>T</em>&gt;</code>
+    for some type <em>T</em>. In this subclause, we will refer to such a coroutine as 
+    <em>task coroutine</em> and to type <em>T</em> as <em>eventual type</em>
+    of a coroutine.  The implementation shall define class template <code>task</code> and provide
+    and two specializations, task&lt;&amp;T&gt; and task&lt;void&gt;.
+    </li>
+    <br>
+    <li>
+    The implementation shall provide specializations of <code>coroutine_traits</code>
+    as required to implement the following behavior:
+    <p>
+    <ol type="I">
+      <li>
+        A call to a task coroutine <em>f</em>
+        shall return a task object <em>t</em> associated with 
+        that coroutine. The called coroutine must be suspended 
+        at the initial suspend point (11.4.4).
+        Such task object is considered to be in the <em>armed</em> state.        
+      </li>
+      <br>
+      <li>
+        A type of a task object shall satisfy the <code>Awaitable</code> concept and
+        awaiting on a task object in the <em>armed</em> state as 
+        if by <code>co_await<em>t</em></code> (8.3.8) shall register the
+        awaiting coroutine <em>a</em> with task object <em>t</em> 
+        and resume the coroutine <em>f</em>.
+        At this point task object <em>t</em>
+        is considered to be in a <em>launched</em> state. Awaiting on a task object
+        that is not in the <em>armed</em> state has undefined behavior.
+      </li>
+      <br>
+      <li>        
+        Let <em>sa</em> be a simple awaitable of <em>t</em> (21.11.6).
+        If coroutine <em>f</em> completes due to execution of
+        a <em>coroutine return statement</em> (9.6.3) or an unhandled
+        exception leaving the user-authored body of the coroutine,
+        awaiting coroutine <em>a</em> is resumed and an expression
+        <code><em>sa</em>.await_resume()</code>
+        shall evaluate to the operand of <code>co_return</code> 
+        statement in coroutine <em>f</em>, or shall throw the exception, respectively. 
+      </li>
+      <br>
+      <li>
+        If in the definition of the coroutine <em>g</em>, the first parameter has type
+        <code>allocator_arg_t</code>, then the coroutine must have at least two arguments
+        and the type of the second parameter shall satisfy the <code>Allocator</code> 
+        requirements (Table 31) and if dynamic allocation required to store 
+        the coroutine state (11.4.4), implementation should use provided allocator to
+        allocate and deallocate the coroutine state.
+      </li>
+      <br>
+      <li>
+        If <em>yield-expression</em> (8.20) occurs in the suspension context of
+        the task coroutine, the program is ill-formed.
+      </li>
+    </ol>
+    </p>
+  </ol>
+<h5>XX.1.3.1 constructor</h5>
+<pre>
+  task(task&amp;&amp; rhs) noexcept;
+</pre>
+  <li>
+    <em>Effects:</em> Move constructs a <code>task</code> object that refers
+    to the coroutine that was originally referred to by <code>rhs</code> (if any).
+  </li>
+  <li>
+    <em>Postcondition:</em> <code>rhs</code> is empty.
+  </li>
+<h5>XX.1.3.2 destructor</h5>
+<pre>  ~task();  </pre>
+  <ol>
+    <li>
+      <em>Requires:</em> the coroutine referred to by the <code>task</code> object
+      (if any) must be suspended.
+    </li>
+    <li>
+      <em>Effects:</em> Move constructs a <code>task</code> object that refers
+      to the coroutine that was originally referred to by <code>rhs</code> (if any).
+    </li>
+    <li>
+      <em>Postcondition:</em> Referred to coroutine (if any) is destroyed.
+      <em>[Note: </em> A resumption of a destroyed coroutine
+       results in undefined behavior <em>-- end note]</em>
+    </li>
+  </ol>
+  
+</body>
+</html>

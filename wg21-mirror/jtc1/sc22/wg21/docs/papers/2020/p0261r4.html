@@ -1,0 +1,1415 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN"
+ "http://www.w3.org/TR/html4/strict.dtd">
+<html><head>
+<meta http-equiv="Content-Type" content="text/html;charset=US-ASCII">
+
+<style type="text/css">
+body { color: #000000; background-color: #FFFFFF; }
+del { text-decoration: line-through; color: #8B0040; }
+ins { text-decoration: underline; color: #005100; }
+p.example { margin: 2em; }
+pre.example { margin: 2em; }
+div.example { margin: 2em; }
+code.extract { background-color: #F5F6A2; }
+pre.extract { margin: 2em; background-color: #F5F6A2;
+  border: 1px solid #E1E28E; }
+p.function { }
+p.attribute { text-indent: 3em; }
+blockquote.std { color: #000000; background-color: #F1F1F1;
+  border: 1px solid #D1D1D1; padding: 0.5em; }
+blockquote.stddel { text-decoration: line-through;
+  color: #000000; background-color: #FFEBFF;
+  border: 1px solid #ECD7EC; padding: 0.5em; }
+blockquote.stdins { text-decoration: underline;
+  color: #000000; background-color: #C8FFC8;
+  border: 1px solid #B3EBB3; padding: 0.5em; }
+table { border: 1px solid black; border-spacing: 0px;
+  margin-left: auto; margin-right: auto; }
+th { text-align: left; vertical-align: top; padding: 0.2em; border: none; }
+td { text-align: left; vertical-align: top; padding: 0.2em; border: none; }
+</style>
+
+<title>C++ Distributed Counters</title>
+</head>
+<body>
+<h1>C++ Distributed Counters</h1>
+<table style="margin-right: 0em">
+<tbody>
+<tr><th>Project:</th><td>ISO JTC1/SC22/WG21: Programming Language C++</td></tr>
+<tr><th>Number:</th><td>P0261R4</td></tr>
+<tr><th>Date:</th><td>2020-01-12</td></tr>
+<tr><th>Audience</th><td>LEWG</td></tr>
+<tr><th>Revises:</th><td>P0261R3</td></tr>
+<tr><th>Author:</th><td>Lawrence Crowl</td></tr>
+<tr><th>Contact</th><td>Lawrence@Crowl.org</td></tr>
+</tbody>
+</table>
+
+
+<h2>Abstract</h2>
+
+<p>
+We propose four class templates implementing distributed atomic counters.
+</p>
+
+
+<h2>Contents</h2>
+
+<p>
+<a href="#Introduction">Introduction</a><br>
+<a href="#Solution">Solution</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#DistibutableCounter">Distibutable Counter</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#CounterBroker">Counter Broker</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#CounterArray">Counter Array</a><br>
+<a href="#Implementation">Implementation</a><br>
+<a href="Questions">Questions, Answers and Alternatives</a><br>
+<a href="#Wording">Wording</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#distctr">?.? Distributed counters [distctr]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#distctr.general">?.?.1 General [distctr.general]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#distctr.sync">?.?.1.1 Synchronization [distctr.sync]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#distctr.value">?.?.1.2 Value Computation [distctr.value]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#distctr.syn">?.?.2 Synopsis [distctr.syn]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#distctr.bumper">?.?.4 Bumper concept [distctr.bumper]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#distctr.dstctr">?.?.5 Class template <code>distributable_counter</code> [distctr.dstctr]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#distctr.broker">?.?.6 Class template <code>counter_broker</code> [distctr.broker]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#distctr.generalarray">?.?.7 Class <code>distributable_counter_array</code> [distctr.generalarray]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#distctr.brokerarray">?.?.8 Class <code>counter_broker_array</code> [distctr.brokerarray]</a><br>
+<a href="#revision_history">Revision History</a><br>
+<a href="#references">References</a><br>
+</p>
+
+
+<h2><a name="Introduction">Introduction</a></h2>
+
+<p>
+Counters are ubiquitous in computing.
+For multi-threaded programs,
+atomic integers can provide safe concurrent counting.
+</p>
+
+<p>
+In many cases, counters are much more commonly incremented than read.
+For example, long-running multithreaded server programs
+may maintain many counters to aid in program diagnosis.
+Counters are often read
+only in response to a network query or program termination.
+</p>
+
+<p>
+Unfortunately, the cost incrementing an atomic integer
+is significantly greater than reading one,
+even when reads are rare relative to increments.
+As the program scales,
+the cost of incrementing rarely-read atomic integers
+can limit program performance.
+</p>
+
+<p>
+We need a mechanism that
+minimizes the cost of incrementing a counter,
+even if it has increased costs to read the counter.
+</p>
+
+<p>
+Cilk adder-reducers
+<a href="#Cilk-Reducer">[Cilk-Reducer]</a>
+are one such mechanism.
+Unfortunately, the reduction is control-dependent
+and hence not suitable for external inspection of the count.
+</p>
+
+<p>
+We propose a counter
+that has a complexity similar to atomic integers in the simple case,
+but enables programmers to easily distribute that counter
+across multiple threads
+when scalability becomes a concern.
+</p>
+
+<p>
+This proposal restricts itself to precise counters.
+Statistical counters,
+where the read count may be slightly different
+from the count operations,
+can produce better performance
+<a href="Dice-Lev-Moir-2013">[Dice-Lev-Moir-2013]</a>.
+</p>
+
+
+<h2><a name="Solution">Solution</a></h2>
+
+<p>
+We propose two coordinated counter types
+that collectively provide for distributed counting.
+The essential component of the design is a trade-off
+between
+the cost of incrementing the counter,
+the cost of loading (reading) the counter value,
+and the "lag" between an increment and its appearance in a "read" value.
+That is, the read of a counter value may not reflect the most recent increments.
+However, no count will be lost.
+</p>
+
+<p>
+These counters are parameterized by the base integer type
+that maintains the count.
+Avoid situations that overflow the integer,
+as that may have uninterpretable or undefined behavior.
+This constraint implies that counters must be sized to their use.
+(For dynamic mitigation, see the <code>exchange</code> operation below.)
+</p>
+
+<p>
+The base of the design is the concept of a counter bumper.
+This concept only provides for increasing or decreasing a counter.
+None of its operations provide any means to read the count.
+</p>
+
+
+<h3><a name="DistibutableCounter">Distibutable Counter</a></h3>
+
+<p>
+The first type programmers will encounter is the <code>distributable_counter</code>.
+This counter implements the bumper concept
+and provides two additional operations,
+<code>load</code> and <code>exchange</code>.
+The <code>load</code> operation returns the current count.
+Note that 'current' is a fuzzy notion when other threads
+are concurrently incrementing the counter.
+The <code>exchange</code> operation
+replaces the current count with the given value
+and returns the old value.
+This operation has particular utility in long-running programs
+in occasionally draining the counter
+to prevent integer overflow.
+</p>
+
+<pre class="example">
+distributable_counter&lt;int&gt; red_count;
+
+void count_red( Bag bag ) {
+    for ( auto i: bag )
+        if ( i.is_red() )
+            ++red_count;
+}
+
+int how_many_red() {
+    return red_count.load();
+}
+</pre>
+
+
+<h3><a name="CounterBroker">Counter Broker</a></h3>
+
+<p>
+When contention becomes a problem,
+programmers distribute the counting
+with a <code>counter_broker</code> objects.
+These will typically be thread-local objects,
+but could be CPU-local objects or even stack-based objects.
+</p>
+
+<pre class="example">
+distributable_counter&lt;int&gt; red_count;
+thread_local counter_broker&lt;int&gt; thread_red( red_count );
+
+void count_red( Bag bag )
+    for ( auto i: bag )
+        if ( i.is_red() )
+            ++thread_red;
+}
+</pre>
+
+<p>
+The association of counter brokers to general counter variables
+is an essential part of the distribution of counters,
+and not easily moved or copied.
+Therefore, we provide no copy or move operations for these types.
+</p>
+
+
+<h3><a name="CounterArray">Counter Array</a></h3>
+
+<p>
+Managing the association between general counters and their attached brokers
+can require a non-trivial amount of space and time.
+Therefore, we provide a means to handle many counters with one name
+with the <code>distributable_counter_array</code>.
+The size of the counter arrays is fixed at construction time.
+Counter arrays have the same structure as single-value counters,
+with the following exceptions.
+</p>
+
+<ul>
+<li><p>
+Increment a counter by first indexing into its array
+and then applying one of the bumper operations.
+E.g. <code>++ctr_ary[i]</code>.
+</p></li>
+
+<li><p>
+The load and exchange operations take an additional index parameter. 
+</p></li>
+</ul>
+
+
+<h2><a name="Implementation">Implementation</a></h2>
+
+<p>
+Olivier Giroux suggested an implementation
+in which the set of attached brokers was tracked
+by an intrusive list through the brokers themselves,
+rather than through a separate set data structure.
+This approach has some advantages.
+</p>
+
+<ul>
+<li><p>
+No dynamic allocation is required.
+</p></li>
+<li><p>
+The constructor of the general counter can be constexpr,
+which avoids initialization order problems for global objects.
+</p></li>
+<li><p>
+The head of the list is null until such time as a broker attaches itself,
+which substantially reduces the cost of using a general counter
+in the case where there are no brokers.
+</p></li>
+</ul>
+
+<p>
+The benefit of a constexpr initializer is high enough
+so that we choose to adopt the constexpr initializer.
+Unfortunately, counter arrays require allocation for their array of bumpers,
+and so cannot have constexpr initializers.
+</p>
+
+<p>
+An implementation of an earlier version of the design
+(with the separate broker set data structure)
+is available from the Google Concurrency Library
+<a href="https://github.com/alasdairmackintosh/google-concurrency-library">
+https://github.com/alasdairmackintosh/google-concurrency-library</a>
+at
+<a href="https://github.com/alasdairmackintosh/google-concurrency-library/blob/master/include/counter.h">
+.../blob/master/include/counter.h</a>.
+This paper's <code>distributable_counter</code>
+maps to <code>counter::strong_duplex</code>
+and
+this paper's <code>counter_broker</code>
+maps to <code>counter::strong_broker</code>.
+</p>
+
+
+<h2><a name="Questions">Questions, Answers and Alternatives</a></h2>
+
+<dl>
+
+<dt>
+Are these counters good for reference counting?
+</dt>
+<dd><p>
+No.
+The design point for the paper is when reads are rare releative to increments.
+Reference counting has closer to a one-to-one ratio.
+</p></dd>
+
+<dt>
+Isn't a <code>distributable_counter</code> just a wrapper around an atomic integral?
+</dt>
+<dd><p>
+No.
+The <code>distributable_counter</code> maintains the list of associated brokers
+and uses that list to poll the brokers
+for <code>load</code> and <code>exchange</code> operations.
+</p></dd>
+
+<dt>
+Why is it called a <code>counter_broker</code>?
+</dt>
+<dd><p>
+The type brokers the increments for the counter.
+</p></dd>
+
+<dt>
+Can you come up with better names?
+</dt>
+<dd><p>
+I welcome specific suggestions with rationale.
+</p></dd>
+
+<dt>
+Aren't the <code>counter_broker</code>s a needless complication?
+</dt>
+<dd><p>
+No.
+The essential performance gain comes from <em>distribution</em>,
+which requires variables in different parts of the system
+<a href="Vollmann-2015">[Vollmann-2015]</a>.
+</p></dd>
+
+<dt>
+Wouldn't automatically creating the <code>counter_broker</code>s be better?
+</dt>
+<dd>
+<p>
+There is no language mechanism
+for automatically creating the distributed variables.
+Mechanisms do exist on <em>some</em> systems
+for hand-coding a distribution.
+The standard should no rely on narrowly implemented facilities.
+</p>
+
+<p>
+Even so, these hand-coded mechanisms generally do not have the performance
+of language-defined <code>thread_local</code> variables.
+The cost of finding 'your' broker
+may quickly become the performance bottleneck.
+Access to variables is best integrated into the compilation system.
+</p>
+
+<p>
+<em>The current design enables end-user programmers to exploit
+any system-provided distribution mechanism.</em>
+</p>
+
+<p>
+When high-performance distribution mechanisms
+are more widely implemented and integrated into the compilation system,
+automatic distribution becomes more viable.
+</dd>
+
+<dt>
+You example shows <code>thread_local</code> brokers.
+Wouldn't CPU-local brokers be better?
+</dt>
+<dd><p>
+Yes.
+However, not all platforms provide efficient access to a CPU-local variable.
+If your platform provides CPU-local variables,
+you can use brokers with them.
+</p></dd>
+
+<dt>
+A dedicated thread-distributed counter could use store(load()+1) to
+implement increments, right?
+</dt>
+<dd><p>
+Yes.
+This technique was used
+in the <code>weak_duplex</code> and <code>weak_broker</code> types
+in earlier versions of the paper.
+The downside is that one cannot have the exchange operation
+because the exchange would be a concurrent write to the broker.
+SG1 chose to remove the weaker version
+to simplify the interface.
+</p></dd>
+
+<dt>
+Can we use 'restartable sequences'?
+</dt>
+<dd><p>
+Restartable sequences are only now have limited availability.
+More importantly, they require <em>exclusive</em> CPU access,
+or at least the ability to detect potential non-exclusive acces,
+which effectively prohibits the <code>exchange</code> operation.
+That is, restartable sequences only work with the weaker broker.
+</p></dd>
+
+<dt>
+Can we get the weaker broker back?
+</dt>
+<dd><p>
+There is nothing in this proposal
+that precludes adding the weaker version later.
+Given that SG1 has a preference for a simple initial facility,
+adding the weaker version should be a separate paper.
+</p></dd>
+
+<dt>
+Can you use brokers with automatic variables?
+</dt>
+<dd><p>
+Yes.
+Higher-performance facilities for use with automatic variables
+were in the earlier version of the paper.
+They used a 'push' model of returning counts to the main counter
+to eliminate atomic variable cost entirely.
+These facilities were removed by SG1
+to reduce the complexity of the interface.
+</p></dd>
+
+</dl>
+
+
+<h2><a name="Wording">Wording</a></h2>
+
+<p>
+The distributed counter definition is as follows.
+</p>
+
+
+<h3><a name="distctr">?.? Distributed counters [distctr]</a></h3>
+
+<p>
+Add a new section.
+</p>
+
+
+<h3><a name="distctr.general">?.?.1 General [distctr.general]</a></h3>
+
+<p>
+Add a new section.
+</p>
+
+<blockquote class="stdins">
+
+<p>
+This section provides mechanisms for distributed counters.
+These types optimize modifying the count over reading the count.
+That is, reading is assumed to be relatively rare compared to modifying.
+These mechanisms ease the production of scalable concurrent programs.
+</p>
+
+<p>
+The <code>distributable_counter</code> provides a single counter.
+When contention on that counter becomes undesireable,
+one can distribute the counting and representation
+by associating one or more <code>counter_broker</code>s
+with the <code>distributable_counter</code>.
+Together, they povide a single abstract counter.
+</p>
+
+<p>
+Every operation on a <code>distributable_counter</code>
+its associated <code>counter_broker</code>
+is an operation on the abstract counter.
+</p>
+
+<p>
+Likewise, <code>distributable_counter_array</code>
+and <code>counter_broker_array</code>
+provides an indexed set of abstract counters.
+Operations on both <em>with the same index</em>
+are operations on a single abstract counter.
+</p>
+
+<p>
+Each abstract counter
+has a set <var>M</var>
+consisting of the modify operations
+(<code>+=</code>, <code>-=</code>, and <code>exchange</code>)
+and a set R consisting of the read operations
+(<code>load</code> and <code>exchange</code>).
+The <code>exchange</code> operations exist in both sets.
+</p>
+
+</blockquote>
+
+
+<h3><a name="distctr.sync">?.?.1.1 Synchronization [distctr.sync]</a></h3>
+
+<p>
+Add a new section.
+</p>
+
+<blockquote class="stdins">
+
+<p>
+All read and modify operations are atomic.
+[<i>Note:</i>
+They will not cause a data race.
+&mdash;<i>end note</i>] 
+</p>
+
+<p>
+The classes described in [distctr]
+impose no memory ordering between increment and decrement operations
+and any other operations.
+So, the set of modify operations might not be totally ordered.
+[<i>Note:</i>
+Detecting a count value that indicates that an event has occured
+does not mean that any other memory updates associated with that event
+are visible to the current thread.
+Acting on any particular count requires additional synchronization.
+&mdash;<i>end note</i>] 
+</p>
+
+</blockquote>
+
+
+<h3><a name="distctr.value">?.?.1.2 Value Computation [distctr.value]</a></h3>
+
+<p>
+Add a new section.
+</p>
+
+<blockquote class="stdins">
+
+<p>
+The set of observed modify operations <var>O</var><sub><var>i</var></sub>
+of a read operation <var>R</var><sub><var>i</var></sub>
+of an abstract counter
+is the union of the following sets:
+</p>
+
+<ul>
+
+<li>
+The set <var>P</var><sub><var>i</var></sub>
+contains the union of <var>O</var><sub><var>j</var></sub>
+such that <var>R</var><sub><var>j</var></sub>
+happens before <var>R</var><sub><var>i</var></sub>.
+</li>
+
+<li>
+The set <var>B</var><sub><var>i</var></sub>
+contains those operations in <var>M</var>
+that happen before <var>R</var><sub><var>i</var></sub>.
+</li>
+
+<li>
+The set <var>U</var><sub><var>i</var></sub>,
+is an arbitrary subset of those operations in <var>M</var>
+that neither happen after nor happen before <var>R</var><sub><var>i</var></sub>
+and are not <var>R</var><sub><var>i</var></sub>.
+[<i>Note:</i>
+The <code>exchange</code> operation does not observe its own modification.
+&mdash;<i>end note</i>] 
+</li>
+
+</ul>
+
+<p>
+The abstract value <var>V</var><sub><var>i</var></sub>
+of a read operation <var>R</var><sub><var>i</var></sub>
+is the sum of:
+</p>
+
+<ul>
+
+<li>
+the initial abstract value <var>I</var>,
+</li>
+
+<li>
+the argument to each <code>+=</code> operation
+<var>M</var><sub><var>i</var></sub>
+that is in <var>O</var><sub><var>i</var></sub>,
+</li>
+
+<li>
+the negative of the argument to each <code>-=</code> operation
+<var>M</var><sub><var>i</var></sub>
+that is in <var>O</var><sub><var>i</var></sub>, and
+</li>
+
+<li>
+the argument to each <code>exchange</code> operation
+<var>M</var><sub><var>i</var></sub>
+minus its abstract value <var>V</var><sub><var>i</var></sub>
+such that the operation
+<var>M</var><sub><var>i</var></sub>
+is in <var>O</var><sub><var>i</var></sub>.
+</li>
+
+</ul>
+
+<p>
+The actual value is the abstract value
+when the abstract value never exceeds the range of the template parameter type.
+Otherwise, the actual value is implementation-defined.
+</p>
+
+</blockquote>
+
+
+<h3><a name="distctr.syn">?.?.2 Synopsis [distctr.syn]</a></h3>
+
+<p>
+Add a new section.
+</p>
+
+<blockquote class="stdins">
+<pre>
+<code>template&lt; typename Integral &gt; class distributable_counter;
+template&lt; typename Integral &gt; class counter_broker;
+template&lt; typename Integral &gt; class distributable_counter_array;
+template&lt; typename Integral &gt; class counter_broker_array;</code>
+</pre>
+</blockquote>
+
+
+<h3><a name="distctr.bumper">?.?.4 Bumper concept [distctr.bumper]</a></h3>
+
+<p>
+Add a new section.
+</p>
+
+<blockquote class="stdins">
+
+<p>
+The bumper concept provides a common interface
+for increasing or decreasing the value of a counter.
+It consists of the following operations.
+[<i>Note:</i>
+These operations specifically return <code>void</code>
+to avoid leaking information
+that would defeat the purpose of optimizing for increments over loads.
+&mdash;<i>end note</i>]
+</p>
+
+<p class="function">
+<code>void operator +=( <var>integer</var> )</code>
+<br>
+<code>void operator -=( <var>integer</var> )</code>
+</p>
+
+<dl class="attribute">
+<dt>Effects:</dt>
+<dd><p>
+Atomically add/subtract a value to/from the counter.
+</p></dd>
+</dl>
+
+<p class="function">
+<code>void operator ++()</code>
+<br>
+<code>void operator ++(int)</code>
+<br>
+<code>void operator --()</code>
+<br>
+<code>void operator --(int)</code>
+</p>
+
+<dl class="attribute">
+<dt>Effects:</dt>
+<dd><p>
+As if
+<code><var>counter</var>+=1</code>
+or
+<code><var>counter</var>-=1</code>,
+respectively.
+</p></dd>
+</dl>
+
+</blockquote>
+
+
+<h3><a name="distctr.dstctr">?.?.5 Class template <code>distributable_counter</code> [distctr.dstctr]</a></h3>
+
+<p>
+Add a new section.
+</p>
+
+<blockquote class="stdins">
+
+<p>
+A <code>distributable_counter</code> counter need not be distributed.
+It can act as a simple counter.
+</p>
+
+<pre>
+<code>namespace std {
+template&lt; typename Integral &gt;
+class distributable_counter
+{
+  distributable_counter( const distributable_counter&amp; ) = delete;
+  distributable_counter&amp; operator=( const distributable_counter&amp; ) = delete;
+public:
+  explicit constexpr distributable_counter( Integral );
+  constexpr distributable_counter();
+  ~distributable_counter();
+  void operator +=( Integral );
+  void operator -=( Integral );
+  void operator ++();
+  void operator ++(int);
+  void operator --();
+  void operator --(int);
+  Integral load();
+  Integral exchange( Integral to );
+}</code>
+</pre>
+
+<p>
+The <code>Integral</code> template type parameter
+shall be an integral type
+for which <code>std::atomic</code> has a specialization
+(29.5 [atomics.types.generic]).
+</p>
+
+<p>
+The <code>distributable_counter</code> class template
+implements the bumper concept
+(<a href="#distctr.bumper">[distctr.bumper]</a>).
+</p>
+
+<p class="function">
+<code>explicit constexpr distributable_counter( Integral )</code>
+<br>
+<code>constexpr distributable_counter()</code>
+</p>
+
+<dl class="attribute">
+<dt>Effects:</dt>
+<dd><p>
+Initialize the <code>distributable_counter</code> with the given value,
+or zero if no value is given.
+</p></dd>
+</dl>
+
+<p class="function">
+<code>~distributable_counter()</code>
+</p>
+
+<dl class="attribute">
+<dt>Requirements:</dt>
+<dd><p>
+All attached <code>counter_broker</code> objects
+shall have been previously destroyed.
+</p></dd>
+
+<dt>Effects:</dt>
+<dd><p>
+Destroys the <code>distributable_counter</code>.
+</p></dd>
+</dl>
+
+<p class="function">
+<code>Integer load()</code>
+</p>
+
+<dl class="attribute">
+<dt>Returns:</dt>
+<dd><p>
+Atomically returns the value of the <code>distributable_counter</code>.
+[<i>Note:</i>
+The value will be an approximation
+if any threads may concurrently update the <code>distributable_counter</code>.
+&mdash;<i>end note</i>]
+</p></dd>
+</dl>
+
+<p class="function">
+<code>Integer exchange( Integer )</code>
+</p>
+
+<dl class="attribute">
+<dt>Effects:</dt>
+<dd><p>
+Atomically replaces the value of the <code>distributable_counter</code>
+with the value of the parameter.
+</p></dd>
+
+<dt>Returns:</dt>
+<dd><p>
+The replaced value.
+</p></dd>
+</dl>
+
+</blockquote>
+
+
+<h3><a name="distctr.broker">?.?.6 Class template <code>counter_broker</code> [distctr.broker]</a></h3>
+
+<p>
+Add a new section.
+</p>
+
+<blockquote class="stdins">
+
+<pre>
+template&lt; typename Integral &gt;
+class counter_broker
+{
+  counter_broker( const counter_broker&amp; ) = delete;
+  counter_broker&amp; operator=( const counter_broker&amp; ) = delete;
+public:
+  counter_broker( distributable_counter&lt;Integral&gt;&amp; );
+  ~counter_broker();
+  void operator +=( Integral );
+  void operator -=( Integral );
+  void operator ++();
+  void operator ++(int);
+  void operator --();
+  void operator --(int);
+};
+</pre>
+
+<p>
+The <code>Integral</code> template type parameter
+shall be an integral type
+for which <code>std::atomic</code> has a specialization
+(29.5 [atomics.types.generic]).
+</p>
+
+<p>
+The <code>counter_broker</code> class template
+implements the bumper concept
+(<a href="#distctr.bumper">[distctr.bumper]</a>).
+</p>
+
+<p class="function">
+<code> counter_broker( distributable_counter&lt;Integral&gt;&amp; )</code>
+</p>
+
+<dl class="attribute">
+<dt>Effects:</dt>
+<dd><p>
+Initialize the broker,
+atomically associating it with the given <code>distributable_counter</code>.
+</p></dd>
+</dl>
+
+<p class="function">
+<code>~counter_broker()</code>
+</p>
+
+<dl class="attribute">
+<dt>Effects:</dt>
+<dd><p>
+Atomically moves any part of the count value
+retained within the <code>counter_broker</code>
+to its associated <code>distributable_counter</code>.
+Atomically disassociates the <code>counter_broker</code>
+from the <code>distributable_counter</code>.
+Destroys the <code>counter_broker</code>.
+</p></dd>
+</dl>
+
+</blockquote>
+
+
+<h3><a name="distctr.generalarray">?.?.7 Class <code>distributable_counter_array</code> [distctr.generalarray]</a></h3>
+
+<p>
+Add a new section.
+</p>
+
+<blockquote class="stdins">
+
+<pre>
+template&lt; typename Integral &gt;
+class distributable_counter_array
+{
+  distributable_counter_array( const distributable_counter_array&amp; ) = delete;
+  distributable_counter_array&amp; operator=( const distributable_counter_array&amp; ) = delete;
+public:
+  typedef size_t size_type;
+  distributable_counter_array( size_type size );
+  <var>some_bumper_type</var>&amp; operator[]( size_type idx );
+  size_type size();
+  Integral load( size_type idx );
+  Integral exchange( size_type idx, Integral value );
+};
+</pre>
+
+<p>
+The <code>Integral</code> template type parameter
+shall be an integral type
+for which <code>std::atomic</code> has a specialization
+(29.5 [atomics.types.generic]).
+</p>
+
+<p class="function">
+<code>constexpr distributable_counter_array( size_type );</code>
+</p>
+
+<dl class="attribute">
+<dt>Effects:</dt>
+<dd><p>
+Initialize the <code>distributable_counter_array</code>
+with the given number of counters,
+each initialized to zero.
+</p></dd>
+</dl>
+
+<p class="function">
+<code>~distributable_counter_array()</code>
+</p>
+
+<dl class="attribute">
+<dt>Requirements:</dt>
+<dd><p>
+All attached <code>counter_broker_array</code> objects
+shall have been previously destroyed.
+</p></dd>
+
+<dt>Effects:</dt>
+<dd><p>
+Destroys the <code>distributable_counter_array</code>.
+</p></dd>
+</dl>
+
+<p class="function">
+<code>size_type size()</code>
+</p>
+
+<dl class="attribute">
+<dt>Returns:</dt>
+<dd><p>
+The value passed to the constructor.
+</p></dd>
+</dl>
+
+<p class="function">
+<code><var>some_bumper_type</var>&amp; operator[]( size_type index )</code>
+</p>
+
+<dl class="attribute">
+<dt>Precondition:</dt>
+<dd><p>
+0 &le; <code>index</code> &lt; <code>size()</code>
+</p></dd>
+
+<dt>Returns:</dt>
+<dd><p>
+A reference to an object, identified by the <code>index</code>,
+implementing the bumper concept
+<a href="#distctr.bumper">[distctr.bumper]</a>.
+</p></dd>
+</dl>
+
+<p class="function">
+<code>Integer load( size_type index )</code>
+</p>
+
+<dl class="attribute">
+<dt>Precondition:</dt>
+<dd><p>
+0 &le; <code>index</code> &lt; <code>size()</code>
+</p></dd>
+
+<dt>Returns:</dt>
+<dd><p>
+the value of the bumper with the given <code>index</code>.
+[<i>Note:</i>
+The value will be an approximation
+if any threads may concurrently update the counter.
+&mdash;<i>end note</i>]
+</p></dd>
+</dl>
+
+<p class="function">
+<code>Integer exchange( size_type index, Integer value )</code>
+</p>
+
+<dl class="attribute">
+<dt>Precondition:</dt>
+<dd><p>
+0 &le; <code>index</code> &lt; <code>size()</code>
+</p></dd>
+
+<dt>Effects:</dt>
+<dd><p>
+Atomically replaces the value of the bumper at the given <code>index</code>
+with the given <code>value</code>.
+</p></dd>
+
+<dt>Returns:</dt>
+<dd><p>
+The replaced value.
+</p></dd>
+</dl>
+
+</blockquote>
+
+<h3><a name="distctr.brokerarray">?.?.8 Class <code>counter_broker_array</code> [distctr.brokerarray]</a></h3>
+
+<p>
+Add a new section.
+</p>
+
+<blockquote class="stdins">
+
+<pre>
+template&lt; typename Integral &gt;
+class counter_broker_array
+{
+  counter_broker_array( const counter_broker_array&amp; ) = delete;
+  counter_broker_array&amp; operator=( const counter_broker_array&amp; ) = delete;
+public:
+  typedef size_t size_type;
+  counter_broker_array( distributable_counter_array&lt;Integral&gt;&amp; );
+  <var>some_bumper_type</var>&amp; operator[]( size_type idx );
+  size_type size();
+};
+</pre>
+
+<p>
+The <code>Integral</code> template type parameter
+shall be an integral type
+for which <code>std::atomic</code> has a specialization
+(29.5 [atomics.types.generic]).
+</p>
+
+<p class="function">
+<code>constexpr counter_broker_array( distributable_counter_array< Integral >&amp; );</code>
+</p>
+
+<dl class="attribute">
+<dt>Effects:</dt>
+<dd><p>
+Initialize the broker array.
+Atomically associate the <code>counter_broker_array</code>
+with the <code>distributable_counter_array</code>.
+</p></dd>
+</dl>
+
+<p class="function">
+<code>~counter_broker_array()</code>
+</p>
+
+<dl>
+<dt>Effects:</dt>
+<dd><p>
+Atomically moves each count value retained within the broker
+to its associated position in the counter array.
+Atomically disassociates the broker array from the counter array.
+Destroys the broker array.
+</p></dd>
+</dl>
+
+<p class="function">
+<code>size_type size()</code>
+</p>
+
+<dl class="attribute">
+<dt>Returns:</dt>
+<dd><p>
+The value passed to the constructor.
+</p></dd>
+</dl>
+
+<p class="function">
+<code><var>some_bumper_type</var>&amp; operator[]( size_type index )</code>
+</p>
+
+<dl class="attribute">
+<dt>Precondition:</dt>
+<dd><p>
+0 &le; <code>index</code> &lt; <code>size()</code>
+</p></dd>
+
+<dt>Returns:</dt>
+<dd><p>
+A reference to an object, identified by the <code>index</code>,
+implementing the bumper concept
+<a href="#distctr.bumper">[distctr.bumper]</a>.
+</p></dd>
+</dl>
+
+</blockquote>
+
+
+<h2><a name="revision_history">Revision History</a></h2>
+
+<p>
+This paper revises
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/p0261r3.html">
+P0261R3 - 2017-03-13</a>.
+Its changes are as follows.
+</p>
+
+<ul>
+
+<li><p>
+LEWGI suggested several renamings of <code>general_counter</code>,
+of which the top two were
+<code>distributed_counter</code> and <code>atomic_counter</code>,
+with <code>shared_counter</code> as honorable mention.
+This revision chooses <code>distributable_counter</code>
+with text clarifying that a <code>distributable_counter</code>
+need not be distributed, but may serve as a simple atomic counter.
+</p></li>
+
+<li><p>
+Made <code>distributable_counter::load</code> <code>const</code>.
+</p></li>
+
+<li><p>
+Added <code>is_lock_free</code> and <code>is_always_lock_free</code>.
+</p></li>
+
+</ul>
+
+<p>
+P0261R3 revised
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/p0261r2.html">
+P0261R2 - 2017-02-05</a>.
+Its changes are as follows.
+</p>
+
+<ul>
+
+<li><p>
+Add introductory text to [distctr.general].
+</p></li>
+
+<li><p>
+Define modify and read operations in [distctr.general].
+</p></li>
+
+<li><p>
+Add a Synchronization section [distctr.sync] in [distctr.general].
+Define read operations that happen after other read operations
+to include all those increments seen by the other.
+Define the increment and decrement operations to impose no memory order.
+</p></li>
+
+<li><p>
+Add a Value Computation section [distctr.value] in [distctr.general].
+Define the abstract value of the counter for any read operation
+as the sum of observed modify operations.
+</p></li>
+
+<li><p>
+Add a questions, answers and alternatives section
+to address design choices.
+</p></li>
+
+<li><p>
+Add the descriptions of the <code>size</code> function.
+Add prerequisites using <code>size</code> where appropriate.
+</p></li>
+
+</ul>
+
+<p>
+P0261R2 revised
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0261r1.html">
+P0261R1 - 2016-10-13</a>.
+Its changes are as follows.
+</p>
+
+<ul>
+
+<li><p>
+Merge all synchronization clauses into a single new section.
+Require cache coherence on counts.
+</p></li>
+
+<li><p>
+Clarify that moving the count from the broker
+does so an atomic element at at time, not atomically in bulk.
+</p></li>
+
+<li><p>
+Remove "There is no default value" as it follows from the declaration
+and is potentially confusing.
+</p></li>
+
+<li><p>
+Move the note about increments returning <code>void</code>
+to the top of the section so that it applies to all operations.
+</p></li>
+
+</ul>
+
+
+<p>
+P0261R1 revised
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0261r0.html">
+P0261R0 - 2016-02-14</a>.
+Its changes are as follows.
+</p>
+
+<ul>
+
+<li><p>
+Clarify that <code>general_counter::load</code> is atomic.
+</p></li>
+
+<li><p>
+Use the type-specific phrase "<code>counter_broker</code> object"
+rather than the general phrase "counter broker"
+in the proposed wording.
+Do the same with the array forms.
+</p></li>
+
+<li><p>
+Correct parameter and description of effective broker constructors.
+</p></li>
+
+<li><p>
+Add a <code>size_type</code> to the counter array classes.
+</p></li>
+
+<li><p>
+Clarify initialization of counter array values.
+</p></li>
+
+<li><p>
+Clarify the adoption of constexpr <code>general_counter</code> constructors.
+</p></li>
+
+<li><p>
+Expand on the problem of counter overflow.
+</p></li>
+
+<li><p>
+Update the document header.
+</p></li>
+
+<li><p>
+Add an abstract.
+</p></li>
+
+<li><p>
+Add subheadings to Solution.
+</p></li>
+
+<li><p>
+Do general editorial cleanup.
+</p></li>
+
+</ul>
+
+<p>
+P0261R0 revised
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2013/n3706.html">
+N3706 - 2013-09-01</a>.
+Its changes are as follows:
+</p>
+
+<ul>
+
+<li><p>
+Add more context to the introduction and rework subsequent discussion.
+</p></li>
+
+<li><p>
+Reduce the number of types to four,
+a <code>general_counter</code>
+equivalent to the earlier <code>strong_duplex</code>,
+a <code>counter_broker</code>
+equivalent to the earlier <code>strong_broker</code>,
+a <code>general_counter_array</code>
+equivalent to the earlier <code>strong_duplex_array</code>, and
+a <code>counter_broker_array</code>
+equivalent to the earlier <code>strong_broker_array</code>.
+</p></li>
+
+<li><p>
+Remove the atomicity specification.
+Only full and relaxed atomicity is now supported.
+</p></li>
+
+<li><p>
+As a consequence of the above two points,
+drastically reduce the solution presentation.
+</p></li>
+
+<li><p>
+Update the implementation discussion
+with a new technique
+and new pointers to the code base.
+</p></li>
+
+<li><p>
+Add proposed wording.
+</p></li>
+
+</ul>
+
+<p>
+N3706 revised
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3355.html">
+N3355 = 12-0045 - 2012-01-14</a>.
+Its changes are as follows:
+</p>
+
+<ul>
+
+<li><p>
+Add more context to the introduction.
+</p></li>
+
+<li><p>
+Change named <code>inc</code> and <code>dec</code> functions to operators.
+</p></li>
+
+<li><p>
+Place all declarations within namespace <code>counter</code>.
+The namespace serves to avoid redundancy in names.
+</p></li>
+
+<li><p>
+Rename types for increased clarity.
+</p></li>
+
+<li><p>
+Change separate serial and atomic counter types
+with a single type templatized on the atomicity.
+</p></li>
+
+<li><p>
+Add issues of memory order and contention to the atomicity parameter.
+</p></li>
+
+<li><p>
+Add counter arrays.
+</p></li>
+
+<li><p>
+Add open issues section.
+</p></li>
+
+<li><p>
+Add implementation section.
+</p></li>
+
+<li><p>
+Add revision history section.
+</p></li>
+
+<li><p>
+Add references section.
+</p></li>
+
+</ul>
+
+<h2><a name="references">References</a></h2>
+
+<dl>
+
+<dt><a name="Cilk-Reducer">[Cilk-Reducer]</a></dt>
+<dd>
+"Reducers",
+<a href="http://software.intel.com/sites/products/documentation/hpc/composerxe/en-us/2011Update/cpp/lin/cref_cls/common/cilk_bk_reducer_intro.htm">
+http://software.intel.com/sites/products/documentation/hpc/composerxe/en-us/2011Update/cpp/lin/cref_cls/common/cilk_bk_reducer_intro.htm</a>;
+"Intel Cilk Plus",
+<a href="http://software.intel.com/sites/products/documentation/hpc/composerxe/en-us/2011Update/cpp/lin/cref_cls/common/cilk_bk_using_cilk.htm">
+http://software.intel.com/sites/products/documentation/hpc/composerxe/en-us/2011Update/cpp/lin/cref_cls/common/cilk_bk_using_cilk.htm</a>;
+"Intel C++ Compiler XE 12.1 User and Reference Guides",
+<a href="http://software.intel.com/sites/products/documentation/hpc/composerxe/en-us/2011Update/cpp/lin/main/main_cover_title.htm">
+http://software.intel.com/sites/products/documentation/hpc/composerxe/en-us/2011Update/cpp/lin/main/main_cover_title.htm</a>
+</dd>
+
+<dt><a name="Dice-Lev-Moir-2013">[Dice-Lev-Moir-2013]</a></dt>
+<dd>
+"Scalable Statstics Counters";
+Dave Dice, Yossi Lev, Mark Moir;
+SPAA'13, June 23-25, 2013, Montr&egrave;al Qu&egrave;bec, Canada.
+</dd>
+
+<dt><a name="Lev-Moir-2011">[Lev-Moir-2011]</a></dt>
+<dd>
+"Lightweight Parallel Accumulators Using C++ Templates";
+Yossi Lev, Mark Moir;
+ICSE'11, May 21-28, 2011, Waikiki, Honolulu, HI, USA
+</dd>
+
+<dt><a name="Vollmann-2015">[Vollmann-2015]</a></dt>
+<dd>
+Atomic Counters: A Lesson on Performance and Hardware Concurrency";
+Detlef Vollmann;
+ACCU, April 2015
+<a href="https://accu.org/content/conf2015/DetlefVollmann-Atomic%20Counters.pdf">
+https://accu.org/content/conf2015/DetlefVollmann-Atomic%20Counters.pdf</a>
+</dd>
+
+</dl>
+
+</body></html>

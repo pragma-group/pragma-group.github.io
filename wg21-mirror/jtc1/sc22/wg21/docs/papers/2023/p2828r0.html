@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Copy elision for direct-initialization with a conversion function (Core
+issue 2327)</title>
+<style>
+ins {
+    color: green;
+    text-decoration: underline;
+}
+del {
+    color: red;
+    text-decoration: line-through;
+}
+ul {
+    list-style: none;
+    padding: 0 0 0 1.5em;
+}
+li {
+    padding: 0.5ex 0;
+}
+li::before {
+    content: "\2014";
+    float: left;
+    margin-left: -1.5em;
+}
+pre.example::before {
+    color: #888;
+    display: block;
+    font-style: italic;
+    counter-increment: example;
+    content: "// Example " counter(example);
+}
+pre {
+    margin-left: 1em;
+}
+dt {
+    font-weight: bold;
+}
+</style>
+</head>
+<body style="counter-reset: example">
+<h1>Copy elision for direct-initialization with a conversion function
+(<a href="https://wg21.link/CWG2327">Core issue 2327</a>)</h1>
+<table style="float: right">
+<tr><td>Document number:</td><td>P2828R0</td></tr>
+<tr><td>Date:</td><td>March 13, 2023</td></tr>
+<tr><td>Audience:</td><td>CWG</td></tr>
+<tr><td>Reply to:</td><td>Brian Bi (bbi5291@gmail.com)</td></tr>
+<tr><td>With thanks to:</td><td>Richard Smith</td></tr>
+</table>
+<div style="clear: both"></div>
+<h2>Copy elision in the Big 4</h2>
+<p>Consider the example given in the issue report:</p>
+<pre class="example"><code>struct Cat {};
+struct Dog { operator Cat(); };
+
+Dog d;
+Cat c(d);</code></pre>
+<p>Recent versions of Clang, GCC, MSVC, and NVC++ (which uses an EDG front end) all implement copy elision, and
+accept the code even if <code>Cat</code>'s move constructor is explicitly
+deleted. However, each implementation has taken a different approach in order to
+achieve this result. Comparison of the approaches reveals a surprisingly large
+design space for copy elision for direct-initialization using a conversion
+function. Even if (as will be proposed later in this paper) CWG adopts the most
+conservative possible approach as the resolution for issue 2327, I believe there
+is value in discussing the strengths and weaknesses of the various different
+approaches currently found <q>in the wild</q> in case CWG (or EWG) sees fit to
+expand the scope of copy elision in the future.</p>
+
+<p>(As an obvious disclaimer, I do not have access to the EDG or MSVC source
+code, so any statements I make about their copy elision logic are mere educated
+guesses. I am also not affiliated with, nor authorized to make any official
+statements regarding, any of the four implementations surveyed herein.)</p>
+
+<p>EDG appears to take the simplest and most conservative possible approach:
+perform overload resolution exactly as the standard currently requires, and if
+the copy or move constructor of <code>Cat</code> is selected to perform the
+direct-initialization, and a temporary of type <i>cv</i>&nbsp;<code>Cat</code>
+would be materialized in order to bind the parameter of the constructor to the
+prvalue result of calling a conversion function, then just use that prvalue to
+directly construct the object being initialized instead of creating a
+temporary. Since I don't have access to the EDG source code, I can't be
+exactly sure that this is what it's doing, but an examination of various cases
+on which EDG diverges from Clang, GCC, and MSVC showed that this rule would explain
+the divergence every time.</p>
+
+<p>Clang's approach, as explained to me by Richard Smith, involves considering
+both constructors and conversion functions as candidates for the
+direct-initialization. In the above example, the three candidate functions for
+the initialization are therefore the copy and move constructor of
+<code>Cat</code> and the conversion function in <code>Dog</code>.  In order to
+call either constructor of <code>Cat</code>, a user-defined conversion (namely,
+<code>Dog::operator&nbsp;Cat</code>) must be invoked on the initializer
+<code>d</code>. But <code>operator&nbsp;Cat</code> itself is also a candidiate,
+and it only requires a standard conversion sequence (namely the reference
+binding of the implicit object parameter). Consequently, it wins the overload
+resolution and is called to initialize <code>c</code>. Clang's approach
+represents the most aggressive modification to the overload resolution rules,
+and thus sits on the opposite end of the spectrum from EDG.</p>
+
+<p>GCC's approach, which I discovered by simply reading the source
+code, has characteristics of both Clang's approach and EDG's approach. It first
+enumerates the candidate constructors as the standard currently requires, but,
+when determining the overload resolution priority of a copy or move constructor
+whose reference parameter would bind to the prvalue result of a conversion
+operator to type <i>cv</i>&nbsp;<code>Cat</code>, that constructor is considered
+to be replaced by the conversion function itself (which increases its overload
+resolution priority for the reasons explained in the previous paragraph).</p>
+
+<p>Finally, the MSVC approach is very conservative (similar to EDG) but does
+appear to diverge from it slightly. The divergence is mysterious and I'm not
+able to come up with a coherent hypothesis as to what logic it uses. This will
+be discussed later in the paper.</p>
+
+<p>In all cases, the only relevant conversion functions are the ones with return
+type exactly <i>cv</i>&nbsp;<code>Cat</code>; not a derived class, and not a
+reference. That's because you can't perform copy/move elision unless the
+conversion function returns a prvalue of type exactly
+<i>cv</i>&nbsp;<code>Cat</code>.</p>
+
+<h2>Known divergences</h2>
+<p>In this section I discuss the known divergences between the three
+implementations. Because of the conservative nature of EDG's approach, we can
+assume that it doesn't break any currently valid code (other than in possible
+cases where SFINAE causes a different overload to be chosen when a previously
+ill-formed construct becomes well-formed); at the same time, EDG's approach
+also never <q>improves</q> overload resolution (<i>i.e.</i> it cannot make any
+currently ambiguous cases unambiguous). Therefore, I'll treat EDG's approach as
+if it's the status quo when discussing the pros and cons of the other three
+approaches.</p>
+
+<h3>Disambiguating in favor of move constructors when multiple conversion
+operators are present</h3>
+<p>This is the most common type of implementation divergence noticed by Stack
+Overflow users. Its most common incarnation boils down to:</p>
+<pre class="example"><code>struct X {
+   X(int);
+   // X(X&amp;&amp;);  // implicitly declared
+};
+
+struct Y {
+   operator X();
+   operator int();
+};
+
+X x(Y{});</code></pre>
+<p>The status quo is that this is ambiguous because the candidates
+<code>X::X(int)</code> and <code>X::X(X&amp;&amp;)</code> each require a
+different user-defined conversion function (<code>Y::operator&nbsp;int</code>
+and <code>Y::operator&nbsp;X</code>), respectively. Clang and GCC exhibit
+improved behavior in such cases: Clang by treating <code>operator X</code> as a
+candidate, and GCC by replacing <code>X::X(X&amp;&amp;)</code> by
+<code>operator X</code> when comparing it against <code>X::X(int)</code>.</p>
+
+<p>In the February 2023 WG21 meeting in Issaquah, the consensus in CWG was that
+code like the above ought to be well-formed,
+and that an approach similar to the Clang approach should be pursued in order
+to make it so. However, when the issue was discussed again at the March 3, 2023
+telecon, concerns were expressed about overly ambitious revisions to the
+overload resolution rules (see particularly Example 4 below). The consensus was
+that the benefits to making Example 2 work are outweighed by the costs of
+changing the currently mandated behavior of Example 4 to a different (but also
+well-formed) behavior.</p>
+
+<p>This divergence also arises in the context of standard library classes that
+have multiple one-argument constructors:</p>
+<pre class="example"><code>#include &lt;string&gt;
+
+struct X {
+   template &lt;typename T&gt;
+   operator T();
+};
+
+std::string s(X{});
+  // string(string&amp;&amp;)?
+  // string(const char*)?
+  // string(const allocator&amp;)?
+  // string(initializer_list&lt;char&gt;)?
+  // string(nullptr_t)?</code></pre>
+<p>Here, virtually anyone but a language lawyer would expect the conversion
+operator to be called to convert to <code>std::string</code>.
+However, having an unconstrained conversion function template as in this
+example is not a particularly compelling use case. The consensus of CWG in the
+March 3, 2023 telecon was again that making this example work should not come at
+the cost of changing the behavior of Example 4.</p>
+
+<h3>Preference of conversion functions over constructors that would use a
+standard conversion</h3>
+<p>In the previous section we discussed some cases where the Clang/GCC approach
+picks the <q>right</q> constructor/conversion&nbsp;operator pair instead of
+leaving it ambiguous. However, there are also currently valid cases where the
+Clang/GCC approach <em>changes</em> the behavior in possibly surprising ways: a
+conversion function that is suitable for elision will be preferred over most
+constructors even if the implicit conversion sequence for the constructor is a
+standard conversion sequence. For example:</p>
+<pre class="example"><code>struct Dog;
+
+struct Cat {
+    Cat(const Dog&amp;);
+};
+
+struct Dog {
+    operator Cat();
+};
+
+Cat cat(Dog{});</code></pre>
+<p>In current C++ and in EDG and MSVC, this will call the converting constructor. In
+Clang/GCC, this will call <code>operator&nbsp;Cat</code> because when
+<code>operator&nbsp;Cat</code> is a candidate, its implicit conversion sequence
+is the binding of the implicit object parameter of type <code>Dog&amp;</code>,
+while the converting constructor binds a <code>const&nbsp;Dog&amp;</code>. Per
+<a href="https://eel.is/c++draft/over.ics.rank#3.2.6">[over.ics.rank]/3.2.6</a>,
+the less cv-qualified reference wins. Note that if the constructor and the
+conversion operator cannot be distinguished by their implicit conversion
+sequences, such as if <code>operator&nbsp;Cat</code> above were made
+const-qualified, both Clang and GCC have a tie-breaker rule that prefers the
+constructor.</p>
+
+<p>GCC and Clang have been doing this for a long time:</p>
+<ul>
+<li>GCC chooses the conversion function over the constructor since version 7.1
+as long as the language mode is set to C++17 or higher. (Version 7.1, released
+in 2017, is the first version that is reported to support P0135.) See commit
+<code>36cbfd</code>, which predates the implementation of GCC's current strategy
+of tweaking overload resolution priority.</li>
+<li>Clang began choosing the conversion function over the constructor since
+version 6.0.0, which was released in 2018, as long as the language mode is set
+to C++17 or higher. See commit <code>67ef14</code>.</li>
+</ul>
+<p>It's
+possible for the Clang/GCC behavior to cause problems for users who expect
+direct-initialization to always call a constructor. They might try to implement
+the conversion function as follows:</p>
+<pre><code>Dog::operator Cat() {
+    return Cat(*this);  // OK in current C++ and MSVC; infinite recursion in Clang and GCC
+}</code></pre>
+<p>Either the constructor or the conversion function might be instantiated from
+a template rather than written directly to convert to/from a single type;
+typically, the constructor.
+For this reason, Clang's tie-breaker rule of preferring a
+constructor over a conversion function had to be moved ahead of the template
+tie-breakers (otherwise, a non-template conversion function would win over a constructor template and would call itself
+recursively); see commit <a href="https://github.com/llvm/llvm-project/commit/5173136a968547330ab5a25c467b9b968be9ab43"><code>5173136</code></a>. Even still, if the constructor
+template takes its argument by const reference and the conversion function is
+not const-qualified, the conversion function will win like in Example 4.</p>
+
+<p>At the March 3, 2023 CWG telecon, some implementers expressed concerns over
+changing the behavior of Example 4, citing domains in which having both a
+constructor and a conversion function like in Example 4 are actually common. The
+consensus was that the behavior of Example 4 should not be changed, which rules
+out the current Clang and GCC approaches.</p>
+
+<p>A related implementation divergence between Clang/GCC and EDG/MSVC that was
+reported on Stack Overflow involves a binding of a base class reference to a
+derived class object, and can be illustrated as follows:</p>
+<pre class="example"><code>struct A1 {};
+
+struct A2 {
+    A2(const A1&amp;);  // EDG and MSVC call this (conform to current standard)
+    A2(const A2&amp;);
+};
+
+struct B : A1 {
+    operator A2();  // Clang and GCC call this
+};
+
+A2 a(B{});</code></pre>
+
+<h3>Conversion functions to both <code>A</code> and <q>reference to
+<code>A</code></q></h3>
+<p>Consider the following:</p>
+<pre class="example"><code>struct T {
+    T(T const&amp;);
+};
+
+struct S {
+    operator T();
+    operator T&amp;();
+};
+
+S s;
+T t(s);</code></pre>
+<p>The status quo is this will call <code>S::operator&nbsp;T&amp;</code> because
+the implicit conversion from <code>S</code> to <code>T&nbsp;const&amp;</code>
+prefers to bind the reference to an lvalue rather than materializing a
+temporary (<a href="https://eel.is/c++draft/dcl.init.ref#5.1.2">[dcl.init.ref]/5.1.2</a>).
+EDG, GCC, and MSVC all retain this behavior; Clang's approach of treating
+<code>S::operator&nbsp;T</code> as a separate top-level candidate results in it
+winning, and <code>S::operator&nbsp;T&amp;</code> is not used.</p>
+
+<p>My feeling is that people who write this kind of code are asking for trouble;
+having both <code>operator&nbsp;const&nbsp;T&amp;</code> and
+<code>operator&nbsp;T&amp;&amp;</code> in the same class would be fine (sort of
+like how we often overload on such pairs of types) but having one return by
+reference and the other by value should be expected to cause difficulties. If
+we end up changing the behavior of code like this in order to make the more
+common cases work properly, the amount of breakage it would cause is likely to
+be limited. Nevertheless, this example is based on a real Stack Overflow
+question, so I felt it was worth mentioning.</p>
+
+<h3>Hypothetical examples where Clang/GCC might introduce new
+ambiguities</h3>
+<p>There were no reported cases on Stack Overflow where Clang's approach
+introduced an ambiguity that is not present in the current standard. However, it
+is possible to construct one by having multiple conversion functions that take
+precedence over all constructors but are ambiguous among themselves:</p>
+<pre class="example"><code>struct Y;
+
+struct X {
+    X(const Y&amp;);
+};
+
+struct A {
+    operator X();
+};
+
+struct B {
+    operator X();
+};
+
+struct Y : A, B { };
+
+X x(Y{});  // well-formed in current C++, ambiguous in Clang</code></pre>
+<p>My sense is that the amount of real code that would exhibit this kind of
+breakage is low, although there are approaches we could take to avoid them if
+CWG considers it important to do so.
+It was also pointed out on the reflector that users who would encounter such an
+ambiguity as a result of adopting the Clang approach would have an easy fix:
+add the constructor <code>X::X(Y&amp;&amp;)</code>.</p>
+
+<p>I don't think GCC's algorithm ever introduces new ambiguities. In cases like
+the above where it is ambiguous which conversion function would be used in order
+to call the copy/move constructor of the destination class, the overload
+resolution priority of that constructor is unaffected relative to the status
+quo; in the specific example above, that means the move constructor of
+<code>X</code> loses in overload resolution, just as in the status quo. If GCC
+does decide to replace one or more copy/move constructors with a conversion
+function for the purposes of overload resolution, then all such constructors
+will use the same conversion function since the reference binding in all cases
+will use
+<a href="http://eel.is/c++draft/dcl.init.ref#5.4.1">[dcl.init.ref]/5.4.1</a>.
+If that conversion function wins the top-level overload resolution, it is called
+(there is no need to pick one of the copy/move constructors that originally
+required it, since the constructor wouldn't be called anyway). The conversion
+function will never be ambiguous relative to another constructor, because
+constructors are preferred over conversion functions in case of a tie.</p>
+
+<h3>Philosophical difference between Clang and GCC</h3>
+<p>The Clang approach makes direct-initialization conceptually more similar to
+copy-initialization in that constructors and conversion functions are both
+considered when enumerating candidates. This might be viewed as a simplification
+of the language (although not one that is particularly likely to result in a
+simplification of the wording). The GCC approach preserves the current
+philosophy in which constructors are primary for direct-initialization; a
+conversion function only gets considered if it chosen by a constructor. This
+difference is not just philosophical; in addition to the divergences already
+discussed, we can observe that the Clang approach permits copy elision even in
+cases where no copy constructor, not even a deleted one, has its constraints satisfied:</p>
+<pre class="example"><code>template &lt;int i = 0&gt;
+class NonCopyable {
+  public:
+    NonCopyable(const NonCopyable&amp;) requires(i != 0);
+
+  private:
+    NonCopyable(int x);
+    friend struct Source;
+};
+
+struct Source {
+    operator NonCopyable&lt;0&gt;();
+};
+
+NonCopyable&lt;0&gt; nc(Source{});  // OK in Clang; ill-formed in GCC, MSVC, and the current standard</code></pre>
+
+<p>In the March 3, 2023 telecon, CWG appeared to be divided as to how this
+example should behave. It was pointed out that in current C++, this
+initialization is well-formed as a copy-initialization, and some members
+expressed dissatisfaction that it does not also work as a direct-initialization.
+Others pointed out that the direct-initialization syntax looks as if it connotes
+a constructor call, and while we all agree that we intend to elide that call
+under some circumstances (see Example 1), perhaps we should not actually be
+trying to support Example 8.</p>
+
+<p>I note that the link between direct-initialization and calling
+constructors already went out the window in C++20 with the introduction of
+direct-non-list-initialization for aggregates, so if making Example 8 work is
+judged to be the most useful behavior, then we shouldn't let any perceived
+link between direct-initialization and calling a constructor hold us back from
+standardizing such behavior.</p>
+
+<h3>Mysterious divergence between EDG and MSVC</h3>
+<p>The following is very similar to Example 2, but shows that EDG and MSVC do
+not take the exact same approach:</p>
+<pre class="example"><code>struct Cat {
+    Cat(const Cat&amp;);
+    Cat(int);
+};
+
+struct Dog {
+    operator Cat();
+    operator int();
+};
+
+Cat cat(Dog{});  // ambiguous in current C++</code></pre>
+<p>Example 2 has both an implicitly declared copy constructor and an implicitly
+declared move constructor, while Example 9 has a user-declared copy constructor
+and, therefore, no move constructor. As in Example 2, Clang and GCC will call
+<code>operator&nbsp;Cat</code> in Example 9, and as in Example 2, Example 9 is
+ambiguous for EDG. However, MSVC, which considers Example 2 ambiguous, accepts
+Example 9, following Clang and GCC in calling <code>operator&nbsp;Cat</code>.
+It seems that when a <em>copy</em> constructor is present, MSVC prefers it over
+<code>Cat::Cat(int)</code>, but when a <em>move</em> constructor is present
+together with the copy constructor, it takes precedence over the copy
+constructor but does <em>not</em> take precedence over
+<code>Cat::Cat(int)</code>. This seems difficult to explain and may simply be a
+bug in MSVC. (This bug may be unrelated to copy elision, since it appears that
+older versions of MSVC, which do not perform copy elision in Example 9, also
+exhibit the nonconforming behavior of choosing the copy constructor.)</p>
+
+<h2>Proposed resolution</h2>
+<p>After the CWG telecon on March 3, 2023, and in particular the consensus to
+continue calling the constructor in Example 4, a number of different feasible
+approaches still remain. One is to simply adopt the EDG approach, which is
+guaranteed to have no effect on overload resolution. A second is the EDG
+approach plus a small fix for Example 8, namely: only if there is no viable
+constructor for the direct-initialization, consider conversion functions. A
+third approach, which preserves the behavior of Examples 4 and 5 while retaining
+the Clang/GCC changes for Examples 2 and 3 and the Clang changes for Example 8,
+is to
+consider conversion functions as candidates (as Clang) but give them a handicap during overload resolution:
+a constructor using a
+standard conversion sequence beats any conversion function. I'll refer to this
+as <q>Clang with constructor preference</q>.</p>
+
+<p>I think Clang with constructor preference is probably the best approach from
+an evolutionary perspective and the one I would advocate if the author of P0135
+were still in the process of revising it. However, after CWG initially appeared
+to favor the current Clang approach and then had to change course after
+considering the unexpected consequences for Example 4, there does not appear to
+be consensus on how to change the overload resolution rules to take conversion
+functions into account during direct-initialization. It therefore seems to me
+that we should simply adopt the most conservative (EDG) approach for resolving
+issue 2327, and defer any decision on changing the overload resolution rules to
+a future point in time (and perhaps a different room, <i>i.e.</i>, EWG). Taking
+the conservative approach here will not close the door to future changes in
+overload resolution to require elision in more cases.</p>
+
+<p>In any case, the resolution should also cover the (very similar) case where an
+object of class type is list-initialized from an initializer list with a single
+element of class type.</p>
+

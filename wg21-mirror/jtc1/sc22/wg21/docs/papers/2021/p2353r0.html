@@ -1,0 +1,645 @@
+<html><head><style>body {
+   color: black;
+}
+</style></head><body><h1 id="metaprograms-and-fragments-are-needed-in-comma-separated-contexts">Metaprograms and fragments are needed in comma-separated contexts</h1>
+<p>Document #: P2353R0</p>
+<p>Date: 2021-03-28</p>
+<p>Audience: SG7</p>
+<p>Reply-to: David Rector <a href="&#109;&#97;&#105;&#x6c;&#116;&#x6f;&#58;&#x64;&#97;&#x76;&#x72;&#x65;&#99;&#x40;&#103;&#109;&#x61;&#x69;&#x6c;&#46;&#99;&#111;&#x6d;">&#x64;&#97;&#x76;&#x72;&#x65;&#99;&#x40;&#103;&#109;&#x61;&#x69;&#x6c;&#46;&#99;&#111;&#x6d;</a></p>
+<h2 id="abstract">Abstract</h2>
+<p>P0712/P2237 define &quot;metaprograms&quot;  (<code>consteval { }</code>), within which code generation via &quot;injection&quot; (<code>&lt;&lt;</code>) of semantically structured &quot;fragments&quot; is permitted, with the benefit of typical function-scope semantics: control flow statements, local variables, etc.  </p>
+<p>Metaprograms are allowed in class, namespace, and block scopes.  But this is a subset of all code generation contexts which require function-scope semantics, demonstrated by the fact that a cruder &quot;string-injection&quot; approach would permit metaprogramming that is presently impossible with P2237 facilities.  </p>
+<p>As remedy, this paper proposes:</p>
+<ol>
+<li>Allowing metaprograms in comma-separated contexts as well: enumerator lists, (template) parameter lists, (template) argument lists, (constructor) initializer lists, and base specifier lists; and</li>
+<li>Adding corresponding fragment kinds to allow injection of user-defined entities in these contexts.</li>
+</ol>
+<p>In addition, a generalized fragment syntax of the form <code>^&lt;K&gt;{}</code> is proposed to handle the new fragment kinds.</p>
+<p>These changes should extend the capabilities of P2237&#39;s fragment-injection facilities to nearly match those of a string-injection approach, while avoiding its drawbacks.</p>
+<h2 id="revision-history">Revision history</h2>
+<h3 id="unpublished-draft-r0-">Unpublished draft -&gt; R0:</h3>
+<p>A non-numbered draft of this paper, shared on the SG7 mailing list and entitled &quot;The syntactic gap: string-injection metaprogramming capabilities and how the semantic approach can match them,&quot; proposed class fragment syntax equivalent to that used to reflect an anonymous class: e.g. <code>^class {}</code>.  This was discarded in favor of <code>^&lt;class&gt; {}</code>, owing to an important distinction between reflections and fragments, discussed in section 6.</p>
+<h2 id="contents">Contents</h2>
+<ol>
+<li>String vs. token-sequence vs. fragment injection</li>
+<li>Under P2237, control flow is either not possible or not efficient in many injection contexts. </li>
+<li><code>Sum&lt;T,U&gt;</code> / <code>PreCalcdSum&lt;T,U&gt;</code> demonstrate the need for additional injection contexts with control flow</li>
+<li>String-injection permits arbitrary injection with control flow, but with costs.</li>
+<li>Proposal: <code>consteval {}</code> should be permitted in &quot;comma-separated&quot; contexts, and new fragment kinds introduced.</li>
+<li>Proposal: new fragment syntax <code>^&lt;K&gt;{}</code></li>
+<li><code>PreCalcdSum&lt;T,U&gt;</code> implementation</li>
+<li>Alternative: replace <code>consteval {}</code> with <code>&lt;&lt;</code> or <code>...[::]...</code></li>
+<li>Packs: syntactic sugar for fragment-injecting metaprograms?</li>
+</ol>
+<h2 id="1-string-vs-token-sequence-vs-fragment-injection">1. String vs. token-sequence vs. fragment injection</h2>
+<p>P2237 [1] summarizes metaprogramming facilities under advanced consideration, among them the &quot;metaprogram&quot; <code>consteval { }</code> (originally introduced in P0712 as a &quot;constexpr block&quot; [2]) and the injection operator <code>&lt;&lt;</code>. </p>
+<p>What kinds of things should follow <code>&lt;&lt;</code>?  P0633 [4] first delineated the three rough possibilities, which today might be distinguished as follows: 1) strings, 2) token-sequences, and 3) fragments.</p>
+<h3 id="1-1-string-injection-">1.1 String injection.</h3>
+<p>In a string injection approach, the user constructs, manipulates, and injects strings containing ordinary code syntax at compile time; the compiler parses the resulting strings as dependencies are sufficiently resolved.  Such an approach is used by D string mixins <a href="https://dlang.org/articles/mixin.html">3</a>, but is also possible in C++ [4, 5].  An example of possible C++ syntax:</p>
+<pre><code>template&lt;struct T&gt;
+<span class="hljs-class"><span class="hljs-keyword">class</span> <span class="hljs-title">Interface</span> </span>{
+<span class="hljs-keyword">public</span>:
+  consteval {
+    template <span class="hljs-keyword">for</span> (auto data : meta::data_members_of(^T))
+      &lt;&lt; format(<span class="hljs-string">"virtual {} {}() const = 0;"</span>,
+                meta::qualified_name_of(meta::type_of(data)), 
+                <span class="hljs-string">"get_"</span> + meta::name_of(data));
+  }
+};
+consteval <span class="hljs-function"><span class="hljs-keyword">void</span> <span class="hljs-title">inject_field_or_var</span><span class="hljs-params">()</span> </span>{
+  &lt;&lt; <span class="hljs-string">"int i = 4;"</span>
+}
+<span class="hljs-class"><span class="hljs-keyword">class</span> <span class="hljs-title">A</span> </span>{
+  <span class="hljs-comment">// Injects a field named `i`, with default initializer 4.</span>
+  consteval { inject_field_or_var(); } 
+};
+<span class="hljs-keyword">void</span> f() {
+  <span class="hljs-comment">// Injects a variable declaration `i` initialized to 4.</span>
+  consteval { inject_field_or_var(); }
+}
+</code></pre><h3 id="1-2-token-sequence-injection">1.2 Token-sequence injection</h3>
+<p>Token-sequence injection improves upon the readability of string injection by keeping the user&#39;s injected content out of quotation marks, but is little different semantically, storing dependent parsed content in an unstructured manner (as a sequence of tokens).  Some string manipulation and injection is still possible, but is restricted to producing identifier tokens.  Possible syntax of token-sequence injection, adopting the <code>[::]</code> and <code>|##|</code> identifier splice syntax from P2237/P2320:</p>
+<pre><code><span class="hljs-keyword">template</span>&lt;<span class="hljs-keyword">struct</span> T&gt;
+<span class="hljs-keyword">class</span> Interface {
+<span class="hljs-keyword">public</span>:
+  consteval {
+    <span class="hljs-keyword">template</span> <span class="hljs-built_in">for</span> (<span class="hljs-keyword">auto</span> data : meta::data_members_of(^T))
+      &lt;&lt; { <span class="hljs-keyword">virtual</span> [:meta::type_of(data):] 
+           |#<span class="hljs-string">"get_"</span> + meta::name_of(data)#|() <span class="hljs-keyword">const</span> = <span class="hljs-number">0</span>; };
+  }
+};
+consteval <span class="hljs-keyword">void</span> inject_field_or_var() {
+  &lt;&lt; { <span class="hljs-keyword">int</span> i = <span class="hljs-number">4</span>; };
+}
+<span class="hljs-keyword">class</span> A {
+  <span class="hljs-comment">// Injects a field named `i`, with default initializer 4.</span>
+  consteval { inject_field_or_var(); } 
+};
+<span class="hljs-keyword">void</span> f() {
+  <span class="hljs-comment">// Injects a variable declaration `i` initialized to 4.</span>
+  consteval { inject_field_or_var(); }
+}
+</code></pre><h3 id="1-3-fragment-injection">1.3 Fragment injection</h3>
+<p>Fragment-injection only permits injection of entities whose semantics are unambiguous [11, 12].  This approach is accomplished by simply requiring the user to specify the &quot;kind&quot; of the entities to be injected; otherwise the syntax is identical to token-sequence injection.   An example of the P2237 syntax:</p>
+<pre><code><span class="hljs-keyword">template</span>&lt;<span class="hljs-keyword">struct</span> T&gt;
+<span class="hljs-keyword">class</span> Interface {
+<span class="hljs-keyword">public</span>:
+  consteval {
+    <span class="hljs-keyword">template</span> <span class="hljs-built_in">for</span> (<span class="hljs-keyword">auto</span> data : meta::data_members_of(^T))
+      &lt;&lt; &lt;<span class="hljs-keyword">class</span> { <span class="hljs-comment">// a "class fragment"</span>
+            <span class="hljs-keyword">virtual</span> <span class="hljs-keyword">typename</span> [:meta::type_of(data):]
+            |#<span class="hljs-string">"get_"</span> + meta::name_of(data)#|() <span class="hljs-keyword">const</span> = <span class="hljs-number">0</span>; 
+          }&gt;;
+
+      <span class="hljs-comment">// (<span class="hljs-doctag">NOTE:</span> We omit use of the "unquote operator" %{} [12, 1])</span>
+      <span class="hljs-comment">// here and in all other fragment examples, for simplicity.)</span>
+  }
+};
+consteval <span class="hljs-keyword">void</span> inject_field() {
+  &lt;&lt; &lt;<span class="hljs-keyword">class</span> { <span class="hljs-keyword">int</span> i = <span class="hljs-number">4</span>; }&gt;; <span class="hljs-comment">//class fragment injection</span>
+}
+consteval <span class="hljs-keyword">void</span> inject_vardecl() {
+  &lt;&lt; &lt;{ <span class="hljs-keyword">int</span> i = <span class="hljs-number">4</span>; }&gt;; <span class="hljs-comment">//statement injection</span>
+}
+<span class="hljs-keyword">class</span> A {
+  <span class="hljs-comment">// Injects a field named `i`, with default initializer 4.</span>
+  consteval { 
+    <span class="hljs-comment">//inject_vardecl(); //ERROR</span>
+    inject_field(); 
+  } 
+};
+<span class="hljs-keyword">void</span> f() {
+  <span class="hljs-comment">// Injects a variable declaration `i` initialized to 4.</span>
+  consteval { 
+    <span class="hljs-comment">//inject_field(); //ERROR</span>
+    inject_vardecl(); 
+  }
+}
+</code></pre><p>These approaches produce the same instantiated declarations in any target program.  Which is best?</p>
+<p>The benefit of string-injection is that its capabilities are limitless: users can generate any entity whose syntax they can represent via compile time string manipulations, typically involving many string-returning reflection queries.</p>
+<p>The downsides of string-injection have been discussed extensively in P0633 and on the SG7 mailing list, and include such matters as poor syntax highlighting, a tendency to produce &quot;write-only&quot; code, and difficult debugging and semantic analysis. [4, 6, 7]</p>
+<p>The token-sequence injection approach improves readability and syntax highlighting abilities, but semantic analysis remains nearly as problematic as under the string-injection approach, due to the similar unstructured nature of the content.  Worse still, the token approach loses the arbitrary capabilities of the string-injection approach (as generally suggested in [4] but more specifically evident from the examples considered below, which are just as impossible for token-injection as they are for fragment-injection).</p>
+<p>Fragment-injection improves further upon the token approach by allowing the compiler to verify as much information as possible about the injected entities&#39; syntax and semantics, even in the presence of dependencies (i.e. in templates, prior to instantiation).  To be sure: because identifiers may still be generated from string manipulations, some semantic verification must wait until instantiation even under this approach, but this problem seems unavoidable in any sufficiently capable metaprogramming facilities.</p>
+<p>The fragment approach seems best <em>so long as</em> it is as capable as a string-injection approach.  To the extent it is not as capable, the choice is less clear.</p>
+<p>The mechanisms summarized in P2237 are not yet as capable as a string-injection approach, but can be.</p>
+<h2 id="2-under-p2237-control-flow-is-either-not-possible-or-not-efficient-in-many-injection-contexts-">2. Under P2237, control flow is either not possible or not efficient in many injection contexts.</h2>
+<p>Section 3 of P0712 describes the goal of metaprograms (&quot;constexpr blocks&quot; then) and the fragment-injection facilities therein as to provide &quot;the ability to execute constexpr in (nearly) any context, and the ability to specify what code gets injected.&quot; [2]</p>
+<p>However, metaprograms are presently only permitted in class, namespace, and block scopes, which is a subset of all injection contexts.  Injection <em>with control flow</em> is a) not possible -- or at least not efficient -- into expression lists, enumerator lists, and parameter lists; and b) is certainly not possible in still other contexts for which the necessary fragment kinds do not yet exist.</p>
+<p>Regarding (a): reproduced below are excerpts from relevant sections of P2237, providing syntax examples of the unusual injection mechanisms permitted in expression, enumerator, and parameter contexts:</p>
+<h3 id="p2237-section-7-1-5">P2237 Section 7.1.5</h3>
+<blockquote>
+<p> ...Expression fragments are typically inserted into a program via splicing. Also, if the expression fragment contains multiple initializers, then the splice must be expanded.</p>
+<pre><code> <span class="hljs-keyword">constexpr</span> meta::info inits = &lt;(<span class="hljs-number">1</span>, <span class="hljs-number">2</span>, <span class="hljs-number">3</span>)&gt;; 
+ <span class="hljs-built_in">vector</span>&lt;<span class="hljs-keyword">int</span>&gt; vec{ ...[:inits:]... }; <span class="hljs-comment">// (adjusted to use P2320 [8] syntax)</span>
+</code></pre><p> The resulting vector is initialized with the values 1, 2, and 3.</p>
+</blockquote>
+<h3 id="p2237-section-7-2-2">P2237 Section 7.2.2</h3>
+<blockquote>
+<p> Enumeration fragments can be injected into enums using an injection enumerator: </p>
+<pre><code> constexpr <span class="hljs-symbol">meta:</span>:info rbg = &lt;<span class="hljs-class"><span class="hljs-keyword">enum</span> { <span class="hljs-title">red</span>, <span class="hljs-title">blue</span>, <span class="hljs-title">green</span> }&gt;;</span> 
+ constexpr <span class="hljs-symbol">meta:</span>:info cmy = &lt;<span class="hljs-class"><span class="hljs-keyword">enum</span> { <span class="hljs-title">cyan</span>, <span class="hljs-title">magenta</span>, <span class="hljs-title">yellow</span> }&gt;;</span> 
+ <span class="hljs-class"><span class="hljs-keyword">enum</span> <span class="hljs-title">class</span> <span class="hljs-title">color</span> {</span>
+   &lt;&lt; rbg;
+   &lt;&lt; cmy; 
+ };
+</code></pre></blockquote>
+<h3 id="p2237-section-7-2-6">P2237 Section 7.2.6</h3>
+<blockquote>
+<pre><code>int f(auto<span class="hljs-params">...</span> <span class="hljs-keyword">params</span> &lt;&lt; meta<span class="hljs-type">::parameters_of</span>(some_fn)) {
+  eat(<span class="hljs-keyword">params</span><span class="hljs-params">...</span>); 
+}
+</code></pre></blockquote>
+<p>While each of these unusual, outside-of-<code>consteval {}</code> injection mechanisms may be defensible, by living outside <code>consteval {}</code> they offer no apparent, efficient mechanism to add control flow to specify precisely which entities should be injected, and which should not.  (To be sure, a combination of P2237 facilities <em>might</em> allow an <em>inefficient</em> means of injecting with control flow into these contexts; this possibility, and its fatal inefficiency, is discussed in section 8.)</p>
+<p>In still other contexts -- for example, constructor initializer lists -- injection is not possible at all (even inefficiently); that is, in such contexts there is not even the possibility of using unusual <code>...[::]...</code> or <code>&lt;&lt;</code> mechanisms to inject user-defined entities, because the necessary fragment kinds do not exist.</p>
+<p>Is this really a problem?  Is injection with control flow really needed in these contexts?  The following class of examples suggest it is.</p>
+<h2 id="3-sum-t-u-precalcdsum-t-u-demonstrate-the-need-for-additional-injection-contexts-with-control-flow">3. <code>Sum&lt;T,U&gt;</code> / <code>PreCalcdSum&lt;T,U&gt;</code> demonstrate the need for additional injection contexts with control flow</h2>
+<p><code>Sum&lt;T,U&gt;</code> and <code>PreCacldSum&lt;T,U&gt;</code> are examples whose implementation requires additional injection contexts with control flow.  They were roughly described on the SG7 mailing list as follows: <a href="https://lists.isocpp.org/sg7/2021/02/0184.php">13</a></p>
+<pre><code><span class="hljs-keyword">template</span>&lt;<span class="hljs-keyword">class</span> T, <span class="hljs-keyword">class</span> U&gt; 
+<span class="hljs-keyword">class</span> Sum { 
+  T t; 
+  U u; 
+<span class="hljs-keyword">public</span>: 
+  <span class="hljs-keyword">constexpr</span> Sum(T &amp;t, U u) : t(t), u(u) {} 
+
+  <span class="hljs-comment">// Methods: the union of the methods of T and U. </span>
+  <span class="hljs-comment">// Wherever they "share" a method, such that names and </span>
+  <span class="hljs-comment">// signatures of method reflections m_t and m_u are the same </span>
+  <span class="hljs-comment">// (not necc. via inheritance) that method is implemented </span>
+  <span class="hljs-comment">// to return t.[:m_t:](...) + u.[:m_u:](...). Otherwise, it returns </span>
+  <span class="hljs-comment">// t.[:m_t:](...) or u.[:m_t:](...) individually. </span>
+
+  <span class="hljs-comment">// Conversion operators: construct from the relevant fields, </span>
+  <span class="hljs-comment">// but for any data T shares with U, need to add in the other's</span>
+  <span class="hljs-comment">// data to the initializer. </span>
+  <span class="hljs-keyword">constexpr</span> <span class="hljs-keyword">explicit</span> <span class="hljs-keyword">operator</span> T(); 
+  <span class="hljs-keyword">constexpr</span> <span class="hljs-keyword">explicit</span> <span class="hljs-keyword">operator</span> U(); 
+}; 
+
+<span class="hljs-keyword">template</span>&lt;<span class="hljs-keyword">class</span> T, <span class="hljs-keyword">class</span> U&gt; 
+<span class="hljs-keyword">class</span> PreCalcdSum { 
+  <span class="hljs-comment">// Data members: union of the "unique" data members </span>
+  <span class="hljs-comment">// of T and U. </span>
+
+<span class="hljs-keyword">public</span>: 
+  <span class="hljs-comment">// Initializes each of the data members above, again as either sum </span>
+  <span class="hljs-comment">// from t and u or results from t or u individually </span>
+  <span class="hljs-keyword">constexpr</span> PreCalcdSum(T t, U u); 
+
+  <span class="hljs-comment">// Methods: same as before, union of methods of T and U, </span>
+  <span class="hljs-comment">// but now implemented in terms of above-calculated data. </span>
+
+  <span class="hljs-comment">// Conversion operators: construct from the relevant fields </span>
+  <span class="hljs-keyword">constexpr</span> <span class="hljs-keyword">explicit</span> <span class="hljs-keyword">operator</span> T(); 
+  <span class="hljs-keyword">constexpr</span> <span class="hljs-keyword">explicit</span> <span class="hljs-keyword">operator</span> U(); 
+};
+</code></pre><p>On the SG7 list Ville Voutilainen notes the broader utility of further generalizations of <code>Sum&lt;T,U&gt;</code>:</p>
+<blockquote>
+<p>Such things certainly should be supported. It&#39;s just another variant of a generic Mediator that invokes multiple Observers, and summing is just one of many things that one might want to do with such a thing, others include, for example, collecting the results in a tuple, and collecting the results into a vector. The generic Mediator has the same functions its Observers have, and it just injects those functions into its own interface by reflecting the interface(s) of the Observer(s). We write these things fairly often, and reflection+injection makes it significantly less boilerplatey and more generic. And <em>using</em> such a generic Mediator makes it very easy to write such combinations without the status quo of excessive boiler-plate programming. [9]</p>
+</blockquote>
+<p>Neither <code>Sum&lt;T,U&gt;</code> nor <code>PreCalcdSum&lt;T,U&gt;</code> can be implemented with existing P2237 facilities.  They can be implemented with string injection, however.</p>
+<h2 id="4-string-injection-permits-arbitrary-injection-with-control-flow-but-with-costs-">4. String-injection permits arbitrary injection with control flow, but with costs.</h2>
+<p>String-injection allows for arbitrary code generation with arbitrary control flow in the above contexts and any other conceivable contexts, such as constructor initializers:</p>
+<pre><code><span class="hljs-keyword">template</span>&lt;<span class="hljs-keyword">struct</span> T, <span class="hljs-keyword">struct</span> U&gt; 
+<span class="hljs-keyword">class</span> PreCalcdSum { 
+  ...
+<span class="hljs-keyword">private</span>:
+  <span class="hljs-function"><span class="hljs-keyword">static</span> consteval <span class="hljs-keyword">void</span> <span class="hljs-title">colon_or_comma</span><span class="hljs-params">(<span class="hljs-keyword">bool</span> &amp;first)</span> </span>{
+    <span class="hljs-keyword">if</span> (first) {
+      &lt;&lt; <span class="hljs-string">":"</span>;
+      first = <span class="hljs-literal">false</span>; 
+    } <span class="hljs-keyword">else</span> 
+      &lt;&lt; <span class="hljs-string">","</span>;
+  }
+  <span class="hljs-keyword">static</span> <span class="hljs-keyword">constexpr</span> <span class="hljs-built_in">set</span>&lt;<span class="hljs-keyword">const</span> <span class="hljs-keyword">char</span> *&gt; Tset = ...;<span class="hljs-comment">// members of T</span>
+  <span class="hljs-keyword">static</span> <span class="hljs-keyword">constexpr</span> <span class="hljs-built_in">set</span>&lt;<span class="hljs-keyword">const</span> <span class="hljs-keyword">char</span> *&gt; Uset = ...;<span class="hljs-comment">// members of U</span>
+  <span class="hljs-keyword">static</span> <span class="hljs-keyword">constexpr</span> <span class="hljs-built_in">set</span>&lt;<span class="hljs-keyword">const</span> <span class="hljs-keyword">char</span> *&gt; TUset = ...;<span class="hljs-comment">// members of TU</span>
+<span class="hljs-keyword">public</span>:
+  consteval {
+    &lt;&lt; <span class="hljs-string">"constexpr PreCalcdSum(T t, U u)"</span>;
+    <span class="hljs-keyword">bool</span> first = <span class="hljs-literal">true</span>;
+    <span class="hljs-keyword">for</span> (<span class="hljs-keyword">auto</span> name : TUset) {
+      colon_or_comma(first);
+      &lt;&lt; name &lt;&lt; <span class="hljs-string">"("</span>;
+      <span class="hljs-keyword">bool</span> inT = Tset.contains(name);
+      <span class="hljs-keyword">bool</span> inU = Uset.contains(name);
+      <span class="hljs-keyword">if</span> (inT) {
+        <span class="hljs-keyword">if</span> (inU)
+          &lt;&lt; format(<span class="hljs-string">"t.{} + u.{}"</span>, name, name);
+        <span class="hljs-keyword">else</span>
+          &lt;&lt; format(<span class="hljs-string">"t.{}"</span>, name);
+      } <span class="hljs-keyword">else</span>
+        &lt;&lt; format(<span class="hljs-string">"u.{}"</span>, name);
+      &lt;&lt; <span class="hljs-string">")"</span>;
+    }
+    &lt;&lt; <span class="hljs-string">"{}"</span>;
+  }
+};
+</code></pre><p>This IO-style is perfectly capable of performing any injection task with arbitrary control flow, but the drawbacks discussed earlier are apparent: this code is difficult to read, unpleasant to write, and due to its unstructured nature hides information from the template about entities which occur in each instantiation, which inhibits semantic analysis and can obscure bugs which only present during certain instantiations.  Essentially: unstructured injection is to structured/&quot;fragment&quot; injection as macros are to templates.  </p>
+<p>Nevertheless, the gap in capabilities remains: P2237 facilities cannot write the <code>constexpr PreCalcdSum(T t, U u)</code> constructor at all.</p>
+<p>Fortunately, it is straightforward to extend the P2237 facilities to match string injection capabilities, and thereby allow fragment-injection to subsume more (all?) of the capabilities of string-injection, while avoiding its drawbacks.</p>
+<h2 id="5-proposal-consteval-should-be-permitted-in-comma-separated-contexts-and-new-fragment-kinds-introduced-">5. Proposal: <code>consteval {}</code> should be permitted in &quot;comma-separated&quot; contexts, and new fragment kinds introduced.</h2>
+<p><code>consteval {}</code> is presently allowed in class, namespace, and block scopes.  It should additionally be allowed in:
+    a) the expression, enumerator, and function injection contexts referenced above, and 
+    b) other &quot;comma-separated&quot; contexts which require new fragment kinds as well.</p>
+<p>To state the goal more generally:  in order to match string-injection capabilities, it seems <em>any</em> context in which a variable number of entities can be supplied (declarations, statements, expressions, intializers, template arguments, etc.) should be considered an &quot;injection context&quot;, with an associated fragment kind and the ability to accept one or more <code>consteval { }</code> metaprograms amidst its entities.</p>
+<h3 id="5-1-fragment-injection-with-control-flow-in-various-contexts">5.1 Fragment injection with control flow in various contexts</h3>
+<pre><code><span class="hljs-keyword">constexpr</span> meta::info inits = &lt;(<span class="hljs-number">1</span>, <span class="hljs-number">2</span>, <span class="hljs-number">3</span>)&gt;; 
+vector&lt;<span class="hljs-keyword">int</span>&gt; vec{ 
+  consteval { 
+    <span class="hljs-keyword">template</span> <span class="hljs-built_in">for</span> (<span class="hljs-keyword">auto</span> init : inits) {
+      <span class="hljs-built_in">if</span> (somecond(init))
+        &lt;&lt; init; 
+    }
+  }, 
+  <span class="hljs-number">4</span>, <span class="hljs-number">5</span>, <span class="hljs-number">6</span>
+};
+...
+<span class="hljs-keyword">enum</span> <span class="hljs-keyword">class</span> color {
+  consteval {
+    <span class="hljs-built_in">if</span> (cond)
+      &lt;&lt; rbg;
+    <span class="hljs-built_in">else</span>
+      &lt;&lt; cmy;
+  }, 
+  grue
+};
+...
+<span class="hljs-keyword">int</span> f(<span class="hljs-keyword">int</span> i,
+      consteval { 
+        <span class="hljs-keyword">template</span> <span class="hljs-built_in">for</span> (<span class="hljs-keyword">auto</span> p : meta::parameters_of(some_fn))
+          <span class="hljs-built_in">if</span> (cond(p))
+            &lt;&lt; p;
+      }, 
+      <span class="hljs-keyword">int</span> j)
+{
+  eat(i,
+      consteval {
+        <span class="hljs-keyword">template</span> <span class="hljs-built_in">for</span> (<span class="hljs-keyword">auto</span> p : meta::parameters_of(some_fn))
+          <span class="hljs-built_in">if</span> (cond(p))
+            &lt;&lt; &lt;( [:p:] ) &gt;;
+      }, 
+      j);
+}
+
+<span class="hljs-keyword">template</span>&lt;consteval { <span class="hljs-comment">/*temp param fragment injections*/</span> }, 
+         <span class="hljs-keyword">typename</span> T&gt;
+<span class="hljs-keyword">class</span> SomeTemplate;
+
+SomeTemplate&lt;consteval { <span class="hljs-comment">/*temp arg fragment injections*/</span> }, T&gt;;
+
+Foo(<span class="hljs-keyword">const</span> T&amp; t, <span class="hljs-keyword">const</span> U&amp; u) 
+  : bar(u.bar),
+    consteval { <span class="hljs-comment">/*ctor init fragment injections*/</span> },
+    other(t.other)
+{}
+
+<span class="hljs-keyword">class</span> B : consteval { <span class="hljs-comment">/* base spec. fragment injections */</span> }, 
+          <span class="hljs-keyword">private</span> Foo
+{};
+</code></pre><h2 id="6-proposal-new-fragment-syntax">6. Proposal: new fragment syntax</h2>
+<p>There five fragment kinds are introduced in P2237 section 7:</p>
+<ul>
+<li>namespace fragments: <code>&lt;namespace {}&gt;</code></li>
+<li>class fragments: <code>&lt;class {}&gt;</code> / <code>&lt;struct {}&gt;</code></li>
+<li>enum fragments: <code>&lt;enum {}&gt;</code></li>
+<li>statement fragments: <code>&lt;{}&gt;</code></li>
+<li>expression fragments <code>&lt;()&gt;</code></li>
+</ul>
+<p>This syntax is elegant as is.  </p>
+<p>However, the previous section has introduced additional needs for:</p>
+<ul>
+<li>parameter fragments</li>
+<li>template parameter fragments</li>
+<li>template argument fragments</li>
+<li>initializer fragments</li>
+<li>constructor initializer fragments</li>
+<li>base specifier fragments</li>
+</ul>
+<p>and perhaps still others.</p>
+<p>It is difficult to conceive of any elegant symbolic extensions to the P2237 syntax that would incorporate these new fragment kinds.  Instead, a new fragment syntax is proposed which can handle an arbitrary quanitity of fragment kinds.  </p>
+<p>Two categories of fragments require separate discussion:</p>
+<ol>
+<li>Class, namespace, and enum fragments vs. </li>
+<li>All others.</li>
+</ol>
+<h3 id="6-1-proposed-syntax">6.1 Proposed syntax</h3>
+<pre><code>  <span class="hljs-comment">^&lt;K&gt;</span>{ }
+</code></pre><p>where <code>K</code> is a non-dependent identifier or keyword indicating the fragment kind.</p>
+<p>Statement and expression fragment kinds would be changed as follows:</p>
+<pre><code>    <span class="hljs-comment">^&lt;frag::stmt&gt;</span>{ [<span class="hljs-symbol">:m:</span>] = <span class="hljs-number">42</span><span class="hljs-comment">; }  // was &lt;{ [:m:] = 42; }&gt;</span>
+    <span class="hljs-comment">^&lt;frag::expr&gt;</span>{ <span class="hljs-number">3</span>, [<span class="hljs-symbol">:m:</span>] + <span class="hljs-number">4</span> } // was &lt;( <span class="hljs-number">3</span>, [<span class="hljs-symbol">:m:</span>] + <span class="hljs-number">4</span> )&gt;
+</code></pre><p>Six new fragment kinds would be introduced:</p>
+<pre><code>    <span class="hljs-comment">^&lt;frag::parm&gt;</span>{ int i, int j } 
+    <span class="hljs-comment">^&lt;frag::tparm&gt;</span>{ typename T, int N }
+    <span class="hljs-comment">^&lt;fram::targ&gt;</span>{ [<span class="hljs-symbol">:Trefl:</span>], [<span class="hljs-symbol">:Nrefl:</span>] }
+    <span class="hljs-comment">^&lt;frag::init&gt;</span>{ <span class="hljs-number">3</span>, .[<span class="hljs-symbol">:m:</span>] = <span class="hljs-number">4</span> }
+    <span class="hljs-comment">^&lt;frag::cinit&gt;</span>{ [<span class="hljs-symbol">:m:</span>](<span class="hljs-number">3</span>), [<span class="hljs-symbol">:n:</span>](<span class="hljs-number">4</span>) } 
+    <span class="hljs-comment">^&lt;frag::base&gt;</span>{ public Foo, private virtual [<span class="hljs-symbol">:Barrefl:</span>] }
+</code></pre><p>Each above identifier <code>K</code> in <code>^&lt;K&gt;{}</code> could be interpreted either of two ways:</p>
+<ol>
+<li>As a built-in value. The type of the expression would remain <code>meta::info</code>.</li>
+<li>As a built-in fragment type, each a subclass of <code>meta::info</code>.  The type of the expression would then be <code>K</code>.</li>
+</ol>
+<p>Option 2 seems preferable, but option 1 is also reasonable, should implementation concerns demand all reflections and fragments be of <code>meta::info</code> type and absolutely no more.</p>
+<h3 id="6-2-class-enum-and-namespace-fragments">6.2 Class, enum, and namespace fragments</h3>
+<p>Class fragments must allow for base specification ( <code>&lt;class : Base {}&gt;</code>), and so require additional consideration.</p>
+<p>Enum and namespace fragments do not have this problem, but it would be advisable to handle them similarly to class fragments for uniformity.</p>
+<p>It would <em>seem</em> ideal to use this opportunity to link fragment specification syntax to reflection syntax, by expressing class, namespace, and enum fragments as reflections of anonymous entities of those kinds:</p>
+<pre><code>    <span class="hljs-keyword">auto</span> f1 = ^<span class="hljs-keyword">class</span> : <span class="hljs-keyword">private</span> Base { }; <span class="hljs-comment">// was &lt;class : private Base{ }&gt;</span>
+    <span class="hljs-keyword">auto</span> f2 = ^<span class="hljs-keyword">namespace</span> { };            <span class="hljs-comment">// was &lt;namespace { }&gt;</span>
+    <span class="hljs-keyword">auto</span> f3 = ^<span class="hljs-keyword">enum</span> { };                 <span class="hljs-comment">// was &lt;enum { }&gt;</span>
+</code></pre><p>However, reflections and fragments are not quite the same, because they are injected differently: an injection of a reflection (even an anonymous one) injects that declaration, whereas injection of a fragment injects the <em>members of</em> the fragment.  E.g., if the above syntax were used, this confusion might result:</p>
+<pre><code><span class="hljs-class"><span class="hljs-keyword">class</span> <span class="hljs-title">Foo</span> {</span> <span class="hljs-class"><span class="hljs-keyword">enum</span> {</span> MaskA = <span class="hljs-number">0x1</span> } };
+<span class="hljs-class"><span class="hljs-keyword">class</span> <span class="hljs-title">Bar</span> {</span>
+  consteval {
+    <span class="hljs-comment">// Injects anonymous enum containing MaskA</span>
+    template <span class="hljs-keyword">for</span> (auto <span class="hljs-string">mem :</span> <span class="hljs-string">meta:</span>:members_of(^Foo))
+      &lt;&lt; mem;
+
+    <span class="hljs-comment">//ERROR: cannot inject enum fragment into class</span>
+    &lt;&lt; ^<span class="hljs-class"><span class="hljs-keyword">enum</span> {</span> MaskB = <span class="hljs-number">0x2</span> };
+  }
+};
+</code></pre><p>The better solution is to use <code>^&lt;K&gt;{}</code> syntax here as well:</p>
+<pre><code>^&lt;<span class="hljs-class"><span class="hljs-keyword">class</span> : <span class="hljs-title">private</span> <span class="hljs-title">Base</span>&gt;{} // <span class="hljs-title">was</span> &lt;<span class="hljs-title">class</span> : <span class="hljs-title">private</span> <span class="hljs-title">Base</span>{ }&gt;</span>
+^&lt;<span class="hljs-class"><span class="hljs-keyword">enum</span>&gt;{}                 // <span class="hljs-title">was</span> &lt;<span class="hljs-title">namespace</span> { }&gt;</span>
+^&lt;namespace&gt;{}            /<span class="hljs-regexp">/ was &lt;enum { }&gt;</span>
+</code></pre><p>As before, the type of each expression could either remain <code>meta::info</code>, or become these subclasses thereof: <code>frag::cls</code>, <code>frag::ns</code>, and <code>frag::en</code> respectively.</p>
+<p>It might also reasonable to write these as</p>
+<pre><code>^&lt;<span class="hljs-selector-tag">frag</span><span class="hljs-selector-pseudo">::cls</span> : <span class="hljs-selector-tag">private</span> <span class="hljs-selector-tag">Base</span>&gt; {}
+^&lt;<span class="hljs-selector-tag">frag</span><span class="hljs-selector-pseudo">::ns</span>&gt; {}
+^&lt;<span class="hljs-selector-tag">frag</span><span class="hljs-selector-pseudo">::en</span>&gt; {}
+</code></pre><p>which would make class fragments the only idiosyncratic fragment kind -- and even then, only when a base specifier is needed, which is probably rare.  The downside of this alternative is that it would not make full use of the existing language keywords.  The optimal choice is a matter of taste.</p>
+<p>Possible language conflicts of <code>^</code> are discussed in P2237 and do not appear to be a factor here either.</p>
+<p>In sum, this dual fragment syntax can be extended to arbitrary new fragment kinds as future needs are identified, and links fragment syntax to reflection <code>^</code> syntax, which is suitable because reflections and fragments are precisely the two <code>meta::info</code>-typed expressions able to take non-<code>meta::info</code> operands.  That is, these are the two &quot;entry points&quot; to higher level &quot;meta&quot; space, and the syntax should naturally imply this commonality.</p>
+<h2 id="7-precalcdsum-t-u-example">7. <code>PreCalcdSum&lt;T,U&gt;</code> example</h2>
+<p>Only a simplified version of <code>PreCalcdSum&lt;T,U&gt;</code> will be demonstrated here, which sufficiently demonstrates the proposed syntax and capabilities.</p>
+<p>Note again that usage of the &quot;unquote operator&quot; <code>%{}</code> [12, 1] is omitted in this syntax, as it was in previous fragment examples, for simplicity.</p>
+<pre><code><span class="hljs-comment">// --- PreCalcdSum.h --- //</span>
+
+<span class="hljs-comment">/// A "sum" of arbitrary objects of types T and U.</span>
+<span class="hljs-comment">/// </span>
+<span class="hljs-comment">/// That is: each instantiation's fields are a (set-)union </span>
+<span class="hljs-comment">/// of the fields of T and U.</span>
+<span class="hljs-comment">/// For any fields of unqualified name `fieldname` which</span>
+<span class="hljs-comment">/// T and U share (not necc. via inheritance), that field </span>
+<span class="hljs-comment">/// is constructed with the value</span>
+<span class="hljs-comment">/// t.|#fieldname#| + u.|#fieldname#|.  </span>
+<span class="hljs-comment">/// Otherwise, that field is constructed with the value</span>
+<span class="hljs-comment">/// t.|#fieldname#| or u.|#fieldname#| alone.</span>
+<span class="hljs-comment">///</span>
+<span class="hljs-comment">/// For now we assume T and U each have public data and no </span>
+<span class="hljs-comment">/// named methods.  Each instantiation of PreCalcdSum&lt;T,U&gt; </span>
+<span class="hljs-comment">/// also has these properties.</span>
+<span class="hljs-comment">///</span>
+<span class="hljs-keyword">template</span>&lt;<span class="hljs-keyword">struct</span> T, <span class="hljs-keyword">struct</span> U&gt;
+<span class="hljs-keyword">class</span> PreCalcdSum {
+
+  <span class="hljs-comment">// --- Compile-time data calculation </span>
+  <span class="hljs-comment">//     (no new syntax here) --- //</span>
+  <span class="hljs-keyword">using</span> comptime_data_t =
+          tuple&lt;set&lt;<span class="hljs-keyword">string</span>&gt;,
+                set&lt;<span class="hljs-keyword">string</span>&gt;,
+                set&lt;<span class="hljs-keyword">string</span>&gt;,
+                <span class="hljs-built_in">map</span>&lt;<span class="hljs-keyword">string</span>, meta::info&gt;&gt;;
+  <span class="hljs-keyword">static</span> <span class="hljs-keyword">constexpr</span> comptime_data_t comptime_data = [](){
+    comptime_data_t data;
+    <span class="hljs-keyword">auto</span> &amp;Tset  = std::<span class="hljs-built_in">get</span>&lt;<span class="hljs-number">0</span>&gt;(data);
+    <span class="hljs-keyword">auto</span> &amp;Uset  = std::<span class="hljs-built_in">get</span>&lt;<span class="hljs-number">1</span>&gt;(data);
+    <span class="hljs-keyword">auto</span> &amp;TUset = std::<span class="hljs-built_in">get</span>&lt;<span class="hljs-number">2</span>&gt;(data);
+    <span class="hljs-keyword">auto</span> &amp;types = std::<span class="hljs-built_in">get</span>&lt;<span class="hljs-number">3</span>&gt;(data);
+
+    <span class="hljs-keyword">template</span> <span class="hljs-built_in">for</span> (tfield : meta::fields_of(^T)) {
+      <span class="hljs-keyword">string</span> name = meta::name_of(tfield);
+      Tset.insert(name);
+      TUset.insert(name);
+      types[name] = meta::type_of(tfield);
+    }
+    <span class="hljs-keyword">template</span> <span class="hljs-built_in">for</span> (ufield : meta::fields_of(^U)) {
+      <span class="hljs-keyword">string</span> name = meta::name_of(ufield);
+      Uset.insert(name);
+      <span class="hljs-keyword">bool</span> inTtoo = TUset.insert(name).second;
+      <span class="hljs-built_in">if</span> (inTtoo) {
+        meta::info &amp;type = types[name];
+        type = ^<span class="hljs-keyword">decltype</span>(
+            std::declval&lt;[:type:]<span class="hljs-comment">/*tfield type*/</span>&gt;() + 
+            std::declval&lt;<span class="hljs-keyword">decltype</span>([:ufield:])&gt;() );
+      } <span class="hljs-built_in">else</span>
+        types[name] = meta::type_of(ufield);
+    }
+    <span class="hljs-built_in">return</span> data;
+  }();
+  <span class="hljs-keyword">static</span> <span class="hljs-keyword">constexpr</span> <span class="hljs-keyword">auto</span> &amp;Tset  = std::<span class="hljs-built_in">get</span>&lt;<span class="hljs-number">0</span>&gt;(comptime_data);
+  <span class="hljs-keyword">static</span> <span class="hljs-keyword">constexpr</span> <span class="hljs-keyword">auto</span> &amp;Uset  = std::<span class="hljs-built_in">get</span>&lt;<span class="hljs-number">1</span>&gt;(comptime_data);
+  <span class="hljs-keyword">static</span> <span class="hljs-keyword">constexpr</span> <span class="hljs-keyword">auto</span> &amp;TUset = std::<span class="hljs-built_in">get</span>&lt;<span class="hljs-number">2</span>&gt;(comptime_data);
+  <span class="hljs-keyword">static</span> <span class="hljs-keyword">constexpr</span> <span class="hljs-keyword">auto</span> &amp;types = std::<span class="hljs-built_in">get</span>&lt;<span class="hljs-number">3</span>&gt;(comptime_data);
+
+
+  <span class="hljs-comment">// --- Class fragment injection --- //</span>
+<span class="hljs-keyword">public</span>:
+  consteval {
+    <span class="hljs-built_in">for</span> (<span class="hljs-keyword">auto</span> name : TUset)
+      &lt;&lt; ^&lt;<span class="hljs-keyword">struct</span>&gt;{ <span class="hljs-keyword">typename</span> [:types[name]:] |<span class="hljs-meta">#name#|; };</span>
+  }
+
+<span class="hljs-keyword">private</span>:
+  <span class="hljs-keyword">static</span> consteval <span class="hljs-keyword">void</span> 
+  inject_cinits_from_tu(meta::info trefl, meta::info urefl) {
+    <span class="hljs-built_in">for</span> (<span class="hljs-keyword">auto</span> name : TUset) {
+      <span class="hljs-built_in">if</span> (Tset.contains(name)) {
+        <span class="hljs-built_in">if</span> (Uset.contains(name))
+          &lt;&lt; ^&lt;frag::cinit&gt;{ |<span class="hljs-meta">#name#|([:trefl:].|#name#| + </span>
+                                      [:urefl:].|<span class="hljs-meta">#name#|) };</span>
+        <span class="hljs-built_in">else</span>
+          &lt;&lt; ^&lt;frag::cinit&gt;{ |<span class="hljs-meta">#name#|([:trefl:].|#name#|) };</span>
+      } <span class="hljs-built_in">else</span>
+        &lt;&lt; ^&lt;frag::cinit&gt;{ |<span class="hljs-meta">#name#|([:urefl:].|#name#|) };</span>
+    }
+  }
+
+<span class="hljs-keyword">public</span>:
+  <span class="hljs-keyword">constexpr</span> PreCalcdSum(<span class="hljs-keyword">const</span> T &amp;t, <span class="hljs-keyword">const</span> U &amp;u) 
+    : consteval { inject_cinits_from_tu(^t, ^u); }
+  {}
+
+  <span class="hljs-comment">// --- Parameter and constructor-initializer injection --- //</span>
+<span class="hljs-keyword">private</span>:
+  <span class="hljs-keyword">static</span> consteval <span class="hljs-keyword">void</span>
+  inject_fields_as_parms() {
+    <span class="hljs-built_in">for</span> (<span class="hljs-keyword">auto</span> name : TUset)
+      &lt;&lt; ^&lt;frag::parm&gt;{ [:types[name]:] |<span class="hljs-meta">#name#| };</span>
+  }
+  <span class="hljs-keyword">static</span> consteval <span class="hljs-keyword">void</span>
+  inject_fields_as_cinits() {
+    <span class="hljs-built_in">for</span> (<span class="hljs-keyword">auto</span> name : TUset)
+      &lt;&lt; ^&lt;frag::cinit&gt;{ |<span class="hljs-meta">#name#|(|#name#|) };</span>
+  }
+<span class="hljs-keyword">public</span>:
+  <span class="hljs-keyword">constexpr</span> PreCalcdSum(consteval { inject_fields_as_parms() }) 
+    : consteval { inject_fields_as_cinits() }
+  {}
+
+  <span class="hljs-comment">// --- Initializer fragment injection --- //</span>
+  <span class="hljs-keyword">constexpr</span> <span class="hljs-keyword">operator</span> T() <span class="hljs-keyword">const</span> {
+    <span class="hljs-built_in">return</span> T{
+      consteval {
+        <span class="hljs-built_in">for</span> (<span class="hljs-keyword">auto</span> name : Tset)
+          &lt;&lt; ^&lt;frag::init&gt;{ .|<span class="hljs-meta">#name#| = |#name#| };</span>
+      }
+    };
+  }
+  <span class="hljs-keyword">constexpr</span> <span class="hljs-keyword">operator</span> U() <span class="hljs-keyword">const</span> {
+    <span class="hljs-built_in">return</span> U{
+      consteval {
+        <span class="hljs-built_in">for</span> (<span class="hljs-keyword">auto</span> name : Uset)
+          &lt;&lt; ^&lt;frag::init&gt;{ .|<span class="hljs-meta">#name#| = |#name#| };</span>
+      }
+    };
+  }
+};
+</code></pre><p>A test usage of <code>PreCalcdSum</code>:</p>
+<pre><code><span class="hljs-comment">#include "PreCalcdSum.h"</span>
+
+template &lt;class T, class U&gt; 
+class operator_plus_defined {...}<span class="hljs-comment">; //sfinae detector </span>
+
+template&lt;typename T, typename U, 
+         typename = std::enable_if_t&lt;!operator_plus_defined&lt;T, U&gt;::value&gt;&gt; 
+PreCalcdSum&lt;T, U&gt; operator+(T t, U u) { return PreCalcdSum&lt;T, U&gt;(t, u)<span class="hljs-comment">; } </span>
+
+struct A {
+  int f<span class="hljs-comment">;</span>
+  int g<span class="hljs-comment">;</span>
+}<span class="hljs-comment">;</span>
+struct <span class="hljs-keyword">B </span>{
+  int g<span class="hljs-comment">;</span>
+  A   h<span class="hljs-comment">;</span>
+}<span class="hljs-comment">;</span>
+struct C { 
+  int f<span class="hljs-comment">; </span>
+  int g<span class="hljs-comment">; </span>
+  <span class="hljs-keyword">B </span>  h<span class="hljs-comment">; //NB different type from B::h</span>
+}<span class="hljs-comment">; </span>
+
+int main() { 
+  A <span class="hljs-built_in">a1</span>{.f = <span class="hljs-number">1</span>, .g = <span class="hljs-number">2</span>}<span class="hljs-comment">; </span>
+  A <span class="hljs-built_in">a2</span>{.f = <span class="hljs-number">3</span>, .g = <span class="hljs-number">6</span>}<span class="hljs-comment">;</span>
+  <span class="hljs-keyword">B </span><span class="hljs-keyword">b{ </span>        .g = <span class="hljs-number">3</span>, .h = A{.f = <span class="hljs-number">4</span>, .g = <span class="hljs-number">5</span>}}<span class="hljs-comment">; </span>
+  C c{ .f = <span class="hljs-number">7</span>, .g = <span class="hljs-number">1</span>, .h = <span class="hljs-keyword">B{ </span>       .g = <span class="hljs-number">3</span>, .h = A{.f = <span class="hljs-number">1</span>, .g = <span class="hljs-number">2</span>}}}<span class="hljs-comment">; </span>
+
+  auto sum = <span class="hljs-built_in">a1</span> + <span class="hljs-built_in">a2</span> + <span class="hljs-keyword">b </span>+ c<span class="hljs-comment">; </span>
+
+  assert(sum.f = <span class="hljs-number">11</span>)<span class="hljs-comment">;</span>
+  assert(sum.g = <span class="hljs-number">12</span>)<span class="hljs-comment">;</span>
+  assert(sum.h.g == <span class="hljs-number">8</span>)<span class="hljs-comment">;</span>
+  assert(sum.h.h.f == <span class="hljs-number">1</span>)<span class="hljs-comment">;</span>
+}
+</code></pre><h2 id="8-alternative-replace-consteval-with-or-">8. Alternative: replace <code>consteval {}</code> with <code>&lt;&lt;</code>  or <code>...[::]...</code></h2>
+<p>The new fragment kinds discussed above seem to be necessary to advance the goal of matching string-injection capabilities.  </p>
+<p>However, there is a reasonable alternative to <em>how</em> fragments should be injected, based on certain unusual injection facilities already present in P2237.</p>
+<p>Section 7.2.3 of P2237 describes the injection operator <code>&lt;&lt;</code> as able to inject into an alternative context; e.g. one can write  <code>dst &lt;&lt; frag</code> to inject <code>frag</code> into <code>dst</code> (which must be another <code>meta::info</code> object).</p>
+<p>This permits treating a fragment like a container, which in turn permits an intriguing possibility: <code>consteval {}</code> can technically be done away with altogether, at least as a mechanism for injecting with control flow, and replaced with either <code>...[::]...</code> or <code>&lt;&lt;</code> syntax everywhere injection with control flow is needed.</p>
+<p>Here is how the relevant parts of the <code>PreCalcdSum&lt;T,U&gt;</code> example might be written using <code>...[::]...</code> syntax exclusively in place of <code>consteval {}</code>:</p>
+<pre><code><span class="hljs-keyword">public</span>:
+  <span class="hljs-comment">// --- Class fragment injection --- //</span>
+  ...[:
+    []() {
+      <span class="hljs-keyword">auto</span> res = ^&lt;<span class="hljs-keyword">struct</span>&gt; {};
+      <span class="hljs-built_in">for</span> (<span class="hljs-keyword">auto</span> name : TUset)
+        res &lt;&lt; ^&lt;<span class="hljs-keyword">struct</span>&gt; { [:types[name]:] |<span class="hljs-meta">#name#|; };</span>
+      <span class="hljs-built_in">return</span> res;
+    }() 
+    :]...;
+
+  <span class="hljs-comment">// --- Constructor initializer injection --- //</span>
+<span class="hljs-keyword">private</span>:
+  <span class="hljs-keyword">static</span> consteval meta::info 
+  build_cinits_from_tu(meta::info trefl, meta::info urefl) {
+    <span class="hljs-keyword">auto</span> res = ^&lt;frag::cinit&gt;{};
+    <span class="hljs-built_in">for</span> (<span class="hljs-keyword">auto</span> name : TUset) {
+      <span class="hljs-built_in">if</span> (Tset.contains(name)) {
+        <span class="hljs-built_in">if</span> (Uset.contains(name))
+          res &lt;&lt; ^&lt;frag::cinit&gt;{ |<span class="hljs-meta">#name#|([:trefl:].|#name#| + </span>
+                                          [:urefl:].|<span class="hljs-meta">#name#|) };</span>
+        <span class="hljs-built_in">else</span>
+          res &lt;&lt; ^&lt;frag::cinit&gt;{ |<span class="hljs-meta">#name#|([:trefl:].|#name#|) };</span>
+      } <span class="hljs-built_in">else</span>
+        res &lt;&lt; ^&lt;frag::cinit&gt;{ |<span class="hljs-meta">#name#|([:urefl:].|#name#|) };</span>
+    }
+    <span class="hljs-built_in">return</span> res;
+  }
+<span class="hljs-keyword">public</span>:
+  <span class="hljs-keyword">constexpr</span> PreCalcdSum(<span class="hljs-keyword">const</span> T &amp;t, <span class="hljs-keyword">const</span> U &amp;u) 
+    : ...[:build_cinits_from_tu(^t, ^u):]...
+  {}
+
+  <span class="hljs-comment">// --- Parameter and constructor-initializer injection --- //</span>
+<span class="hljs-keyword">private</span>:
+  <span class="hljs-keyword">static</span> consteval <span class="hljs-keyword">auto</span> build_fields_as_parms() {
+    <span class="hljs-comment">//...</span>
+  }
+  <span class="hljs-keyword">static</span> consteval <span class="hljs-keyword">auto</span> build_cinits_from_params() {
+    <span class="hljs-comment">//...</span>
+  }
+<span class="hljs-keyword">public</span>:
+  <span class="hljs-keyword">constexpr</span> PreCalcdSum( ...[:build_fields_as_parms():]... ) 
+    : ...[:build_cinits_from_params():]...
+  {}
+
+  <span class="hljs-comment">// Initializer injection</span>
+<span class="hljs-keyword">private</span>: 
+  <span class="hljs-keyword">static</span> consteval <span class="hljs-keyword">auto</span>
+  build_inits_for_set(<span class="hljs-keyword">const</span> <span class="hljs-keyword">decltype</span>(Tset) &amp;nameset) {
+    <span class="hljs-comment">//...</span>
+  }
+
+<span class="hljs-keyword">public</span>:
+  <span class="hljs-keyword">constexpr</span> T <span class="hljs-keyword">operator</span> T() {
+    <span class="hljs-built_in">return</span> T{ ...[:build_inits_for_set(Tset):]... };
+  }
+  <span class="hljs-keyword">constexpr</span> U <span class="hljs-keyword">operator</span> U() {
+    <span class="hljs-built_in">return</span> U{ ...[:build_inits_for_set(Uset):]... };
+  }
+};
+</code></pre><p>This alternative offers the exact same capabilities to <code>consteval {}</code>, and the <code>...[::]...</code> syntax might be considered preferable.  Which is better?</p>
+<p>The  <code>consteval {}</code> version seems to win handily on build time-efficiency grounds.  Whereas <code>consteval { inject_stuff() }</code> can inject directly into the ultimate destination, <code>...[:buildfrag():]...</code> requires copying the contents of the result of <code>buildfrag()</code> into the ultimate destination during evaluation.  One cannot rely on compiler heroics to save us from this, as they too count against efficiency, and therefore rarely show up for constant evaluation tasks -- see the rationale for the <code>meta::info</code> type given in P1240, which points out that that even basic subobject access is not optimized during constant evaluation in major compilers [9].</p>
+<p>In short, it seems we really do need <code>consteval {}</code> directly in the destination contexts for efficient injection with control flow.</p>
+<h2 id="9-packs-syntactic-sugar-for-fragment-injecting-metaprograms-">9. Packs: syntactic sugar for fragment-injecting metaprograms?</h2>
+<p>This paper has proposed extending metaprograms with associated fragment kinds beyond the class, namespace, and block scopes, as P2237 presently allows for, and into &quot;comma-separated&quot; contexts.  </p>
+<p>To some extent, this goal is an inversion of P1858 [14], which proposes to extend pack expansions and declarations beyond comma-separated contexts and into class, namespace, and block scopes; e.g.:</p>
+<pre><code><span class="hljs-keyword">template</span> &lt;<span class="hljs-keyword">typename</span>... Ts&gt;
+<span class="hljs-keyword">struct</span> tuple {
+    Ts... elems;
+};
+<span class="hljs-keyword">template</span> &lt;<span class="hljs-keyword">typename</span>... Ts&gt;
+<span class="hljs-function"><span class="hljs-keyword">void</span> <span class="hljs-title">foo</span><span class="hljs-params">(Ts&amp;&amp;... ts)</span> </span>{
+    <span class="hljs-keyword">using</span> ...decayed = <span class="hljs-built_in">std</span>::<span class="hljs-keyword">decay_t</span>&lt;Ts&gt;;
+    <span class="hljs-keyword">auto</span>... copies = <span class="hljs-built_in">std</span>::forward&lt;Ts&gt;(ts);
+}
+</code></pre><p>The overlap between the contexts in which pack and metaprogram usages are either presently allowed or proposed suggests a more general principle: pack expansions and declarations might best be considered syntactic sugar for fragment-injecting metaprograms, suitable for use in these circumstances:</p>
+<ol>
+<li>in the case of pack expansions, the entities to be expanded do not require filtering or other fine-grained manipulations via control flow statements, or</li>
+<li>in the case of pack declarations, the entities to be declared to not require idiosyncratic names, and can instead be referenced via e.g. <code>elems...[I]</code>.</li>
+</ol>
+<p>This is often the case, but not always, as suggested by the <code>Sum&lt;T,U&gt;</code> and <code>PreCalcdSum&lt;T,U&gt;</code> examples.</p>
+<p>Thus, perhaps a more general principle can be stated: in any C++ context which allows for a variable number of entities (declarations, statements, parameters, etc.), the language should allow for each of the following:</p>
+<ol>
+<li>Metaprograms (<code>consteval {}</code>)</li>
+<li>A fragment kind for that entity (<code>^&lt;frag::someentity&gt;{ }</code>)</li>
+<li>Pack expansions and/or pack declarations </li>
+</ol>
+<p>The relationship between metaprograms, fragments, and pack usage, and in particular how their relationship might be expressed generically across all contexts, warrants additional thought.</p>
+<h2 id="references">References</h2>
+<p>[1]: Sutton, A.  &quot;Metaprogramming.&quot; P2237,  <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p2237r0.pdf">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p2237r0.pdf</a>, 10/2020.</p>
+<p>[2]: Sutton, A., Sutter, H.  &quot;Implementing language support for compile-time metaprogramming.&quot; P0712, <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/p0712r0.pdf">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/p0712r0.pdf</a>, 06/2017.</p>
+<p>[4]: Vandevoorde, D., Dionne, L. &quot;Exploring the design space of metaprogramming and reflection.&quot; <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/p0633r0.pdf">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/p0633r0.pdf</a>, 03/2017.</p>
+<p>[5]: Rector, D. <a href="https://github.com/drec357/clang-meta">https://github.com/drec357/clang-meta</a>, 2019 (implementation of C++ string-injection). </p>
+<p>[6]: <a href="https://lists.isocpp.org/sg7/2020/10/0071.php">https://lists.isocpp.org/sg7/2020/10/0071.php</a>, 10/2020.</p>
+<p>[7]: <a href="https://lists.isocpp.org/sg7/2020/10/0053.php">https://lists.isocpp.org/sg7/2020/10/0053.php</a>, 10/2020.</p>
+<p>[8]: Sutton, A., Childers, W., Vandevoorde, D.  &quot;The Syntax of Static Reflection.&quot;  <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2021/p2320r0.pdf">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2021/p2320r0.pdf</a>, 02/2021.</p>
+<p>[9]: Childers, W., Sutton, A., Vali, F., Vandevoorde, D.  &quot;Scalable Reflection in C++.&quot; <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1240r1.pdf">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1240r1.pdf</a>, 10/2018. </p>
+<p>[10]: <a href="https://lists.isocpp.org/sg7/2021/02/0187.php">https://lists.isocpp.org/sg7/2021/02/0187.php</a>, 02/2021</p>
+<p>[11]: Sutton, A., Childers, W. &quot;Compile-time Metaprogramming in C++.&quot; <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1717r0.pdf">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1717r0.pdf</a>, 06/2019.</p>
+<p>[12]: Sutton, A., Childers, W. &quot;Tweaks to the design of source-code fragments.&quot; <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p2050r0.pdf">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p2050r0.pdf</a>, 01/2020.</p>
+<p>[14]: Revzin, Barry.  &quot;Generalized pack declaration and usage.&quot;  <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p1858r2.html">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p1858r2.html</a>, 03/2020.</p>
+</body></html>

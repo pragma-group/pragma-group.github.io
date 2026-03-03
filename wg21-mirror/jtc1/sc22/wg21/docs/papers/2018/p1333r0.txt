@@ -1,0 +1,553 @@
+
+                          Document Number: R1333R0
+
+   Assigning Concrete Semantics to Contract-Checking Levels at Compile Time
+
+                    Joshua Berne - jberne4@Bloomberg.net
+                      John Lakos -  jlakos@Bloomberg.net
+
+                      Revised Monday, November 26, 2018
+
+                                  ABSTRACT
+                                  ========
+
+        DISCLAIMER: This is NOT (yet) a complete proposal for C++20.
+        Instead, it provides (I) concise complete definitions of five
+        commonly needed contract-checking-statement (CCS) semantics and
+        (II) a table-based framework for comparing various combinations
+        of supported contract-level semantics.  What is deliberately
+        still MISSING from this "proposal" is any firm opinion about
+        which combinations of individual semantics should be required
+        of conforming implementations, along with what must be the
+        default combination (i.e., if none is specified explicitly).
+        It is intended that this paper will form the foundation of a
+        joint proposal for C++20 from the original six "contracts"
+        authors of P0542R5 (adopted in Rapperswil, 2018) for the
+        pre-meeting mailing for the Kona meeting (February, 2019).
+
+        The wording in the WP has taken an overly simplistic view of
+        the semantics of a given contract-checking statement (CCS) in
+        two important ways: the wording in Rappersil (1) failed to
+        address completely the breadth of possible semantics assignable
+        to a given CCS associated with a given contact-checking level
+        (i.e., 'default', 'audit', or 'axiom'), and (2) presumed that if
+        a contract is not actively checking its predicate at runtime,
+        then it must necessarily be the intent of the developer that the
+        predicate in the inactive check may (is permitted to) be presumed
+        true (e.g., by the compiler) and, if it is ever evaluated to be
+        otherwise, would result in hard (language) Undefined Behavior (UB).
+
+        What we "propose" here has ABSOLUTELY NO EFFECT on ANY C++ SOURCE
+        CODE syntax; it merely extends the discourse by enabling concrete
+        contract-checking semantics to be independently associated with
+        each of the already established, named contract-checking levels
+        (i.e., 'default', 'audit', or 'axiom'), thereby allowing developers
+        to express precisely their true intent in terms of whichever
+        combination of contract-checking semantics are actually supported.
+
+
+                                Table Of Contents
+                                =================
+
+        1. Concrete Contract-Checking-Statement (CCS) Semantics Overview
+        2. Detailed Specification of CCS Semantics
+        2.1. The "ignore" Semantic
+        2.2. The "assume" Semantic
+        2.3. The "Check (Never Continue)" Semantic
+        2.4. The "Check (Maybe Continue)" Semantic
+        2.5. The "Check (Always Continue)" Semantic
+        3. Possible Formal Wordings
+        3.1. Open Questions
+        3.2. Example (Draft) Wording Changes
+        4. Plausible Compiler-Command-Line Syntax
+        5. Required/Allowed/Proscribed Mappings
+
+
+1. Concrete Contract-Checking-Statement (CCS) Semantics Overview
+================================================================
+A critically important aspect missing from the original contract-checking
+proposal was a precise statement of what kinds of behaviors are possible in a
+C++ runtime, and how we identify them.  After deep reflection (and consultation
+with members of the CWG), we now understand that there are in fact exactly
+five (5) concrete behaviors (a.k.a., semantics) that a contract-checking
+statement (CCS) might reasonably have -- *irrespective* of how a particular
+concrete semantic comes to be associated with that statement:
+
+                               Runtime    Assumed true   Assumed to continue
+  #  Semantic Description      Checked?   AFTER check?   after false predicate
+ === ======================    ========   ============   =====================
+  1. ignore                       NO           NO                YES
+
+  2. assume                       NO          YES         Undefined Behavior*
+
+  3. check (never continue)      YES          YES                 NO
+
+  4. check (maybe continue)      YES           NO                 NO
+
+  5. check (always continue)     YES           NO                YES
+
+
+  * The generated code may treat any situation where the condition is false
+    as though it was hard (language) undefined behavior (UB).
+
+A CCS having any one of the three semantics that enable runtime checking will
+evaluate its predicate (at run time) and, if false, the violation handler will
+be invoked (passing in all relevant context pertinent to that CCS).  If (and to
+what extent) the flow of control is expected (by the compiler) to return after
+the handler is called will depend solely on which of the three runtime-checking
+semantics is employed, and is entirely independent of whether the currently
+installed assertion handler ever actually returns.  Note that the semantic
+differences between the final two (4 and 5) runtime checks (i.e., *maybe*
+versus *always* continue, see section 2 below), though subtle, are nonetheless
+important -- both in terms of (I) OBSERVABLE BEHAVIOR (for poorly written or
+"buggy" programs only) and (II) RUNTIME PERFORMANCE (in general).
+
+What makes these five distinct ("canonical") semantic behaviors "reasonable"
+is that they are all (1) easily defined, (2) eminently implementable,
+(3) individually ideal for well-known practical use cases (see section 2),
+and (4) independent.
+
+Other semantics -- though possible -- are arguably undesirable.  For example,
+we could imagine a semantic that checked the predicate at runtime and continued
+with no additional assumptions.  This semantic would not, however, be
+independent of the installed violation handler the way the other semantics are.
+By deliberately not identifying and specifying such an undesirable CCS semantic
+in the standard, we naturally discourage (but can't actually prevent) compiler
+vendors from making it available.
+
+On the other hand, it is not inconceivable that, through practical use of this
+basic contract-checking facility, a new (sixth) useful and implementable
+("canonical") CCS semantic might (some day) be discovered.  Cataloging such
+practicable semantics, as we have done here (see section 2), not only serves
+to make each recognized (standardized) CCS semantic explicit, but also readily
+enables the seamless addition of new semantics if and as needed.
+
+A more lengthy discussion motivating the need for independently assignable
+individual-level semantics can be found in P1332R0.
+
+
+2. Detailed Specification of CCS Semantics
+==========================================
+This section, intended primarily at the core working group (CWG) and
+compiler-developers, elucidates in full detail what is meant by the initial
+five contract-checking-statement (CCS) semantics proposed here.  In the five
+respective subsections that follow, we delineate how a particular, say,
+'audit'-level 'assert' CCS
+
+    [[ assert audit: x > 0 ]] ;
+
+would behave if 'audit' were assigned that corresponding standard CCS semantic.
+(Note that basic idea is the same for the two kinds of CCS statements other
+than 'assert': 'expects' and 'ensures'.)
+
+Places where the violation handler is invoked will be indicated using
+'__invoke_violation_handler(...)'.  This (hypothetical) function is assumed
+to be an intrinsic that, in turn, calls the violation handler, passing an
+'std::contract_violation' populated with relevant context, such as the
+source-code location (file and line), information from the CCS itself (such
+as the 'level', or absence there of), and the associated contract 'semantic'.
+
+
+2.1. The "ignore" Semantic
+--------------------------
+A CCS (at the 'audit' level) having the "ignore" contract-checking semantic
+(like all CCSs) must be syntactically correct, but contributes nothing to a
+program's semantics.  E.g.:
+
+    void f(int x)
+    {
+      // ...
+      [[ assert audit: x > 0 ]];
+      // ...
+    }
+
+would be equivalent to:
+
+    void f(int x)
+    {
+      // ...
+      (void) sizeof ((x > 0) ? true : false);
+          // No assumptions about the result of the expression '(x > 0)'
+          // is permitted to have any effect on the program; after reaching
+          // this CCS, all code after it is also (always) reachable.
+      // ...
+    }
+
+This semantic is useful for disabling CCSs -- e.g., to avoid runtime overhead
+or when otherwise contraindicated for active use.
+
+
+2.2. The "assume" Semantic
+--------------------------
+A CCS (at the 'audit' level) having the "assume" contract-checking semantic
+is never evaluated at runtime, and the compiler may (is permitted/encouraged
+to) presume the truth of the predicate (e.g., for optimization purposes)
+because its having a value of 'false' would be considered "hard" (language)
+undefined behavior (UB).  E.g.:
+
+    void f(int x)
+    {
+      // ...
+      [[ assert audit: x > 0 ]];
+      // ...
+    }
+
+would be equivalent to:
+
+    void f(int x)
+    {
+      // ...
+      __intrinsic_assume_true_but_dont_evaluate(x > 0);
+          // The compiler is allowed to assume that the expression '(x > 0)'
+          // is true at the point this CCS is reached.
+      // ...
+    }
+
+This semantic is useful for explicitly enabling compiler optimizations based
+on predicates that are ("for sure") known (at build time) to be true, without
+adding any runtime (checking) overhead.
+
+
+2.3. The "Check (Never Continue)" Semantic
+------------------------------------------
+A CCS (at the 'audit' level) having the "check (never continue)"
+contract-checking semantic is always evaluated at runtime, and the compiler
+must not allow the flow of control to proceed past the CCS if the predicate
+evaluates to 'false'.  E.g:
+
+    void f(int x)
+    {
+      // ...
+      [[ assert audit: x > 0 ]];
+      // ...
+    }
+
+would be equivalent to:
+
+    void f(int x)
+    {
+      // ...
+      if (!(x > 0)) {
+        __invoke_violation_handler(...);
+        std::terminate();
+      }
+         // The compiler n naturally assume that '(x > 00' is true if the flow
+         // of control reaches this point.
+      // ...
+    }
+
+This semantic is useful for explicitly enabling runtime validation of
+predicates that are nominally "presumed" to be true, while still allowing for
+some compiler optimization.  It catches failures of this assumption at runtime
+with a hard error, instead of allowing programs to continue to run in
+indeterminate states.
+
+
+2.4. The "Check (Maybe Continue)" Semantic
+------------------------------------------
+A CCS (at the 'audit' level) having the "check (maybe continue)"
+contract-checking semantic is always evaluated at runtime, and the compiler
+must NOT assume anything about whether the flow of control does (or does not)
+proceed past the CCS if the predicate evaluates to 'false'.  E.g.:
+
+    void f(int x)
+    {
+      // ...
+      [[ assert audit: x > 0 ]];
+      // ...
+    }
+
+would be equivalent to:
+
+    void f(int x)
+    {
+      // ...
+      if (!(x > 0)) {
+        __invoke_violation_handler(...);
+        if (__optimization_barrier(), __access_unknowable()) std::terminate();
+      }
+          // The compiler must act as though continuation past this
+          // invocation is not guaranteed, even in cases where the handler is
+          // completely known (e.g., due to whole-program optimization) and
+          // would, in practice, continue.
+      // ...
+     }
+
+
+This semantic is useful for explicitly enabling runtime checking of predicates
+that are NOT presumed to be true (e.g., during debugging), while MAXIMALLY
+inhibiting compiler optimizations that might otherwise lead to code elision.
+
+Note that, for debugging purposes, We would choose this semantic, (#4) "check
+(maybe continue), over the following one, (#5) "check (always continue)",
+because a CCS implementing semantic (#4) is itself less likely to be elided due
+to unintended hard UB than one implementing semantic (#5).
+
+
+2.5. The "Check (Always Continue)" Semantic
+-------------------------------------------
+A CCS (at the 'audit' level) having the "check (always continue)"
+contract-checking semantic is always evaluated at runtime, and the compiler may
+(is permitted/encourage to) assume (e.g., for optimization purposes), that the
+flow of control always DOES proceed past the CCS -- even if the predicate
+evaluates to 'false' and irrespective of the actual runtime ("return") behavior
+the currently installed handler.  E.g.:
+
+    void f(int x)
+    {
+      // ...
+      [[ assert audit: x > 0 ]];
+      // ...
+    }
+
+would be equivalent to:
+
+    void f(int x)
+    {
+      // ...
+      if (!(x > 0)) {
+        __invoke_violation_handler(...);
+      }
+      // The compiler is not allowed to make any assumptions based on the truth
+      // (or falsehood) of the expression '(x > 0)'; hence, reachable undefined
+      // behavior from here might impact (e.g., elide) code generated prior to
+      // to this CCS, including even this CCS itself!  (Note the importance of
+      // the compiler's being able to assume control flow ALWAYS continues past
+      // this CCS (irrespective of whether the currently installed handler
+      // would actually ever return): It is this assumption that allows the
+      // compiler to do the same optimizations that it would have been able to
+      // do prior to the addition of this CCS, thereby having MINIMAL effect.
+   }
+
+This semantic is useful for explicitly enabling runtime checking of predicates
+that are NOT YET presumed to be true (e.g., during the addition of new CCSs to
+production software), while MINIMALLY inhibiting compiler optimizations that
+would otherwise lead to code elision.
+
+Note that, for pre-certification purposes, We would chose this semantic, (#5)
+"check (always continue), over the previous one, (#4) "check (maybe continue)",
+because a CCS implementing semantic (#5) is itself less likely to cause any
+change to the code elision of an existing program by masking unintended hard UB
+than one implementing semantic (#4), hence having the very desirable MINIMAL
+effect on working (but possibly buggy) production code.
+
+
+3. Possible Formal Wordings
+===========================
+There are clearly many equivalent ways to describe, at a high level, what is
+required of compiler vendors with respect to giving developers control over
+the mapping of five proposed CCS semantics -- "ignore", "assume",
+"check (never continue)", "check (maybe continue)", "check (always continue)"
+(but whose names have not yet been agreed to, see P1334R0) -- to the respective
+already-agreed-upon (standard) contract-checking-level names: 'default',
+'audit', and 'axiom'.  While it is explicitly NOT our intention here to presume
+any particular subset of the fifty possible semantic combinations is what's
+required (and no more), we do advocate avoiding any prescription of
+command-line syntax for how compiler vendors might enable developers to realize
+such mappings -- irrespective of whatever combinations eventually wind up being
+standardized.
+
+
+3.1. Open Questions
+-------------------
+Formal wording for most of the changes we propose is very direct.  The largest
+open question that remains is how to best word the requirements on the "Maybe"
+and "Always" continuing checked semantics (see section 2).  Proper wording for
+these will require input from CWG and (perhaps) compiler implementers as well.
+
+This paper proposes only that a conforming compiler must enable a way to map
+a minimal set of required semantics corresponding to the established 'default',
+'audit', and 'axiom' contract-checking levels.  Which of the fifty possible
+combinations should be required (or discouraged) is deferred until section 5.
+Further wording requiring (or discouraging) specific combinations of these five
+semantics can easily be added later if and as needed.
+
+Note that a conforming implementation is at liberty to support any combinations
+of individual layer semantics it desires so long as it somehow make at least
+the required ones available.
+
+
+3.2. Example (Draft) Wording Changes
+-----------------------------------
+Replace 9.11.4.3.3 with the following sections:
+9.11.4.3.3.a - Contract Semantics
+Each contract will be translated with a particular semantic (see 9.11.4.3.3.b).
+There are three possible runtime-checked semantics ("check (never continue)",
+"check (maybe continue)", and "check (always continue)"), and two possible
+non-runtime-checked ones ("ignore" and "assume").
+
+9.11.4.3.3.b - translation
+A translation will be performed with semantics chosen for each contract level:
+default, audit, and axiom.  [Note: no explicit requirements are made on how
+these levels are specified. --end note]
+
+9.11.4.3.3.c - ignore
+A contract having the semantic 'ignore' should act as if the predicate was
+placed in an unevaluated boolean context.  The predicate for such contracts is
+not evaluated.
+
+9.11.4.3.3.d - assume
+The predicate for a contract having the semantic 'assume' is not evaluated; if
+the predicate of such a contract would evaluate to false, the behavior is
+undefined.
+
+9.11.4.3.3.e - check (never continue)
+The predicate for a contract having the semantic 'check (never continue)'
+should be evaluated.  If it evaluates to false, the violation handler should be
+invoked, and then std::terminate should be invoked (if the violation handler
+returns normally).
+
+9.11.4.3.3.f - check (maybe continue)
+The predicate for a contract having the semantic 'check (maybe continue)'
+should be evaluated.  If it evaluates to false, the violation handler should be
+invoked.  The translation cannot assume that control flow will, or will not,
+continue from the point of invocation of the violation handler.
+
+9.11.4.3.3.g - check (always continue)
+The predicate for a contract having the semantic 'check (always continue)'
+should be evaluated.  If it evaluates to false, the violation handler should be
+invoked.  The translation may assume that control flow will always continue
+after the invocation of the violation handler.
+
+9.11.4.3.4 - constant expression evaluation
+We suggest alternate wording for this section: "During constant expression
+evaluation any non-runtime-checked semantics are treated as 'ignore' and any
+invocation of the contract violation handler should be treated as ill-formed,
+diagnostic required."
+
+9.11.4.3.5 - violation handler
+Change references to "checked contract evaluates to false" to "semantic for the
+contract dictates it."
+
+9.11.4.3.7 - delete (definition of continuation mode)
+
+16.8.2 Class contract_violation
+Add "string_view contract_semantic() const noexcept"
+
+16.8.2.7
+string_view contract_semantic() const noexcept
+  Returns: Text describing the semantic of the violated contract.
+
+
+4. Plausible Compiler-Command-Line Syntax
+=========================================
+It is not within the purview of the standards committee to dictate
+command-line syntax to compiler vendors.  As an example, however, a vendor
+*might* choose to allow a developer to map the 'default' (contract-checking)
+level to the "check (never continue)" semantic, the 'audit' level to the
+"ignore" semantic, and the 'axiom' level to the "assume" semantic -- all on
+the command line like this:
+
+ CC -setlevels default=check_never_continue,audit=ignore,axiom=assume file.cpp
+
+And, of course, this is just one possibility, and is not intended as any sort
+of serious recommendation.
+
+
+5. Required/Allowed/Proscribed Mappings
+=======================================
+It has been suggested that not all fifty syntactically allowable combinations
+of mappings from our five established semantics { "ignore", "assume", "check
+(never continue)", "check (maybe continue)", and "check (always continue)" }
+onto the three agreed-upon (named) contract-checking levels { 'default',
+'audit', and 'axiom' } necessarily make good semantic sense.  It is therefore
+incumbent on us (e.g., the authors of the original paper) to specify (or at
+least recommend) which combinations must, may, or (if any) should NOT be made
+available to developers by conforming implementations.
+
+That is, given that both the 'default' and 'audit' contract-checking levels
+could (conceivably) each be mapped independently to any of the five identified
+CCS semantics (5 X 5 = 25 combinations), and that the 'axiom' level can also
+independently take on either the "ignore" or "assume" semantic (2 orthogonal
+combinations), we must agree on some rendering of following prescriptive table
+-- *irrespective* of whatever wording we ultimately decide to adopt:
+
+                                                                       UNKNOWN
+                                                                 REQUIRED    |
+                                                             ALLOWED    |    |
+                                                     PROSCRIBED    |    |    |
+Row                                                           |    |    |    |
+ #        'default'               'audit'          'axiom'    |    |    |    |
+--  -----------------------  ---------------------  ------    |    |    |    |
+ 0          ignore                 ignore           ignore   [ ]  [ ]  [X]  [ ]
+ 1          assume                 ignore           ignore   [ ]  [ ]  [ ]  [ ]
+ 2  check (never continue)         ignore           ignore   [ ]  [ ]  [ ]  [ ]
+ 3  check (maybe continue)         ignore           ignore   [ ]  [ ]  [ ]  [ ]
+ 4  check (always continue)        ignore           ignore   [ ]  [ ]  [ ]  [ ]
+
+ 5          ignore                 assume           ignore   [ ]  [ ]  [ ]  [ ]
+ 6          assume                 assume           ignore   [ ]  [ ]  [ ]  [ ]
+ 7  check (never continue)         assume           ignore   [ ]  [ ]  [ ]  [ ]
+ 8  check (maybe continue)         assume           ignore   [ ]  [ ]  [ ]  [ ]
+ 9  check (always continue)        assume           ignore   [ ]  [ ]  [ ]  [ ]
+
+10          ignore          check (never continue)  ignore   [ ]  [ ]  [ ]  [ ]
+11          assume          check (never continue)  ignore   [ ]  [ ]  [ ]  [ ]
+12  check (never continue)  check (never continue)  ignore   [ ]  [ ]  [ ]  [ ]
+13  check (maybe continue)  check (never continue)  ignore   [ ]  [ ]  [ ]  [ ]
+14  check (always continue) check (never continue)  ignore   [ ]  [ ]  [ ]  [ ]
+
+15          ignore          check (maybe continue)  ignore   [ ]  [ ]  [ ]  [ ]
+16          assume          check (maybe continue)  ignore   [ ]  [ ]  [ ]  [ ]
+17  check (never continue)  check (maybe continue)  ignore   [ ]  [ ]  [ ]  [ ]
+18  check (maybe continue)  check (maybe continue)  ignore   [ ]  [ ]  [ ]  [ ]
+19  check (always continue) check (maybe continue)  ignore   [ ]  [ ]  [ ]  [ ]
+
+20          ignore          check (always continue) ignore   [ ]  [ ]  [ ]  [ ]
+21          assume          check (always continue) ignore   [ ]  [ ]  [ ]  [ ]
+22  check (never continue)  check (always continue) ignore   [ ]  [ ]  [ ]  [ ]
+23  check (maybe continue)  check (always continue) ignore   [ ]  [ ]  [ ]  [ ]
+24  check (always continue) check (always continue) ignore   [ ]  [ ]  [ ]  [ ]
+
+25          ignore                 ignore           assume   [ ]  [ ]  [ ]  [ ]
+26          assume                 ignore           assume   [ ]  [ ]  [ ]  [ ]
+27  check (never continue)         ignore           assume   [ ]  [ ]  [ ]  [ ]
+28  check (maybe continue)         ignore           assume   [ ]  [ ]  [ ]  [ ]
+29  check (always continue)        ignore           assume   [ ]  [ ]  [ ]  [ ]
+
+30          ignore                 assume           assume   [ ]  [ ]  [ ]  [ ]
+31          assume                 assume           assume   [ ]  [ ]  [ ]  [ ]
+32  check (never continue)         assume           assume   [ ]  [ ]  [ ]  [ ]
+33  check (maybe continue)         assume           assume   [ ]  [ ]  [ ]  [ ]
+34  check (always continue)        assume           assume   [ ]  [ ]  [ ]  [ ]
+
+35          ignore          check (never continue)  assume   [ ]  [ ]  [ ]  [ ]
+36          assume          check (never continue)  assume   [ ]  [ ]  [ ]  [ ]
+37  check (never continue)  check (never continue)  assume   [ ]  [ ]  [ ]  [ ]
+38  check (maybe continue)  check (never continue)  assume   [ ]  [ ]  [ ]  [ ]
+39  check (always continue) check (never continue)  assume   [ ]  [ ]  [ ]  [ ]
+
+40          ignore          check (maybe continue)  assume   [ ]  [ ]  [ ]  [ ]
+41          assume          check (maybe continue)  assume   [ ]  [ ]  [ ]  [ ]
+42  check (never continue)  check (maybe continue)  assume   [ ]  [ ]  [ ]  [ ]
+43  check (maybe continue)  check (maybe continue)  assume   [ ]  [ ]  [ ]  [ ]
+44  check (always continue) check (maybe continue)  assume   [ ]  [ ]  [ ]  [ ]
+
+45          ignore          check (always continue) assume   [ ]  [ ]  [ ]  [ ]
+46          assume          check (always continue) assume   [ ]  [ ]  [ ]  [ ]
+47  check (never continue)  check (always continue) assume   [ ]  [ ]  [ ]  [ ]
+48  check (maybe continue)  check (always continue) assume   [ ]  [ ]  [ ]  [ ]
+49  check (always continue) check (always continue) assume   [ ]  [ ]  [ ]  [ ]
+
+As an example, we have marked with an 'X' the mapping:
+
+ CC -setlevels default=ignore,audit=ignore,axiom=ignore file.cpp
+
+to be REQUIRED, as we assert that it should be possible on all conforming
+implementations for the developer to disable entirely (apart from syntax
+checking) any effect associated with contract checking.
+
+The remainder of this table, along with a plausible mandated default (i.e., if
+no individual level semantic is specified) is deliberately left as an exercise
+to the reader.
+
+Please send all (only serious) comments and/or filled-out tables to
+jlakos@bloomberg.net so that a revised enhanced version of this paper,
+P1333R1, or (ideally) a new proposal, coauthored by all of the original
+co-authors of P0542R5, might be provided for the pre-meeting mailing for Kona,
+HI (February, 2019).
+
+As an example of a concrete proposal that addresses some of the concerns
+raised since Rapperswil, see R1290R0.  For a mapping of that proposal (R1290R0)
+described in terms of the framework presented here (R1333R0), see R1335R0.
+

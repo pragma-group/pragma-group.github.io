@@ -1,0 +1,219 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+ "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8">
+<title>P0982R0: Weaken release sequences</title>
+<style type="text/css">
+html { line-height: 135%; }
+ins { background-color: #DFD; }
+del { background-color: #FDD; }
+</style>
+</head>
+<body>
+<table>
+        <tr>
+                <th>Doc. No.:</th>
+                <td>WG21/P0982R0</td>
+        </tr>
+        <tr>
+                <th>Date:</th>
+                <td>2018-04-01</td>
+        </tr>
+        <tr>
+                <th>Reply-to:</th>
+                <td>Hans-J. Boehm</td>
+        </tr>
+        <tr>
+                <th>Email:</th>
+                <td><a href="mailto:hboehm@google.com">hboehm@google.com</a></td>
+        </tr>
+        <tr>
+                <th>Authors:</th>
+		<td>Hans-J. Boehm, Olivier Giroux, Viktor Vafeiades</td>
+        </tr>
+        <tr>
+                <th>Audience:</th>
+                <td>SG1, then CWG</td>
+        </tr>
+</table>
+
+<h1>P0982R0: Weaken Release Sequences</h1>
+<p>
+This proposal was forked from P0668R2. That paper contains three memory
+mode revision proposals, all of which are independent.
+SG1 decided that this piece of the
+memory model revision proposal was essentially ready to move forward, while
+other pieces require more discussion. It was suggested that this
+might be combined with P0735, which also deals with release sequences.
+But the proposals themselves, as well as the arguments pro and con, are entirely
+disjoint, so it seemed less confusing to keep them separate.
+<p>
+Release sequences were originally introduced to prevent relaxed
+read-modify-write operations, from breaking
+synchronizes-with relationships. If a thread initializes a data
+structure, and then, via a <code>memory_order_release</code> operation,
+sets an "initialized" bit in a word to signal that
+it has done so, other threads using e.g. <code>fetch_or</code> to set other bits
+should not interfere with that signaling mechanism. A thread observing
+the "initialized" bit via a <code>memory_order_acquire</code> operation
+is thus still guaranteed to see the data structure fully initialize.
+<p>
+If the "initialized" bit is set by a
+<code>memory_order_release operation</code>, additional bits
+in the same location are added using any atomic read-modify-write
+operations, and then the "initialized" bit is read via a
+<code>memory_order_acquire</code>
+load, we guarantee that the initial release operation still synchronizes
+with the final acquire load, even if the intervening read-modify-write
+operations are relaxed operations. In order for a release store to
+synchronize with an acquire load on the same location, the acquire load
+must observe either the value stored by the original release operation,
+<i>or another store operation in the "release sequence" headed by the
+release store</i>. Read-modify-write operations are included in the release
+sequence, and hence the appropriate synchronizes-with relationship
+is established, and a thread observing the "initialized" bit set is
+guaranteed to see the intialization of the associated object.
+<p>
+The standard implementation of reference counting relies heavily on the
+fact that atomic read-modify-write operations are included in release sequences.
+<p>
+Unfortunately, it was decided in the C++11 time frame that not only
+read-modify-write operations, but also <code>memory_order_relaxed</code>
+stores performed by the same thread that performed the original
+<code>memory_order_release</code> store, should be included in release sequences.
+This seemed reasonable at the time because this was expected to be a
+"free" property provided by existing architectures in any case.
+It was not motivated by good use cases at the time, and it is not
+clear there are any.
+<p>
+(There was a discussion of possible
+use cases on the reflector, starting on March 13, 2018. This suggested
+marginaly plausible scenarios in which such cases might possibly arise,
+but also reasons that such code remains extremely unlikely.)
+<p>
+It is becoming increasingly common to design hardware
+features (e.g. ARMv8 acquire loads and release stores) to match
+the C++ memory model specification. For such new designs, release
+sequences do impose additional constraints, as was pointed out by
+the hardware architects participating in the Toronto discussion of P0668.
+Thus weaker constraints are likely to benefit future hardware and thus
+C++ performance.
+
+<h2>The problem with release sequences</h2>
+<p>
+This discussion largely follows Section 4.3 of
+<a href="https://people.mpi-sws.org/~viktor/papers/popl2015-c11comp.pdf">
+Vafeiades et al, Common Compiler Optimisations are Invalid in the C11 Memory Model and what we
+can do about it, POPL 2015</a>.
+<p>
+We can illustrate the problem with the example from the above paper:
+</p>
+<blockquote>
+<table border="1">
+<tr>
+<td>Thread 1</td> <td>Thread 2</td><td>Thread 3</td>
+</tr>
+<tr>
+<td rowspan=3>
+<code>x =<sub>rlx</sub> 2</code></td>
+
+<td rowspan=3><code>y =<sub>na</sub> 1</code><br>
+<code>x =<sub>rel</sub > 1</code><br>
+<code>x =<sub>rlx</sub > 3</code></td>
+
+<td rowspan=3><code>if (x<sub>acq</sub> == 3)</code><br>
+<code>&nbsp;&nbsp;print(y)</code></td>
+</tr>
+</table>
+</blockquote>
+<p>
+Without Thread 1, this program is data-race-free. 
+Thread 3 accesses <code>y</code> only if it sees a value of 3 for <code>x</code>,
+which must mean that it saw the second assignment to <code>x</code> by Thread 2.
+Since this assignment is performed by the same thread that performed the
+release store, with no intervening assignments to <code>x</code>,
+it is in the release sequence of the release store. Hence the second assignment
+synchronizes with the conditional in Thread 3. The program must print 1,
+if it prints anything at all.
+<p>
+Surprisingly, this no longer holds if we add Thread 1. If the Thread 1
+assignment occurs (in <code>x</code>'s modification order) between the
+two assignments in Thread 2, then the release sequence is broken by this
+intervening assignment. There is no longer a synchronizes with relationship,
+and thus there is a data race.
+<p>
+This is highly counter-intuitive, since Thread 1 should have no impact on memory
+ordering in this case. This ability for other threads to interfere in such
+synchronizes-with relationships also makes it difficult to use this
+guarantee in correct code.
+<p>
+The existing definition also greatly complicates reasoning about C++
+programs. Consider the above example with non-atomic operations replaced by
+relaxed operations. That program allows Thread 3 to print zero, since
+again the release sequence can be broken by Thread 1. However the
+program without Thread 1 does not allow this execution, in spite of the
+fact that no Thread actually observes the write by Thread 1. In all
+reasonable senses of the word, the program without Thread 1 is a prefix of
+the whole program. But the execution of the whole program is not an
+extension of the program prefix. This is problematic for both formal
+and informal reasoning about programs.
+<p>
+Relying on same thread writes in release sequences is also inherently brittle.
+Such use breaks if the final assignment is done by a helper thread instead of
+the original thread. For example, this does not interact well with the
+<code>task_block</code> <code>run</code> or <code>wait</code> functions
+from Parallelism TS v2, which may, mor or less implicitly, switch threads.
+<h2>Proposed solution</h2>
+<p>
+P0668 suggested two different solutions to the core problem:
+Either we strengthen release sequences to prevent interference by
+other threads, or we weaken release sequences to no longer include
+same-thread-writes. The SG1 consensus in Jacksonville was in
+favor of the second solution, in spite of the fact that it is technically
+a breaking change. This was motivated largely by concerns about adding
+additional hardware constraints in support of a feature with no known use
+cases.
+<p>
+The proposal in P0668R2 was to deprecate same-thread writes in release
+sequences. The SG1 consensus in Jacksonville was to prefer outright removal.
+That's the wording change we present here.
+<p>
+Update Section 6.8.2.1p5 [intro.races] to read:
+<blockquote>
+<p>
+A release sequence headed by a release operation <i>A</i>
+on an atomic object <i>M</i> is a maximal contiguous sub-sequence of side effects
+in the modification order of <i>M</i>, where the
+first operation is <i>A</i>, and every subsequent operation
+<del>is performed by the same thread that performed <i>A</i>, or</del>
+is an atomic read-modify-write operation.
+</blockquote>
+<p>
+(The list formatting was also removed.)
+<p>
+Add a new section in Clause C.5.<i>N</i> (position and <i>N</i> determined by the
+editor):
+<blockquote>
+<p>
+<ins><b>C.5.<i>N</i> Same-thread stores in release sequences</b></ins>
+<p>
+<ins>Affected subclause: 6.8.2.1 [intro.races]</ins>
+<p>
+<ins>Change: Same-thread stores are no longer allowed in release sequences.</ins>
+<p>
+<ins>Rationale: Computed values could depend on code that neither happened
+before the computation of the value, nor stored a value that was ever read.
+In addition, the effect of the earlier guarantee could be invalidated by
+delegating code execution to a helper thread. This made it much more difficult
+to reason, either formally, or informally, about programs using acquire-release
+atomic operations. There were no known use cases of the stronger guarantee.</ins>
+<p>
+<ins>Effect on original feature:
+If a <code>memory_order_release</code> atomic store is followed by a <code>memory_order_relaxed</code>
+store to the same variable by the same thread, then reading the latter value
+with a <code>memory_order_acquire</code> load no longer provides any happens before
+guarantees, even in the absence of intervening stores by another thread.</ins>
+</blockquote>
+</body>
+</html>

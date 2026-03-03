@@ -1,0 +1,168 @@
+<html>
+<body>
+
+<address>Document Number: P1091R0</address>
+<address>Date: 2018-05-07</address>
+<address>Reply-to: Nicolas Lesser &lt;blitzrakete@gmail.com&gt;</address>
+<address>Audience: EWG</address>
+
+<h1 id="extendingstructuredbindingstobemorelikevariabledeclarations">Extending structured bindings to be more like variable declarations</h1>
+
+<h3 id="introduction">Introduction</h3>
+
+<p>There are a lot of restriction on structured bindings compared to variable declarations, like not being able to mark them <code>static</code>, <code>constexpr</code> or them not having unclear linkage. This proposal's aim is to fix this by for example making the underlying structured binding object (and tuple binding variables) have external linkage and by allowing various specifiers (<code>static</code>, <code>thread_local</code>, <code>constexpr</code>, <code>inline</code>, <code>extern</code>) on structured bindings.</p>
+
+<h3 id="motivation">Motivation</h3>
+
+<p>Structured bindings, although very useful, are actually pretty magical. They don't introduce variables in the normal sense for each binding, rather, they are names that refer to specific objects. As such, there are problems including what it means for a binding to be <code>static</code> and how it would work and what linkage do those bindings even have.</p>
+
+<p>Those problems could not be resolved during the discussion of the paper and afterwards, a paper was requested to analyse the possible design impact that such additions to structured bindings would have after two NB comments proposing this were rejected. This paper attempts to do so.</p>
+
+<p>One motivation to do so is to bring structured bindings closer to actual variable declarations, so consistency. This will also make structured bindings more useful, as they are currently lacking for example <code>constexpr</code>, which is becoming every more important for various features of the language.</p>
+
+<p>As a consequence this paper also fixes some DRs that were filed and are under consideration or going to be eventually by either Evolution or Core.</p>
+
+<h3 id="linkage">Linkage</h3>
+
+<p>As per [basic.link]p8, bindings do not have any linkage because they're just names. Currently, in both gcc and clang, tuple binding have linkage, as they were specified as variable declarations in the standard. This is no longer the case though due to the resolution of DR2313<sup>1</sup>.</p>
+
+<p>But the underlying structured binding object is an actual variable, which can have either internal or external linkage depending on the declaration of the structured binding, as gcc and clang do it. There is no way to refer to that object though without making the program IL-NDR as the object has a name like <code>_ZDC1a2bbE</code> for <code>auto[a, bb]</code>.</p>
+
+<p>[dcl.struct.bind]p1 has the following to say about the object:</p>
+
+<blockquote>
+  <p>First, a variable with a unique name <em>e</em> is introduced.</p>
+</blockquote>
+
+<p>It follows that the variable cannot be referenced in a conforming program anyways, and as such, it doesn't make much sense to give it external linkage. Nonetheless, to be consistent with the rest of the declarations and being able to use just <code>inline</code> (see below) without an extra <code>extern</code> to give the structured binding external linkage, the underlying object should have external linkage.</p>
+
+<h3 id="extern">extern</h3>
+
+<p>As discussed in the previous section, there is no way to reference either the bindings or the underlying object within a conforming program, so allowing <code>extern</code> on such a structured binding would not make much sense.</p>
+
+<p>However, this would prohibit <code>inline</code> on structured bindings that have been declared <code>const</code> and <code>inline</code>, which might be desirable in some cases. For this reason, it should be allowed. Note that <code>extern</code> would have no effect on the individual bindings, except for the tuple case.</p>
+
+<h3 id="staticandthread_local">static and thread_local</h3>
+
+<p><code>static</code> and <code>thread_local</code> on a structured binding make sense and are actually useful. The way to make this work nicely in the standard is to only apply them on the underlying object, and not on the bindings (which wouldn't make sense and can't work today without major changes to the specification of bindings anyways). For the tuple case on the additional variable declarations too.</p>
+
+<p>Because bindings refer to certain objects (depending on the initializer of the structured binding), they would implicitly get the desired semantics of <code>static</code> and <code>thread_local</code>, as they refer to either objects within the underlying object or to separate variables (in the tuple case) which are marked with the desired specifiers.</p>
+
+<h3 id="inline">inline</h3>
+
+<p><code>inline</code> is also useful and will be consistent with inline variables. It will work just as with <code>static</code> and <code>thread_local</code>: The underlying object is marked <code>inline</code> and any additional variables introduced as part of tuple bindings.</p>
+
+<h3 id="constexpr">constexpr</h3>
+
+<p>If <code>constexpr</code> were applied just like <code>static</code> and co. are, then there would be a problem, because the current language rules make the following code ill-formed:</p>
+
+<pre><code class="c++ language-c++">// at block scope
+constexpr auto[a] = std::tuple&lt;int&gt;(1);
+// "equivalent" to
+constexpr auto __sb = std::tuple&lt;int&gt;(1);
+constexpr const int&amp; __a = std::get&lt;0&gt;(__sb); // ill-formed today
+</code></pre>
+
+<p>A reference must be initialized by a constant expression to be a core constant expression ([expr.const]p2.11], but <code>std::get&lt;0&gt;(__sb)</code> is not a constant expression due to [expr.const]p6.</p>
+
+<p>Richard Smith on the core reflector<sup>2</sup> suggested to relax the restriction on what constitutes a core constant expression of a reference by just requiring that the reference must be initialized by a <em>core</em> constant expression instead (see below to what this change entails).</p>
+
+<p>This would mean that to make structured bindings <code>constexpr</code>, it is necessary to apply <code>constexpr</code> to the underlying object, and apply <code>const</code> to any other variable introduced by tuple bindings.</p>
+
+<p>Of course, one thing to note is that it is important to guarantee that the call to <code>get</code> is a constant expression, because or else <code>constexpr</code> will act like <code>const</code>, which is only maybe a core constant expression.</p>
+
+<h3 id="impact">Impact</h3>
+
+<p>This proposal only makes ill-formed or code with unspecified behavior well-formed in relation to structured bindings.</p>
+
+<p>Due to <code>constexpr</code> tuple binding variables requiring a change to what constitutes a core constant expression, ill-formed code today will become well-formed:</p>
+
+<pre><code class="c++ language-c++">// at block scope
+const int var = 1;
+const int&amp; ref = var;
+static_assert(ref == 1); // ill-formed today, well-formed with this proposal
+</code></pre>
+
+<h3 id="proposedwording">Proposed wording</h3>
+
+<p>All changes relative to the latest C++20 draft.</p>
+
+<p>Change [dcl.dcl]p9 as follows:</p>
+
+<blockquote>
+  <p>A <em>simple-declaration</em> with an <em>identifier-list</em> is called a <em>structured binding declaration</em> ([dcl.struct.bind]). The <em>decl-specifier-seq</em> shall contain only the <em>type-specifier</em> auto <ins>, the <em>storage-class-specifier</em>s static, extern and thread_local, constexpr, inline</ins> and <em>cv-qualifiers</em>. The initializer shall be of the form “= <em>assignment-expression</em>”, of the form “{ <em>assignment-expression</em> }”, or of the form “( <em>assignment-expression</em> )”, where the <em>assignment-expression</em> is of array or non-union class type.</p>
+</blockquote>
+
+<p>Change [dcl.struct.bind]p1 as follows:</p>
+
+<blockquote>
+  <p>A structured binding declaration introduces the <em>identifiers</em> v<sub>0</sub>, v<sub>1</sub>, v<sub>2</sub>, . . . of the <em>identifier-list</em> as names ([basic.scope.declarative]) of structured bindings. Let <em>cv</em> denote the <em>cv-qualifiers</em> in the <em>decl-specifier-seq</em>. First, a variable with a unique name <em>e</em> is introduced. <ins>For linkage purposes, two structured bindings with same <em>v<sub>i</sub></em> in the same order shall have the same name ([basic.link]).</ins> If the <em>assignment-expression</em> in the <em>initializer</em> has array type A and no <em>ref-qualifier</em> is present, <em>e</em> has type <em>cv</em> A <ins>and with every <em>decl-specifier</em> in the <em>decl-specifier-seq</em> applied except for the <em>type-specifier</em> auto</ins>, and each element is copy-initialized or direct-initialized from the corresponding element of the <em>assignment-expression</em> as specified by the form of the <em>initializer</em>. Otherwise, <em>e</em> is defined as-if by</p>
+  
+  <p>attribute-specifier-seq<sub>[opt]</sub> decl-specifier-seq ref-qualifier<sub>[opt]</sub> e initializer ;</p>
+  
+  <p>where the declaration is never interpreted as a function declaration and the parts of the declaration other than the <em>declarator-id</em> are taken from the corresponding structured binding declaration. The type of the <em>id-expression</em> <em>e</em> is called <em>E</em>. [ Note: <em>E</em> is never a reference type ([expr.prop]). <ins>The linkage of <em>e</em> is described in [basic.link]</ins> — end note ]</p>
+</blockquote>
+
+<p>Change [dcl.struct.bind]p3 as follows:</p>
+
+<blockquote>
+  <p>Otherwise, if the <em>qualified-id</em> std::tuple_size&lt;E&gt;::value names a complete type, the expression std::tuple_size&lt;E&gt;::value shall be a well-formed integral constant expression and the number of elements in the <em>identifier-list</em> shall be equal to the value of that expression. The <em>unqualified-id</em> get is looked up in the scope of <em>E</em> by class member access lookup ([basic.lookup.classref]), and if that finds at least one declaration that is a function template whose first template parameter is a non-type parameter, the initializer is e.get&lt;i&gt;(). Otherwise, the initializer is get&lt;i&gt;(e), where get is looked up in the associated namespaces. In either case, get&lt;i&gt; is interpreted as a <em>template-id</em> <ins>and get shall be marked <em>constexpr</em> if <em>constexpr</em> is in the <em>decl-specifier-seq</em></ins>. [ Note: Ordinary unqualified lookup is not performed. — end note ] In either case, <em>e</em> is an lvalue if the type of the entity <em>e</em> is an lvalue reference and an xvalue otherwise. Given the type T<sub>i</sub> designated by std::tuple_element&lt;i, E&gt;::type, variables are introduced with unique names r<sub>i</sub> of type “reference to <ins>c</ins> T<sub>i</sub>”<ins>, where <em>c</em> is <em>const</em> if <em>constexpr</em> appear in the <em>decl-specifier-seq</em> and empty otherwise,</ins> initialized with the initializer ([dcl.init.ref]), where the reference is an lvalue reference if the initializer is an lvalue and an rvalue reference otherwise, <ins>with every <em>decl-specifier</em> in the <em>decl-specifier-seq</em> applied except for the <em>type-specifier</em> auto and constexpr. If <em>constexpr</em> appears within the <em>decl-specifier-seq</em>, the initializer shall be a <em>constant-expression</em> and every <em>T<sub>i</sub></em> shall be of literal type</ins>. Each v<sub>i</sub> is the name of an lvalue of type T<sub>i</sub> that refers to the object bound to r<sub>i</sub>; the referenced type is T<sub>i</sub>.</p>
+</blockquote>
+
+<p>Change [expr.const]p2 as follows:</p>
+
+<blockquote>
+  <ul>
+  <li>an <em>id-expression</em> that refers to a variable or data member of reference type unless the reference has a preceding initialization and either
+  
+  
+  <ul>
+  <li>it is initialized with a <ins>core</ins> constant expression or</li>
+  
+  <li>its lifetime began within the evaluation of e;</li></ul>
+  </li>
+  </ul>
+</blockquote>
+
+<p>Change [dcl.stc]p3 as follows:</p>
+
+<blockquote>
+  <p>The <em>thread_local</em> specifier indicates that the named entity has thread storage duration. It shall be applied only to the names of variables of namespace or block scope<ins>, to structured binding declarations ([dcl.struct.bind])</ins> and to the names of static data members. When <em>thread_local</em> is applied to a variable of block scope the <em>storage-class-specifier</em> <em>static</em> is implied if no other <em>storage-class-specifier</em> appears in the <em>decl-specifier-seq</em>.</p>
+</blockquote>
+
+<p>Change [dcl.stc]p4 as follows:</p>
+
+<blockquote>
+  <p>The <em>static</em> specifier can be applied only to names of variables and functions<ins>, to structured binding declarations ([dcl.struct.bind])</ins> and to anonymous unions. There can be no <em>static</em> function declarations within a block, nor any <em>static</em> function parameters. A <em>static</em> specifier used in the declaration of a variable declares the variable to have static storage duration, unless accompanied by the <em>thread_local</em> specifier, which declares the variable to have thread storage duration. A <em>static</em> specifier can be used in declarations of class members; [class.static] describes its effect. For the linkage of a name declared with a <em>static</em> specifier, see [basic.link].</p>
+</blockquote>
+
+<p>Change [dcl.stc]p5 as follows:</p>
+
+<blockquote>
+  <p>The <em>extern</em> specifier can be applied only to the names of variables and functions <ins>and to structured binding declarations ([dcl.struct.bind])</ins>. The <em>extern</em> specifier cannot be used in the declaration of class members or function parameters. For the linkage of a name declared with an extern specifier, see [basic.link]. [ Note: The <em>extern</em> keyword can also be used in <em>explicit-instantiations</em> and <em>linkage-specifications</em>, but it is not a <em>storage-class-specifier</em> in such contexts. — end note ]</p>
+</blockquote>
+
+<p>Change [dcl.inline]p1 as follows:</p>
+
+<blockquote>
+  <p>The <em>inline</em> specifier can be applied only to the declaration or definition of a variable or function<ins>, or to a structured binding declaration ([dcl.struct.bind])</ins>.</p>
+</blockquote>
+
+<p>Change [dcl.constexpr]p1 as follows:</p>
+
+<blockquote>
+  <p>The <em>constexpr</em> specifier shall be applied only to the definition of a variable or variable template or the declaration of a function or function template<ins>, or to a structured binding declaration ([dcl.struct.bind])</ins>. A function or static data member declared with the <em>constexpr</em> specifier is implicitly an inline function or variable ([dcl.inline]). If any declaration of a function or function template has a <em>constexpr</em> specifier, then all its declarations shall contain the <em>constexpr</em> specifier. [ Note: An explicit specialization can differ from the template declaration with respect to the <em>constexpr</em> specifier. — end note ] [ Note: Function parameters cannot be declared <em>constexpr</em>. — end note ]</p>
+</blockquote>
+
+<h3 id="references">References</h3>
+
+<p><sup>1</sup>:  http://www.open-std.org/jtc1/sc22/wg21/docs/cwg_defects.html#2313</p>
+
+<p><sup>2</sup>: http://lists.isocpp.org/core/2018/04/4206.php</p>
+
+<h3 id="acknowledgements">Acknowledgements</h3>
+
+<p>Thanks to k-ballo, T.C, Richard Smith, Alberto Barbati for mentioning and solving specific problems with this proposal and the countless others on the #future-standard Cpplang channel and the std-proposals mailing list.</p>
+
+</body>
+</html>

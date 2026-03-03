@@ -1,0 +1,480 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"
+        "http://www.w3.org/TR/html4/loose.dtd">
+<html>
+<head>
+	<title>Disentangling schedulers and executors</title>
+
+	<style>
+	p {text-align:justify}
+	li {text-align:justify}
+	blockquote.note
+	{
+		background-color:#E0E0E0;
+		padding-left: 15px;
+		padding-right: 15px;
+		padding-top: 1px;
+		padding-bottom: 1px;
+	}
+	ins {color:#00A000}
+	del {color:#A00000}
+	</style>
+</head>
+<body>
+
+<address align=right>
+Document number: P2235R0
+<br/>
+Audience: LEWG, SG1
+<br/>
+<br/>
+<a href="mailto:ville.voutilainen@gmail.com">Ville Voutilainen</a><br/>
+On behalf of SFS (Finland)<br/>
+2020-10-15<br/>
+</address>
+<hr/>
+<h1 align=center>Disentangling schedulers and executors</h1>
+
+<h2>Credits</h2>
+
+<p>
+  Many many thanks to Tomasz Kami&#x0144;ski for a very high-quality
+  technical review of this paper.
+</p>
+
+<h2>Abstract</h2>
+
+<p>
+  This proposal proposes to simplify the design of schedulers and executors,
+  providing a single conversion facility from an <code>executor</code> to
+  a <code>scheduler</code>,
+  removing the non-scheduler/sender/receiver facilities from
+  <code>schedule</code> and <code>connect</code>.
+  This proposal *also* removes the ability to
+  <code>execute</code> on a sender.
+</p>
+
+<h3>Why?</h3>
+
+<p>
+  Schedulers and executors are apples and oranges. Schedulers, senders,
+  and receivers establish a generic protocol that is knit together
+  so as to facilitate generic programming and algorithms that can
+  operate within the framework of that protocol, transforming in various
+  ways what senders and receivers do. Executors do not work with this
+  protocol, because they do not provide two thirds of it; namely,
+  they do not provide any means to ever invoke set_error or set_done.
+</p>
+<p>
+  Therefore treating an executor as a scheduler is akin to a lossy
+  conversion. The conversion is sufficiently lossy that it would be unwise
+  if it Just Happens without any indication in source code. That's why
+  multiple reviewers have suggested that that conversion should be
+  explicit. This proposal makes it explicit.
+</p>
+<p>
+  Once we accept that an executor shouldn't just be treated as a scheduler,
+  we also realize that there's no point in providing support for treating
+  a sender-of-void as an executor in the execution::execute() CPO.
+  Such an operation is every bit as lossy as treating an executor as
+  a scheduler. It should be likewise explicit, and there's no reason
+  to provide it in the fundamental building blocks; a separate algorithm
+  can be provided that connects a plain invocable to a sender.
+</p>
+<p>
+  In a slightly different vein, a scheduler or a sender should not be treated
+  as an executor either. That's not like a lossy conversion, but it's
+  like invoking a function with a wide contract, and then having it be
+  overridden by a function with a narrow contract, and thus the caller
+  expectations of a wide contract aren't met. The semantics of execute()
+  are intentionally rather free-form. There is no generic protocol that
+  executors conform to, but senders and receivers do have such a protocol,
+  and schedulers *will* conform to it, causing naive users of execute
+  on senders to shoot themselves in the foot. Furthermore, that protocol
+  will intercept attempts to implement custom protocols solely in the operator()
+  of the user-provided runnable; the handling of scheduling errors
+  will happen in schedulers before that runnable is invoked,
+  thwarting the attempts to implement something custom and breaking
+  expectations for a custom protocol.
+</p>
+<p>
+  These apples and oranges don't mix. In either direction. Cross-pollination
+  attempts should be explicit, visible, greppable, and done with utmost care.
+</p>
+<h3>How?</h3>
+
+<ol>
+  <li><code>schedule()</code> operates on schedulers only.</li>
+  <li><code>execute()</code> is a customization point that operates on an executor only.</li>
+  <li>All senders&amp;receivers-related operations, like <code>connect()</code>,
+    operate on senders&amp;receivers only.</li>
+  <li>There is a conversion function that takes an executor, and converts it
+    to a scheduler. The working name for this function
+    is <code>make_scheduler_from_executor()</code>, because that's what it does.</li>
+  <li>Separate algorithms, most likely and preferrably with names other
+    than 'execute', can be provided in e.g. <a href="https://wg21.link/p1897">P1897</a> to allow straightforward fire-and-forget on schedulers
+    or senders.
+</ol>
+
+<h2>Rumination</h2>
+
+<h3>The current design is complex, confusing, and error-prone</h3>
+
+<p>
+  The current design allows execute() on anything, schedule() on anything,
+  connect() on anything. But that makes no sense; execute() is okay
+  as a one-way fire-and-forget mechanism when no particular error-handling
+  semantics are expected, but schedule() on an executor
+  tosses in the wind the <code>set_error/set_done</code> parts. Those
+  parts are absolutely necessary for some senders&amp;receivers use
+  cases to work. Padding them in with operations that e.g.
+  <code>terminate</code> shouldn't just happen willy-nilly. Otherwise
+  it becomes impossible to reason about generic code, and to trust
+  that senders are actual senders, receivers are actual receivers,
+  and that the senders&amp;receivers protocol actually works.
+  As far as execute() goes, the story is similar. What we have
+  right now will terminate() a program if there is a scheduling
+  error. This becomes ever more likely when programs and applications
+  using these facilities grow more complex; simple schedulers&amp;senders&amp;receivers combine into more complicated ones, increasing the chance
+  that scheduling errors will not be just allocation failures, but
+  something much more likely, such as i/o errors. Thus, simply executing
+  on a sender that has terminate() called from its receivers' set_done/set_error
+  is a massive footgun. It's also a massive footgun if we make executing
+  on a sender actually work properly with the sender&amp;receiver protocol,
+  since transitioning to the executor world will again drop that protocol.
+</p>
+
+<p>
+  This proposal makes the design clearer. In order to make the jump
+  from executors (which don't conform to any protocol) to senders&amp;receivers,
+  there is exactly one conversion operation that crosses that bridge
+  (or rather jumps over the river when there is no bridge)
+  Otherwise, the separate worlds are kept separate. Similarly,
+  the jump from senders&amp;receivers to executors doesn't introduce
+  surprises when an execute function would do drastically different
+  things depending on what it's invoked on. This avoids a vector&lt;bool&gt;
+  problem that we currently have in the design of P0443. Any jumps
+  back and forth between the worlds don't introduce surprises either.
+</p>
+<p>
+  Once in a senders&amp;receivers world, all operations related to them
+  work as expected. The cross-river jump mentioned before is easy
+  to find, and is greppable. One doesn't need to look at all operations,
+  including <code>schedule</code> and <code>connect</code> and wonder
+  whether they're operating on a scheduler and a sender or perhaps
+  an executor and an invocable.
+</p>
+<p>
+  Similarily, once in an executor world, the operations related to an executor
+  work as expected. In order to have a protocol, or to deal with
+  executor-specific means of handling scheduling errors, that needs to be
+  programmed explicitly, instead of having a sender introduce a protocol
+  where it's perhaps not expected or even desired.
+</p>
+<p>
+  It's still perfectly plausible to provide a function that queues
+  a plain invocable to run as an error-ignoring receiver of a sender.
+  But that's a separate named algorithm, not an overload of <code>connect</code>. It's still possible to indirectly call <code>schedule</code> on an executor,
+  but that's <code>schedule(make_scheduler_from_executor(foo))</code>,
+  not <code>schedule(foo)</code>.
+</p>
+
+<h3>The cross-concept bridging the current design attempts is not
+  useful for programmers</h3>
+
+<p>
+  We are going to see a fair amount of generic algorithms that
+  operate on senders. These algorithms will provide decorators
+  that change (sometimes extend, sometimes transform) what
+  senders, receivers, and operation_states do. They will be lego-like
+  building blocks that introduce a particular form of aspect-oriented
+  programming into the world of senders and receivers.
+</p>
+<p>
+  Programmers, even library programmers, are expected to be mostly using
+  such algorithms, rather than using things like <code>connect()</code>
+  directly. These algorithms will be constrained to accept
+  <code>schedulers, </code><code>senders</code>
+  and <code>receivers</code>. They will not be constrained to accept
+  both <code>schedulers</code> and <code>executors</code> even if the
+  cross-concept bridging that's currently in P0443 might make using
+  them on <code>executors</code> well-formed.
+</p>
+<p>
+  And, again, code that uses executors will probably do so with the expectation
+  that there is a particular custom protocol in play, or no protocol at all.
+  Implicitly introducing the senders&amp;receivers protocol into code that has
+  the aforementioned expectation(s) can be a massively breaking change.
+</p>
+<p>
+  We need a clear, simple, and understandable story of what our concepts
+  are and what they do. That means we shouldn't encourage every programmer
+  to deal with a <code>scheduler_or_executor</code> concept that's basically
+  a disjunction of the two concepts. Executors aren't schedulers, so let's
+  not pretend that they are. For those who insist on treating an executor
+  as a scheduler, we provide them with a very explicit conversion function.
+  Executors are a perfectly reasonable family of types in and of themselves,
+  types that provide a less strict protocol than schedulers do; that's fine,
+  those types can be used by audiences who have no use for the
+  senders-and-receivers protocol. But as long as those audiences don't
+  have a use for the senders-and-receivers protocol, we make the conversion
+  from an executor to a scheduler _deliberately_ ugly. And as long as those
+  audiences don't have a use for the senders-and-receivers protocol, we
+  don't inflict it on those audiences implicitly, either.
+</p>
+
+<h3>All that considered, is make_scheduler_from_executor fundamental for P0443?</h3>
+
+<p>
+  That would be no. We could just as well do something like it separately in P1897. It's proposed here to provide a better overall view of the cross-concept
+  picture, but doesn't strictly need to be in P0443.
+</p>
+
+<h3>What about bridging to the other direction? Why is there no make_executor_from_sender proposed here?</h3>
+
+<p>
+  Such a facility is fraught with peril. A sender will report scheduling errors.
+  For an executor, those errors have nowhere to go. Thus they would
+  be unhandled errors, and would need to be intercepted and most likely
+  call terminate(). What makes it worse is that you can take a sender,
+  and apply an error-handling algorithm on top of it, which would otherwise
+  intercept the set_error calls and do what that algorithm defines.
+  But a hypothetical make_executor_from_sender wouldn't know that, so it would
+  need to intercept set_error again, on top, and those intercepts would cause termination
+  even if an algorithm that would make those intercepts unnecessary
+  has already been applied.
+</p>
+
+<h3>All that considered, do we still need both concepts, executor and scheduler?</h3>
+
+<p>
+  Yes, we do. Schedulers, senders, and receivers establish a scalable
+  protocol that can deal with errors between task submission and
+  callback of the invokable, and provide proper cleanup. However,
+  if you need something completely different from that protocol,
+  an executor may be a better fit.
+  And to be able to write multiple different executors, they should still
+  have a common API.
+</p>
+
+<h2>Changes to P0443</h2>
+
+<p>
+  In 2.2.3.4 execution::execute, modify the second paragraph and remove
+  the third bullet:
+<p>
+
+<p>
+  For some subexpressions e and f, let E be decltype((e)) and let F be decltype((f)). The expression execution::execute(e, f) is ill-formed if F does not model invocable, or if E does not model<del> either</del> executor <del>or sender</del>. Otherwise, it is expression-equivalent to:
+</p>
+<pre><ul>
+    <li>e.execute(f), if that expression is valid. If the function selected does not execute the function object f on the executor e, the program is ill-formed with no diagnostic required.</li>
+    <li>Otherwise, execute(e, f), if that expression is valid, with overload resolution performed in a context that includes the declaration
+
+      void execute();
+
+and that does not include a declaration of execution::execute. If the function selected by overload resolution does not execute the function object f on the executor e, the program is ill-formed with no diagnostic required.</li>
+    <li><del>Otherwise, execution::submit(e, as-receiver&lt;remove_cvref_t&lt;F&gt;, E&gt;{forward&lt;F&gt;(f)}) if</del>
+      <ul>
+        <li><del>F is not an instance of as-invocable&lt;R,E'&gt; for some type R where E and E' name the same type ignoring cv and reference qualifiers, and</del></li>
+        <li><del>invocable&lt;remove_cvref_t&lt;F&gt;&amp;&gt; &amp;&amp; sender_to&lt;E, as-receiver&lt;remove_cvref_t&lt;F&gt;, E&gt;&gt; is true</del></li></ul>
+
+    <del>where as-receiver is some implementation-defined class template equivalent to:</del>
+
+        <del>template&lt;class F, class&gT;</del>
+        <del>struct as-receiver {</del>
+          <del>F f_;</del>
+          <del>void set_value() noexcept(is_nothrow_invocable_v&lt;F&amp;&gt;) {</del>
+            <del>invoke(f_);</del>
+          <del>}</del>
+          <del>template&lt;class E&gt;</del>
+          <del>[[noreturn]] void set_error(E&&) noexcept {</del>
+            <del>terminate();</del>
+          <del>}</del>
+          <del>void set_done() noexcept {}</del>
+        <del>};</del>
+	</li>
+	</ul>
+</pre>
+  In 2.2.3.5 execution::connect, remove the third bullet:
+</p>
+
+<ul>
+  <del><li>Otherwise, as-operation{s, r}, if
+    <ul>
+      <li>r is not an instance of as-receiver&lt;F, S'> for some type F where S and S' name the same type ignoring cv and reference qualifiers, and</li>
+
+    <li>receiver_of&lt;R&gt; && executor-of-impl&lt;remove_cvref_t&lt;S&gt;, as-invocable&lt;remove_cvref_t&lt;R&gt;, S&gt;&gt; is true,</li>
+</ul>
+<p>where as-operation is an implementation-defined class equivalent to</p>
+<pre>
+  struct as-operation {
+    remove_cvref_t&lt;S&gt; e_;
+    remove_cvref_t&lt;R&gt; r_;
+    void start() noexcept try {
+      execution::execute(std::move(e_), as-invocable&lt;remove_cvref_t&lt;R&gt;, S&gt;{r_});
+    } catch(...) {
+      execution::set_error(std::move(r_), current_exception());
+    }
+  };
+</pre>
+<p>and as-invocable is a class template equivalent to the following:</p>
+
+<pre>  template&lt;class R, class&gt;
+  struct as-invocable {
+    R* r_;
+    explicit as-invocable(R& r) noexcept
+      : r_(std::addressof(r)) {}
+    as-invocable(as-invocable && other) noexcept
+      : r_(std::exchange(other.r_, nullptr)) {}
+    ~as-invocable() {
+      if(r_)
+        execution::set_done(std::move(*r_));
+    }
+    void operator()() & noexcept try {
+      execution::set_value(std::move(*r_));
+      r_ = nullptr;
+    } catch(...) {
+      execution::set_error(std::move(*r_), current_exception());
+      r_ = nullptr;
+    }
+  };</pre></li></del>
+
+<li>Otherwise, execution::connect(s, r) is ill-formed.</li>
+</ul>
+
+<p>
+  In 2.2.3.8 execution::schedule, remove the third bullet:
+</p>
+<ul>
+<del><li>Otherwise, as-sender&lt;remove_cvref_t&lt;S&gt;&gt;{s} if S satisfies executor, where as-sender is an implementation-defined class template equivalent to
+
+<pre>  template&lt;class E&gt;
+  struct as-sender {
+  private:
+    E ex_;
+  public:
+    template&lt;template&lt;class...&gt; class Tuple, template&lt;class...&gt; class Variant&gt;
+      using value_types = Variant&lt;Tuple&lt;&gt;&gt;;
+    template&lt;template&lt;class...&gt; class Variant&gt;
+      using error_types = Variant&lt;std::exception_ptr&gt;;
+    static constexpr bool sends_done = true;
+
+    explicit as-sender(E e) noexcept
+      : ex_((E&&) e) {}
+    template&lt;class R&gt;
+      requires receiver_of&lt;R&gt;
+    connect_result_t&lt;E, R&gt; connect(R&& r) && {
+      return execution::connect((E&&) ex_, (R&&) r);
+    }
+    template&lt;class R&gt;
+      requires receiver_of&lt;R&gt;
+    connect_result_t&lt;const E &, R&gt; connect(R&& r) const & {
+      return execution::connect(ex_, (R&&) r);
+    }
+  };
+</pre></li></del>
+<li>Otherwise, execution::schedule(s) is ill-formed.</li>
+</ul>
+
+<p>
+  After 2.2.3, add a new section:
+
+<blockquote>
+  <p>
+  <ins>2.x execution::make_scheduler_from_executor
+  </ins>
+  </p>
+  <p><ins>The behavior of a program that adds specializations for <code>make_scheduler_from_executor</code> is undefined.</ins>
+  </p>
+  <p><ins><code>template &lt;class E&gt; scheduler auto make_scheduler_from_executor(E&amp;&amp; executor);</code></ins></p>
+  <p><ins>Constraints: remove_cvref_t&lt;E&gt; satisfies execution::executor.</ins></p>
+  <p><ins>Preconditions: remove_cvref_t&lt;E&gt; models execution::executor.</ins></p>
+  <p><ins>Returns:</ins></p>
+  <p>
+    <ins>a <code>scheduler</code>, so that calling <code>execution::schedule(s)</code> on that
+      <code>scheduler </code>s returned from <code>make_scheduler_from_executor</code>
+	is expression-equivalent to</ins>
+  </p>
+  <p>
+    <ins>as-sender&lt;remove_cvref_t&lt;S&gt;&gt;{executor}, where as-sender is an implementation-defined class template equivalent to</ins></p>
+
+<ins><pre>  template&lt;class E&gt;
+  struct as-sender {
+  private:
+    E ex_;
+  public:
+    template&lt;template&lt;class...&gt; class Tuple, template&lt;class...&gt; class Variant&gt;
+      using value_types = Variant&lt;Tuple&lt;&gt;&gt;;
+    template&lt;template&lt;class...&gt; class Variant&gt;
+      using error_types = Variant&lt;std::exception_ptr&gt;;
+    static constexpr bool sends_done = true;
+
+    explicit as-sender(E e) noexcept
+      : ex_((E&&) e) {}
+    template&lt;class R&gt;
+      requires receiver_of&lt;R&gt;
+    auto connect(R&& r) && {
+      return as-operation&lt;E, remove_cvref_t&lt;R&gt;&gt;{(E&&)ex_, (R&&) r};
+    }
+    template&lt;class R&gt;
+      requires receiver_of&lt;R&gt;
+    auto connect(R&& r) const & {
+      return as-operation&lt;E, remove_cvref_t&lt;R&gt;&gt;{ex_, (R&&) r};
+    }
+  };
+</pre></ins>
+
+<p><ins>where as-operation is an implementation-defined class template equivalent to</p>
+<ins><pre>
+    template &lt;class E, class R&gt;
+    struct as-operation {
+    E e_;
+    R r_;
+    void start() noexcept try {
+      execution::execute(std::move(e_), as-invocable&lt;R, E&gt;{r_});
+    } catch(...) {
+      execution::set_error(std::move(r_), current_exception());
+    }
+  };
+</pre></ins>
+<p><ins>and as-invocable is an implementation-defined class template equivalent to the following:</p></ins>
+
+<ins><pre>  template&lt;class R, class&gt;
+  struct as-invocable {
+    R* r_;
+    explicit as-invocable(R& r) noexcept
+      : r_(std::addressof(r)) {}
+    as-invocable(as-invocable && other) noexcept
+      : r_(std::exchange(other.r_, nullptr)) {}
+    ~as-invocable() {
+      if(r_)
+        execution::set_done(std::move(*r_));
+    }
+    void operator()() & noexcept try {
+      execution::set_value(std::move(*r_));
+      r_ = nullptr;
+    } catch(...) {
+      execution::set_error(std::move(*r_), current_exception());
+      r_ = nullptr;
+    }
+  };</pre></ins>
+
+</p>
+</blockquote>
+
+
+<h2>What This Buys</h2>
+
+<p>
+  The user can no longer pass an executor to <code>schedule()</code>
+  or <code>connect()</code>, and have the code be well-formed, but with broken
+  runtime semantics.  Such code is extremely likely to be a mistake.
+</p>
+<p>
+  The user can no longer pass a sender to <code>execute()</code>,
+  and have the code be well-formed, but with broken
+  runtime semantics.  Such code is extremely likely to be a mistake.
+</p>
+
+</body>
+</html>

@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>html5 – The trouble with coroutine_traits</title>
+  <style type="text/css">
+      code{white-space: pre-wrap;}
+      span.smallcaps{font-variant: small-caps;}
+      span.underline{text-decoration: underline;}
+      div.column{display: inline-block; vertical-align: top; width: 50%;}
+  </style>
+  <!--[if lt IE 9]>
+    <script src="//cdnjs.cloudflare.com/ajax/libs/html5shiv/3.7.3/html5shiv-printshiv.min.js"></script>
+  <![endif]-->
+</head>
+<body>
+<pre>
+Document number: P1471r0
+Date:            2019-01-20
+Project:         Programming Language C++
+Audience:        EWG
+Reply-to:        Christopher Kohlhoff &lt;chris&#x40;kohlhoff.com&gt;
+</pre>
+<h1 id="the-trouble-with-coroutine_traits">The trouble with <code>coroutine_traits</code></h1>
+<h2 id="introduction">Introduction</h2>
+<p>This paper describes some issues encountered during the use of the Coroutines TS <a href="#N4775">N4775</a> in some real libraries and applications. These issues relate to <code>coroutine_traits</code> specifically, and in particular how <code>coroutine_traits</code>:</p>
+<ul>
+<li>couples implementation to interface; and</li>
+<li>is a global registry.</li>
+</ul>
+<h2 id="issues">Issues</h2>
+<h3 id="implementation-is-coupled-to-interface">Implementation is coupled to interface</h3>
+<p>When presented with a function declaration of the form:</p>
+<pre><code>std::future&lt;int&gt; foo(Arg1, Arg2);</code></pre>
+<p>a user does not know whether the implementation is a coroutine or not. This is a good thing, as it separates interface from implementation. In this case the use of a coroutine is an implementation detail.</p>
+<p>The problem is that if <code>foo</code> <em>is</em> implemented as a coroutine then it must be a particular implementation as determined by <code>coroutine_traits&lt;future&lt;int&gt;, Arg1, Arg2&gt;::promise_type</code>.</p>
+<h3 id="cannot-specialize-coroutine_traits-for-standard-types">Cannot specialize <code>coroutine_traits</code> for standard types</h3>
+<p>The first problem is that we are not allowed to partially specialize <code>coroutine_traits</code> using only standard types.</p>
+<p>To work around this without changing our library interface, we instead implement our coroutine inside a lambda, with a tag argument:</p>
+<pre><code>std::future&lt;int&gt; foo(Arg1, Arg2)
+{
+  return [](my_tag_type, Arg1, Arg2)
+  {
+    // ...
+  }();
+}</code></pre>
+<p>We then partially specialize <code>coroutine_traits</code></p>
+<pre><code>template&lt;class R, class... Args&gt;
+struct coroutine_traits&lt;future&lt;R&gt;, my_tag_type, Args...&gt;;</code></pre>
+<p>(An alternative approach is to include the tag type in our <code>foo</code> function signature. However, this leaks implementation details into the interface which is exactly what we are trying to avoid.)</p>
+<h3 id="coroutine_traits-represents-a-global-registry-of-behaviour"><code>coroutine_traits</code> represents a global registry of behaviour</h3>
+<p>For the sake of argument, let’s assume that the standard library already specializes <code>coroutine_traits</code> for <code>std::future</code> return types. This specialization’s promise type might exhibit a behaviour that is unacceptable for our use case (for example, we might want to enforce that <code>await_ready</code> always return false for any <code>co_await</code> operations it performs).</p>
+<p>As <code>coroutine_traits</code> is effectively a global registry of coroutine promise types, we must once again employ our tag-based coroutine lambda to select an alternative implementation.</p>
+<h3 id="cannot-specialize-coroutine_traits-for-arbitrary-potentially-builtin-types">Cannot specialize <code>coroutine_traits</code> for arbitrary (potentially builtin) types</h3>
+<p><code>coroutine_traits</code> aside, the Coroutines TS syntax <em>can</em> be used in the implementation of functions that have arbitrary return types and arguments:</p>
+<pre><code>template&lt;class T, class U&gt;
+auto something_generic(T t, U u)
+{
+  // ...
+}</code></pre>
+<p>Examples of when we want to do this include:</p>
+<ul>
+<li>employing coroutines for lightweight error handling; and</li>
+<li>writing algorithms that can be used in both coroutine and non-coroutine contexts</li>
+</ul>
+<p>Once again, we must use our tag-based coroutine lambda workaround.</p>
+<h3 id="lambdas-lambdas-everywhere">Lambdas, lambdas everywhere</h3>
+<p>As a consequence of the above issues we find that, over time, function implementations employing coroutines-as-lambdas tend to proliferate. For those concerned about the teachability of coroutines (and in particular the concern that the coroutine lambda syntax of <a href="#P1063">P1063</a> was less teachable), this represents a leap in complexity for commonly encountered use cases.</p>
+<h3 id="danger-of-conflicting-coroutine_traits-specializations">Danger of conflicting <code>coroutine_traits</code> specializations</h3>
+<p>Another consequence of this tag-based approach to specialization is that if the standard later introduces its own partial specializations:</p>
+<pre><code>template&lt;class R, class... Args&gt; struct coroutine_traits&lt;future&lt;R&gt;, Args...&gt;;
+template&lt;class... Args&gt; struct coroutine_traits&lt;future&lt;void&gt;, Args...&gt;;</code></pre>
+<p>our partial specializations are now ambiguous. A similar problem of ambiguity can occur between unrelated third-party libraries.</p>
+<h2 id="proposed-solution">Proposed solution</h2>
+<p>This paper proposes to eliminate <code>coroutine_traits</code> and instead employ a syntax similar to:</p>
+<pre><code>R f(A1, A2, ..., An) coroutine&lt;C&gt;
+{
+}</code></pre>
+<p>Whether or not a given function is a coroutine is an implementation detail of that function. Thus, the trailing <code>coroutine&lt;C&gt;</code> annotation would be applied to a function definition, rather than its declaration. It belongs with the definition to reflect the fact that it is an implementation detail.</p>
+<p><code>C</code> is a name that is used by the compiler in the expression <code>C&lt;R, A1, A2, ... An&gt;</code> to determine the coroutine’s promise type.</p>
+<p>For example:</p>
+<pre><code>// Declaration of coroutine function:
+future&lt;int&gt; foo(Arg1, Arg2);
+
+// Alias template used to determine coroutine promise type:
+template &lt;class R, class... Args&gt;
+using task = /* ... */;
+
+// Definition of coroutine function:
+future&lt;int foo(Arg1 a1, Arg2 a2) coroutine&lt;task&gt;
+{
+  // ...
+}</code></pre>
+<p>This approach eliminates the leap in complexity when using lambdas to address these use cases.</p>
+<h3 id="an-added-bonus">An added bonus</h3>
+<p>One useful by-product of an explicit annotation is that we no longer require the <code>co_return</code> keyword. The remaining keywords <code>co_await</code> and <code>co_yield</code> are now only valid in this explicitly annotated context, so it may also be feasible to drop the <code>co_</code> prefix.</p>
+<h2 id="references">References</h2>
+<p><a name="N4775">[N4775]</a> G. Nishanov. <em>Working Draft, C++ Extensions for Coroutines</em>.</p>
+<p><a name="P1063">[P1063]</a> G. Romer, J. Dennett, C. Carruth. <em>Core Coroutines</em>.</p>
+</body>
+</html>

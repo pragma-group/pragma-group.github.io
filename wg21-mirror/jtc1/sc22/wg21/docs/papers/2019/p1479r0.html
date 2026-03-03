@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>ostringstream wrapper</title>
+    <style>
+        pre { font: inherit; margin: 1em 3em; }
+        h1 { counter-reset: h2; }
+        h2:before { counter-increment: h2; content: counter(h2, upper-roman) ". "; }
+        nav ol { list-style-type: upper-roman; }
+    </style>
+</head>
+<body>
+
+    <table><tbody>
+        <tr><td>Document number:</td><td>P1479R0</td></tr>
+        <tr><td>Date:</td><td>2019-01-21</td></tr>
+        <tr><td>Reply-to:</td><td>Robert Kawulak &lt;Robert Kawulak at gmail dot com&gt;</td></tr>
+        <tr><td>Audience:</td><td>SG18 (LEWG Incubator)</td></tr>
+    </tbody></table>
+
+    <h1><code>ostringstream</code> wrapper</h1>
+
+    <nav><h2 id="contents">Table of Contents</h2>
+        <ol start="2">
+            <li><a href="#introduction">Introduction</a></li>
+            <li><a href="#motivation">Motivation</a></li>
+            <li><a href="#qa">Q&amp;A</a></li>
+            <li><a href="#issues">Open Issues</a></li>
+            <li><a href="#impact">Impact on the Standard</a></li>
+            <li><a href="#specifications">Technical Specifications</a></li>
+        </ol>
+    </nav>
+
+    <section><h2 id="introduction">Introduction</h2>
+
+This paper proposes adding a standard library function that wraps the common idiom of converting an object to a string using an <code>ostringstream</code>:
+
+<pre><code>ostringstream os;
+os &lt;&lt; obj;
+string text = os.str();
+</code></pre>
+
+The proposed solution is:
+
+<pre><code>template&lt;class charT, class traits = char_traits&lt;charT&gt;,
+    class Allocator = allocator&lt;charT&gt;, class... Args&gt;
+basic_string&lt;charT,traits,Allocator&gt; to_basic_string(Args&amp;&amp;... args)
+{
+    basic_ostringstream&lt;charT,traits,Allocator&gt; stream;
+    stream.exceptions(ios_base::failbit | ios_base::badbit);
+    (stream &lt;&lt; ... &lt;&lt; forward&lt;Args&gt;(args));
+    return move(stream).str(); // make use of <a href="https://wg21.link/P0408">P0408</a>
+}
+
+template&lt;class... Args&gt;
+string to_string(Args&amp;&amp;... args)
+{
+    return to_basic_string&lt;char&gt;(forward&lt;Args&gt;(args)...);
+}
+
+// other variants like to_wstring etc. (omitted for brevity)</code></pre>
+
+<p>Note that the name <code>to_string</code> may be treated as <em>tentative</em> for a lack of a better alternative for now and is possibly a subject of future bikeshedding (see <a href="#naming">Naming</a>).</p>
+
+<p>This paper is a follow-up to <a href="https://wg21.link/P0117R0">P0117 'Generic <code>to_string</code>/<code>to_wstring</code> functions'</a>, which was discussed at the Kona 2015 committee meeting. The author was not present at the meeting, but from the <a href="http://wiki.edg.com/bin/view/Wg21kona2015/P0117">feedback received</a> he concludes that the paper hasn't been motivated well enough and possibly the intentions were misunderstood. In this (completely rewritten) paper, the author tries to clarify the <a href="#motivation">motivation</a> and <a href="#qa">address the feedback</a>.</p>
+
+    </section>
+
+    <section><h2 id="motivation">Motivation</h2>
+
+<p>Using <code>ostringstream</code> to convert an object to its text representation is a familiar programming pattern in C++. The problem with using it is its verbosity – something that ought to be a single function call is most commonly a three-line boilerplate code injecting unnecessary variables into the scope and often ignoring error handling. While C++11 somehow improved the situation by providing a set of overloaded <code>to_string</code> functions, these are only limited to built-in numeric types.</p>
+
+<p>The main features of the proposed solution are:</p>
+<ul>
+    <li>it wraps the common idiom in a simple and easy-to-use interface,</li>
+    <li>doesn't introduce any new concepts or formatting APIs, therefore:
+    <ul>
+        <li>is trivial to learn by anyone familiar with iostreams,</li>
+        <li>takes advantage of existing iostream support for user defined types (including <a href="#manipulators">manipulators</a>),</li>
+    </ul></li>
+    <li>makes it harder to ignore errors by enabling exceptions for the used stream,</li>
+    <li>avoids accidentally copying the result rather than moving it,</li>
+    <li>is generalised into a <a href="#variadic">variadic function</a> to improve its usability.</li>
+</ul>
+
+<p>The proposed function is also <a href="#impact">mostly consistent</a> with the <code>to_string</code> functions already found in the Standard Library and could act as a generalisation of those, making them optimised special cases. However, this is not the main point of this proposal and the utility can be added as an unrelated function <a href="#naming">with a different name</a> as well.</p>
+
+<p>A few examples:</p>
+
+<pre><code>// a simple case:
+
+complex c{0, 1};
+assert(to_string(c) == "(0,1)");
+
+// easy concatenation:
+
+minutes m{10};
+assert(to_string(m.count(), "min") == "10min");
+
+// manipulators work too:
+
+bitset&lt;3&gt; b{0b010};
+assert(to_string(setfill('0'), setw(6), b) == "000010");
+
+// a user-defined type with existing elaborate iostreams support:
+
+struct coord { int x, y; };
+ostream&amp; operator&lt;&lt;(ostream&amp;, coord);
+ostream&amp; coord_labelled(ostream&amp;); // manipulator setting "labelled" format
+
+coord c{2,4};
+assert(to_string(c) == "[2,4]");
+assert(to_string(coord_labelled, c) == "[x=2,y=4]");
+</code></pre>
+
+    </section>
+
+    <section><h2 id="qa">Q&amp;A</h2>
+
+        <section><h3 id="customisation">Are there any customisation points for user-defined types?</h3>
+
+Yes – the solution reuses the most common customisation point for representing objects as text in C++: a stream insertion operator. While not the most efficient, this interface is well-known and widespread. Why not go further and provide a second customisation point to get more efficiency? Because:
+<ul>
+    <li>the crucial aspect of this proposal is simplicity – adding more customisation points would complicate the design considerably. Sacrificing the simplicity isn't necessarily worth the perceived performance gain;</li>
+    <li>if one really cares about performance, then <code>to_string</code> returning a dynamically-allocating <code>string</code> is possibly already a too heavy-weight API (that's why the <code>to_chars</code>/<code>from_chars</code> functions were added despite already having <code>to_string</code> for numeric types);</li>
+    <li>for the use-cases when efficiency has a high priority, <a href="https://wg21.link/P0645">P0645 'Text Formatting'</a> will provide an API for custom type conversions avoiding streams, locales and dynamic allocations.</li>
+</ul>
+
+        </section>
+
+        <section><h3 id="fmt">Isn't this redundant with <a href="https://wg21.link/P0645">P0645 'Text Formatting'</a>?</h3>
+
+This proposal (unlike P0645) doesn't really introduce anything like a new formatting API – it only encapsulates the common iostreams use pattern, and nothing more. While certainly there is some overlap, <code>to_string</code> is more direct in basic use cases in which the required format string would simply be redundant, for instance:
+<pre><code>string s = to_string(obj);</code></pre>
+versus somewhat clumsy:
+<pre><code>string s = format("{}", obj);</code></pre>
+
+<p>Moreover, an important advantage of <code>to_string</code> is its compatibility with any already existing user-defined stream manipulators altering the formatting, while in order to use P0645 the user would have to write analogous formatters from scratch.</p>
+
+<p>To recap, the two mechanisms can live side-by-side being complementary – <code>to_string</code> being useful for simple use cases and for types that already have an elaborate iostream formatting support implemented, while P0645 being good for more involved needs and for users willing to write formatters conforming to the new API.</p>
+
+        </section>
+
+        <section><h3 id="variadic">Why a variadic function rather than a single-argument one?</h3>
+
+Simply because it is a low-hanging fruit that doesn't cost much in terms of simplicity or otherwise, yet provides significant gains in functionality. Apart from allowing the use of stream manipulators, it provides a more concise alternative to the following:
+<pre><code>string s = to_string(obj1) + to_string(obj2) + to_string(obj3);</code></pre>
+which can be written as:
+<pre><code>string s = to_string(obj1, obj2, obj3);</code></pre>
+
+The usability gains of the variadic version shouldn't be underestimated. The author has some experience with a very similar utility in a codebase he's working on professionally and gathered some numbers to illustrate this point. Although – statistically speaking – the sample size is rather small, the proportions clearly show the practical usefulness of the variadic version:
+<ul>
+    <li>all calls in the code: 12;</li>
+    <li>single-argument vs. multiple-argument calls: 2 vs. 10;</li>
+    <li>calls using stream manipulators: 3;</li>
+    <li>calls taking advantage of multiple arguments concatenation: 8.</li>
+</ul>
+
+        </section>
+
+        <section><h3 id="manipulators">Isn't supporting stream manipulators too clever?</h3>
+
+There's nothing magical or tricky done here to make manipulators supported and the author doubts that anyone familiar with iostreams would have trouble understanding how this utility works, including manipulators. In fact, artificially inhibiting manipulators use would make the utility much more complicated to implement and, arguably, surprisingly inconsistent.
+
+        </section>
+
+    </section>
+
+    <section><h2 id="issues">Open Issues</h2>
+
+        <section><h3 id="naming">Naming</h3>
+
+While <code>to_string</code> is not a bad candidate for the name of the utility, being concise, correct about what it does and fitting as a generalisation of the already existing <code>to_string</code> functions, it's not perfect either: it doesn't hint at using iostreams as the underlying mechanism and may cause a breaking change in rare cases (see <a href="#impact">Impact on the Standard</a>). Some other ideas for the name are:
+<ul>
+    <li><code>to_stringstream</code></li>
+    <li><code>to_stream</code></li>
+    <li><code>to_text</code></li>
+    <li><code>stringize</code></li>
+    <li><code>streamify</code></li>
+    <li><code>lexify</code></li>
+</ul>
+The author is open to other naming proposals.
+
+        </section>
+
+        <section><h3 id="from_string">Analogous parsing functionality</h3>
+
+While the paper is concerned with conversion of objects to strings, it is tempting to provide a symmetrical utility for easy parsing of strings as objects. Therefore it is shown here for consideration of the committee and will be included in a future revision of this proposal if the committee is in favour of it. It could look like this:
+
+<pre><code>template&lt;class charT, class traits = char_traits&lt;charT&gt;, class... Args&gt;
+streamsize from_basic_string(basic_string_view&lt;charT,traits&gt; view, Args&amp;&amp;... args)
+{
+    basic_ispanstream&lt;charT,traits&gt; stream{span&lt;charT&gt;{view}}; // see notes below
+    stream.exceptions(ios_base::failbit | ios_base::badbit);
+    (stream &gt;&gt; ... &gt;&gt; forward&lt;Args&gt;(args));
+    return view.length() - stream.tellg(); // see notes below
+}
+
+template&lt;class... Args&gt;
+streamsize from_string(string_view view, Args&amp;&amp;... args)
+{
+    return from_basic_string(view, forward&lt;Args&gt;(args)...);
+}
+
+// other variants like from_wstring etc. (omitted for brevity)</code></pre>
+
+<p>There are two things to note here. First, rather than a <code>basic_string</code>, the function takes a <code>basic_string_view</code> as its argument. This makes this function more generic and callable not only with string arguments, but also with string splices or C-style strings. Also, the stream type used here is <code>basic_ispanstream</code> (proposed in <a href="https://wg21.link/P0448">P0448</a>) rather than <code>basic_istringstream</code> to avoid copying of the input data unnecessarily.</p>
+
+<p>Second, it is an open question what to do in the situation when the input has been consumed only partially. One option is to throw an exception, another one is to signal this with a return value – either just a boolean, or e.g. the number of bytes left unconsumed. The code assumes the last option for the sake of example, but the author doesn't have a strong opinion here.</p>
+
+        </section>
+
+    </section>
+
+    <section><h2 id="impact">Impact on the Standard</h2>
+
+<p>Generally speaking, the proposal describes a new component of the Standard Library which should have no impact on existing code.</p>
+
+<p>However, if the proposed function template is called <code>to_string</code>, it will overload existing Standard Library functions with this name. In large majority of cases the result of the new function is consistent with the existing functions, but in some obscure corner cases it's not, yielding a change of behaviour. Specifically, these cases are calls of <code>to_string</code> with an argument that doesn't match a parameter type of any of the existing overloads, but is implicitly convertible to one of the types. For example, the call <code>to_string('0')</code>, which was resolving to the <code>to_string(int)</code> overload and yielded <code>"48"</code> (assuming ASCII encoding) would now call the new function template's specialisation <code>to_string&lt;char&gt;(char&amp;&amp;)</code> yelding <code>"0"</code> (which is actually a more reasonable outcome, but a breaking change nonetheless).</p>
+
+    </section>
+
+    <section><h2 id="specifications">Technical Specifications</h2>
+
+Proposed wording will be provided in a future revision of the document.
+
+    </section>
+
+</body>
+</html>

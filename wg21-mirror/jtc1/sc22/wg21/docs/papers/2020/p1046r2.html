@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>Automatically Generate More Operators</title>
+        
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/markdown.css">
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/highlight.css">
+        
+        <style>
+.task-list-item { list-style-type: none; } .task-list-item-checkbox { margin-left: -20px; vertical-align: middle; }
+</style>
+        <style>
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe WPC', 'Segoe UI', 'Ubuntu', 'Droid Sans', sans-serif;
+                font-size: 14px;
+                line-height: 1.6;
+            }
+        </style>
+        
+        
+    </head>
+    <body class="vscode-light">
+        <h1 id="automatically-generate-more-operators">Automatically Generate More Operators</h1>
+<pre>Document Number: P1046R2
+Date: 2020-01-11
+Author: David Stone (david.stone@uber.com, david@doublewise.net)
+Audience: Evolution Working Group (EWG), Library Evolution Working Group (LEWG)</pre>
+<h2 id="summary">Summary</h2>
+<p>This proposal follows the lead of <code>operator&lt;=&gt;</code> (see <a href="http://open-std.org/JTC1/SC22/WG21/docs/papers/2017/p0515r3.pdf">Consistent Comparison</a>) by generating rewrite rules if a particular operator does not exist in current code. All of these operators would support <code>= default</code> to explicitly opt in and <code>= delete</code> to explicitly opt out.</p>
+<ul>
+<li>Rewrite <code>lhs += rhs</code> as <code>lhs = std::move(lhs) + rhs</code>, but evaluate <code>lhs</code> only once</li>
+<li>Rewrite <code>lhs -= rhs</code> as <code>lhs = std::move(lhs) - rhs</code>, but evaluate <code>lhs</code> only once</li>
+<li>Rewrite <code>lhs *= rhs</code> as <code>lhs = std::move(lhs) * rhs</code>, but evaluate <code>lhs</code> only once</li>
+<li>Rewrite <code>lhs /= rhs</code> as <code>lhs = std::move(lhs) / rhs</code>, but evaluate <code>lhs</code> only once</li>
+<li>Rewrite <code>lhs %= rhs</code> as <code>lhs = std::move(lhs) % rhs</code>, but evaluate <code>lhs</code> only once</li>
+<li>Rewrite <code>lhs &amp;= rhs</code> as <code>lhs = std::move(lhs) &amp; rhs</code>, but evaluate <code>lhs</code> only once</li>
+<li>Rewrite <code>lhs |= rhs</code> as <code>lhs = std::move(lhs) | rhs</code>, but evaluate <code>lhs</code> only once</li>
+<li>Rewrite <code>lhs ^= rhs</code> as <code>lhs = std::move(lhs) ^ rhs</code>, but evaluate <code>lhs</code> only once</li>
+<li>Rewrite <code>lhs &lt;&lt;= rhs</code> as <code>lhs = std::move(lhs) &lt;&lt; rhs</code>, but evaluate <code>lhs</code> only once</li>
+<li>Rewrite <code>lhs &gt;&gt;= rhs</code> as <code>lhs = std::move(lhs) &gt;&gt; rhs</code>, but evaluate <code>lhs</code> only once</li>
+<li>Rewrite <code>++x</code> as <code>x += 1</code></li>
+<li>Rewrite <code>--x</code> as <code>x -= 1</code></li>
+<li>Rewrite <code>x++</code> as <code>++x</code> but return a copy of the original value</li>
+<li>Rewrite <code>x--</code> as <code>--x</code> but return a copy of the original value</li>
+<li>Rewrite <code>lhs-&gt;rhs</code> as <code>(*lhs).rhs</code></li>
+<li>Rewrite <code>lhs-&gt;*rhs</code> as <code>(*lhs).*rhs</code></li>
+</ul>
+<h2 id="revision-history">Revision History</h2>
+<h3 id="changes-in-r1">Changes in R1</h3>
+<ul>
+<li>Added <code>operator-&gt;*</code>.</li>
+<li>Added more detail on how postfix operators would work.</li>
+<li>Updated section on allocators in light of recent changes to the standard from P1165.</li>
+<li>Updated some code examples to take advantage of implicit moves from rvalue references.</li>
+<li>Added standard library impact.</li>
+<li>Added discussion on other options for postfix <code>operator++</code> and <code>operator--</code>.</li>
+</ul>
+<h3 id="changes-in-r2">Changes in R2</h3>
+<ul>
+<li>Postfix <code>operator++</code> and <code>operator--</code> return <code>void</code> for non-copyable types.</li>
+<li>Added &quot;Other approaches considered&quot;</li>
+<li>Expanded section on to_address and pointer_traits</li>
+</ul>
+<h2 id="design-goals">Design Goals</h2>
+<p>There are certain well-defined patterns for how certain operators &quot;should&quot; be written. Many of these guidelines are widely followed and correct, leading to large amounts of code duplication. Some of these guidelines are widely followed and less optimal since C++11, leading to an even worse situation. Worst of all, some guidelines do not exist because the &quot;correct&quot; code cannot be written in C++. This proposal attempts reduce boilerplate, improve performance, increase regularity, and remove bugs.</p>
+<p>One of the primary goals of this paper is that users should have very little reason to write their own version of an operator that this paper proposes generating. It would be a strong indictment if there are many examples of well-written code for which this paper provides no simplification, so a fair amount of time in this paper will be spent looking into the edge cases and making sure that we generate the right thing. At the very least, types that would not have the correct operator generated should not generate an operator at all. In other words, it should be uncommon for users to define their own versions (<code>= default</code> should be good enough most of the time), and it should be very rare that users want to suppress the generated version (<code>= delete</code> should almost never appear).</p>
+<h2 id="arithmetic-bitwise-and-compound-assignment-operators">Arithmetic, Bitwise, and Compound Assignment Operators</h2>
+<p>For all binary arithmetic and bitwise operators, there are corresponding compound assignment operators. There are two obvious ways to implement these pairs of operators without code duplication: implement <code>a += b</code> in terms of <code>a = a + b</code> or implement <code>a = a + b</code> in terms of <code>a += b</code>. Using the compound assignment operator as the basis has a tradition going back to C++98, so let's consider what that code looks like using <code>string</code> as our example:</p>
+<pre><code><code><div>string &amp; operator+=(string &amp; lhs, string const &amp; rhs) {
+	lhs.append(rhs);
+	return lhs;
+}
+string &amp; operator+=(string &amp; lhs, string &amp;&amp; rhs) {
+	if (lhs.size() + rhs.size() &lt;= lhs.capacity()) {
+		lhs.append(rhs);
+		return lhs;
+	} else {
+		rhs.insert(0, lhs);
+		lhs = std::move(rhs);
+		return lhs;
+	}
+}
+
+string operator+(string const &amp; lhs, string const &amp; rhs) {
+	string result;
+	result.reserve(lhs.size() + rhs.size());
+	result = lhs;
+	result.append(rhs);
+	return result;
+}
+string operator+(string const &amp; lhs, string &amp;&amp; rhs) {
+	rhs.insert(0, lhs);
+	return rhs;
+}
+template&lt;typename String&gt; requires std::same_as&lt;std::decay_t&lt;String&gt;, string&gt;
+string operator+(string &amp;&amp; lhs, String &amp;&amp; rhs) {
+	lhs += std::forward&lt;String&gt;(rhs);
+	return lhs;
+}
+</div></code></code></pre>
+<p>This does not seem to save us as much as we might like. We can have a single template definition of <code>string + string</code> when we take an rvalue for the left-hand side argument, but when we have an lvalue as our left-hand side we need to write two more overloads (neither of which really benefits from <code>operator+=</code>). It may seem tempting at first to take this approach due to historical advice, but taking advantage of move semantics eliminates most code savings. This does not feel like a generic answer to defining one class of operators.</p>
+<p>What happens if we try to use <code>operator+</code> as the basis for our operations? The initial reason that C++03 code typically defined its operators in terms of <code>operator+=</code> was for efficiency, but with the addition of move semantics to C++11, we can regain this efficiency. What does the ideal <code>string + string</code> implementation look like?</p>
+<pre><code><code><div>// Same as in the previous example
+string operator+(string const &amp; lhs, string const &amp; rhs) {
+	string result;
+	result.reserve(lhs.size() + rhs.size());
+	result = lhs;
+	result.append(rhs);
+	return result;
+}
+// Same as in the previous example
+string operator+(string const &amp; lhs, string &amp;&amp; rhs) {
+	rhs.insert(0, lhs);
+	return rhs;
+}
+// Very similar to the equivalent in the previous example
+string operator+(string &amp;&amp; lhs, string const &amp; rhs) {
+	lhs.append(rhs);
+	return lhs;
+}
+// Compare to previous example's operator+=(string &amp;, string &amp;&amp;)
+string operator+(string &amp;&amp; lhs, string &amp;&amp; rhs) {
+	return (lhs.size() + rhs.size() &lt;= lhs.capacity()) ?
+		std::move(lhs) + std::as_const(rhs) :
+		std::as_const(lhs) + std::move(rhs);
+}
+
+template&lt;typename String&gt; requires std::same_as&lt;std::decay_t&lt;String&gt;, string&gt;
+string &amp; operator+=(string &amp; lhs, String &amp;&amp; rhs) {
+	lhs = std::move(lhs) + std::forward&lt;String&gt;(rhs);
+	return lhs;
+}
+</div></code></code></pre>
+<p>This mirrors the implementation if <code>operator+=</code> is the basis operation: we still end up with five functions in our interface. One important difference between the two is that in the first case, where <code>operator+=</code> is the basis operation, we needed to define <code>operator+=</code> and <code>operator+</code>. Defining only <code>operator+=</code> and trying to generically define <code>operator+</code> in terms of that gives us an inefficiently generated <code>operator+</code>. In the second case, however, we need to define only <code>operator+</code> specially, and our one <code>operator+=</code> overload will be maximally efficient.</p>
+<p>One interesting thing of note here is that the <code>operator+=</code> implementation does not know anything about its types other than that they are addable and assignable. Compare that with the <code>operator+</code> implementations from the first piece of code where they need to know about sizes, reserving, and insertion because <code>operator+=</code> alone is not powerful enough. There are several more counterexamples that argue against <code>operator+=</code> being our basis operation, but most come down to the same fact: <code>operator+</code> does not treat either argument -- lhs or rhs -- specially, but <code>operator+=</code> does.</p>
+<p>The first counterexample is <code>std::string</code> (again). We can perform <code>string += string_view</code>, but not <code>string_view += string</code>. If we try to define <code>operator+</code> in terms of <code>operator+=</code>, that would imply that we would be able to write <code>string + string_view</code>, but not <code>string_view + string</code>, which seems like an odd restriction. The class designer would have to manually write out both <code>+=</code> and <code>+</code>, defeating our entire purpose.</p>
+<p>The second counterexample is the <code>bounded::integer</code> library and <code>std::chrono::duration</code>. <code>bounded::integer</code> allows users to specify compile-time bounds on an integer type, and the result of arithmetic operations reflects the new bounds based on that operation. For instance, <code>bounded::integer&lt;0, 10&gt; + bounded::integer&lt;1, 9&gt; =&gt; bounded::integer&lt;1, 19&gt;</code>. <code>duration&lt;LR, Period&gt; + duration&lt;RR, Period&gt; =&gt; duration&lt;common_type_t&lt;LR, RR&gt;, Period&gt;</code> If <code>operator+=</code> is the basis, it requires that the return type of the operation is the same as the type of the left-hand side of that operation. This is fundamentally another instance of the same problem with <code>string_view + string</code>.</p>
+<p>The third counterexample is all types that are not assignable (for instance, if they contain a const data member). This restriction makes sense conceptually. An implementation of <code>operator+</code> requires only that the type is addable in some way. Thanks to guaranteed copy elision, we can implement it on most types in such a way that we do not even require a move constructor. An implementation of <code>operator+=</code> requires that the type is both addable and assignable. We should make the operations with the broadest applicability our basis.</p>
+<p>Let's look a little closer at our <code>operator+=</code> implementation that is based on <code>operator+</code> and see if we can lift the concepts used to make the operation more generic. For strings, we wrote this:</p>
+<pre><code><code><div>template&lt;typename String&gt; requires std::same_as&lt;std::decay_t&lt;String&gt;, string&gt;
+string &amp; operator+=(string &amp; lhs, String &amp;&amp; rhs) {
+	lhs = std::move(lhs) + std::forward&lt;String&gt;(rhs);
+	return lhs;
+}
+</div></code></code></pre>
+<p>The first obvious improvement is that the types should not be restricted to be the same type. Users expect that if <code>string = string + string_view</code> compiles, so does <code>string += string_view</code>. We are also not using anything string specific in this implementation, and our goal is to come up with a single <code>operator+=</code> that works for all types. With this, we end up with:</p>
+<pre><code><code><div>template&lt;typename LHS, typename RHS&gt;
+LHS &amp; operator+=(LHS &amp; lhs, RHS &amp;&amp; rhs) {
+	lhs = std::move(lhs) + std::forward&lt;RHS&gt;(rhs);
+	return lhs;
+}
+</div></code></code></pre>
+<p>Are there any improvements we can make to this signature? One possible problem is that we unconditionally return a reference to the lhs, regardless of the behavior of the assignment operator. This is what is commonly done, but there are some use cases for not doing so. The most compelling example might be <code>std::atomic</code>, which returns <code>T</code> instead of <code>atomic&lt;T&gt;</code> in <code>atomic&lt;T&gt; = T</code>, and this behavior is reflected in the current compound assignment operators. An improvement to our previous signature, therefore, is the following implementation:</p>
+<pre><code><code><div>template&lt;typename LHS, typename RHS&gt;
+decltype(auto) operator+=(LHS &amp; lhs, RHS &amp;&amp; rhs) {
+	return lhs = std::move(lhs) + std::forward&lt;RHS&gt;(rhs);
+}
+</div></code></code></pre>
+<p>Now our compound assignment operator returns whatever the assignment operator returns. We have a technical reason to make this change, but does it match up with our expectations? Conceptually, <code>operator+=</code> should perform an addition followed by an assignment, so it seems reasonable to return whatever assignment returns, and this mirrors the (only?) type in the standard library that returns something other than <code>*this</code> from its assignment operator. This is also the behavior that would naturally fall out of using a rewrite rule such that the expression <code>lhs += rhs</code> is rewritten to <code>lhs = std::move(lhs) + rhs</code>, which is what is proposed by this paper.</p>
+<p>One final question might be about that somewhat strange looking <code>std::move(lhs)</code> piece. You might wonder whether this is correct or safe, since it appears to lead to a self-move-assignment. Fortunately, we sidestep this problem entirely because there is actually no self-move-assignment occurring here. For well-behaved types, <code>operator+</code> might accept its argument by rvalue-reference, but that function then returns by value. This means that the object assigned to <code>lhs</code> is a completely separate object, and there are no aliasing concerns.</p>
+<h3 id="single-evaluation">Single evaluation</h3>
+<p>Because this proposal works in terms of expression rewrites, there is a pitfall in simply rewriting <code>lhs @= rhs</code> as <code>lhs = std::move(lhs) @ rhs</code>: the expression <code>lhs</code> appears twice. We want essentially the same semantics that a function would give us: exactly one evaluation of <code>lhs</code>. In other words, the specification would have to be equivalent to something like</p>
+<pre><code><code><div>[&amp;] {
+	auto &amp;&amp; __temp = lhs;
+	return static_cast&lt;decltype(__temp)&gt;(__temp) = std::move(__temp) @ rhs;
+}()
+</div></code></code></pre>
+<h3 id="allocators">Allocators</h3>
+<p>There is one major remaining question here: how does this interact with allocators? In particular, we might care about the values in <code>std::allocator_traits</code> for <code>propagate_on_container_copy_assignment</code>, <code>propagate_on_container_move_assignment</code>, <code>propagate_on_container_swap</code> and <code>select_on_container_copy_construction</code>. The move constructor of a standard container has no special interaction with allocators -- in particular, for all containers (except <code>std::array</code>) the move constructor is constant time, regardless of the type or value of the source allocator.</p>
+<p>With an eye toward allocators, let's look again at the case of <code>string</code> and the operator overloads (with minor modifications to our example code to match the current specification of <code>operator+</code> with regards to allocators):</p>
+<pre><code><code><div>string operator+(string const &amp; lhs, string const &amp; rhs) {
+	string result(allocator_traits::select_on_container_copy_construction(lhs.get_allocator()));
+	result.reserve(lhs.size() + rhs.size());
+	result.append(lhs);
+	result.append(rhs);
+	return result;
+}
+string operator+(string &amp;&amp; lhs, string const &amp; rhs) {
+	lhs.append(rhs);
+	return lhs;
+}
+string operator+(string const &amp; lhs, string &amp;&amp; rhs) {
+	rhs.insert(0, lhs);
+	return rhs;
+}
+string operator+(string &amp;&amp; lhs, string &amp;&amp; rhs) {
+	return (lhs.size() + rhs.size() &lt;= lhs.capacity() or lhs.get_allocator() != rhs.get_allocator()) ?
+		std::move(lhs) + std::as_const(rhs) :
+		std::as_const(lhs) + std::move(rhs);
+}
+
+template&lt;typename LHS, typename RHS&gt;
+decltype(auto) operator+=(LHS &amp; lhs, RHS &amp;&amp; rhs) {
+	return lhs = std::move(lhs) + std::forward&lt;RHS&gt;(rhs);
+}
+</div></code></code></pre>
+<p>Our goal here is to make sure that given the proper definitions of <code>operator+</code>, our generic definition of <code>operator+=</code> will still do the correct thing. This is somewhat tricky, so we'll walk through this step by step. First, let's consider the case where <code>rhs</code> is <code>string const &amp;</code>. We end up with this instantiation:</p>
+<pre><code><code><div>string &amp; operator+=(string &amp; lhs, strong const &amp; rhs) {
+	return lhs = std::move(lhs) + rhs;
+}
+</div></code></code></pre>
+<p>That will call this overload of <code>operator+</code>:</p>
+<pre><code><code><div>string operator+(string &amp;&amp; lhs, string const &amp; rhs) {
+	lhs.append(rhs);
+	return lhs;
+}
+</div></code></code></pre>
+<p>Before calling this function, nothing has changed with allocators because all we have done is bound variables to references. Inside the function, we make use of the allocator associated with <code>lhs</code>, if necessary, which is exactly what we want (the final object will be <code>lhs</code>). We then return <code>lhs</code>, which move constructs the return value. Move construction is guaranteed to move in the allocator, so our resulting value has the same allocator as <code>lhs</code> did at the start of the function. Going back up the stack, we then move assign this constructed string back into <code>lhs</code>. This will be fast because those allocators compare equal. This is true regardless of the value of <code>propagate_on_container_move_assignment</code>, since propagation is unnecessary due to the equality.</p>
+<p>The other case to consider is when <code>rhs</code> is <code>string &amp;&amp;</code>. Let's walk through the same exercise:</p>
+<pre><code><code><div>string &amp; operator+=(string &amp; lhs, strong &amp;&amp; rhs) {
+	return lhs = std::move(lhs) + std::move(rhs);
+}
+</div></code></code></pre>
+<p>That will call this overload of <code>operator+</code>:</p>
+<pre><code><code><div>string operator+(string &amp;&amp; lhs, string &amp;&amp; rhs) {
+	return (lhs.size() + rhs.size() &lt;= lhs.capacity() or lhs.get_allocator() != rhs.get_allocator()) ?
+		std::move(lhs) + std::as_const(rhs) :
+		std::as_const(lhs) + std::move(rhs);
+}
+</div></code></code></pre>
+<p>If <code>lhs</code> has enough capacity for the resulting object, we forward to the same overload we just established as being correct for our purposes. If the allocators are different, it means we care which allocator we use, and so we should also fall back to that same overload. In that second branch, we end up returning <code>rhs</code> with its allocator, but this is acceptable because we know the allocators are equal.</p>
+<p>In other words, this proposal properly handles the allocator model of <code>std::string</code> and would presumably properly handle a hypothetical <code>big_integer</code> type.</p>
+<p>Note that these examples still hold if we add in overloads for <code>string_view</code> and <code>char const *</code>. For simplicity, they have been left out.</p>
+<h3 id="does-this-break-the-stream-operators">Does this break the stream operators?</h3>
+<p>For &quot;bitset&quot; types, the expressions <code>lhs &lt;&lt; rhs</code> and <code>lhs &gt;&gt; rhs</code> mean something very different than for other types, thanks to those operators being used for stream insertion / extraction. Fortunately, this proposal is unlikely to lead to the creation of a strange <code>&lt;&lt;=</code> or <code>&gt;&gt;=</code> operator with stream arguments. The existing stream operators require the stream to start out on the left-hand side. This means that the only compound assignment operators that this proposal attempts to synthesize are <code>stream &lt;&lt;= x</code> and <code>stream &gt;&gt;= x</code>. For this to compile using <code>std::istream</code> or <code>std::ostream</code>, the user must have overloaded <code>operator&gt;&gt;</code> or <code>operator&lt;&lt;</code> to return something other than the standard of <code>stream &amp;</code> and instead return something that can be used as the source of an assignment to a stream object. There are not many types that meet this criterion, so the odds of this happening accidentally are slim.</p>
+<h3 id="optimization-opportunities">Optimization opportunities</h3>
+<p>To ensure that we are not generating code that is difficult to optimize, it can be helpful to consider a simple <code>vector3d</code> class:</p>
+<pre><code><code><div>struct vector3d {
+	double x;
+	double y;
+	double z;
+};
+</div></code></code></pre>
+<p>This example uses a struct with three data members, but the generated code is identical for a struct containing a single array data member.</p>
+<p>To see how some major compilers handle various ways of defining operator overloads for this type, you can see <a href="https://godbolt.org/z/D9UbSF">this Godbolt link</a>. The compiler flags used are maximum optimization with no special architecture-specific flags like <code>-march</code> or <code>-mtune</code>, but a cursory examination of various values for those flags showed it did not change interpretation of the results. For example:</p>
+<ul>
+<li>llvm generates identical instructions (in a slightly different order) for <code>+</code> defined directly, for <code>+=</code> defined in terms of <code>+</code>, and for <code>+=</code> defined directly, but it generates worse code for <code>+</code> defined in terms of <code>+=</code>. In other words, it is best to define <code>+=</code> in terms of <code>+</code>.</li>
+<li>gcc generates identical instructions (in a slightly different order) for all combinations. In other words, it does not matter which is the basis.</li>
+<li>MSVC generates identical instructions (in a slightly different order) for <code>+</code> defined directly and for <code>+=</code> defined directly, but it generates the same worse code for whichever operator is defined in terms of the other.</li>
+<li>ICC generates identical code for <code>+=</code> defined directly or in terms of <code>+</code>. It generates worse code for <code>+</code> defined in terms of <code>+=</code> than for <code>+</code> defined directly.</li>
+</ul>
+<p>To summarize, it is better for llvm and ICC to define <code>+</code> as the basis operation, irrelevant for gcc, and on MSVC you want to define neither in terms of the other.</p>
+<h3 id="recommendation">Recommendation</h3>
+<p>We should synthesize compound assignment operators following the same rules as we follow for <code>operator&lt;=&gt;</code>: the overload set for the compound assignment operators include a synthesized operator, which is considered a worse match than a non-synthesized operator. In other words, <code>lhs @= rhs</code> has a candidate overload of <code>lhs = std::move(lhs) @ rhs</code>. Users can explicitly opt in to using such an operator rewrite by specifying <code>= default</code>. This is entirely for symmetry, as it is not especially useful, just like <code>bool operator!=(T, T) = default;</code> is not especially useful. They can opt out by using <code>= delete</code>. This section of the proposal would synthesize rewrite rules for the following operators:</p>
+<ul>
+<li><code>operator+=</code></li>
+<li><code>operator-=</code></li>
+<li><code>operator*=</code></li>
+<li><code>operator/=</code></li>
+<li><code>operator%=</code></li>
+<li><code>operator&amp;=</code></li>
+<li><code>operator|=</code></li>
+<li><code>operator^=</code></li>
+<li><code>operator&lt;&lt;=</code></li>
+<li><code>operator&gt;&gt;=</code></li>
+</ul>
+<h2 id="prefix-increment-and-decrement">Prefix Increment and Decrement</h2>
+<h3 id="recommendation-1">Recommendation</h3>
+<p>Rewrite <code>++a</code> as <code>a += 1</code>, and rewrite <code>--a</code> as <code>a -= 1</code>.</p>
+<h2 id="postfix-increment-and-decrement">Postfix Increment and Decrement</h2>
+<h3 id="recommendation-2">Recommendation</h3>
+<p>Rewrite <code>a++</code> as something like</p>
+<pre><code><code><div>[&amp;] {
+	if constexpr (std::is_copy_constructible_v&lt;std::remove_reference_t&lt;decltype(a)&gt;&gt;) {
+		auto __previous = a;
+		++a;
+		return __previous;
+		// with guaranteed NRVO (one copy, zero moves)
+	} else {
+		++a;
+	}
+}()
+</div></code></code></pre>
+<p>and rewrite <code>a--</code> as something like</p>
+<pre><code><code><div>[&amp;] {
+	if constexpr (std::is_copy_constructible_v&lt;std::remove_reference_t&lt;decltype(a)&gt;&gt;) {
+		auto __previous = a;
+		--a;
+		return __previous;
+		// with guaranteed NRVO (one copy, zero moves)
+	} else {
+		--a;
+	}
+}()
+</div></code></code></pre>
+<h2 id="member-of-pointer">Member of pointer (<code>-&gt;</code>)</h2>
+<p>This area has been well-studied for library solutions. This paper, however, traffics in rewrite rules (following the lead of <code>operator&lt;=&gt;</code>), not in terms of function calls. Because of this, we have one more option that the library-only solutions lack: we could define <code>lhs-&gt;rhs</code> as being equivalent to <code>(*lhs).rhs</code>. This neatly sidesteps all of the issues of library-only solutions (how do we get the address of the object? how do we handle temporaries?). It even plays nicely with existing rules around lifetime extension of temporaries. This solves many long-standing issues around proxy iterators that return by value.</p>
+<h3 id="recommendation-3">Recommendation</h3>
+<p>Rewrite <code>lhs-&gt;rhs</code> as <code>(*lhs).rhs</code>.</p>
+<h2 id="pointer-to-member-of-pointer">Pointer to member of pointer (<code>-&gt;*</code>)</h2>
+<p>Same reasoning as <code>operator-&gt;</code>.</p>
+<h3 id="recommendation-4">Recommendation</h3>
+<p>Rewrite <code>lhs-&gt;*rhs</code> as <code>(*lhs).*rhs</code>.</p>
+<h2 id="other-approaches-considered">Other approaches considered</h2>
+<p>As a companion to this paper, I have implemented the approaches that are possible in standard C++ in <a href="https://github.com/davidstone/operators">https://github.com/davidstone/operators</a>. This section will describe the general outline of several possible solutions in this problem space, including example code using the operators library.</p>
+<h3 id="automatically-generated">Automatically generated</h3>
+<p>This is the approach recommended by this paper. It is intended to work the same way as the comparison operators work in C++20, where the existence of a base operation or set of operations (<code>operator==</code> and <code>operator&lt;=&gt;</code> in the case of comparisons) is used as a rewrite target for some other operator (for instance, <code>operator&lt;</code>). Other than writing those base operators, there is no additional syntax required to opt in, and the user can use <code>= delete</code> to opt out.</p>
+<p>This requires language support.</p>
+<h3 id="generated-with--default">Generated with <code>= default</code></h3>
+<p>This is similar to the more implicit approach above, except that users must additionally type something like</p>
+<pre><code><code><div>auto operator+=(Type &amp;, Type const &amp;) = default;
+auto operator+=(Type &amp;, Type &amp;&amp;) = default;
+</div></code></code></pre>
+<p>to get the operator generated / synthesized.</p>
+<p>This requires language support.</p>
+<h3 id="use-using-declarations">Use using declarations</h3>
+<p>This gives users a simple way to opt-in to specific operators for all types in their namespace. Unlike a using directive (<code>using namespace operators;</code>), a using declaration (<code>using operators::operator+=;</code>) actually puts the function declaration in your namespace for purposes of ADL. Using the operators library, user code looks like:</p>
+<pre><code><code><div>namespace user {
+
+using operators::operator+=;
+using operators::operator-=;
+using operators::operator*=;
+using operators::operator/=;
+using operators::operator%=;
+using operators::operator&lt;&lt;=;
+using operators::operator&gt;&gt;=;
+using operators::operator&amp;=;
+using operators::operator|=;
+using operators::operator^=;
+
+struct type1 {
+	// define binary arithmetic operators as friends or members here
+};
+// Or as non-member non-friends here
+struct type2 {
+	// define binary arithmetic operators as friends or members here
+};
+// Or as non-member non-friends here
+
+} // namespace user
+</div></code></code></pre>
+<p>This does not require language support. This has the advantage that users can write code once that applies to all of their types. This can be further factored into a single include file for easy reuse through the user's code. The operators library also provides a macro for the bundle of all compound assignment operators: <code>OPERATORS_IMPORT_COMPOUND_ASSIGNMENT</code>. This cannot be used to implement <code>operator-&gt;</code> because that operator cannot be defined as a free function.</p>
+<h3 id="derive-from-a-library-type">Derive from a library type</h3>
+<p>This gives users a simple way to opt-in to specific operators for a specific type. Using the magic of ADL, it is possible for this solution to not even require CRTP for most operators; users can derive from a normal base class. Using the operators library, it looks like:</p>
+<pre><code><code><div>struct my_type : operators::compound_assignment {
+	// define binary arithmetic operators as friends or members here
+};
+// Or as non-member non-friends here
+
+struct wants_plus_equal_only : operators::plus_equal {
+	// define binary operator+ as friend or member here
+};
+// Or as non-member non-friend here
+
+struct wants_arrow : operators::arrow&lt;wants_arrow&gt; {
+	// define unary operator* as friend or member here
+};
+// Or as non-member non-friend here
+
+struct dereference_returns_value : operators::arrow_proxy&lt;dereference_returns_value&gt; {
+	// define unary operator* as friend or member here
+};
+// Or as non-member non-friend here
+</div></code></code></pre>
+<p>Because <code>operator-&gt;</code> cannot be defined as a free function, it cannot use the ADL-based solutions that the other operators can use, and thus it requires a CRTP base class.</p>
+<p>This does not require language support. This cannot solve all of the problems solved by a language solution for <code>operator-&gt;</code>, as shown in the example. In particular, a library solution will always have shortcomings related to <code>operator*</code> that returns by value.</p>
+<h3 id="put-a-macro-in-your-class-body">Put a macro in your class body</h3>
+<p>This gives users a simple way to opt-in to specific operators for a specific type. Using the operators library, it looks like:</p>
+<pre><code><code><div>struct wants_arrow {
+	OPERATORS_ARROW_DEFINITIONS
+	// define unary operator* as friend or member here
+};
+// Or as non-member non-friend here
+
+struct dereference_returns_value {
+	OPERATORS_ARROW_PROXY_DEFINITIONS
+	// define unary operator* as friend or member here
+};
+// Or as non-member non-friend here
+</div></code></code></pre>
+<p>This does not require language support. The one advantage this has over the base class version above is that it does not require re-typing your class name for the <code>operator-&gt;</code> case.</p>
+<h2 id="library-impact">Library impact</h2>
+<p>Given the path we took for <code>operator&lt;=&gt;</code> of removing manual definitions of operators that can be synthesized and assuming we want to continue with that path by approving <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1732r1.pdf">&quot;Do not promise support for function syntax of operators&quot;</a>, this will allow removing a large amount of specification in the standard library by replacing it with blanket wording that these rewrites apply. I have surveyed the standard library to get an overview of what would change in response to this, and to ensure that the changes would work properly.</p>
+<h3 id="operator"><code>operator@=</code></h3>
+<h4 id="types-that-can-have-all-of-their-operator-defaulted">Types that can have all of their <code>operator@=</code> defaulted</h4>
+<ul>
+<li><code>basic_string</code>: Can remove all <code>operator+=</code> except the overload taking <code>initializer_list</code> (or we could add <code>basic_string + initializer_list</code>)</li>
+<li><code>basic_string::iterator</code>: <code>+=</code>, <code>-=</code></li>
+<li><code>array::iterator</code>: <code>+=</code>, <code>-=</code></li>
+<li><code>deque::iterator</code>: <code>+=</code>, <code>-=</code></li>
+<li><code>vector::iterator</code>: <code>+=</code>, <code>-=</code></li>
+<li><code>valarray::iterator</code>: <code>+=</code>, <code>-=</code></li>
+<li><code>iota_view::iterator</code>: <code>+=</code>, <code>-=</code></li>
+<li><code>elements_view::iterator</code>: <code>+=</code>, <code>-=</code></li>
+<li><code>complex</code>: <code>+=</code>, <code>-=</code>, <code>*=</code>, <code>/=</code></li>
+<li><code>valarray</code>: <code>+=</code>, <code>-=</code>, <code>*=</code>, <code>/=</code>, <code>%=</code>, <code>^=</code>, <code>&amp;=</code>, <code>|=</code>, <code>&lt;&lt;=</code>, <code>&gt;&gt;=</code></li>
+<li><code>chrono::day</code>: <code>+=</code>, <code>-=</code></li>
+<li><code>chrono::month</code>: <code>+=</code>, <code>-=</code></li>
+<li><code>chrono::year</code>: <code>+=</code>, <code>-=</code></li>
+<li><code>chrono::weekday</code>: <code>+=</code>, <code>-=</code></li>
+<li><code>chrono::year_month</code>: <code>+=</code>, <code>-=</code></li>
+<li><code>chrono::year_month_day</code>: <code>+=</code>, <code>-=</code></li>
+<li><code>chrono::year_month_day_last</code>: <code>+=</code>, <code>-=</code></li>
+<li><code>chrono::year_month_weekday</code>: <code>+=</code>, <code>-=</code></li>
+<li><code>chrono::year_month_weekday_last</code>: <code>+=</code>, <code>-=</code></li>
+<li>&quot;bitmask type&quot;: <code>^=</code>, <code>&amp;=</code>, <code>|=</code> can be removed from the exposition</li>
+<li><code>byte</code>: <code>^=</code>, <code>&amp;=</code>, <code>|=</code>, <code>&lt;&lt;=</code>, <code>&gt;&gt;=</code></li>
+<li><code>bitset</code>: <code>^=</code>, <code>&amp;=</code>, <code>|=</code>, <code>&lt;&lt;=</code>, <code>&gt;&gt;=</code></li>
+<li><code>reverse_iterator</code></li>
+<li><code>move_iterator</code></li>
+<li><code>counted_iterator</code></li>
+<li><code>transform_view::iterator</code></li>
+<li><code>chrono::duration</code> (also <code>*=</code>, <code>/=</code>, <code>%=</code>)</li>
+<li><code>chrono::time_point</code></li>
+</ul>
+<p>The specification of the iterator adapters (other than <code>elements_view::iterator</code>) have an <code>operator+</code> that calls some underlying type's <code>operator+</code> and an <code>operator+=</code> that call some underlying type's <code>operator+=</code>. The new <code>random_access_iterator</code> concept and the old <code>Cpp17RandomAccessIterator</code> requirements table already state that if your type is a random access iterator, the two operations must be equivalent, which should mean the two are interchangeable. <code>elements_view::iterator</code> wraps a user-defined iterator is currently specified as always calling <code>+=</code>, but again, it should also be equivalent.</p>
+<p>For <code>chrono::duration</code>, the standard states that its template parameter &quot;<code>Rep</code> shall be an arithmetic type or a class emulating an arithmetic type&quot;. It is unclear how true this emulation must be, but presumably it requires that arithmetic operations have the usual equivalences, in which case it should not matter which specific operators are called.</p>
+<h4 id="types-that-mysteriously-do-not-have-a--b-but-do-have-a--b-even-though-they-have-a--b-and-a--b">Types that mysteriously do not have <code>a + b</code> but do have <code>a += b</code>, even though they have <code>a / b</code> and <code>a /= b</code></h4>
+<ul>
+<li><code>filesystem::path</code></li>
+</ul>
+<p>If we define <code>operator+</code> for this type, we could then get rid of <code>operator+=</code>. Pros: increased uniformity and better support for functional programming styles. Cons: Would make the following code valid:</p>
+<pre><code><code><div>std::list&lt;char&gt; range{0, 1, 2, 3, 4, 5};
+std::filesystem::path p = &quot;101&quot;;
+std::regex(range.begin() + p);
+// Note: This code is already valid if you replace `+` with `/`
+</div></code></code></pre>
+<p>The synthesized version of <code>operator/=</code> is correct for <code>filesystem::path</code>.</p>
+<h4 id="correctly-unaffected-types">Correctly unaffected types</h4>
+<ul>
+<li><code>slice_array</code></li>
+<li><code>gslice_array</code></li>
+<li><code>mask_array</code></li>
+<li><code>indirect_array</code></li>
+<li><code>atomic_ref</code></li>
+<li><code>atomic</code></li>
+</ul>
+<p>These have only compound assignment operators.</p>
+<h3 id="prefix-operator-and-operator">Prefix <code>operator++</code> and <code>operator--</code></h3>
+<h4 id="types-that-have-the-operator-now-and-it-behaves-the-same-as-the-synthesized-operator-a--1">Types that have the operator now and it behaves the same as the synthesized operator (<code>a += 1</code>)</h4>
+<ul>
+<li><code>basic_string::iterator</code></li>
+<li><code>array::iterator</code></li>
+<li><code>deque::iterator</code></li>
+<li><code>vector::iterator</code></li>
+<li><code>valarray::iterator</code></li>
+<li><code>atomic&lt;integral&gt;</code> and <code>atomic&lt;pointer&gt;</code></li>
+<li><code>atomic_ref&lt;integral&gt;</code> and <code>atomic_ref&lt;pointer&gt;</code></li>
+</ul>
+<h4 id="types-that-have-the-operator-now-but-do-not-or-might-not-have--or---no-change-from-this-proposal">Types that have the operator now but do not or might not have <code>+=</code> or <code>-=</code> (no change from this proposal)</h4>
+<ul>
+<li><code>forward_list::iterator</code> (<code>++</code> only)</li>
+<li><code>list::iterator</code></li>
+<li><code>map::iterator</code></li>
+<li><code>set::iterator</code></li>
+<li><code>multimap::iterator</code></li>
+<li><code>multiset::iterator</code></li>
+<li><code>unordered_map::iterator</code></li>
+<li><code>unordered_set::iterator</code></li>
+<li><code>unordered_multimap::iterator</code></li>
+<li><code>unordered_multiset::iterator</code></li>
+<li><code>back_insert_iterator</code> (<code>++</code> only)</li>
+<li><code>front_insert_iterator</code> (<code>++</code> only)</li>
+<li><code>insert_iterator</code> (<code>++</code> only)</li>
+<li><code>reverse_iterator</code></li>
+<li><code>move_iterator</code></li>
+<li><code>common_iterator</code></li>
+<li><code>counted_iterator</code></li>
+<li><code>istream_iterator</code> (<code>++</code> only)</li>
+<li><code>ostream_iterator</code> (<code>++</code> only)</li>
+<li><code>istreambuf_iterator</code> (<code>++</code> only)</li>
+<li><code>ostreambuf_iterator</code> (<code>++</code> only)</li>
+<li><code>iota_view::iterator</code></li>
+<li><code>filter_view::iterator</code></li>
+<li><code>transform_view::iterator</code></li>
+<li><code>join_view::iterator</code> (<code>++</code> only)</li>
+<li><code>split_view::outer_iterator</code> (<code>++</code> only)</li>
+<li><code>split_view::inner_iterator</code> (<code>++</code> only)</li>
+<li><code>basic_istream_view::iterator</code> (<code>++</code> only)</li>
+<li><code>elements_view::iterator</code></li>
+<li><code>directory_iterator</code> (<code>++</code> only)</li>
+<li><code>recursive_directory_iterator</code> (<code>++</code> only)</li>
+<li><code>regex_iterator</code> (<code>++</code> only)</li>
+<li><code>regex_token_iterator</code> (<code>++</code> only)</li>
+</ul>
+<h4 id="would-gain-operator-and-operator">Would gain <code>operator++</code> and <code>operator--</code></h4>
+<ul>
+<li><code>complex</code></li>
+<li><code>atomic&lt;floating_point&gt;</code></li>
+</ul>
+<p>These types support <code>lhs += 1</code> and <code>lhs -= 1</code>, and their underlying type supports <code>++a</code> and <code>--a</code>. Discussion on the reflector did not turn up any reason for this to not be present, just that it wasn't deemed particularly useful.</p>
+<h4 id="needs-to-keep-existing-version-because-the-rewrite-would-not-compile">Needs to keep existing version because the rewrite would not compile</h4>
+<ul>
+<li><code>chrono::duration</code></li>
+<li><code>chrono::time_point</code></li>
+<li><code>chrono::day</code></li>
+<li><code>chrono::month</code></li>
+<li><code>chrono::year</code></li>
+<li><code>chrono::weekday</code></li>
+</ul>
+<h4 id="does-not-have-operator-or-operator---now-and-should-not-have-it--delete">Does not have <code>operator++</code> or <code>operator--</code> now, and should not have it (<code>= delete</code>)</h4>
+<ul>
+<li><code>basic_string</code> (<code>operator++</code> only)</li>
+<li><code>valarray</code></li>
+<li><code>slice_array</code></li>
+<li><code>gslice_array</code></li>
+<li><code>mask_array</code></li>
+<li><code>indirect_array</code></li>
+<li><code>filesystem::path</code> (<code>operator++</code> only)</li>
+</ul>
+<p>For <code>basic_string</code> and <code>filesystem::path</code>, it is quite strange already that users can call <code>value += 1</code>. This is allowed only because of the implicit conversion from <code>int</code> to <code>char</code>.</p>
+<h3 id="postfix-operator-and-operator">Postfix <code>operator++</code> and <code>operator--</code></h3>
+<h4 id="types-that-have-the-operator-now-and-it-behaves-the-same-as-the-synthesized-operator">Types that have the operator now and it behaves the same as the synthesized operator</h4>
+<ul>
+<li><code>basic_string::iterator</code></li>
+<li><code>array::iterator</code></li>
+<li><code>deque::iterator</code></li>
+<li><code>vector::iterator</code></li>
+<li><code>forward_list::iterator</code> (<code>++</code> only)</li>
+<li><code>list::iterator</code></li>
+<li><code>map::iterator</code></li>
+<li><code>set::iterator</code></li>
+<li><code>multimap::iterator</code></li>
+<li><code>multiset::iterator</code></li>
+<li><code>unordered_map::iterator</code></li>
+<li><code>unordered_set::iterator</code></li>
+<li><code>unordered_multimap::iterator</code></li>
+<li><code>unordered_multiset::iterator</code></li>
+<li><code>valarray::iterator</code></li>
+<li><code>reverse_iterator</code></li>
+<li><code>back_insert_iterator</code> (<code>++</code> only)</li>
+<li><code>front_insert_iterator</code> (<code>++</code> only)</li>
+<li><code>insert_iterator</code> (<code>++</code> only)</li>
+<li><code>istream_iterator</code> (<code>++</code> only)</li>
+<li><code>chrono::duration</code></li>
+<li><code>chrono::time_point</code></li>
+<li><code>chrono::day</code></li>
+<li><code>chrono::month</code></li>
+<li><code>chrono::year</code></li>
+<li><code>chrono::weekday</code></li>
+<li><code>regex_iterator</code> (<code>++</code> only)</li>
+<li><code>regex_token_iterator</code> (<code>++</code> only)</li>
+<li><code>move_iterator</code></li>
+<li><code>iota_view::iterator</code></li>
+<li><code>filter_view::iterator</code></li>
+<li><code>transform_view::iterator</code></li>
+<li><code>join_view::iterator</code></li>
+<li><code>split_view::outer_iterator</code></li>
+<li><code>split_view::inner_iterator</code></li>
+<li><code>basic_istream_view::iterator</code></li>
+<li><code>elements_view::iterator</code></li>
+</ul>
+<h4 id="types-that-defer-to-a-wrapped-postfix--for-iterators-that-do-not-meet-forwarditerator">Types that defer to a wrapped postfix <code>++</code> for iterators that do not meet <code>forward_iterator</code></h4>
+<ul>
+<li><code>common_iterator</code></li>
+<li><code>counted_iterator</code></li>
+</ul>
+<p>Regardless of what happens with this proposal, these types sometimes return their own type and call the wrapped type's prefix <code>operator++</code>, and sometimes returns the result of calling the wrapped type's postfix <code>operator++</code>. This is an inconsistent design that probably deserves further discussion.</p>
+<h4 id="types-that-return-a-reference-from-postfix">Types that return a reference from postfix <code>++</code></h4>
+<ul>
+<li><code>ostream_iterator</code></li>
+<li><code>ostreambuf_iterator</code></li>
+</ul>
+<h4 id="types-that-would-do-something-bad-with-the-synthesized-version-and-thus-need-to-keep-their-existing-overload">Types that would do something bad with the synthesized version and thus need to keep their existing overload</h4>
+<ul>
+<li><code>istreambuf_iterator</code> has a postfix <code>operator++</code> that returns a proxy that keeps the old value alive</li>
+<li><code>directory_iterator</code> has no postfix, but it is a copyable <code>input_iterator</code>.</li>
+<li><code>recursive_directory_iterator</code> has no postfix, but it is a copyable <code>input_iterator</code></li>
+</ul>
+<h4 id="types-that-would-return-less-information-than-is-currently-returned-and-thus-need-to-keep-their-existing-overload">Types that would return less information than is currently returned and thus need to keep their existing overload</h4>
+<ul>
+<li><code>atomic_ref</code></li>
+<li><code>atomic</code></li>
+</ul>
+<p>These overloads would need to stay. The postfix operators return a copy of the underlying value as it was before the increment. Under the language rules of this proposal, if the manual postfix operators were removed from <code>std::atomic</code>, the postfix operator would return <code>void</code> instead. If the manual postfix operators were removed from <code>atomic_ref</code>, it would return a copy of the <code>atomic_ref</code> rather than the value.</p>
+<h3 id="operator-1"><code>operator-&gt;</code></h3>
+<h4 id="types-that-will-gain-operator--and-this-is-a-good-thing">Types that will gain <code>operator-&gt;</code> and this is a good thing</h4>
+<ul>
+<li><code>move_iterator</code> currently has a deprecated <code>operator-&gt;</code></li>
+<li><code>counted_iterator</code></li>
+<li><code>istreambuf_iterator</code></li>
+<li><code>istreambuf_iterator::proxy</code> (exposition only type)</li>
+<li><code>iota_view::iterator</code></li>
+<li><code>transform_view::iterator</code></li>
+<li><code>split_view::outer_iterator</code></li>
+<li><code>split_view::inner_iterator</code></li>
+<li><code>basic_istream_view::iterator</code></li>
+<li><code>elements_view::iterator</code></li>
+</ul>
+<p>Most of these are iterators that return either by value or by <code>decltype(auto)</code> from some user-defined function. It is not possible to safely and consistently define <code>operator-&gt;</code> for these types, so we do not always do so, but under this proposal they would all do the right thing.</p>
+<h4 id="types-that-will-technically-gain-operator--but-it-is-not-observable">Types that will technically gain <code>operator-&gt;</code> but it is not observable</h4>
+<ul>
+<li><code>insert_iterator</code></li>
+<li><code>back_insert_iterator</code></li>
+<li><code>front_insert_iterator</code></li>
+<li><code>ostream_iterator</code></li>
+</ul>
+<p>The insert iterators and <code>ostream_iterator</code> technically gain an <code>operator-&gt;</code>, but <code>operator*</code> returns a reference to <code>*this</code> and the only members of those types are types, constructors, and operators, none of which are accessible through <code>operator-&gt;</code> using the syntaxes that are supported to access the standard library.</p>
+<h4 id="types-that-will-gain-operator--and-its-weird-either-way">Types that will gain <code>operator-&gt;</code> and it's weird either way</h4>
+<ul>
+<li><code>ostreambuf_iterator</code></li>
+</ul>
+<p><code>ostreambuf_iterator</code> is the one example for which we might possibly want to explicitly delete <code>operator-&gt;</code>. It has an <code>operator*</code> that returns <code>*this</code>, and it has a member function <code>failed()</code>, so it would allow calling <code>it-&gt;failed()</code> with the same meaning as <code>it.failed()</code>.</p>
+<h4 id="types-that-have-operator--now-and-it-behaves-the-same-as-the-synthesized-operator">Types that have <code>operator-&gt;</code> now and it behaves the same as the synthesized operator</h4>
+<p>All types in this section have an <code>operator-&gt;</code> that is identical to the synthesized version if we do not wish to support users calling with the syntax <code>thing.operator-&gt;()</code>.</p>
+<ul>
+<li><code>optional</code></li>
+<li><code>unique_ptr</code> (single object)</li>
+<li><code>shared_ptr</code></li>
+<li><code>weak_ptr</code></li>
+<li><code>basic_string::iterator</code></li>
+<li><code>basic_string_view::iterator</code></li>
+<li><code>array::iterator</code></li>
+<li><code>deque::iterator</code></li>
+<li><code>forward_list::iterator</code></li>
+<li><code>list::iterator</code></li>
+<li><code>vector::iterator</code></li>
+<li><code>map::iterator</code></li>
+<li><code>multimap::iterator</code></li>
+<li><code>set::iterator</code></li>
+<li><code>multiset::iterator</code></li>
+<li><code>unordered_map::iterator</code></li>
+<li><code>unordered_set::iterator</code></li>
+<li><code>unordered_multimap::iterator</code></li>
+<li><code>unordered_multiset::iterator</code></li>
+<li><code>span::iterator</code></li>
+<li><code>istream_iterator</code></li>
+<li><code>valarray::iterator</code></li>
+<li><code>tzdb_list::const_iterator</code></li>
+<li><code>filesystem::path::iterator</code></li>
+<li><code>directory_iterator</code></li>
+<li><code>recursive_directory_iterator</code></li>
+<li><code>match_results::iterator</code></li>
+<li><code>regex_iterator</code></li>
+<li><code>regex_token_iterator</code></li>
+<li><code>reverse_iterator</code></li>
+<li><code>common_iterator</code></li>
+<li><code>filter_view::iterator</code></li>
+<li><code>join_view::iterator</code></li>
+</ul>
+<p>All of these types that are adapter types define their <code>operator-&gt;</code> as deferring to the base iterator's <code>operator-&gt;</code>. However, the Cpp17InputIterator requirements specify that <code>a-&gt;m</code> is equivalent to <code>(*a).m</code>, so anything a user passes to <code>reverse_iterator</code> must already meet this. <code>common_iterator</code>, <code>filter_view::iterator</code>, and <code>join_view::iterator</code> are new in C++20 and require <code>input_or_output_iterator</code> of their parameter, which says nothing about <code>-&gt;</code>. This means that based on what we have promised about our interfaces, we could implement all of these under the language proposal without breaking compatibility if we change those three for C++20. They would be changed to return only <code>addressof(**this)</code> for C++20 to leave room for using the generated version in C++23.</p>
+<h4 id="iteratortraits"><code>iterator_traits</code></h4>
+<p><code>std::iterator_traits&lt;I&gt;::pointer</code> is essentially defined as <code>typename I::pointer</code> if such a type exists, otherwise <code>decltype(std::declval&lt;I &amp;&gt;().operator-&gt;())</code> if that expression is well-formed, otherwise <code>void</code>. The type appears to be unspecified for iterators into any standard container, depending on how you read the requirements. The only relevant requirement on standard container iterators (anything that meets Cpp17InputIterator) are that <code>a-&gt;m</code> is equivalent to <code>(*a).m</code>. We never specify that any other form is supported, nor do we specify that any of them contain the member type <code>pointer</code>. There are three options here:</p>
+<ol>
+<li>Change nothing. This would make <code>pointer</code> defined as <code>void</code> for types that have a synthesized <code>operator-&gt;</code></li>
+<li>Specify a further fallback of <code>decltype(std::addressof(*a))</code> to maintain current behavior and allow users to delete their own <code>operator-&gt;</code> without changing the results of <code>iterator_traits</code></li>
+<li>Deprecate or remove the <code>pointer</code> typedef, as it is not used anywhere in the standard except to define other <code>pointer</code> typedefs and it seems to have very little usefulness outside the standard.</li>
+</ol>
+<p>My recommendation is 2, 3, or both.</p>
+<h4 id="toaddress-and-pointertraits"><code>to_address</code> and <code>pointer_traits</code></h4>
+<p>[pointer.conversion] specifies <code>to_address</code> in terms of calling <code>p.operator-&gt;()</code>, so some thought will need to be put in there on what to do.</p>
+<p>The following standard types can be used to instantiate <code>pointer_traits</code>:</p>
+<ul>
+<li><code>T *</code></li>
+<li><code>unique_ptr</code></li>
+<li><code>shared_ptr</code></li>
+<li><code>weak_ptr</code></li>
+<li><code>span</code></li>
+</ul>
+<p>However, none of them are specified to have member <code>to_address</code>.</p>
+<p>Note that <code>span</code> does not have <code>operator-&gt;</code> and is thus not relevant to the below discussion at all. <code>unique_ptr</code>, <code>shared_ptr</code>, and <code>weak_ptr</code> are not iterators, and are thus minimally relevant to the below discussion.</p>
+<p><code>std::to_address</code> is specified as calling <code>pointer_traits&lt;Ptr&gt;::to_address(p)</code> if that is well formed, otherwise calling <code>operator-&gt;</code> with member function syntax. This leaves us with several options:</p>
+<ol>
+<li>Leave this function as-is and specify that all of the types that currently have <code>operator-&gt;</code> have a specialization of <code>pointer_traits</code> that defines <code>pointer_traits&lt;T&gt;::to_address</code></li>
+<li>Specify that all types that currently have <code>operator-&gt;</code> work with <code>std::to_address</code></li>
+<li>Define a second fallback if <code>p.operator-&gt;()</code> is not valid that would be defined as <code>std::addressof(*p)</code>. This is similar to the question for <code>std::iterator_traits&lt;I&gt;::pointer</code>.</li>
+<li>Decide that iterators that do not satisfy <code>contiguous_iterator</code> are not sufficiently &quot;pointer like&quot;, and thus should not be used with <code>std::to_address</code>. This would require changing the definition for C++20. We would then say that calling <code>std::to_address</code> works for all <code>contiguous_iterator</code> types. Whether something is a <code>contiguous_iterator</code> is currently specified via an opt-in tag definition. If we decide in favor of this option, that opt-in mechanism would no longer be strictly necessary -- whether <code>std::to_address</code> is valid would distinguish <code>random_access_iterator</code> from <code>contiguous_iterator</code>, and thus we could determine that the same way we can determine other iterator categories. This option dramatically reduces the number of types that would have to do anything special here (in the standard, it would be just 6 types: <code>basic_string::iterator</code>, <code>basic_string_view::iterator</code>, <code>array::iterator</code>, <code>vector&lt;non_bool&gt;::iterator</code>, <code>span::iterator</code>, and <code>valarray::iterator</code>).</li>
+</ol>
+<p>1 and 2 feel like the wrong approach -- they would mean that authors of iterator types still need to define their own <code>operator-&gt;</code>, or they must specialize some class template (if we agree that the current semantics with regard to iterators are correct), or they must overload <code>to_address</code> and we make that a customization point found by ADL. I strongly support option 4.</p>
+<p>On a related note, it feels backward to define <code>std::to_address</code> in terms of <code>std::pointer_traits&lt;I&gt;::to_address</code>, since it means that if I write a <code>contiguous_iterator</code>, I need to specialize a class template with boilerplate of</p>
+<ul>
+<li><code>using pointer = ...</code></li>
+<li><code>using element_type = ...</code></li>
+<li><code>using difference_type = ...</code></li>
+<li><code>template&lt;typename U&gt; using rebind = ...</code></li>
+<li><code>static pointer pointer_to(element_type &amp;)</code></li>
+</ul>
+<p>The status quo means that the following types can be given to <code>to_address</code> and it will happily return you a pointer:</p>
+<ul>
+<li><code>std::list&lt;T&gt;::iterator</code> (with undefined behavior if one-past-the-end)</li>
+<li><code>std::optional&lt;T&gt;</code> (with undefined behavior if <code>!has_value()</code>)</li>
+<li><code>std::reverse_iterator&lt;T&gt;</code> (with undefined behavior if one-past-the-reverse-end)</li>
+<li>Anything else with <code>operator-&gt;</code></li>
+</ul>
+<p>This is especially troubling since <code>to_address</code> is the hook that a contiguous_iterator uses to convert to a raw pointer, and when using that hook, it is required for that expression to be valid even for the past-the-end iterator. I find it concerning that <code>to_address</code> is valid on all valid contiguous_iterators, including past-the-end iterators, but it is undefined behavior in general for other past-the-end iterators.</p>
+<h2 id="things-with-no-recommendations-to-change">Things with no recommendations to change</h2>
+<p>The following sections are operators that were evaluated, but for which there is not a recommendation to change.</p>
+<h3 id="subscript-operator">Subscript (<code>operator[]</code>)</h3>
+<p>The subscript operator is a bit trickier. The problem here is that there are actually at least three different subscript operators with the same syntax. The first subscript operator is the subscript operator of iterators: <code>it[n]</code> is equivalent to <code>*(it + n)</code>. The second subscript operator is the subscript operator of random-access ranges: <code>range[n]</code> is equivalent to <code>begin(range)[n]</code>. The third subscript operator is lookup into an associative container: <code>dictionary[key]</code> is equivalent to <code>*dictionary.emplace(key).first</code>. This gets even more complicated when you consider that a type can model both a random-access range and an associative container (for instance: <code>flat_map</code>).</p>
+<h3 id="operator-2"><code>operator-</code></h3>
+<p><code>a - b</code> is theoretically equivalent to <code>a + -b</code>. This is true in C++ only for types that accurately model their mathematical equivalents or else maintain a modular equivalence (for instance, unsigned types). The problem is that the expression <code>-b</code> might overflow. Even if that negation is well defined, there still may be overflow; consider <code>ptr - 1U</code>: if we rewrote that to be <code>ptr + -1U</code>, the pointer arithmetic would overflow. Attempting this rewrite is a dangerous non-starter.</p>
+<p>How about the other way around? Perhaps we could define <code>-a</code> as <code>0 - a</code>? This could be a promising avenue, but it is not proposed in this paper. That exact definition would need some tweaking, as this would give pointers a unary minus operator with undefined behavior for non-null pointers (<code>0</code> is also a null pointer constant, allowing the conversion, and pointer arithmetic is undefined for out-of-bounds arithmetic, but this is a solvable problem).</p>
+<h2 id="references">References</h2>
+<ul>
+<li><a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/p0541r1.html">Ranges TS: Post-Increment on Input and Output Iterators</a></li>
+<li><a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1207r1.html">Movability of Single-pass Iterators</a></li>
+</ul>
+
+    </body>
+    </html>
