@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<title>Converting contiguous iterators to pointers</title>
+  <style type='text/css'>
+  body {font-variant-ligatures: none;}
+  p {text-align:justify}
+  li {text-align:justify}
+  blockquote.note, div.note
+  {
+          background-color:#E0E0E0;
+          padding-left: 15px;
+          padding-right: 15px;
+          padding-top: 1px;
+          padding-bottom: 1px;
+  }
+  p code {color:navy}
+  ins p code {background-color:PaleGreen}
+  p ins code {background-color:PaleGreen}
+  p del code {background-color:LightPink}
+  ins {background-color:PaleGreen}
+  del {background-color:LightPink}
+  table#boilerplate { border:0 }
+  table#boilerplate td { padding-left: 2em }
+  table.bordered, table.bordered th, table.bordered td {
+    border: 1px solid;
+    text-align: center;
+  }
+  ins.block {background-color:PaleGreen; text-decoration: none}
+  del.block {background-color:LightPink; text-decoration: none}
+  #hidedel:checked ~ * del, #hidedel:checked ~ * del * { display:none; visibility:hidden }
+  </style>
+<meta property="og:title" content="Converting contiguous iterators to pointers">
+<meta property="og:type" content="website">
+<meta property="og:image" content="https://isocpp.org/assets/images/cpp_logo.png">
+<meta property="og:url" content="https://wg21.link/<tr><td>Document number</td><td>P3349R0</td></tr>">
+</head><body>
+<table id="boilerplate">
+<tr><td>Document number</td><td>P3349R0</td></tr>
+<tr><td>Date</td><td>2024-10-16</td></tr>
+<tr><td>Project</td><td>Programming Language C++, Library Evolution Working Group</td></tr>
+<tr><td>Reply-to</td><td>Jonathan Wakely &lt;cxx&#x40;kayari.org&gt;</td></tr>
+</table><hr>
+<h1>Converting contiguous iterators to pointers</h1>
+<ul>
+ <li>
+ <ul>
+  <li><a href="#Revision-History">Revision History</a></li>
+  <li><a href="#Introduction">Introduction</a></li>
+  <li><a href="#Discussion">Discussion</a></li>
+  <li><a href="#Proposed-wording">Proposed wording</a></li>
+  <li><a href="#Acknowledgements">Acknowledgements</a></li>
+  <li><a href="#References">References</a></li>
+ </ul>
+ </li>
+</ul>
+<a name="Revision-History"></a>
+<h2>Revision History</h2>
+
+<ul>
+<li>Initial revision</li>
+</ul>
+
+
+<a name="Introduction"></a>
+<h2>Introduction</h2>
+
+<p>Iterators that model the <code>std::contiguous_iterator</code> concept can be converted to
+a pointer by calling the <code>std::to_address</code> function.
+However, the standard library is not allowed to do anything useful with such
+a pointer. We should fix that.</p>
+
+<a name="Discussion"></a>
+<h2>Discussion</h2>
+
+<p>C++20 introduced the <code>std::contiguous_iterator</code> concept, which can be used
+to check whether <code>*(a + n)</code> is equivalent to <code>*(std::addressof(*a) + n)</code>,
+that is, whether a range denoted by such an iterator contains elements
+that are stored contiguously in memory.</p>
+
+<p>In theory this is a a very useful guarantee, because it allows algorithms to
+lower a contiguous iterator to a pointer, and operate directly on the
+underlying memory locations, e.g. by optimizing <code>std::copy</code> to <code>std::memmove</code>.
+However, the standard seems to be missing some additional permission to allow
+such optimizations. Consider a contiguous iterator which throws on increment
+when it reaches a particular element. This could be used to break out of an
+algorithm early, e.g.</p>
+
+<pre><code>int data[4]{1,2,3,4};
+try {
+    ranges::for_each(throwing_iterator(data, data+2), data+4,
+                     [](int i){ assert(i != 3); });
+} catch (...) {
+}
+</code></pre>
+
+<p>If the iterator throws when it reaches <code>data+2</code> then the assert never fails.
+This program seems to be valid according to the standard, and must not abort.
+But this is just silly, and makes contiguous iterators less useful, because
+the only thing that makes them different from random access iterators is the
+guarantee of contiguous memory. If that guarantee doesn't allow us to
+do anything differently, it might as well not exist.</p>
+
+<p>I think the standard library algorithms can conform to the requirements by
+lowering the iterator for the start of the range to a pointer, then
+incrementing that iterator until it reaches the sentinel, and if those
+increments didn't throw, then use <code>memmove</code> (or similar) on the raw pointer.
+But that seems silly too, and may add unnecessary overhead performing those
+increments just to check if they throw, which will almost certainly never
+happen in any real program.</p>
+
+<p>Non-standard algorithms <em>are</em> allowed to lower contiguous iterators to pointers
+and operate on the underlying memory directly, because they can just document
+that that's what they do (or even not document it, but just define it as a
+feature not a bug). But the algorithms in the C++ standard library are expected
+to work as specified, and the specification doesn't say that contiguous
+iterators won't be incremented until they reach the sentinel value.</p>
+
+<p>We should add wording to the standard that says the implementation is allowed
+to replace any non-empty contiguous range <code>r</code> with something like
+<code>[to_address(begin(r)), to_address(begin(r))+size(r))</code>
+so that programs cannot rely on any side effects of incrementing or
+dereferencing the contiguous iterators.</p>
+
+<a name="Proposed-wording"></a>
+<h2>Proposed wording</h2>
+
+<p>The edits are shown relative to <a href="n4988.pdf" title="Working Draft - Programming Languages -- C++">N4988</a>.</p>
+
+<p>Modify 25.3.1 [iterator.requirements.general] as indicated:</p>
+
+<p>-8- Most of the library’s algorithmic templates that operate on data structures
+have interfaces that use ranges.
+A <em>range</em> is an iterator and a <em>sentinel</em> that designate the beginning and end
+of the computation, or an iterator and a count that designate the beginning
+and the number of elements to which the computation is to be applied.</p>
+
+<p>-9-
+An iterator and a sentinel denoting a range are comparable.
+A range [<code>i</code>, <code>s</code>) is empty if <code>i == s</code>;
+otherwise, [<code>i</code>, <code>s</code>) refers to the elements in the data structure
+starting with the element pointed to by <code>i</code> and up to but not including
+the element, if any, pointed to by the first iterator <code>j</code> such that <code>j == s</code>.</p>
+
+<p>-10-
+ A sentinel <code>s</code> is called <em>reachable</em> from an iterator <code>i</code> if and only if
+ there is a finite sequence of applications of the expression <code>++i</code>
+ that makes <code>i == s</code>.
+ If <code>s</code> is reachable from <code>i</code>, [<code>i</code>, <code>s</code>) denotes a valid range.</p>
+
+<p>-11-
+A counted range <code>i</code> + [<code>0</code>, <code>n</code>) is empty if <code>n == 0</code>;
+otherwise, <code>i + [</code>0<code>,</code>n<code>) refers to the</code>n<code>elements in the data structure
+starting with the element pointed to by</code>i<code>and up to but not including
+the element, if any, pointed to by the result of</code>n<code>applications of</code>++i<code>.
+A counted range</code>i<code>+ [</code>0<code>,</code>n<code>) is valid if and only if</code>n == 0<code>;
+or</code>n<code>is positive,</code>i<code>is dereferenceable, and</code>++i<code>+ [</code>0<code>,</code>--n`) is valid.</p>
+
+<p>-12-
+The result of the application of library functions to invalid ranges
+is undefined.</p>
+
+<p><ins class="block">
+-?- For an iterator, <code>i</code>, of a type that models <code>contiguous_iterator</code>
+([iterator.concept.contiguous]), library functions are permitted to replace
+[<code>i</code>, <code>s</code>) with [<code>to_address(i)</code>, <code>to_address(i) + distance(i, s)</code>),
+and to replace <code>i</code> + [<code>0</code>, <code>n</code>) with <code>to_address(i)</code> + [<code>0</code>, <code>n</code>).
+</ins></p>
+
+<p><ins class="block">
+[<em>Note ?</em>: This means a program cannot rely on any side effects of incrementing
+or dereferencing <code>i</code>, because library functions might perform those operations
+on a pointer obtained by <code>to_address(i)</code> instead of performing them on <code>i</code>.
+&mdash; <em>end note</em>]
+</ins></p>
+
+<a name="Acknowledgements"></a>
+<h2>Acknowledgements</h2>
+
+<a name="References"></a>
+<h2>References</h2>
+
+<p><a href="n4988.pdf" title="Working Draft - Programming Languages -- C++">N4988</a>, Working Draft - Programming Languages -- C++, Thomas Köppe, 2024.</p>
+</body></html>

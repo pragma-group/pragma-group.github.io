@@ -1,0 +1,196 @@
+<html>
+<head>
+<title>P3257R0: Make the predicate of <TT>contract_assert</TT> more regular</title>
+
+<meta http-equiv="Content-Type" content="text/html;charset=UTF-8">
+
+<style type="text/css">
+  ins { text-decoration:none; font-weight:bold; background-color:#A0FFA0 }
+  .new { text-decoration:none; font-weight:bold; background-color:#D0FFD0 }
+  del { text-decoration:line-through; background-color:#FFA0A0 }  
+  .del { text-decoration:line-through; background-color:#FFC0C0 }  
+  strong { font-weight: inherit; color: #2020ff }
+  table, td, th { border: 1px solid black; border-collapse:collapse; padding: 5px }
+</style>
+</head>
+
+<body>
+ISO/IEC JTC1 SC22 WG21 P3257R0<br/>
+Jens Maurer &lt;Jens.Maurer@gmx.net><br/>
+Target audience: SG21, EWG<br/>
+2024-04-26<br/>
+
+<h1>P3257R0: Make the predicate of <TT>contract_assert</TT> more regular</h1>
+
+<h2>Introduction</h2>
+
+<p>
+Discussions in EWG and SG21 and on the respective reflectors have
+shown that the changes effected by P3071R0 (Protection against
+modifications in contracts) cause concerns, because different behavior
+for contract predicates compared to nearby code is established.
+</p>
+
+<p>
+This paper proposes (1) to revert P3071R0 for the interpretation of
+predicates in <TT>contract_assert</TT> and (2) to specify exactly-once
+evaluation of predicates in <TT>contract_assert</TT> unless the
+contract has the "ignore" semantic.
+</p>
+
+
+<h2>History</h2>
+
+<ul>
+<li>R0: Initial paper.
+</ul>
+
+
+<h2>Discussion</h2>
+
+<h3>Const view in <TT>contract_assert</TT></h3>
+
+<p>
+In general, contract predicates should check the state of the program,
+but not modify it.  P3071R0 strives to aid with that by making
+accesses to local variables and data members const-qualified, the
+latter akin to <TT>const</TT> member functions.  It is well understood
+that this may change overload resolution results or make certain
+expressions ill-formed, for example <TT>map[key]</TT>.
+</p>
+
+<p>
+This approach makes the interpretation of a given expression different
+inside and outside of e.g. a <TT>contract_assert</TT>:
+
+<pre>
+void f() {
+  int i = 0;
+  if (++i &lt; 5) { ... }        // OK
+  contract_assert(++i < 5);   // P2900R6: ill-formed; proposed: well-formed
+}
+</pre>
+</p>
+
+<p>Furthermore, some interfaces even in the standard library do not
+offer <TT>const</TT> overloads, e.g. <TT>map[key]</TT>
+or <TT>std::ios_base::iword</TT>:
+
+<pre>
+int g(std::ios_base&amp; io) {
+  int idx = io.xalloc();
+  if (io.iword(idx)) { ... }                // OK
+  contract_assert(io.iword(idx) == 0);      // P2900R6: ill-formed; proposed: well-formed
+  return idx;
+}
+</pre>
+</p>
+
+This is contrary to popular expectations that the same source code
+appearing twice in lexical vicinity works the same.
+</p>
+
+<p>
+This argument applies to a lesser extent to preconditions and
+postconditions, because those appear in the declaration, possibly far
+away from the definition:
+<pre>
+void h(int x, int y)
+  pre(x &gt; 0)       // ok
+  pre(y &lt; 0)       // ok
+  pre(++x &lt; 42);   // ill-formed
+</pre>
+</p>
+
+<p>Thus, as "proposal 1", this paper suggests to revert P3071R0 for
+the interpretation of predicates in <TT>contract_assert</TT> (but not
+in preconditions or postconditions).</p>
+
+<h3>Evaluation semantics</h3>
+
+<p>
+Code patterns involving C-style <TT>assert</TT> have been discovered
+that intentionally modify state only to be used for checking:
+<pre>
+  void f() {
+#ifndef NDEBUG
+    int iter = 0;
+#endif
+    while (/* something */) {
+      assert(++iter < 6);   // iterating more than five times is a bug
+      // ...		  
+    }
+  }
+</pre>
+
+Beyond the fact that there is currently no way in P2900R6 to
+appropriately guard the declaration of the variable <TT>iter</TT>,
+there is also no guarantee that this code works as expected to start
+with when transforming the <TT>assert</TT> into
+a <TT>contract_assert</TT>, because contract predicates are allowed to
+be evaluated an indefinite number of times, per P2900R6:
+<pre>
+  void f() {
+    int iter = 0;
+    while (/* something */) {
+      contract_assert(++iter < 6);   // well-formed with "proposal 1"
+      // ...		  
+    }
+  }
+</pre>
+There are engineering reasons why preconditions and postconditions
+need the liberty to be evaluated up to twice, in order to support
+separate compilation and delivery of callers and callees, but those
+reasons do not apply to <TT>contract_assert</TT>, which always appears
+inside a function body (or lambda).  The allowance to evaluate more
+than twice was introduced to discourage contract predicates that
+change state, because the resulting new state would be unpredictable.
+For <TT>contract_assert</TT>, this goal seems less important than the
+ability to concisely implement the use-cases for state modification
+shown above.
+</p>
+
+<p>
+For another example:
+<pre>
+  if (!expr) {    // #1
+    // modify the state to make `expr` true
+    ...
+  }
+  contract_assert(expr);    //  P2900R6: semantics of "expr" not guaranteed to match #1
+</pre>
+</p>
+
+<p>Thus, as "proposal 2", this paper suggests to guarantee
+exactly-once evaluation of predicates in <TT>contract_assert</TT>,
+unless the contract has the "ignore" semantic (in which case no
+evalution happens).
+</p>
+
+
+<h2>Outline of wording changes relative to P2900R6</h2>
+
+<h3>Proposal 1: Interpretation of predicates in <TT>contract_assert</TT></h3>
+
+<ul>
+<li>Adjust the note in [basic.contract.general] p3.</li>
+<li>Limit the new paragraph in [expr.prim.this] to preconditions and
+postconditions.</li>
+<li>Limit [expr.prim.id.unqual] p5 to preconditions and
+postconditions.</li>
+</ul>
+
+<h3>Proposal 2: Exactly-once evaluation of predicates
+in <TT>contract_assert</TT></h3>
+
+<ul>
+<li>Limit [basic.contract.eval] p6 to preconditions and postconditions.</li>
+</ul>
+
+
+<h2>Acknowledgements</h2>
+
+<p>Thanks to Gabriel Dos Reis for reviewing a draft of this paper.</p>
+
+</body>
+</html>

@@ -1,0 +1,1047 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+
+<meta http-equiv="Content-Type" content="text/html;charset=UTF-8">
+
+<style type="text/css">
+
+body { color: #000000; background-color: #FFFFFF; }
+del { text-decoration: line-through; color: #8B0040; }
+ins { text-decoration: underline; color: #005100; }
+
+p.example { margin-left: 2em; }
+pre.example { margin-left: 2em; }
+div.example { margin-left: 2em; }
+
+code.extract { background-color: #F5F6A2; }
+pre.extract { margin-left: 2em; background-color: #F5F6A2;
+  border: 1px solid #E1E28E; }
+
+p.function { }
+.attribute { margin-left: 2em; }
+.attribute dt { float: left; font-style: italic;
+  padding-right: 1ex; }
+.attribute dd { margin-left: 0em; }
+
+blockquote.std { color: #000000; background-color: #F1F1F1;
+  border: 1px solid #D1D1D1;
+  padding-left: 0.5em; padding-right: 0.5em; }
+blockquote.stddel { text-decoration: line-through;
+  color: #000000; background-color: #FFEBFF;
+  border: 1px solid #ECD7EC;
+  padding-left: 0.5empadding-right: 0.5em; ; }
+
+blockquote.stdins { text-decoration: underline;
+  color: #000000; background-color: #C8FFC8;
+  border: 1px solid #B3EBB3; padding: 0.5em; }
+
+table { border: 1px solid black; border-spacing: 0px;
+  margin-left: auto; margin-right: auto; }
+th { text-align: left; vertical-align: top;
+  padding-left: 0.8em; border: none; }
+td { text-align: left; vertical-align: top;
+  padding-left: 0.8em; border: none; }
+
+</style>
+
+<title>A proposal for a type trait to detect narrowing conversions</title>
+</head>
+<body>
+<h1>A proposal for a type trait to detect narrowing conversions</h1>
+<p>ISO/IEC JTC1 SC22 WG21 P0870R7 2025-06-17</p>
+<p>Project: Programming Language C++</p>
+<p>Audience: Library Working Group, Library Evolution Working Group, Study Group 6 (Numerics)</p>
+<address>Giuseppe D'Angelo, giuseppe.dangelo@kdab.com</address>
+
+<h2>Table of Contents</h2>
+<ul>
+<li><a href="#ch1">1. Introduction</a></li>
+<li><a href="#ch2">2. Changelog</a></li>
+<li><a href="#ch3">3. Motivation and Scope</a></li>
+<li><a href="#ch4">4. Impact On The Standard</a></li>
+<li><a href="#ch5">5. Design Decisions</a></li>
+<li><a href="#ch6">6. Implementation Experience</a></li>
+<li><a href="#ch7">7. Technical Specifications</a></li>
+<li><a href="#appendixa">Appendix A</a></li>
+<li><a href="#appendixb">Appendix B</a></li>
+</ul>
+
+<h2 id="ch1"><a href="#ch1">&sect;</a> 1. Introduction</h2>
+
+<p>This paper proposes a new type trait for the C++ Standard Library,
+<code>is_convertible_without_narrowing</code>, to detect whether a type is
+implictly convertible to another type without going through a narrowing
+conversion.</p>
+
+<h3 id="ch1.1"><a href="#ch1.1">&sect;</a> 1.1 Tony Tables</h3>
+
+<p>
+<table>
+<thead>
+<tr><th>Before</th><th>After</th></tr>
+</thead>
+<tbody>
+<tr><td>
+<pre class="example">
+<code>// list initialization forbids narrowing for e.g. int,
+// but not for types "wrapping" int (like
+// optional&lt;int&gt;, variant&lt;int&gt;, etc.):
+
+
+template &lt;typename T&gt;
+struct my_optional
+{
+    template &lt;typename U = T&gt;
+    my_optional(U&amp;&amp; u)
+
+    { ~~~ }
+};
+
+int some_int{3.14};               // ERROR
+my_optional&lt;int&gt; optional_int{3.14}; // OK, but possibly not wanted</code>
+</pre>
+</td><td>
+<pre class="example">
+<code>// make it possible to block narrowing for int,
+// as well as anything "wrapping" int:
+
+
+
+template &lt;typename T&gt;
+struct my_optional
+{
+    template &lt;typename U = T&gt;
+    my_optional(U&amp;&amp; u)
+    <ins>requires std::is_convertible_without_narrowing_v&lt;U, T&gt;</ins>
+    { ~~~ }
+};
+
+int some_int{3.14};               // ERROR
+my_optional&lt;int&gt; optional_int{3.14}; // ERROR</code>
+</pre>
+</td></tr>
+</tbody>
+</table>
+</p>
+
+<p>
+<table>
+<thead>
+<tr><th>Before</th><th>After</th></tr>
+</thead>
+<tbody>
+<tr><td>
+<pre class="example">
+<code>template &lt;typename T&gt;
+class complex;
+
+// Each floating point specialization of complex defines conversion
+// constructors which are implicit if and only if they don't narrow
+
+template &lt;&gt;
+class complex&lt;float&gt;
+{
+    float re; float im;
+public:
+    explicit complex(const complex&lt;double&gt;&amp; other);
+    explicit complex(const complex&lt;long double&gt;&amp; other);
+};
+
+template &lt;&gt;
+class complex&lt;double&gt;
+{
+    double re; double im;
+public:
+    /* implicit */ complex(const complex&lt;float&gt;&amp; other);
+    explicit complex(const complex&lt;long double&gt;&amp; other);
+};
+
+// repeat for long double, extended floating point [<a href="#P1467R4">P1467R4</a>], etc.
+</pre>
+</td><td>
+<pre class="example">
+<code>template &lt;typename T&gt;
+class complex;
+
+// Just one converting constructor template that uses explicit(bool)
+// (it's pointless to also check for convertibility, floating points
+// always convert to each other)
+
+template &lt;std::floating_point T&gt;
+class complex
+{
+    T re; T im;
+public:
+    template &lt;std::floating_point U&gt;
+    <ins>explicit(!std::is_convertible_without_narrowing_v&lt;U, T&gt;)</ins>
+    complex(const complex&lt;U&gt;&amp; other);
+};
+</code>
+</pre>
+</td></tr>
+</tbody>
+</table>
+</p>
+
+<p>
+<table>
+<thead>
+<tr><th>Before</th><th>After</th></tr>
+</thead>
+<tbody>
+<tr><td>
+<p>[variant.ctor], from [<a href="#N4861">N4861</a>]:</p>
+<code>
+template&lt;class T&gt; constexpr variant(T&amp;&amp; t) noexcept(<i>see below</i>);
+</code>
+<p>Let <code>T<sub>j</sub></code> be a type that is determined
+as follows: build an imaginary function <code>FUN(T<sub>i</sub>)</code>
+for each alternative type <code>T<sub>i</sub></code> for which
+<code>T<sub>i</sub> x[] = {std::forward&lt;T&gt;(t)};</code>
+is well-formed for some invented variable <code>x</code>. [&hellip;]</p>
+</td><td>
+<p>&nbsp;</p>
+<code>
+template&lt;class T&gt; constexpr variant(T&amp;&amp; t) noexcept(<i>see below</i>);
+</code>
+<p>Let <code>T<sub>j</sub></code> be a type that is determined
+as follows: build an imaginary function <code>FUN(T<sub>i</sub>)</code>
+for each alternative type <code>T<sub>i</sub></code> for which
+<ins><code>is_convertible_without_narrowing_v&lt;T&amp;&amp;, T<sub>i</sub>&gt;</code>
+is <tt>true</tt></ins>. [&hellip;]</p>
+</td></tr>
+</tbody>
+</table>
+</p>
+
+<p>
+<table>
+<thead>
+<tr><th>Before</th><th>After</th></tr>
+</thead>
+<tbody>
+<tr><td>
+<pre class="example">
+<code>// simplified from QObject
+
+template &lt;typename Func1, typename Func2&gt;
+bool connect(QObject *sender, Func1 signal,
+             QObject *receiver, Func2 slot)
+{
+    // Check that the signal is compatible with the slot.
+    // This means:
+    // * that the signal carries at least as many arguments
+    //   than the slot;
+    // * that each positional argument of the signal is convertible
+    //   to the respective argument of the slot;
+    // * etc.
+
+    static_assert(detail::check_argument_count&lt;Func1, Func2&gt;,
+                 "The slot requires more arguments than the signal provides.");
+
+    static_assert(detail::check_convertible_arguments&lt;Func1, Func2&gt;,
+                  "Signal and slot arguments are not compatible.");
+
+    return detail::connect_impl(~~~);
+}
+
+// When the temperature changes, emits a signal carrying a double
+BodyThermometer *thermometer = ~~~;
+
+// Has a slot that shows an integer value on the screen
+IntLabel *label = ~~~;
+
+// OK, but likely a mistake: will silently truncate the double
+// emitted with the signal. For instance, 37.0 and 37.99 would
+// be both displayed as "37".
+// Still, it compiles, because double is implicitly convertible to int...
+connect(thermometer, &amp;BodyThermometer::temperatureChanged,
+        label, &amp;IntLabel::setValue);
+</pre>
+</td><td>
+<pre class="example">
+<code>// simplified from QObject
+
+template &lt;typename Func1, typename Func2&gt;
+bool connect(QObject *sender, Func1 signal,
+             QObject *receiver, Func2 slot)
+{
+    // Same checks, but refine the convertibility check so that no argument
+    // carried by the signal needs a narrowing conversion
+    // in order to be converted to the respective argument in of the slot
+
+
+
+
+
+    static_assert(detail::check_argument_count&lt;Func1, Func2&gt;,
+                 "The slot requires more arguments than the signal provides.");
+
+    <ins>static_assert(detail::check_convertible_without_narrowing_arguments&lt;Func1, Func2&gt;,
+                  "Signal and slot arguments are not compatible/would narrow.");</ins>
+
+    return detail::connect_impl(~~~);
+}
+
+
+BodyThermometer *thermometer = ~~~;
+
+
+IntLabel *label = ~~~;
+
+
+
+
+// ERROR: failing static_assert, would narrow
+connect(thermometer, &amp;BodyThermometer::temperatureChanged,
+        label, &amp;IntLabel::setValue);
+</pre>
+</td></tr>
+</tbody>
+</table>
+</p>
+
+<h2 id="ch2"><a href="#ch2">&sect;</a> 2. Changelog</h2>
+
+<ul>
+
+<li>P0870R7
+    <ul>
+    <li>Fixed the feature-testing macro to make it freestanding.</li>
+    <li>Added a note for LWG in the wording.</li>
+    </ul>
+</li>
+
+<li>P0870R6
+    <ul>
+    <li>Added more details to the design decisions. No changes to the wording.</li>
+    </ul>
+</li>
+
+<li>P0870R5
+    <ul>
+    <li>Incorporated feedback after a LWG review; new wording has been provided.</li>
+    <li>Rebased on top of the latest draft.</li>
+    <li>Added a <a href="#ch5.9">discussion</a> about the deliberate choice of never considering the source to be a constant expression.</li>
+    <li>Added a reference to P2509R0.</li>
+    <li>Misc. reading improvements, typo fixes.</li>
+    </ul>
+</li>
+<li>P0870R4
+    <ul>
+    <li>Incorporated the feedback after a review of the paper on the lib-ext mailing list.</li>
+    <li>Changed the proposed name of the trait to
+    <code>is_convertible_without_narrowing</code> following a poll on the mailing list;
+    the semantics have been adapted.</li>
+    <li>Added Tony Tables with more examples.</li>
+    <li>Change the target audience to LEWG.</li>
+    </ul>
+</li>
+<li>P0870R3
+    <ul>
+    <li>Clarified that the implementation using an array won't work with
+    certain datatypes (<code>void</code>, etc.).</li>
+    <li>Added a feature test macro.</li>
+    <li>Rebased the proposed wording on top of N4861.</li>
+    <li>Improved the proposed wording.</li>
+    <li>Editorial fixes: numbered the sections, fixed misspellings.</li>
+    </ul>
+</li>
+<li>P0870R2
+    <ul>
+    <li>Incorporated feedback from the LEWGI, EWGI, EWG sessions in Prague.
+        In the LEWGI session this proposal was met favourably (2-10-2-1-0).
+        EWGI and EWG didn't have any direct feedback
+        (and also no particular concerns).</li>
+    <li>Elaborated on possible implementations.</li>
+    <li>Elaborated more on design decisions, especially regarding whether
+        user-defined types should be handled, and whether
+        this proposal would constrain core language evolution.
+        Unlike R1, we now also include user-defined types in narrow conversion
+        sequences (but like R1, we stick to [dcl.init.list] semantics, which
+        are not customizable).</li>
+    <li>Updated reference to P0608R3.</li>
+    <li>Referenced other papers.</li>
+    <li>Incorporated the changes to [dcl.init.list] introduced by P1957R2.</li>
+    <li>Added SG6 to the target audience.</li>
+    <li>Improved spelling.</li>
+    </ul>
+</li>
+<li>P0870R1
+    <ul>
+    <li>Submitted for the Prague mailing, targeting LEWGI.</li>
+    </ul>
+</li>
+</ul>
+
+
+<h2 id="ch3"><a href="#ch3">&sect;</a> 3. Motivation and Scope</h2>
+
+<p>A <em>narrowing conversion</em> is formally defined by the C++ Standard
+in [dcl.init.list], with the intent of forbidding them from
+list-initializations.</p> 
+
+<p>It is useful in certain contexts to know whether a conversion between two types
+would qualify as a narrowing conversion. For instance, it may be useful to
+inhibit (via SFINAE) construction or conversion of "wrapper" types
+(like <code>std::variant</code> or <code>std::optional</code>) when
+a narrowing conversion is requested.</p>
+
+<p>A use case the author has recently worked on was to prohibit narrowing
+conversions when establishing a connection in the Qt framework 
+(see [<a href="#QT_NO_NARROWING_CONVERSIONS_IN_CONNECT">Qt</a>]),
+with the intent of making the type system more robust. Simplifying,
+a connection is established between a <em>signal</em> non-static member function
+of an object and a <em>slot</em> non-static member function of another object. 
+The signal's and the slot's argument lists must have compatible arguments
+for the connection to be established: the signal must have at least as
+many arguments as the slot, and the each argument of the signal must be
+implictly convertible to the corresponding argument of the slot. In case
+of a mismatch, a compile-time error is generated. Bugs have been
+observed when connections were successfully established, but a narrowing
+conversion (and subsequent loss of data/precision) was happening. Detecting such
+narrowing conversions, and making the connection fail for such cases,
+would have prevented the bugs.</p>
+
+
+<h2 id="ch4"><a href="#ch4">&sect;</a> 4. Impact On The Standard</h2>
+
+<p>This proposal is a pure library extension.</p>
+
+<p>It proposes changes to an existing header, <code>&lt;type_traits&gt;</code>,
+but it does not require changes to any standard classes or functions and
+it does not require changes to any of the standard requirement tables.</p>
+
+<p>This proposal does not require any changes in the core language,
+and it has been implemented in standard C++.</p>
+
+<p>This proposal does not depend on any other library extensions.</p>
+
+<p>This proposal may help with the implementation of
+[<a href="#P0608R3">P0608R3</a>], the adopted resolution for
+[<a href="LEWG227">LEWG 227</a>]. In particular, in
+[<a href="#P0608R3">P0608R3</a>]'s wording section, the "invented variable
+<code>x</code>" is used to detect a narrowing conversion. However, the same
+paragraph is also broader than the current proposal, in the sense that it
+special-cases boolean conversions [conv.bool], while the current proposal
+does not handle them in any special way. The part about boolean conversions
+has been anyhow removed by adoping [<a href="#P1957R2">P1957R2</a>].</p>
+
+<p>The just mentioned [<a href="#P1957R2">P1957R2</a>], as a follow up of
+[<a href="#P0608R3">P0608R3</a>], made conversions from pointers to
+<code>bool</code> narrowing. It was adopted in the Prague meeting,
+therefore extending the definition of narrowing conversion in [dcl.init.list].
+We do not see this as a problem: we aim to provide a trait to
+detect narrowing conversions exactly as specified by the Standard. Should
+the specification change, then the trait detection should also change
+accordingly; cf. the design decisions below.</p>
+
+<p>This proposal overlaps with [<a href="#P1818R1">P1818R1</a>], a proposal
+that aims at introducing a distinction between narrowing and widening conversions.
+[<a href="#P1818R1">P1818R1</a>] is much more ambitious than this proposal;
+amongst other things, it aims at defining a <code>widening</code> trait.
+The wording of [<a href="#P1818R1">P1818R1</a>] is not complete, but we think
+that such a trait somehow overlaps with the semantics of the trait proposed here;
+it would ultimately depend on the exact definition of what constitutes a
+"widening conversion". Anyhow, the adoption of [<a href="#P1818R1">P1818R1</a>]
+is orthogonal to the present proposal.</p>
+
+<p>[<a href="#P1619R1">P1619R1</a>] and [<a href="#P1998R1">P1998R1</a>] introduce
+functions (called respectively <code>can_convert</code> and
+<code>is_value_lossless_convertable</code>) that check whether a given value
+of an integer type can be represented by another integer type. This is in line
+with the spirit of detecting narrowing conversions, namely, preventing loss of
+information and/or preventing undefined behavior. While this proposal works on
+types, the functions examine specific values; we therefore think that
+the proposals are somehow orthogonal to the current proposal.
+Moreover, [<a href="#P1619R1">P1619R1</a>] and [<a href="#P1998R1">P1998R1</a>]'s
+functions only deal with integer types, while the narrowing definition in
+[dcl.init.list] (adopted by this proposal) also deals with floating point and
+enumeration types (and, following [<a href="#P1957R2">P1957R2</a>]'s
+adoption, also boolean and pointer types).</p>
+
+<p>[<a href="#P2509R0">P2509R0</a>] proposes a type trait which complements the
+present proposal, by detecting if a given target type can represent all the values
+of a given source type. This is different from detecting a narrowing conversion
+as defined by the core language; for instance, converting <code>int</code> to <code>double</code>
+is a narrowing conversion even on common platforms where <code>double</code>
+can actually precisely represent any <code>int</code> value. 
+
+<h2 id="ch5"><a href="#ch5">&sect;</a> 5. Design Decisions</h2>
+
+<p>The most natural place to add the trait presented by this proposal
+is the already existing <code>&lt;type_traits&gt;</code> header, which
+collects most (if not all) of the type traits available from the Standard Library.</p>
+
+<p>In the <code>&lt;type_traits&gt;</code> header the <code>is_convertible</code>
+type trait checks whether a type is implictly convertible to another type.
+Building upon this established name, the proposed name for the trait 
+described by this proposal shall therefore be <code>is_convertible_without_narrowing</code>,
+with the corresponding <code>is_convertible_without_narrowing_v</code> type trait helper
+variable template.</p>
+
+
+<h3 id="ch5.1"><a href="#ch5.1">&sect;</a>
+5.1 Should <code>is_convertible_v&lt;From, To&gt; == true</code> be
+a precondition of trying to instantiate 
+<code>is_convertible_without_narrowing&lt;From, To&gt;</code>?</h3>
+
+<p>The author deems this unnecessary. Adding such a precondition would
+likely make the usage of the proposed trait more difficult and/or error prone.</p>
+<p>As far as the author can see, the precondition is not going to dramatically
+simplify the specification for the proposed trait, or its implementation.</p>
+
+<h3 id="ch5.2"><a href="#ch5.2">&sect;</a>
+5.2 Given a type <code>From</code> convertible to a type <code>To</code>,
+should <code>is_convertible_without_narrowing_v&lt;From, To&gt;</code> yield
+<code>false</code> only for the combinations of types listed in [dcl.init.list]?
+What about user-defined types?</h3>
+
+<p>The R1 revision of this paper was limiting the possibility for
+the trait to detect narrowing if and only if both <code>From</code>
+and <code>To</code> were one of the types listed in [dcl.init.list], which
+are all builtin types.
+Now, while we strongly want the type trait to match the language definition
+of narrowing conversion, there are some objections to simply detecting
+if we are in one of the those cases.</p>
+
+<p>For instance, should a conversion from <code>const double</code>
+to <code>float</code> be considered narrowing or not? If we take the listing
+in [dcl.init.list] literally, then the answer would be "no"
+(that is, the trait would have to yield <code>true</code>), because
+<code>const double</code> is not in the list.
+However, this is not really useful, nor expected. If some code checks whether
+there is a conversion between two types and the conversion isn't narrowing,
+such code could erroneously infer that this is the case between
+<code>const double</code> and <code>float</code> and do the conversion.
+(This is in spite of the fact that list-initialization would not work,
+because <em>there is</em> a narrowing conversion in the conversion sequence).</p>
+
+<p>To elaborate on this last sentence: the definition of list-initialization
+in [dcl.init.list] contains several cases where, if a narrowing
+conversion takes place, then the program is ill-formed. We believe
+that, more than detecting if a given conversion between two types <em>is</em>
+a narrowing conversion (as strictly per the definition),
+users want to detect if a conversion <em>has</em> a narrowing conversion,
+and thus would be forbidden if used in a list-initialization.
+As a consequence, we claim that
+<code>is_convertible_without_narrowing_v&lt;const double, float&gt;</code> should
+yield <code>false</code>.</p>
+
+<p>This is not simply doable by stripping <code>From</code> and <code>To</code>
+of their <em>cv</em>-qualifiers (e.g. by applying <code>std::decay_t</code> on them),
+and then checking if the resulting types do not form a narrowing conversion. One
+must also consider all the other cases for conversions, which necessarily
+include user-defined types, as they may define implicit conversion operators
+that can be used as part of a conversion sequence that also includes a narrowing
+conversion. As an example:</p>
+
+<pre class="example">
+<code>
+struct S { operator double() const; };
+S s;
+float f1 = s;     // OK
+float f2 = { s }; // ERROR: narrowing
+</code>
+</pre>
+
+<p>We therefore claim that <code>is_convertible_without_narrowing_v&lt;S, float&gt;</code>
+should yield <code>false</code>. A similar example is used in
+[<a href="#P0608R3">P0608R3</a>] and
+then [<a href="#P1957R2">P1957R2</a>]'s design. Slightly adapted:</p>
+
+<pre class="example">
+<code>
+struct Bad { operator char const*() &amp;&amp;; };
+</code>
+</pre>
+
+<p>With the adoption of [<a href="#P1957R2">P1957R2</a>] in the Standard, we
+claim that <code>is_convertible_without_narrowing_v&lt;Bad, bool&gt;</code> should yield
+<code>false</code>. For completeness,
+<code>is_convertible_without_narrowing_v&lt;Bad &amp;, bool&gt;</code> should yield
+<code>false</code> (there is no conversion), and
+<code>is_convertible_without_narrowing_v&lt;Bad &amp;&amp;, bool&gt;</code> should yield
+<code>false</code> as well (narrowing).</p>
+
+<p>Note that, although user-defined datatypes are involved, the detection
+of whether there is a narrowing conversion sticks to the list of narrowing
+conversions in [dcl.list.init], which deals with fixed number of cases:
+between certain integer and floating point types; from unscoped enumeration
+types to a integer or a floating point type; and from pointer types to boolean.
+We are not proposing to allow any customization to these cases (see below).</p>
+
+<h3 id="ch5.3"><a href="#ch5.3">&sect;</a>
+5.3 Should <code>is_convertible_without_narrowing&lt;From, To&gt;</code> yield
+<code>false</code> for boolean conversions [conv.bool]?</h3>
+
+<p>The author deems this to be out of scope for the proposed trait, which should have
+only the semantics defined by the language regarding narrowing conversion.
+Another trait should be therefore added to detect (implicit) boolean conversions, which,
+according to the current wording of [dcl.init.list], are not considered narrowing conversions.
+(Note that with the adoption of [<a href="#P1957R2">P1957R2</a>], conversions
+from pointer types to boolean are indeed considered narrowing.)</p>
+<p>It is the author's opinion that, in general, implicit boolean conversions are undesirable
+for the same reasons that make narrowing conversions unwanted in certain contexts
+&mdash; in the sense that a conversion towards bool may discard
+important information. However, we recognize the importance of not imbuing a type trait
+with extra, not yet well-defined semantics, and therefore we are excluding
+boolean conversions from the present proposal.</p>
+
+<h3 id="ch5.4"><a href="#ch5.4">&sect;</a>
+5.4 Should <code>is_convertible_without_narrowing&lt;From, To&gt;</code> use
+some other semantics than the narrowing defined in [dcl.init.list]?</h3>
+
+<p>Given that narrowing is formally defined in the core language, we are
+strongly against deviating from that definition. If anything, proposals
+aiming at marking as narrowing certain conversions between user defined types
+should also amend the core language definition; the type trait would
+still stick to that definition.</p>
+
+
+<h3 id="ch5.5"><a href="#ch5.5">&sect;</a>
+5.5 Should specializations of <code>is_convertible_without_narrowing&lt;From, To&gt;</code> be allowed?</h3>
+
+<p>We believe that specializations of the trait should be forbidden.
+This is consistent with the other type traits defined in [meta]
+(cf. [meta.rqmts]), and with the fact that the current wording of
+[dcl.init.list] defining narrowing conversions does not extend to user-defined
+types.</p>
+
+<p>We are aware of broader work happening in the area, such as
+[<a href="#P1818R1">P1818R1</a>]. That proposal introduces a keyword to mark
+widening conversions, but one may think of an alternative approach where users
+are expected to specialize <code>is_convertible_without_narrowing</code> in order to
+mark a conversion as non-narrowing. In any case, lifting the above limitation on
+specializations would always be possible.</p>
+
+<h3 id="ch5.6"><a href="#ch5.6">&sect;</a>
+5.6 Does providing such a trait make changes to the definition of
+"narrowing conversion" harder to land?</h3>
+
+<p>This objection has been raised during the LEWGI meeting in Prague.
+The objection is sound, in the sense that a future possible change to
+the definition of narrowing conversion will impact user code using the trait.</p>
+
+<p>On the other hand, during the Prague meeting, EWGI and EWG did not raise
+this concern regarding this proposal.</p>
+
+<p>First and foremost, we would like to remark that the trait is already
+implementable &mdash; and has indeed already been implemented &mdash; using
+standard C++ (e.g. via <code>To{std::declval&lt;From&gt;()}</code>, cf. below).
+Any change to the definition of narrowing would therefore already be impacting
+user code. The impact would likely go beyond type traits / metaprogramming,
+since initialization itself would change semantics.
+An example of such a change affecting [dcl.init.list] comes from
+[<a href="#P1957R2">P1957R2</a>], which has been adopted in Prague. That
+adoption changed the semantics of code like <code>bool b = {ptr};</code> (making
+it ill-formed; was OK before).</p>
+
+<p>In general, changes to the core language that affected type traits
+have already happened. For instance, between C++17 and C++20 the definition
+of "aggregate" in [dcl.init.aggr] has been changed, therefore changing the
+semantics of the <code>std::is_aggregate</code> type trait.
+Similarly, the definitions of "trivial class" and of "trivially copyable class"
+in [class.prop] have changed between C++14 and C++17;
+meaning that also the type traits <code>std::is_trivial</code> and
+<code>std::is_trivially_copy_constructible</code> have changed semantics.</p>
+
+<p>We can therefore reasonably assume that the presence of a trait does not seem
+to preclude changes to the core language (or, if such an objection was
+raised when proposing these changes to the core language, it was also
+disregarded, as the changes did ultimately land).</p>
+
+<p>Finally, it is the author's opinion that code that is using facilities
+to detect narrowing conversions would like to stick to the core language
+definition. If the definition changes, we foresee that the detection
+wants to change too, following the definition. Note that an ad-hoc solution
+(rather than a standardized trait) may fall out of sync with the core language
+definition, and thus start misdetecting some cases.</p>
+
+
+<h3 id="ch5.7"><a href="#ch5.7">&sect;</a>
+5.7 Should there be a matching concept?</h3>
+
+<p>This point was raised during the LEWGI meeting in Prague, and it was
+deemed unnecessary at this point, because ultimately this proposal is just
+about a type trait. If it will be deemed useful, adding a concept could
+always be done at a later time, via another proposal.</p>
+
+
+<h3 id="ch5.8"><a href="#ch5.8">&sect;</a>
+5.8 Bikeshedding: naming</h3>
+
+<p>The LEWGI review of the R3 revision of this paper discussed several options
+for the name of the trait.</p>
+<p>In earlier versions we proposed the name <code>is_narrowing_convertible</code>;
+however, during the review of the paper, there was a general consensus
+that the majority of uses is going to be about detecting whether a conversion
+is possible <i>without</i> narrowing.
+As such, <code>is_narrowing_convertible</code> (which detects if a conversion
+does involve a narrowing conversion) would always need to be combined with
+<code>is_convertible</code> to achieve the desidered result, for instance like this:</p>
+
+<pre class="example">
+<code>
+~~~
+// detect if From is convertible to To without a narrowing conversion
+requires (is_convertible_v&lt;From, To&gt; &amp;&amp; !is_narrowing_convertible_v&lt;From, To&gt;)
+~~~
+</code>
+</pre>
+
+<p>Another concern was raised about the very usage of "narrowing convertible",
+which is not currently a term used anywhere in the Standard.</p>
+<p>Therefore, a poll was taken on the lib-ext mailing list, trying to
+find a better name, offering options for both a positive name (conversion
+sequence involves a narrowing conversion) or a negative one (conversion
+sequence does not involve a narrowing conversion). The proposed options were:</p>
+
+<ul>
+<li><code>is_narrowing_convertible</code></li>
+<li><code>is_convertible_with_narrowing</code></li>
+<li><code>is_narrowing</code></li>
+<li><code>is_non_narrowing_convertible</code></li>
+<li><code>is_nonarrowing_convertible</code></li>
+<li><code>is_nonnarrowing_convertible</code></li>
+<li><code>is_convertible_without_narrowing</code></li>
+<li><code>is_convertible_no_narrowing</code></li>
+<li><code>is_non_narrowing</code></li>
+</ul>
+
+<p>The poll had very scarce participation, but
+<code>is_convertible_without_narrowing</code> emerged as the preferred option.
+The R4 revision of this paper renamed the trait, and, consequently,
+adapted the discussion regarding its semantics &mdash;
+that is, to detect types that are convertible through a conversion
+sequence that does <i>not</i> require a narrowing conversion.
+This required some rewording in a few places.</p>
+
+
+<h3 id="ch5.9"><a href="#ch5.9">&sect;</a>
+5.9 The problem of detecting constant expressions as source</h3>
+
+<p>Many of the cases for narrowing conversions listed in [dcl.init.list] have an exception that states that a given conversion is <b>not</b> narrowing if <i>the source is a constant expression</i>, and the converted value satisfies certain criteria. For instance, consider this example:</p>
+
+<pre class="example">
+<code>
+int from = 42;
+float to{from};   // ill-formed, narrowing
+</code>
+</pre>
+
+<p>The initialization of <code>to</code> is ill-formed because of narrowing, although 42 is representable by a <code>float</code>. This is because the source is not a constant expression, so the relative provision in [dcl.init.list]/7.3 does not apply. Specifically, a lvalue-to-rvalue conversion is required for the initialization, and [expr.const]/5.9 makes the expression not a core constant expression.</p>
+
+<p>It's however sufficient to change the snippet to this:</p>
+
+<pre class="example">
+<code>
+const int from = 42;    // add const here
+float to{from};         // OK
+</code>
+</pre>
+
+<p>and now there is no longer a narrowing conversion, because the source is a constant expression, and 42 can be represented exactly by both <code>float</code> and <code>int</code>.</p>
+
+<p>A similar example is this one:</p>
+
+<pre class="example">
+<code>
+std::integral_constant&lt;int, 42&gt; from;    // not const
+float to{from};                          // OK
+</code>
+</pre>
+
+<p>Here the initialization of <code>to</code> is again well-formed. The source now is a constant expression, and 42 can be represented exactly. Although <code>from</code> is not "an object that is usable in constant expressions" ([expr.const]/4), there is nothing that disqualifies the expression from being a core constant expression.</p>
+
+<p>(Again, specifically: the aforementioned lvalue-to-rvalue conversion does not apply here. The list-initialization of an object of type <code>float</code> ([dcl.init.general]/16.1) will resolve into direct-initialization ([dcl.init.list]/3.9); then, according to [dcl.init.general]/16.7, a user-defined conversion function is called and that "converts the initializer expression into the object being initialized". For the <code>std::integral_constant</code> class template, the conversion function (in the example, <code>from.operator int()</code>) is <code>constexpr</code>. Then, the prvalue <code>int</code> obtained as a result is converted to <code>float</code> using a floating-integral conversion ([conv.fpint]/2). In conclusion, this means that the source is a constant expression, and there is <em>not</em> a narrowing conversion in the initialization of <code>to</code>.)</p>
+
+<p>It may appear that these considerations need to affect the design of the trait: should <code>is_convertible_without_narrowing_v&lt;int, float&gt;</code> yield <code>true</code> or <code>false</code>? What about <code>is_convertible_without_narrowing_v&lt;const int, float&gt;</code>? <code>is_convertible_without_narrowing_v&lt;std::integral_constant&lt;int, 42&gt;, float&gt;</code>?</p>
+
+<hr />
+
+<p>The answer to these questions lies in the fact that the "exceptions" to the narrowing conversion rules are all based on the source being a constant expression, <i>and that is a quality that is not reflected in any way in the type system</i>.</p>
+
+<p>For instance, a <code>const int</code> variable may or may not be (usable in) a constant expression depending on how and where it gets initialized ([expr.const]/2, 3, 4). Converting such a variable to a <code>float</code> may or may not be a narrowing conversion. We do not have any means to know if it's the case from the <i>types</i> alone &mdash; not to mention the values.</p> 
+
+<p>For this reason, a type trait like the one that we are proposing will never be able to provide a detection that is <i>complete</i>, but only a <i>correct</i> one (no false positives). This does not undermine the usefulness of the trait, which is first and foremost to avoid conversions that may result in accidental loss of data.</p>
+
+<p>Therefore, as a design decision, we are going to assume that the source expression is <b>never</b> a constant expression, and have the trait give the corresponding answer. Practically speaking, we believe this matches the main use case of this trait: constraining functions from being called with parameters of types that may narrow when converted to some other type. These parameters are usually not going to be (usable in) constant expressions anyways:</p>
+
+<pre class="example">
+<code>
+template &lt;typename T&gt;
+struct my_optional
+{
+    template &lt;typename U = T&gt;
+        requires std::is_convertible_without_narrowing_v&lt;U, T&gt;
+    my_optional(U&amp;&amp; u)    // `u` not usable in constant expression
+      : data{std::forward&lt;U&gt;(u)}, loaded{true} {}
+};
+</code>
+</pre>
+
+<p>(A related proposal in this area is <a href="#P1045R1">P1045R1</a> ("<code>constexpr</code> Function Parameters").
+The possibility of such parameters would have implications for the trait. However, work on that proposal seems to have stalled.)</p>
+
+<p>As for <code>is_convertible_without_narrowing_v&lt;std::integral_constant&lt;int, 42&gt;, float&gt;</code>, we believe the trait should return <b><code>true</code></b>.
+Although an object of type <code>std::integral_constant&lt;int, 42&gt;</code> is not necessarily usable in a constexpr context, the <i>conversion</i> of such an object towards e.g. <code>float</code> is a constant expression:</p>
+
+<pre class="example">
+<code>
+std::integral_constant&lt;int, 42&gt; value; // not constexpr
+constexpr float f{value}; // OK
+</code>
+</pre>
+
+<p>Therefore, the trait should correctly determine that we are in a situation where where the conversion is not narrowing, and yield <code>true</code>.</p>
+
+<p>It's important to note that this behavior matches the intended behavior of <code>std::variant</code>'s converting constructor,
+as discussed in <a href="#P3146R2">P3146R2</a> ("Clarifying std::variant converting construction"), which has been approved by LEWG.</p>
+
+
+
+
+<!--
+<p>This design decision is reflected in the proposed wording. This stems from the fact that definition is built on top of the one for <code>std::is_convertible</code>, and that one uses a call to <tt>std::declval&lt;From&gt;()</tt>, which is not a <code>constexpr</code> function and therefore not a constant expression.</p>
+-->
+
+
+<h3 id="ch5.10"><a href="#ch5.10">&sect;</a>
+5.10 Usage of <tt>std::declval</tt> in the wording</h3>
+
+<p>The proposed wording is expressed in terms of <code>std::is_convertible</code>,
+by stating that "the conversion, as defined by <code>is_convertible</code>,
+does not require a narrowing conversion.</p>
+
+<p>It has been pointed out that <code>is_convertible</code> specification, at
+the moment, is formulated in terms of a call to <code>std::declval()</code>. This
+has an impact on the trait, as <code>std::declval</code> is not a constexpr
+function.</p>
+
+<p>The impact has been discussed in the <a href="#ch5.9">previous paragraph</a>:
+the source value is never considered to be a constant expression.</p>
+
+
+<h2 id="ch6"><a href="#ch6">&sect;</a> 6 Implementation Experience</h3>
+
+<p>The proposed type trait has already been implemented in various codebases using
+ad-hoc solutions (depending on the quality of the compiler, etc.), using
+standard C++ and without the need of any special compiler hooks.</p>
+
+<p>One possible implementation is to exhaustively check whether a conversion
+between two types fall in one of the narrowing cases listed in [dcl.list.init].
+This particular implementation has been done in
+[<a href="#QT_IS_NARROWING_IMPLEMENTATION">Qt 5's <code>connect()</code></a>]
+(see this proposal's <a href="#ch3">motivation</a> about why this
+detection has been added to Qt in the first place);
+it has obviously maintenance and complexity shortcomings. The most important
+part is:</p>
+
+<pre class="example">
+<code>
+template&lt;typename From, typename To, typename Enable = void&gt;
+struct AreArgumentsNarrowedBase : std::false_type
+{
+};
+
+template&lt;typename From, typename To&gt;
+struct AreArgumentsNarrowedBase&lt;From, To, typename std::enable_if&lt;sizeof(From) &amp;&amp; sizeof(To)&gt;::type&gt;
+    : std::integral_constant&lt;bool,
+          (std::is_floating_point&lt;From&gt;::value &amp;&amp; std::is_integral&lt;To&gt;::value) ||
+          (std::is_floating_point&lt;From&gt;::value &amp;&amp; std::is_floating_point&lt;To&gt;::value &amp;&amp; sizeof(From) &gt; sizeof(To)) ||
+          ((std::is_integral&lt;From&gt;::value || std::is_enum&lt;From&gt;::value) &amp;&amp; std::is_floating_point&lt;To&gt;::value) ||
+          (std::is_integral&lt;From&gt;::value &amp;&amp; std::is_integral&lt;To&gt;::value
+           &amp;&amp; (sizeof(From) &gt; sizeof(To)
+               || (std::is_signed&lt;From&gt;::value ? !std::is_signed&lt;To&gt;::value
+                   : (std::is_signed&lt;To&gt;::value &amp;&amp; sizeof(From) == sizeof(To))))) ||
+          (std::is_enum&lt;From&gt;::value &amp;&amp; std::is_integral&lt;To&gt;::value
+           &amp;&amp; (sizeof(From) &gt; sizeof(To)
+               || (IsEnumUnderlyingTypeSigned&lt;From&gt;::value ? !std::is_signed&lt;To&gt;::value
+                   : (std::is_signed&lt;To&gt;::value &amp;&amp; sizeof(From) == sizeof(To)))))
+          &gt;
+{
+};</code>
+</pre>
+
+<p>(Historical note: at the time this implementation was done, the codebase could
+only use C++11 features, and some compilers were unable to cope with the
+SFINAE solution presented below.).</p>
+
+<p>The Qt implementation strictly checks for the one of narrowing cases listed
+in [dcl.init.list], which is not the aim of the current proposal
+(cf. design decisions above).
+Also, the snippet does not yet implement the change introduced by
+[<a href="#P1957R2">P1957R2</a>], showing an inherent limitation to such an
+"exhaustive" solution: it may fall out of sync with the core language.</p>
+
+<p>Another, much simpler implementation is to rely on SFINAE around an expression
+such as <code>To{std::declval&lt;From&gt;()}</code>. However, this form is also
+error-prone: it may accidentally select aggregate initialization for <code>To</code>,
+or a constructor taking a <code>std::initializer_list</code>, and so on.
+If for any reason these make the expression ill-formed, then the trait is
+going to report that there is a narrowing conversion between the types, even
+when there actually isn't one (or vice-versa, depending on how one builds
+the trait).</p>
+
+<p>[<a href="#P0608R3">P0608R3</a>] uses a clever
+workaround to avoid falling into these traps: declaring an array, that is,
+building an expression like <code>To t[] = { std::declval&lt;From&gt;() };</code>.
+This solution is now used in the Standard (in [variant.ctor] and
+[variant.assign]), amongst other things, in order to detect and prevent a
+narrowing conversion. The trait that we are proposing could be used to replace
+the ad-hoc solution, and clarify the intent of it.</p>
+
+<p>A possible implementation that uses the just mentioned workaround
+is the following one (courtesy of Zhihao Yuan; received via private
+communication, adapted):</p>
+
+<pre class="example">
+<code>
+template&lt;class From, class To&gt;
+concept is_convertible_without_narrowing = std::is_convertible_v&lt;From, To&gt; &amp;&amp; 
+  requires (From&amp;&amp; x) {
+    { std::type_identity_t&lt;To[]&gt;{std::forward&lt;From&gt;(x)} } -&gt; std::same_as&lt;To[1]&gt;;
+  };
+</code>
+</pre>
+
+<p>(A C++17-compatible version of the above implementation <a href="#QT6_IS_NARROWING_IMPLEMENTATION">has been implemented in Qt 6</a>.)</p>
+
+<p>While an array declaration can be used as the main part of detection,
+a complete implementation also needs handling of the "corner cases". Types such
+as <em>cv</em> <code>void</code>, reference types, function types,
+arrays of unknown bounds, etc., require special care because they cannot
+be used to declare the array of <code>To</code>, and this may give wrong
+results. Note that we propose that it is legal to specialize
+<code>is_convertible_without_narrowing</code> with these types, following
+the precedent set by <code>is_convertible</code>.<p>
+
+<p>This handling of "corner cases" is not much different anyhow from
+the practical implementations of other type traits: for instance, in
+both [<a href="#libstdcpp-is-convertible">libstdc++</a>]
+and [<a href="#libcpp-is-convertible">libc++</a>] implementations of
+<code>is_convertible</code> there is code that deals with some types in a
+special way.</p>
+
+<p>In conclusion, it is the author's opinion that
+<code>is_convertible_without_narrowing</code> can be implemented in standard C++
+without placing an unreasonable burden on implementors.</p>
+
+<p>Author's note: given the amount of subtleties involved, we claim
+that it is extremely likely that non-experts would go for a "na&iuml;ve",
+wrong solution (e.g. <code>To{std::declval&lt;From&gt;()}</code>). This further
+underlines the necessity of providing detection of narrowing conversions
+in the Standard Library, rather than having users reinventing it with
+ad-hoc solutions.</p>
+
+
+<h2 id="ch7"><a href="#ch7">&sect;</a> 7. Technical Specifications</h2>
+
+<h3 id="ch7.1"><a href="#ch7.1">&sect;</a> 7.1. Feature testing macro</h3>
+
+<p>We propose the usage of the <code>__cpp_lib_is_convertible_without_narrowing</code>
+macro, following the pre-existing nomenclature for the other traits in
+<code>&lt;type_traits&gt;</code>.</p>
+
+<h3 id="ch7.2"><a href="#ch7.2">&sect;</a> 7.2. Proposed wording</h3>
+
+<p>All changes are relative to [<a href="#N4928">N4928</a>].</p>
+
+<p>In [meta.type.synop], add to the header synopsis:</p>
+
+<blockquote class="std">
+<pre>
+<code>
+  template &lt;class From, class To&gt; struct is_convertible;
+  template &lt;class From, class To&gt; struct is_nothrow_convertible;
+<ins>  template &lt;class From, class To&gt; struct is_convertible_without_narrowing;</ins>
+</code>
+</pre>
+</blockquote>
+
+<blockquote class="std">
+<pre>
+<code>
+  template &lt;class From, class To&gt;
+    constexpr bool is_convertible_v = is_convertible&lt;From, To&gt;::value;
+  template &lt;class From, class To&gt;
+    constexpr bool is_nothrow_convertible_v = is_nothrow_convertible&lt;From, To&gt;::value;
+<ins>  template &lt;class From, class To&gt;
+    constexpr bool is_convertible_without_narrowing_v = is_convertible_without_narrowing&lt;From, To&gt;::value;</ins>
+</code>
+</pre>
+</blockquote>
+
+<p>In [meta.rel], insert a new row to the <em>Type relationship predicates</em> table (Table 50) after the row for <code>is_nothrow_convertible</code>, with these contents in each column:
+
+<blockquote class="std">
+<dl class="attribute">
+<dt>Template</dt>
+<dd>
+<p><ins><code>template &lt;class From, class To&gt; struct is_convertible_without_narrowing;</code></ins>
+</p></dd>
+
+<dt>Condition</dt>
+<dd><p>
+<ins><code>is_convertible_v&lt;From, To&gt;</code> is <code>true</code> and the conversion, as defined by <code>is_convertible</code>, does not require a narrowing conversion ([dcl.init.list]).</ins>
+</p></dd>
+
+<dt>Comments</dt>
+<dd><p><ins><code>From</code> and <code>To</code> shall be complete types,
+<em>cv</em> <code>void</code>, or arrays of unknown bound.</ins></p></dd>
+</dl>
+</blockquote>
+
+
+<p>In [version.syn], add to the list of feature testing macros in paragraph 2:</p>
+
+<blockquote class="std">
+<pre>
+<ins><code>#define __cpp_lib_is_convertible_without_narrowing     TBD</code> // freestanding, also in <code>&lt;type_traits&gt;</code></ins>
+</pre>
+</blockquote>
+
+<p>The actual value is left to be determined (<code>TBD</code>);
+it should be replaced by <code>yyyymmL</code>,
+matching the year and month of adoption of this proposal.</p>
+
+
+<h3 id="ch7.3"><a href="#ch7.3">&sect;</a> 7.3. Note for LWG</h3>
+
+<p>During the LEWG discussion of this paper there have been remarks to remind LWG about the current definition of <code>std::convertible</code>, which is based on top of <code>std::declval</code>, and that has an impact for this trait <a href="#ch5.10">as discussed above</a>. We hope this comment captures the intent of the room.</p>
+
+<h2 id="appendix"><a href="#appendix">&sect;</a> Appendix</h2>
+
+<h2 id="appendixa"><a href="#appendixa">&sect;</a> A. Acknowledgements</h2>
+
+<p>Thanks to KDAB for supporting this work.</p>
+<p>Thanks to Marc Mutz for his feedback and championing this paper in Prague;
+to Zhihao Yuan for the discussion and some sample code;
+to Walter E. Brown and Andr&eacute; Somers for their feedback.</p>
+<p>All remaining errors are ours and ours only.</p>
+
+<h2 id="appendixb"><a href="#appendixb">&sect;</a> B. References</h2>
+
+<p>[<a name="QT_NO_NARROWING_CONVERSIONS_IN_CONNECT">Qt</a>] Qt version 5.15, <i><a href="https://doc.qt.io/qt-5/qobject.html#QT_NO_NARROWING_CONVERSIONS_IN_CONNECT">QT_NO_NARROWING_CONVERSIONS_IN_CONNECT</a></i>, QObject class documentation</p>
+<p>[<a name="QT_IS_NARROWING_IMPLEMENTATION">Qt <code>connect()</code></a>] Qt version 5.15, <i><a href="https://code.qt.io/cgit/qt/qtbase.git/tree/src/corelib/kernel/qobjectdefs_impl.h?h=5.15#n288">traits for detecting narrowing conversions</a></i></p>
+<p>[<a name="QT6_IS_NARROWING_IMPLEMENTATION">Qt <code>connect()</code></a>] Qt version 6.4.2, <i><a href="https://code.qt.io/cgit/qt/qtbase.git/tree/src/corelib/kernel/qobjectdefs_impl.h?h=v6.4.2#n245">traits for detecting narrowing conversions</a></i></p>
+<p>[<a name="P0608R3">P0608R3</a>] Zhihao Yuan, <i><a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p0608r3.html">A sane variant converting constructor (LEWG 227)</a></i></p>
+<p>[<a name="LEWG227">LEWG 227</a>] Zhihao Yuan, <i><a href="https://issues.isocpp.org/show_bug.cgi?id=227">Bug 227 - variant converting constructor allows unintended conversions</a></i></p>
+<p>[<a name="P1957R2">P1957R2</a>] Zhihao Yuan, <i><a href="https://isocpp.org/files/papers/P1957R2.html">Converting from <code>T*</code> to <code>bool</code> should be considered narrowing (re: US 212)</a></i></p>
+<p>[<a name="P1818R1">P1818R1</a>] Lawrence Crowl, <i><a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p1818r1.html">Narrowing and Widening Conversions</a></i></p>
+<p>[<a name="P1619R1">P1619R1</a>] Lisa Lippincott, <i><a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p1619r1.pdf">Functions for Testing Boundary Conditions on Integer Operations</a></i></p>
+<p>[<a name="P1998R1">P1998R1</a>] Ryan McDougall, <i><a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p1998r1.pdf">Simple Facility for Lossless Integer Conversion</a></i></p>
+<p>[<a name="libstdcpp-is-convertible">libstdc++</a>] libstdc++, <i><a href="https://github.com/gcc-mirror/gcc/blob/master/libstdc++-v3/include/std/type_traits#L1445">implementation of <code>is_convertible</code></a></i></p>
+<p>[<a name="libcpp-is-convertible">libc++</a>] libc++, <i><a href="https://github.com/llvm/llvm-project/blob/master/libcxx/include/type_traits#L1801">implementation of <code>is_convertible</code></a></i></p>
+<p>[<a name="N4928">N4928</a>]  Thomas Koeppe, <i><a href="../2023/n4928.pdf">Working Draft, Standard for Programming Language C++</a></i></p>
+<p>[<a name="P1467R4">P1467R4</a>] David Olsen, Micha&#322; Dominiak, <i><a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2020/p1467r4.html">Extended floating-point types and standard names</a></i></p>
+<p>[<a name="P2509R0">P2509R0</a>] Giuseppe D'Angelo, <i><a href="../2021/p2509r0.html">A proposal for a type trait to detect value-preserving conversions</a></i></p>
+<p>[<a name="P1045R1">P1045R1</a>] David Stone, <i><a href="../2019/p1045r1.html">constexpr Function Parameters</a></i></p>
+<p>[<a name="P1045R1">P3146R2</a>] Giuseppe D'Angelo, <i><a href="../2024/p3146r2.html">Clarifying std::variant converting construction</a></i></p>
+
+</a></i></p>
+
+</body>

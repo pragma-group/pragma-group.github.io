@@ -1,0 +1,138 @@
+<p>Document Number: P3841R0<br>
+Date: 2025-09-12<br>
+Audience: Library Evolution Working Group Incubator<br>
+Reply-To: Avi Kivity &lt;avi@scylladb.com&gt;<br></p>
+<h1 id="proposal-for-std-constructor-function-object">Proposal for <code>std::constructor</code> Function Object</h1>
+<h2 id="i-motivation">I. Motivation</h2>
+<p>C++ users can convert member functions to funtion objects with <code>std::mem_fn()</code>,
+partially bind arguments to functions or function objects with <code>std::bind()</code>,
+<code>std::bind_front()</code>, and <code>std::bind_back()</code>, type-erase them with <code>std::function&lt;&gt;</code>,
+and use them to transform ranges with <code>std::views::transform()</code>. But none
+of that can be done directly to class constructors; a helper function
+must be used to &quot;downgrade&quot; the constructor into a function.</p>
+<p>The proposed <code>std::constructor&lt;T&gt;()</code> is a utility function object that provides
+a convenient, generic mechanism to convert a constructor overload set into
+a function object, thereby allowing all the existing tooling for function
+objects to be brought to bear on it.</p>
+<h2 id="ii-example-problem">II. Example Problem</h2>
+<p>Imagine you have a range of <code>size_t</code> and you wish to return
+a vector of vectors, with the sizes given from the given range.
+Naive code can look like:</p>
+<pre><code class="lang-c++">    <span class="hljs-built_in">std</span>::<span class="hljs-built_in">vector</span>&lt;<span class="hljs-built_in">std</span>::<span class="hljs-built_in">vector</span>&lt;<span class="hljs-keyword">int</span>&gt;&gt; result;
+    result.reserve(<span class="hljs-built_in">std</span>::distance(input));
+    <span class="hljs-keyword">for</span> (<span class="hljs-keyword">auto</span> sz : input) {
+         result.emplace_back(sz);
+    }
+</code></pre>
+<p>However, this is unsatisfying. The input range may be an input_range,
+which does not afford two passes (one for std::distance, one for the for
+loop). The emplace_back loop is less efficient than constructing the vector
+from a range.</p>
+<p>A modern range-based solution would look like</p>
+<pre><code class="lang-c++">   auto result = input
+       | <span class="hljs-symbol">std:</span><span class="hljs-symbol">:views</span><span class="hljs-symbol">:</span><span class="hljs-symbol">:transform</span>([] (size_t sz) {
+           <span class="hljs-keyword">return</span> <span class="hljs-symbol">std:</span><span class="hljs-symbol">:vector&lt;int&gt;</span>(sz);
+       }
+       | <span class="hljs-symbol">std:</span><span class="hljs-symbol">:ranges</span><span class="hljs-symbol">:</span><span class="hljs-symbol">:to&lt;std</span><span class="hljs-symbol">:</span><span class="hljs-symbol">:vector&gt;</span>();
+</code></pre>
+<p>This is still unsatisfying, as the lambda is not concise.</p>
+<p>We propose <code>std::constructor&lt;T&gt;()</code>, similar to <code>std::mem_fn()</code> but instead of converting
+a member function to a callable object, it converts a constructor overload set to
+a callable object. With std::constructor, the example above can be written as</p>
+<pre><code class="lang-c++">    auto result = input
+        | <span class="hljs-symbol">std:</span><span class="hljs-symbol">:views</span><span class="hljs-symbol">:</span><span class="hljs-symbol">:transform</span>(<span class="hljs-symbol">std:</span><span class="hljs-symbol">:constructor&lt;std</span><span class="hljs-symbol">:</span><span class="hljs-symbol">:vector&lt;int&gt;&gt;</span>())
+        | <span class="hljs-symbol">std:</span><span class="hljs-symbol">:ranges</span><span class="hljs-symbol">:</span><span class="hljs-symbol">:to&lt;std</span><span class="hljs-symbol">:</span><span class="hljs-symbol">:vector&gt;</span>();
+</code></pre>
+<h2 id="iii-proposed-solution-std-constructor-">III. Proposed Solution: <code>std::constructor</code></h2>
+<h3 id="a-function-signature">A. Function Signature</h3>
+<p><code>std::constructor&lt;T&gt;()</code> evaluates to a function object that perfectly
+forwards its arguments to T&#39;s constructors.</p>
+<pre><code class="lang-c++"><span class="hljs-keyword">namespace</span> <span class="hljs-built_in">std</span> {
+
+    <span class="hljs-keyword">template</span> &lt;<span class="hljs-keyword">typename</span> T&gt;
+    <span class="hljs-keyword">struct</span> constructor {
+        <span class="hljs-keyword">template</span> &lt;<span class="hljs-keyword">typename</span>... Args&gt;
+        <span class="hljs-function"><span class="hljs-keyword">static</span> <span class="hljs-keyword">constexpr</span> T <span class="hljs-title">operator</span><span class="hljs-params">()</span><span class="hljs-params">(Args&amp;&amp;... args)</span>
+                <span class="hljs-title">noexcept</span><span class="hljs-params">(<span class="hljs-built_in">std</span>::is_nothrow_constructible_v&lt;T, Args...&gt;)</span> </span>{
+            <span class="hljs-keyword">return</span> T(<span class="hljs-built_in">std</span>::forward&lt;Args&gt;(args)...);
+        };
+    };
+
+}
+</code></pre>
+<h3 id="b-semantics">B. Semantics</h3>
+<ul>
+<li>Constructs an object of type <code>T</code> using perfect forwarding</li>
+<li>Supports any public constructor of <code>T</code></li>
+<li>Returns the constructed object by value</li>
+<li>Works with both trivial and complex types</li>
+<li><code>constexpr</code>-compatible</li>
+<li><code>noexcept</code> preserving</li>
+<li>if <code>T</code> is a reference type and <code>std::constructor&lt;T&gt;()</code> attempts to bind its return value to a temporary, the program is ill formed</li>
+</ul>
+<h2 id="iv-example-usage">IV. Example Usage</h2>
+<pre><code class="lang-c++">    <span class="hljs-comment">// Basic usage (not expected in common programs)</span>
+    <span class="hljs-keyword">auto</span> str = <span class="hljs-built_in">std</span>::constructor&lt;<span class="hljs-built_in">std</span>::<span class="hljs-built_in">string</span>&gt;()(<span class="hljs-string">"Hello"</span>);
+
+    <span class="hljs-comment">// Complex type construction</span>
+    <span class="hljs-keyword">struct</span> Complex {
+        <span class="hljs-keyword">int</span> x, y;
+        Complex(<span class="hljs-keyword">int</span> a, <span class="hljs-keyword">int</span> b) : x(a), y(b) {}
+    };
+    <span class="hljs-keyword">auto</span> comp = <span class="hljs-built_in">std</span>::constructor&lt;Complex&gt;()(<span class="hljs-number">10</span>, <span class="hljs-number">20</span>);
+
+    <span class="hljs-comment">// Composability with std::bind_front</span>
+    <span class="hljs-keyword">auto</span> make_imag = <span class="hljs-built_in">std</span>::bind_front(<span class="hljs-built_in">std</span>::constructor&lt;Complex&gt;(), <span class="hljs-number">0</span>);
+    <span class="hljs-keyword">auto</span> sqrt_minus_one = make_imag(<span class="hljs-number">1</span>);
+
+    <span class="hljs-comment">// Updated example from above</span>
+    <span class="hljs-keyword">auto</span> input = <span class="hljs-built_in">std</span>::views::iota(<span class="hljs-number">0</span>, <span class="hljs-number">10</span>);
+    <span class="hljs-keyword">auto</span> result = input
+        | <span class="hljs-built_in">std</span>::views::transform(<span class="hljs-built_in">std</span>::constructor&lt;<span class="hljs-built_in">std</span>::<span class="hljs-built_in">vector</span>&lt;<span class="hljs-keyword">int</span>&gt;&gt;())
+        | <span class="hljs-built_in">std</span>::ranges::to&lt;<span class="hljs-built_in">std</span>::<span class="hljs-built_in">vector</span>&gt;();
+
+    <span class="hljs-comment">// Bind an allocator to a container constructor</span>
+    <span class="hljs-keyword">auto</span> make_vector_with_alloc = <span class="hljs-built_in">std</span>::bind_back(<span class="hljs-built_in">std</span>::constructor&lt;<span class="hljs-built_in">std</span>::<span class="hljs-built_in">vector</span>&lt;<span class="hljs-keyword">int</span>&gt;&gt;(), <span class="hljs-built_in">std</span>::ref(alloc));
+</code></pre>
+<h2 id="v-design-considerations">V. Design Considerations</h2>
+<h3 id="advantages">Advantages</h3>
+<ul>
+<li>Type-safe</li>
+<li>No memory allocation overhead</li>
+<li>Works with any constructible type</li>
+<li>Composable with the rest of the functional library</li>
+</ul>
+<h3 id="potential-concerns">Potential Concerns</h3>
+<ul>
+<li>Might be seen as redundant with <a href="p3312r1.pdf">P3312</a></li>
+</ul>
+<h3 id="naming">Naming</h3>
+<p><code>std::constructor&lt;T&gt;()</code> is seen as consistent with <code>std::plus&lt;T&gt;()</code>.</p>
+<p>Other alternatives:</p>
+<ul>
+<li><code>std::make_obj_using_allocator()</code> is similar. Perhaps <code>std::make_obj&lt;T&gt;()</code> or <code>std::make_object&lt;T&gt;()</code> would work.</li>
+<li><code>std::make_from_tuple()</code> is also similar. So perhaps <code>std::make&lt;T&gt;(...)</code>?!</li>
+</ul>
+<h2 id="vi-implementation">VI. Implementation</h2>
+<p>Reference implementation:</p>
+<pre><code class="lang-cpp">    <span class="hljs-keyword">template</span> &lt;<span class="hljs-keyword">typename</span> T&gt;
+    <span class="hljs-keyword">struct</span> constructor {
+        <span class="hljs-keyword">template</span> &lt;<span class="hljs-keyword">typename</span>... Args&gt;
+        <span class="hljs-function"><span class="hljs-keyword">static</span> <span class="hljs-keyword">constexpr</span> T <span class="hljs-title">operator</span><span class="hljs-params">()</span><span class="hljs-params">(Args&amp;&amp;... args)</span>
+                <span class="hljs-title">noexcept</span><span class="hljs-params">(<span class="hljs-built_in">std</span>::is_nothrow_constructible_v&lt;T, Args...&gt;)</span> </span>{
+            <span class="hljs-keyword">return</span> T(<span class="hljs-built_in">std</span>::forward&lt;Args&gt;(args)...);
+        };
+    };
+</code></pre>
+<h2 id="vii-wording">VII. Wording</h2>
+<p>TBD</p>
+<h2 id="viii-complexity">VIII. Complexity</h2>
+<ul>
+<li>Time Complexity: O(1) construction time</li>
+<li>Space Complexity: No additional space overhead</li>
+</ul>
+<h2 id="ix-proposed-standardization">IX. Proposed Standardization</h2>
+<p>Recommend inclusion in the <code>&lt;functional&gt;</code> header in a future C++ standard revision.</p>
+<h2 id="x-acknowledgments">X. Acknowledgments</h2>
+<p>Thanks to Arthur O&#39;Dwyer for correcting an ealier version on the mailing list, and
+to Claude with assistance on this draft.</p>

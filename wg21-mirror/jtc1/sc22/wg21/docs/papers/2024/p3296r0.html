@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+	"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+
+<html xmlns="http://www.w3.org/1999/xhtml">
+
+<head>
+<title>let_async_scope.html</title>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8"/>
+
+</head>
+
+<body>
+
+<h1 id="p3296r0-let_async_scope">P3296R0 <code>let_async_scope</code></h1>
+<p>Date: 22nd May 2024</p>
+<p>Author: Anthony Williams <a href="mailto:anthony@justsoftwaresolutions.co.uk" class="email">anthony@justsoftwaresolutions.co.uk</a></p>
+<p>Audience: SG1, LEWG</p>
+<h2 id="background-and-motivation">Background and motivation</h2>
+<p>This is intended to address concerns raised in LEWG about ensuring that a <code>counting_scope</code> is joined: the scope provided by <code>let_async_scope</code> is always joined, irrespective of how the nested work completes, and whether or not the provided function throws an exception after spawning work.</p>
+<p>Code with explicit <code>counting_scope</code>:</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode cpp"><code class="sourceCode cpp"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true"></a>    <span class="dt">some_data_type</span> scoped_data = make_scoped_data();</span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true"></a>    counting_scope scope;</span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true"></a></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true"></a>    scope.nest(on(exec, [&amp;] {</span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true"></a>        scope.nest(on(exec, [&amp;] {</span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true"></a>            <span class="cf">if</span> (need_more_work(scoped_data)) {</span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true"></a>                scope.nest(on(exec, [&amp;] { do_more_work(scoped_data); }));</span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true"></a>                scope.nest(on(exec, [&amp;] { do_more_other_work(scoped_data); }));</span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true"></a>            }</span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true"></a>        }));</span>
+<span id="cb1-11"><a href="#cb1-11" aria-hidden="true"></a>        scope.nest(on(exec, [&amp;] { do_something_else_with(scoped_data); }));</span>
+<span id="cb1-12"><a href="#cb1-12" aria-hidden="true"></a>    }));</span>
+<span id="cb1-13"><a href="#cb1-13" aria-hidden="true"></a></span>
+<span id="cb1-14"><a href="#cb1-14" aria-hidden="true"></a>    maybe_throw();</span>
+<span id="cb1-15"><a href="#cb1-15" aria-hidden="true"></a></span>
+<span id="cb1-16"><a href="#cb1-16" aria-hidden="true"></a>    this_thread::sync_wait(scope.join());</span></code></pre></div>
+<p>Here, if <code>maybe_throw</code> throws an exception, then the scope is not joined, and the nested tasks can continue executing asynchronously, potentially accessing both the <code>scope</code> and <code>scoped_data</code> objects out of lifetime.</p>
+<p>Using <code>let_async_scope</code> addresses this by encapsulating the scope object and the result of the previous sender. The returned sender does not complete until all tasks nested on the scope complete, even if the function passed to <code>let_async_scope</code> exits via an exception:</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode cpp"><code class="sourceCode cpp"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true"></a>    <span class="kw">auto</span> scope_sender = just(make_scoped_data()) | let_async_scope([](<span class="kw">auto</span> scope_token,</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true"></a>                                                                           <span class="kw">auto</span>&amp; scoped_data) {</span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true"></a>        scope_token.nest(on(exec, [scope_token, &amp;scoped_data] {</span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true"></a>            scope_token.nest(on(exec, [scope_token, &amp;scoped_data] {</span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true"></a>                <span class="cf">if</span> (need_more_work(scoped_data)) {</span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true"></a>                    scope_token.nest(on(exec, [&amp;scoped_data] { do_more_work(scoped_data); }));</span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true"></a>                    scope_token.nest(on(exec, [&amp;scoped_data] { do_more_other_work(scoped_data); }));</span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true"></a>                }</span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true"></a>            }));</span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true"></a>            scope_token.nest(on(exec, [&amp;scoped_data] { do_something_else_with(scoped_data); }));</span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true"></a>        }));</span>
+<span id="cb2-12"><a href="#cb2-12" aria-hidden="true"></a>        maybe_throw();</span>
+<span id="cb2-13"><a href="#cb2-13" aria-hidden="true"></a>    });</span>
+<span id="cb2-14"><a href="#cb2-14" aria-hidden="true"></a></span>
+<span id="cb2-15"><a href="#cb2-15" aria-hidden="true"></a>    this_thread::sync_wait(scope_sender);</span></code></pre></div>
+<p>Here, even if <code>maybe_throw</code> throws an exception, then <code>scope_sender</code> doesn’t complete until all the nested tasks have completed. This prevents out-of-lifetime access to the <code>scoped_data</code> or the scope itself, unless references to the data or <code>scope_token</code> are stored outside the sender tree.</p>
+<p>Stop requests are propagated to all senders nested in the async scope, but does not prevent those senders adding additional work to the scope. This allows senders to respond to stop requests by scheduling additional work to perform the necessary cleanup for cancellation.</p>
+<h2 id="proposal">Proposal</h2>
+<p><code>let_async_scope</code> provides a means of creating an async scope, which is associated with a set of tasks, and ensuring that they are all complete before the async scope sender completes.The previous sender’s result is passed to a user-specified invocable, along with an async scope token, which returns a new sender that is connected and started.</p>
+<p>The sender returned by <code>let_async_scope</code> completes with the result of the completion of the sender returned from the supplied invocable. It does not complete until all tasks nested on the <code>scope_token</code> passed to the invocable have completed. Additional tasks may be nested on copies of the <code>scope_token</code>, even if the initial sender returned from the invocable has completed. The returned <code>scope_sender</code> will not complete while there are any nested tasks that have not completed.</p>
+<p>Stop requests are propagated to all senders nested in the async scope.</p>
+<h2 id="wording">Wording</h2>
+<h3 id="executionlet_async_scope"><code>execution::let_async_scope</code></h3>
+<ol type="1">
+<li><p><code>let_async_scope</code> transforms a sender’s value completions into a new child asynchronous operation associated with an async scope, by passing the sender’s result datums to a user-specified callable, which returns a new sender that is connected and started.</p></li>
+<li><p>For a subexpression <code>sndr</code>, let <code>let-async-scope-env(sndr)</code> be expression-equivalent to the first well-formed expression below:</p>
+<ul>
+<li><p><code>SCHED-ENV(get_completion_scheduler&lt;decayed-typeof&lt;set_value&gt;&gt;(get_env(sndr)))</code></p></li>
+<li><p><code>MAKE-ENV(get_domain, get_domain(get_env(sndr)))</code></p></li>
+<li><p><code>empty_env{}</code></p></li>
+</ul></li>
+<li><p>The expression <code>let_async_scope(sndr, f)</code> is expression-equivalent to:</p>
+<div class="sourceCode" id="cb3"><pre class="sourceCode cpp"><code class="sourceCode cpp"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true"></a> transform_sender(</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true"></a>   get-domain-early(sndr),</span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true"></a>   make-sender(let_async_scope, f, sndr));</span></code></pre></div></li>
+<li><p>The exposition-only class template <code>impls-for</code> ([exec.snd.general]) is specialized for <code>let_async_scope</code> as follows:</p>
+<div class="sourceCode" id="cb4"><pre class="sourceCode cpp"><code class="sourceCode cpp"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true"></a> <span class="kw">namespace</span> <span class="bu">std::</span>execution {</span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true"></a>   <span class="kw">template</span>&lt;<span class="kw">class</span> State, <span class="kw">class</span> Rcvr, <span class="kw">class</span>... Args&gt;</span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true"></a>   <span class="dt">void</span> let-async-scope-bind(State&amp; state, Rcvr&amp; rcvr, Args&amp;&amp;... args); <span class="co">// exposition only</span></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true"></a></span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true"></a>   <span class="kw">template</span>&lt;&gt;</span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true"></a>   <span class="kw">struct</span> impls-<span class="cf">for</span>&lt;decayed-<span class="ex">typeof</span>&lt;let_async_scope&gt;&gt; : <span class="cf">default</span>-impls {</span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true"></a>     <span class="at">static</span> <span class="kw">constexpr</span> <span class="kw">auto</span> get-state = see below;</span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true"></a>     <span class="at">static</span> <span class="kw">constexpr</span> <span class="kw">auto</span> complete = see below;</span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true"></a>   };</span>
+<span id="cb4-10"><a href="#cb4-10" aria-hidden="true"></a> }</span></code></pre></div>
+<ol type="1">
+<li><p>Let <code>receiver2</code> denote the following exposition-only class template:</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode cpp"><code class="sourceCode cpp"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true"></a> <span class="kw">namespace</span> <span class="bu">std::</span>execution {</span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true"></a>   <span class="kw">template</span>&lt;<span class="kw">class</span> Rcvr, <span class="kw">class</span> Env&gt;</span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true"></a>   <span class="kw">struct</span> receiver2 : Rcvr {</span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true"></a>     <span class="kw">explicit</span> receiver2(Rcvr rcvr, Env env)</span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true"></a>       : Rcvr(<span class="bu">std::</span>move(rcvr)), env(<span class="bu">std::</span>move(env)) {}</span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true"></a></span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true"></a>     <span class="kw">auto</span> get_env() <span class="at">const</span> <span class="kw">noexcept</span> {</span>
+<span id="cb5-8"><a href="#cb5-8" aria-hidden="true"></a>       <span class="at">const</span> Rcvr&amp; rcvr = *<span class="kw">this</span>;</span>
+<span id="cb5-9"><a href="#cb5-9" aria-hidden="true"></a>       <span class="cf">return</span> JOIN-ENV(env, FWD-ENV(execution::get_env(rcvr)));</span>
+<span id="cb5-10"><a href="#cb5-10" aria-hidden="true"></a>     }</span>
+<span id="cb5-11"><a href="#cb5-11" aria-hidden="true"></a></span>
+<span id="cb5-12"><a href="#cb5-12" aria-hidden="true"></a>     Env env; <span class="co">// exposition only</span></span>
+<span id="cb5-13"><a href="#cb5-13" aria-hidden="true"></a>   };</span>
+<span id="cb5-14"><a href="#cb5-14" aria-hidden="true"></a> }</span></code></pre></div></li>
+<li><p><code>impls-for&lt;decayed-typeof&lt;let_async_scope&gt;&gt;::get-state</code> is is initialized with a callable object equivalent to the following:</p>
+<div class="sourceCode" id="cb6"><pre class="sourceCode cpp"><code class="sourceCode cpp"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true"></a> []&lt;<span class="kw">class</span> Sndr, <span class="kw">class</span> Rcvr&gt;(Sndr&amp;&amp; sndr, Rcvr&amp; rcvr) <span class="kw">requires</span> see below {</span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true"></a>   <span class="kw">auto</span>&amp;&amp; [tag, data, child] = <span class="bu">std::</span>forward&lt;Sndr&gt;(sndr);</span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true"></a>   <span class="cf">return</span> [&amp;]&lt;<span class="kw">class</span> Fn, <span class="kw">class</span> Env&gt;(Fn fn, Env env) {</span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true"></a>     <span class="kw">using</span> args-variant-type = see below;</span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true"></a>     <span class="kw">using</span> ops2-variant-type = see below;</span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true"></a>     <span class="kw">using</span> scope-type = see below;</span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true"></a></span>
+<span id="cb6-8"><a href="#cb6-8" aria-hidden="true"></a>     <span class="kw">struct</span> state-type {</span>
+<span id="cb6-9"><a href="#cb6-9" aria-hidden="true"></a>       Fn fn;</span>
+<span id="cb6-10"><a href="#cb6-10" aria-hidden="true"></a>       Env env;</span>
+<span id="cb6-11"><a href="#cb6-11" aria-hidden="true"></a>       scope-type scope;</span>
+<span id="cb6-12"><a href="#cb6-12" aria-hidden="true"></a>       args-variant-type args;</span>
+<span id="cb6-13"><a href="#cb6-13" aria-hidden="true"></a>       ops2-variant-type ops2;</span>
+<span id="cb6-14"><a href="#cb6-14" aria-hidden="true"></a>     };</span>
+<span id="cb6-15"><a href="#cb6-15" aria-hidden="true"></a>     <span class="cf">return</span> state-type{<span class="bu">std::</span>move(fn), <span class="bu">std::</span>move(env), {}, {}};</span>
+<span id="cb6-16"><a href="#cb6-16" aria-hidden="true"></a>   }(<span class="bu">std::</span>forward_like&lt;Sndr&gt;(data), let-async-scope-env(child));</span>
+<span id="cb6-17"><a href="#cb6-17" aria-hidden="true"></a> }</span></code></pre></div>
+<ol type="1">
+<li><p><code>scope-type</code> is a type that satisfies the <code>asynchronous-scope</code> concept.</p>
+<ol type="1">
+<li>Instances of <code>scope-type</code> maintains a count of the number of active senders passed to <code>nest</code> on that scope object or an <code>async-scope-token</code> obtained from that scope object.</li>
+<li>The count of active senders is decremented by one when a sender passed to <code>nest</code> completes.</li>
+<li>The sender returned from calling <code>join()</code> on an instance of the scope type will complete when the number of senders reaches zero.</li>
+<li>Once the count of active senders has been decremented to zero, it is undefined behaviour to attempt to nest a sender into the scope. [[Note: this requires storing a scope token passed to a nested sender in storage that outlives that sender]]</li>
+</ol></li>
+<li><p><code>scope-token-type</code> is the type of the <code>async-scope-token</code> returned from <code>scope-type::get_token</code>.</p></li>
+<li><p>Let <code>Sigs</code> be a pack of the arguments to the <code>completion_signatures</code> specialization named by <code>completion_signatures_of_t&lt;child-type&lt;Sndr&gt;,       env_of_t&lt;Rcvr&gt;&gt;</code>. Let <code>LetSigs</code> be a pack of those types in <code>Sigs</code> with a return type of <code>decayed-typeof&lt;set_value&gt;</code>. Let <code>as-tuple</code> be an alias template such that <code>as-tuple&lt;Tag(Args...)&gt;</code> denotes the type <code>decayed-tuple&lt;Args...&gt;</code>. Then <code>args-variant-type</code> denotes the type <code>variant&lt;monostate,       as-tuple&lt;LetSigs&gt;...&gt;</code>.</p></li>
+<li><p>Let <code>as-sndr2</code> be an alias template such that <code>as-sndr2&lt;Tag(Args...)&gt;</code> denotes the type <code>call-result-t&lt;Fn, scope-token-type, decay_t&lt;Args&gt;&amp;...&gt;</code>. Then <code>ops2-variant-type</code> denotes the type <code>variant&lt;monostate,       connect_result_t&lt;as-sndr2&lt;LetSigs&gt;, receiver2&lt;Rcvr,       Env&gt;&gt;...&gt;</code>.</p></li>
+<li><p>The <em>requires-clause</em> constraining the above lambda is satisfied if and only if the types <code>args-variant-type</code> and <code>ops2-variant-type</code> are well-formed.</p></li>
+</ol></li>
+<li><p>The exposition-only function template <code>let-async-scope-bind</code> is equal to:</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode cpp"><code class="sourceCode cpp"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true"></a><span class="kw">auto</span>&amp; args = state.args.emplace&lt;decayed - tuple&lt;scope - token - type, Args...&gt;&gt;(</span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true"></a>        state.scope.get_token(), <span class="bu">std::</span>forward&lt;Args&gt;(args)...);</span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true"></a><span class="cf">try</span> {</span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true"></a>    <span class="kw">auto</span> sndr2 = state.scope.nest(apply(<span class="bu">std::</span>move(state.fn), args));</span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true"></a>    <span class="kw">auto</span> join_sender = state.scope.join();</span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true"></a>    <span class="kw">auto</span> result_sender = when_all_with_variant(<span class="bu">std::</span>move(sndr2), <span class="bu">std::</span>move(join_sender)) |</span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true"></a>                         then([](<span class="kw">auto</span>&amp; result, <span class="kw">auto</span>&amp;) { <span class="cf">return</span> result; });</span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true"></a>    <span class="kw">auto</span> rcvr2 = receiver2{<span class="bu">std::</span>move(rcvr), <span class="bu">std::</span>move(state.env)};</span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true"></a>    <span class="kw">auto</span> mkop2 = [&amp;] { <span class="cf">return</span> <span class="fu">connect</span>(<span class="bu">std::</span>move(result_sender), <span class="bu">std::</span>move(rcvr2)); };</span>
+<span id="cb7-10"><a href="#cb7-10" aria-hidden="true"></a>    <span class="kw">auto</span>&amp; op2 = state.ops2.emplace&lt;<span class="kw">decltype</span>(mkop2())&gt;(emplace-from{mkop2});</span>
+<span id="cb7-11"><a href="#cb7-11" aria-hidden="true"></a>    start(op2);</span>
+<span id="cb7-12"><a href="#cb7-12" aria-hidden="true"></a>} <span class="cf">catch</span> (...) {</span>
+<span id="cb7-13"><a href="#cb7-13" aria-hidden="true"></a>    <span class="kw">auto</span> result_sender = when_all(just_error(<span class="bu">std::</span>current_exception()), state.scope.join());</span>
+<span id="cb7-14"><a href="#cb7-14" aria-hidden="true"></a>    <span class="kw">auto</span> rcvr2 = receiver2{<span class="bu">std::</span>move(rcvr), <span class="bu">std::</span>move(state.env)};</span>
+<span id="cb7-15"><a href="#cb7-15" aria-hidden="true"></a>    <span class="kw">auto</span> mkop2 = [&amp;] { <span class="cf">return</span> <span class="fu">connect</span>(<span class="bu">std::</span>move(result_sender), <span class="bu">std::</span>move(rcvr2)); };</span>
+<span id="cb7-16"><a href="#cb7-16" aria-hidden="true"></a>    <span class="kw">auto</span>&amp; op2 = state.ops2.emplace&lt;<span class="kw">decltype</span>(mkop2())&gt;(emplace-from{mkop2});</span>
+<span id="cb7-17"><a href="#cb7-17" aria-hidden="true"></a>    start(op2);</span>
+<span id="cb7-18"><a href="#cb7-18" aria-hidden="true"></a>}</span></code></pre></div></li>
+<li><p><code>impls-for&lt;decayed-typeof&lt;let_async_scope&gt;&gt;::complete</code> is is initialized with a callable object equivalent to the following:</p>
+<div class="sourceCode" id="cb8"><pre class="sourceCode cpp"><code class="sourceCode cpp"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true"></a>[]&lt;<span class="kw">class</span> Tag, <span class="kw">class</span>... Args&gt;</span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true"></a>  (<span class="kw">auto</span>, <span class="kw">auto</span>&amp; state, <span class="kw">auto</span>&amp; rcvr, Tag, Args&amp;&amp;... args) <span class="kw">noexcept</span> -&gt; <span class="dt">void</span> {</span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true"></a>    <span class="cf">if</span> <span class="kw">constexpr</span> (same_as&lt;Tag, decayed-<span class="ex">typeof</span>&lt;set_value&gt;&gt;) {</span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true"></a>      TRY-EVAL(<span class="bu">std::</span>move(rcvr), let-async-scope-bind(state, rcvr, <span class="bu">std::</span>forward&lt;Args&gt;(args)...));</span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true"></a>    } <span class="cf">else</span> {</span>
+<span id="cb8-6"><a href="#cb8-6" aria-hidden="true"></a>      Tag()(<span class="bu">std::</span>move(rcvr), <span class="bu">std::</span>forward&lt;Args&gt;(args)...);</span>
+<span id="cb8-7"><a href="#cb8-7" aria-hidden="true"></a>    }</span>
+<span id="cb8-8"><a href="#cb8-8" aria-hidden="true"></a>  }</span></code></pre></div></li>
+</ol></li>
+<li><p>Let <code>sndr</code> and <code>env</code> be subexpressions, and let <code>Sndr</code> be <code>decltype((sndr))</code>. If <code>sender-for&lt;Sndr,    decayed-typeof&lt;let_async_scope&gt;&gt;</code> is <code>false</code>, then the expression <code>let_async_scope.transform_env(sndr, env)</code> is ill-formed. Otherwise, it is equal to <code>JOIN-ENV(let-env(sndr),    FWD-ENV(env))</code>.</p></li>
+<li><p>Let the subexpression <code>out_sndr</code> denote the result of the invocation <code>let_async_scope(sndr, f)</code> or an object copied or moved from such, and let the subexpression <code>rcvr</code> denote a receiver such that the expression <code>connect(out_sndr, rcvr)</code> is well-formed. The expression <code>connect(out_sndr, rcvr)</code> has undefined behavior unless it creates an asynchronous operation ([async.ops]) that, when started:</p>
+<ul>
+<li><p>invokes <code>f</code> when <code>set_value</code> is called with <code>sndr</code>’s result datums,</p></li>
+<li><p>makes its completion dependent on the completion of a sender returned by <code>f</code>, and</p></li>
+<li><p>propagates the other completion operations sent by <code>sndr</code>.</p></li>
+</ul></li>
+</ol>
+<h2 id="acknowledgements">Acknowledgements</h2>
+<p>Thanks to Ian Petersen, Lewis Baker, Inbal Levi, Kirk Shoop, Eric Niebler, Ruslan Arutyunyan, Maikel Nadolski, Lucian Radu Teodorescu, and everyone else who contributed to discussions leading to this paper, and commented on early drafts.</p>
+
+</body>
+</html>

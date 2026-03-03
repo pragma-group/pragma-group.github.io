@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<meta http-equiv="content-type" content="text/html; charset=UTF-8">
+<meta charset="utf-8">
+<meta name="generator" content="dascandy/fiets">
+<title>
+Making Safe C++ Happen</title>
+  <style type="text/css">
+body {
+  margin: 5em;
+  font-family: sans-serif;
+  hyphens: auto;
+  line-height: 1.35;
+}
+ul {
+  padding-left: 2em;
+}
+h1, h2, h3, h4 {
+  position: relative;
+  line-height: 1;
+}
+h1.title {
+}
+h2.subtitle {
+}
+h1.toc a, h2.toc a, h3.toc a, h4.toc a {
+  text-decoration: none;
+  color: #000000;
+}
+h1.toc a:hover, h2.toc a:hover, h3.toc a:hover, h4.toc a:hover {
+  text-decoration: underline;
+}
+a.self-link {
+  position: absolute;
+  top: 0;
+  left: calc(-1 * (3.5rem - 26px));
+  width: calc(3.5rem - 26px);
+  height: 2em;
+  text-align: center;
+  border: none;
+  transition: opacity .2s;
+  opacity: .5;
+  font-family: sans-serif;
+  font-weight: normal;
+  font-size: 83%;
+}
+a.self-link:hover { opacity: 1; }
+a.self-link::before { content: "§"; }
+span.identifier {
+  font-style: italic;
+}
+span.special {
+  color: #bf003f;
+}
+span.keyword {
+  color: #0030cf;
+}
+span.comment {
+  color: #00c000;
+}
+span.new {
+  text-decoration: underline;
+  background-color: #00ff40;
+}
+div.code, span.code {
+  font-family: Courier New, monospace;
+  background-color: #e8e8e8;
+  white-space: pre;
+}
+span.delete {
+  text-decoration: line-through;
+  background-color: #bf0303;
+}
+p.indent {
+  margin-left: 50px;
+}
+p.quote {
+  margin-left: 50px;
+  border: 2px solid black;
+  background-color: #f0f0e0;
+}
+table {
+  border: 1px solid black;
+  border-collapse: collapse;
+  margin-left: auto;
+  margin-right: auto;
+  margin-top: 0.8em;
+  text-align: left;
+  hyphens: none; 
+}
+td, th {
+  padding-left: 1em;
+  padding-right: 1em;
+  vertical-align: top;
+}
+th {
+  border-bottom: 2px solid black;
+  background-color: #f0f0f0;
+}
+</style>
+</head>
+<body>
+<h1 class="title" style="text-align:center">Making Safe C++ Happen</h1><h2 class="subtitle" style="text-align:center">An approach to implementing safety</h2><table><tbody><tr><td> Document # </td><td> P3700R0 </td></tr><tr><td> Date </td><td> 2025-05-19 </td></tr><tr><td> Targeted subgroups </td><td> EWG, SG21, SG23 </td></tr><tr><td> Ship vehicle </td><td> C++29 </td></tr><tr><td> Reply-to </td><td> Peter Bindels &lt;dascandy@gmail.com&gt; </td></tr></tbody></table><h1 data-number="1" id="Introduction"><span class="header-section-number">1</span> Introduction<a href="#Introduction" class="self-link"></a></h1><p>C++ is a language that has a lineage going back to the 1970's, which has attempted to remain backward-compatible with as much C as it reasonably can. While this has huge benefits, it comes with the downside that any construct that was created 50 years ago is still likely valid C++, even though we universally agree by now that the construct in question is always a terrible idea. Compilers have added many flags to enable users to prevent them from having these constructs end up in an executable or in production, and the culture has grown in the direction of enabling more and more warnings. Still, the language retains the reputation that it's possible to write very unsafe code, and that it's common to do so.</p><p>Changing a language with a spread the size of C++ to become safe is a huge undertaking, and not one that can be done in a single, or even in a single dozen papers. This paper attempts to provide a structure to identify and to map progress on the area of safety in C++. It does not propose anything specific itself. In particular, contracts (P2900), profiles (p3081 et al) and others are likely ways to implement part of this.</p><h1 data-number="2" id="What-is-safety-"><span class="header-section-number">2</span> What is safety?<a href="#What-is-safety-" class="self-link"></a></h1><p>Taking a page from <a href="P2687">https://wg21.link/p2687</a>'s book, we find the following set of safety failures. I've ordered them roughly from user responsibility to language responsibility</p><ul><li>Logic errors: perfectly legal constructs that don’t reflect the programmer’s intent, such as using &lt; where a &lt;= or a &gt; was intended.</li><li>Timing errors: for example, delivering a result in 1.2ms to a device supposedly responding to an external event in 1ms.</li><li>Concurrency errors: failing to correctly take current activities into account leading to (typically) obscure problems (such as data races and deadlocks).</li><li>Resource leaks: failing to return resources to their appropriate management system (e.g., memory, file handles, locks) potentially leading to the program grinding to a halt because of lack of available resources.</li><li>Termination errors: a library that terminates in case of “unanticipated conditions” being part of a program that is not allowed to unconditionally terminate.</li><li>Overflows and unanticipated conversions: For example, an unanticipated wraparound of an unsigned integer loop variable or a narrowing conversion.</li><li>Memory corruption: for example, through the result of a range error or by accessing and memory through a pointer to an object that no longer exists thereby changing a different object.</li><li>Type errors: for example, using the result of an inappropriate cast or accessing a union through a member different from the one through which it was written.</li></ul><p>For those at the bottom, the language is fully in a position to fix what it does but currently doesn't. For those at the top, the language is very much in a position where it is unable to do anything directly, but it still has some sway on giving the user tools to help themselves find these problems.</p><p>This paper covers termination errors, overflows and unanticipated conversions, type errors, and memory corruption. It offers hooks to handle situations like resource leaks, concurrency errors, logic errors and timing errors in a uniform way, but does not attempt to find or handle them.</p><h1 data-number="3" id="The-requirements"><span class="header-section-number">3</span> The requirements<a href="#The-requirements" class="self-link"></a></h1><p>These are aspects that we consider to be fundamental to any safety-in-c++ proposal to succeed. We are enumerating them here, so we can refer to them in resulting design properties.</p><ul><li>Code that works in the safe mode is guaranteed to work in the regular mode, and has the same outcomes</li><li>Switching to the safe mode is incremental, allowing people to adopt it over time and as budget is available</li><li>The safe mode is customizable; safety is not a universally-identical thing and people have different priorities in what safety is desired first</li><li>Large scale software must remain supported; we can consider global guarantees but only if they can be done in a way that scales</li><li>Failure in safety at runtime is handled it in an application-appropriate way</li><li>Applications using the safe mode are not slower than those using regular C++ </li><li>The expressivity of the language does not go down</li></ul><h1 data-number="4" id="The-approach"><span class="header-section-number">4</span> The approach<a href="#The-approach" class="self-link"></a></h1><h2 data-number="4.1" id="Prevent-at-compile-time-what-we-can"><span class="header-section-number">4.1</span> Prevent at compile time what we can<a href="#Prevent-at-compile-time-what-we-can" class="self-link"></a></h2><ul><li>Types encode information about semantics and values. When the types cannot, annotations do</li><li>Encode information on TU and function boundaries that translate global problems into local ones</li><li>Disallow local constructs that are not safe</li></ul><h2 data-number="4.2" id="Prevent-at-runtime-what-we-cannot-guarantee-at-compile-time"><span class="header-section-number">4.2</span> Prevent at runtime what we cannot guarantee at compile time<a href="#Prevent-at-runtime-what-we-cannot-guarantee-at-compile-time" class="self-link"></a></h2><ul><li>Emit runtime checks for any non-prevented safety failure</li><li>Have a general approach to handle runtime failure that is suitable for all users</li><li>Allow compilers to take what is specified as a runtime check, and to move it to compile time if they are able to do so</li></ul><h2 data-number="4.3" id="Offer-a-user-friendly-interface-to-start-using-safer-Cpp--and-to-increase-the-safety-requirements"><span class="header-section-number">4.3</span> Offer a user friendly interface to start using safer C++, and to increase the safety requirements<a href="#Offer-a-user-friendly-interface-to-start-using-safer-Cpp--and-to-increase-the-safety-requirements" class="self-link"></a></h2><ul><li>Offer ways for end-users, other standards bodies, and the C++ committee, to define checks, language reductions, and groupings of related checks and reductions, and to enable those in parts of software</li><li>Offer ways for end-users to incrementally adopt stricter practices (Similar to how warnings get switched into errors, and how users can enable more warnings to be fixed)</li><li>Offer ways for users, library developers, end-product developers etc. to communicate with non-C++-developers about the safety of their C++ usage</li></ul><h1 data-number="5" id="The-grid"><span class="header-section-number">5</span> The grid<a href="#The-grid" class="self-link"></a></h1><p>We propose a grid of things to do. The rows of the grid correspond to a type of action to do, a particular tool to use. The columns of the grid correspond to an area of safety that is being addressed, similar to <a href="P3081">P3081</a>'s Profiles. For example, changing <span class="code"><span class="keyword">dynamic_cast</span></span> on unrelated types to ill-formed would be in the "type-safety" column, in the "language subsetting" tool. Making <span class="code"><span class="keyword">operator</span><span class="special">[]</span></span> on a <span class="code">std<span class="special">::</span>span</span> runtime fail on out-of-range access is in the "range safety" column with the "runtime checks" tool.</p><p>Existing papers can be mapped onto this grid by realizing that the columns roughly correspond to Profiles. </p><p>The rows are split up between separate papers, where each paper tackles a separate approach, specifying it in detail, but leaving the specific application in the language to other papers.</p><p>The approach we see that will make the grid a reality is to start by making sure we have all the tools that are needed to make a column implementable, then proposing each column in its own paper that tries to tackle that aspect of safety in a targeted way by using all tools in conjunction. As soon as the tools are specified, all other standard bodies can also do the same, allowing (for example) MISRA to define a MISRA-2023 profile, including compile-time and run-time checks.</p><h1 data-number="6" id="The-rows"><span class="header-section-number">6</span> The rows<a href="#The-rows" class="self-link"></a></h1><p>We need to have tools that enable us to enforce safety. The rows we identify so far are:</p><ul><li>We need the types and annotations that convey sufficient information for tools to prove safety, and to transfer knowledge of safety and values between translation units.</li><li>We need to have a way to remove parts of the language that are now considered to be "bad code" or "un-removable in the general case", that is usable by end users and other standard bodies.</li><li>We need to provide substitute functionality for essential expressivity that is removed</li><li>We need to have a way to handle runtime failure in such a way that each kind of user is able to handle the runtime failures in a way appropriate for their product.</li><li>We need to have a way to name a column, to make the mass of new restrictions and checks tractible for users and integrators to understand, for usability switches to be portable between systems, and for statements about safety to have a lingua franca.</li></ul><p>For each row, it is likely that we need a conjunction of multiple tools to cover it fully.</p><h2 data-number="6.1" id="Cross-TU---cross-function-information"><span class="header-section-number">6.1</span> Cross-TU / cross-function information<a href="#Cross-TU---cross-function-information" class="self-link"></a></h2><p>Software is written with many assumptions. These are often encoded into the program itself by use of an <span class="code">assume<span class="special">()</span></span> function or macro, which verifies the veracity of the assumptions in passing. The downside of adding many of these assumption-documenting notes is that they tend to interact badly with separate compilation. This leads to developers leaving out many such documented assumptions, making it harder for the compiler to prove that those assumptions are in fact tautological and optimizing it out. In particular, on translation unit boundaries, compilers get a known partial set of information, and can not use the information inferrable from other functions in optimizing this translation unit. At best they can try to store the program code until link time and hope that enough information is available to make such conclusions then, and that the compiler is powerful enough to hold all information until that point.</p><p>In many places, having the ability to annotate on function boundaries what assumptions must hold upon entry (preconditions), which assumptions can be made on exit from a valid function call (postconditions), where ownership and lifetime of arguments go (pointer lifetimes) etc. would be a boon to allow the compiler to determine that a function by itself either does or does not adhere to its own assumptions. In an idealized compiler, this would be able to prove that a function is correct, or that it somewhere breaks its indicated conditions. In a practical compiler, it will likely allow compilers to warn on cross-TU constructs that are now detectably wrong on either side, and in some (many) cases, to optimize the code with the knowledge it's checked and enforced, leading to safer and faster programs.</p><p>Existing work was done in many papers adding ownership-containing and lifetime-transferring types (such as <span class="code">unique_ptr</span>, <span class="code">vector</span> etc.). We also include <a href="P2900">https://wg21.link/p2900</a> giving users a way to cross-TU annotate functions with value expectations on entry and exit.</p><h2 data-number="6.2" id="Remove-parts-of-the-language"><span class="header-section-number">6.2</span> Remove parts of the language<a href="#Remove-parts-of-the-language" class="self-link"></a></h2><p>For safety, we want to remove unsafe constructs:</p><ul><li>In hard-embedded setups, we want to avoid dynamic allocations</li><li>In cross-language environments, we want to avoid exceptions</li><li>In "Modern C++", we want to avoid raw <span class="code"><span class="keyword">new</span></span> and <span class="code"><span class="keyword">delete</span></span> statements in user code, pointer arithmetic, use of raw arrays, and similar constructs</li><li>Many people want to use the "without-C" subset of C++ </li><li>Library authors want to use the "C++17-compatible" subset</li><li>MISRA and AutoSAR users want to use the compliant subset</li></ul><p>Language subsetting is a fundamental thing that many people do all the time, in many different areas. To add safety, we need to have a way to define subsets.</p><h2 data-number="6.3" id="Provide-substitutes-for-removed-essential-functionality"><span class="header-section-number">6.3</span> Provide substitutes for removed essential functionality<a href="#Provide-substitutes-for-removed-essential-functionality" class="self-link"></a></h2><p>Many papers in WG21 already take care of providing new and safe ways to express functionality that before that point was only expressible with either disciplined use of less-structured approaches, or by skirting around things that were not quite correct but that functioned regardless. This row exists mostly to ensure that for each column we define, we realize that we may need to define new functionality to replace what we are removing, or alternatively that we should clearly illustrate in each column paper what the safe replacements are for the constructs that are being removed.</p><h2 data-number="6.4" id="Handling-runtime-failure"><span class="header-section-number">6.4</span> Handling runtime failure<a href="#Handling-runtime-failure" class="self-link"></a></h2><p>Depending on the environment, we need a different way to handle failures. The environments vary from Voyager probes at 15 light-minutes distance from Earth, autonomous cars on public roads, server software handling billions of requests per minute, IoT devices handling five requests per day, implanted pace makers, phone software displaying a video stream, to high-frequency trading software and bank software.</p><p>The best way to handle a runtime safety failure for all of these depends greatly on what kind of software it is, what environment it is in, and what the software owner wants the handling to be. For some it will be collecting the errors and sending them as telemetry data to a backend; for some it is more important to get the device into a known-safe state; a third will have to keep working as best it can while sending out a "device needs help" signal and a fourth is best off just crashing to desktop. In some cases we even want different kinds of failure to have different kinds of treatment - for example, a newly added check that may fail, would be best off only being observed, while a check that has existed for months and that is known to be essential to prevent exploitation must be enforced.</p><p>Part of this row's efforts should also be remapping places where our current best handling is to call <span class="code">std<span class="special">::</span>terminate</span> directly, to instead direct to this handler with information on what exactly happened, so that it can figure out what way to handle the failure and to ensure the software keeps performing its job as well as it can.</p><h2 data-number="6.5" id="Naming-safety"><span class="header-section-number">6.5</span> Naming safety<a href="#Naming-safety" class="self-link"></a></h2><p>People tend not to use things that are hard to use, even if using them would be good. In order to make this accessible to people, we will have to enable people to switch on parts of safety at a time, so that they can incrementally adopt more safe standards while updating the code base, one step at a time. We also need to make it possible for people to enable well-known groupings or increments of safety, somewhat similar to current <span class="code"><span class="special">-</span>Wall</span> or MISRA-2023, in a clear, consistent and portable manner.</p><p>To do this, we need to have some way for people to group related settings, checks and properties, for end-users to activate, and for quality assurance to verify. It is much easier to speak about "turning on the MISRA-2023 profile" than a series of checks, even if the meaning is the same.</p><h1 data-number="7" id="The-columns"><span class="header-section-number">7</span> The columns<a href="#The-columns" class="self-link"></a></h1><p>The columns correspond to Profiles, and this paper will not attempt to copy the information already written on it.</p></body></html>
