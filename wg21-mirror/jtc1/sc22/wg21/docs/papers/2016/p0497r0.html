@@ -1,0 +1,174 @@
+<html><head><meta charset="UTF-8">
+<title>Fixes to shared_ptr support for arrays</title>
+  <style type='text/css'>
+  body {font-variant-ligatures: none;}
+  p {text-align:justify}
+  li {text-align:justify}
+  blockquote.note, div.note
+  {
+          background-color:#E0E0E0;
+          padding-left: 15px;
+          padding-right: 15px;
+          padding-top: 1px;
+          padding-bottom: 1px;
+  }
+  p code {color:navy}
+  ins p code {color:#00A000}
+  p ins code {color:#00A000}
+  p del code {color:#A00000}
+  ins {color:#00A000}
+  del {color:#A00000}
+  table#boilerplate { border:0 }
+  table#boilerplate td { padding-left: 2em }
+  table.bordered, table.bordered th, table.bordered td {
+    border: 1px solid;
+    text-align: center;
+  }
+  ins.block {color:#00A000; text-decoration: none}
+  del.block {color:#A00000; text-decoration: none}
+  </style>
+</head><body>
+<table id="boilerplate">
+<tr><td>Document number</td><td>P0497R0</td></tr>
+<tr><td>Date</td><td>2016-11-10</td></tr>
+<tr><td>Project</td><td>Programming Language C++, Library Working Group</td></tr>
+<tr><td>Reply-to</td><td>Jonathan Wakely &lt;cxx&#x40;kayari.org&gt;</td></tr>
+</table><hr>
+<h1>Fixes to shared_ptr support for arrays</h1>
+<h2>Introduction</h2>
+
+<p>LWG Motion 6 in Jacksonville was to apply to the C++ working paper
+the wording from <a href="http://wg21.link/p0220r1">P0220R1</a>,
+<em>Adopt Library Fundamentals V2 TS Components for C++17 (R1)</em>,
+but due to conflicts with changes in the C++ WP the <code>shared_ptr</code> changes
+were not applied. <a href="http://wg21.link/p0414r1">P0414R1</a> remedied that, by clarifying how to
+apply the changes from the TS to the current draft.</p>
+
+<p>That does not entirely resolve the matter, because the specification in the TS
+is missing some things (either by accident, or because the specification in the
+WP changed since a snapshot of it was taken for the TS). There are four issues
+with <code>shared_ptr</code> array support which need to be addressed after P0414R1 is
+applied to the WP.</p>
+
+<h3>Incorrect constraint for <code>shared_ptr</code> construction from <code>unique_ptr</code></h3>
+
+<p>Originally this constructor was unconstrained and had no requirements.
+The TS has a requirement added by [N3290][n3290]:</p>
+
+<blockquote><p><em>Requires:</em> <code>Y*</code> shall be <em>compatible with</em> <code>T*</code>.</p></blockquote>
+
+<p>In parallel, <a href="https://wg21.link/lwg2399">LWG 2399</a> added a slightly different constraint to the WP:</p>
+
+<blockquote><p><em>Remark:</em> This constructor shall not participate in overload resolution unless <code>unique_ptr&lt;Y, D&gt;::pointer</code> is convertible to <code>T*</code>.</p></blockquote>
+
+<p>I combined these in P0414R1 as:</p>
+
+<blockquote><p><em>Remark:</em> This constructor shall not participate in overload resolution unless <code>unique_ptr&lt;Y, D&gt;::pointer</code> is <del>convertible to</del> <ins> <em>compatible with</em> </ins> <code>T*</code>.</p></blockquote>
+
+<p>Based on implementation experience I believe the correct form is:</p>
+
+<blockquote><p><em>Remark:</em> This constructor shall not participate in overload resolution unless <code>Y*</code> is compatible with <code>T*</code> and <code>unique_ptr&lt;Y, D&gt;::pointer</code> is convertible to <code>element_type*</code>.</p></blockquote>
+
+<p>The "compatible with" check prevents undesirable conversions from
+<code>unique_ptr&lt;T[]&gt;</code> to <code>shared_ptr&lt;T&gt;</code> and the "convertible to" check ensures
+that the result of <code>unique_ptr&lt;Y, D&gt;::get()</code> can be stored in the <code>shared_ptr</code>
+and returned by <code>shared_ptr&lt;T&gt;::get()</code>.</p>
+
+<h3>Missing constraint for <code>weak_ptr</code> construction from <code>weak_ptr</code> rvalues.</h3>
+
+<p><a href="https://wg21.link/lwg2315">LWG 2315</a> added new <code>weak_ptr</code> constructors to the WP which are not
+present in the TS and so were not adjusted for array support. The fix here is
+to simply apply the same constraints as for the other <code>weak_ptr</code> constructors,
+requiring that <code>Y*</code> is compatible with <code>T*</code>.</p>
+
+<h3><code>shared_ptr&lt;T[]&gt;</code> and <code>shared_ptr&lt;T[N]&gt;</code> comparisons</h3>
+
+<p>The definition of <code>operator&lt;(const shared_ptr&lt;T&gt;&amp; a, const shared_ptr&lt;U&gt;&amp;)</code> in
+[util.smartptr.shared.cmp] p2 says:</p>
+
+<blockquote><p><em>Returns:</em> <code>less&lt;V&gt;()(a.get(), b.get())</code>, where <code>V</code> is the composite pointer type (Clause 5) of <code>T*</code> and <code>U*</code>.</p></blockquote>
+
+<p>There is no common type for types such as <code>A(*)[2]</code> and <code>B(*)[1]</code>, so mixed
+comparisons are not possible.</p>
+
+<p>The definition of <code>operator&lt;(const shared_ptr&lt;T&gt;&amp; a, nullptr_t)</code> in
+[util.smartptr.shared.cmp] p6 says:</p>
+
+<blockquote><p><em>Returns:</em> The first function template returns <code>less&lt;T*&gt;()(a.get(), nullptr)</code>. The second function template returns <code>less&lt;T*&gt;()(nullptr, a.get())</code>.</p></blockquote>
+
+<p>When <code>T</code> is an array type <code>a.get()</code> is not convertible to <code>T*</code>, so it fails
+to compile.</p>
+
+<p>Both functions should use <code>less&lt;element_type*&gt;</code> instead of simply <code>T*</code>.</p>
+
+<h3>Interaction with <code>enable_shared_from_this</code></h3>
+
+<p>It doesn't make sense to treat the first element of an array specially, so
+a <code>shared_ptr</code> to an array should not enable <code>shared_from_this</code> on
+construction.</p>
+
+<h2>Proposed Wording</h2>
+
+<p>Changes are relative to N4606.</p>
+
+<p>Change 20.11.2.2.1 <code>shared_ptr</code> constructors [util.smartptr.shared.const]:</p>
+
+<blockquote><pre><code>    template&lt;class Y&gt; explicit shared_ptr(Y* p);
+</code></pre>
+
+<p>-4- <em>Requires:</em> [...]</p>
+
+<p>-5-
+<em>Effects:</em> Constructs a <code>shared_ptr</code> object that owns the pointer <code>p</code>. <ins>When <code>T</code> is not an array type, e</ins><del>E</del>nables <code>shared_from_this</code> with <code>p</code>. If an exception is thrown, <code>delete p</code> is called.</p>
+
+<p>[...]</p>
+
+<p>-8- <em>Requires:</em> [...]</p>
+
+<p>-9- <em>Effects:</em> Constructs a <code>shared_ptr</code> object that owns the object <code>p</code> and the deleter <code>d</code>. <ins>When <code>T</code> is not an array type, t</ins><del>T</del>he first and second constructors enable <code>shared_from_this</code> with <code>p</code>. The second and fourth constructors shall use a copy of <code>a</code> to allocate memory for internal use. If an exception is thrown, <code>d(p)</code> is called.</p>
+
+<p>[...]</p>
+
+<pre><code>  template &lt;class Y, class D&gt; shared_ptr(unique_ptr&lt;Y, D&gt;&amp;&amp; r);
+</code></pre>
+
+<p>-26-
+<em>Remark:</em> This constructor shall not participate in overload resolution unless <del><code>unique_ptr&lt;Y, D&gt;::pointer</code></del><ins><code>Y*</code></ins> is <em>compatible with</em> <code>T*</code><ins> and
+<code>unique_ptr&lt;Y, D&gt;::pointer</code> is convertible to <code>element_type*</code></ins>.</p>
+
+<p>-27 <em>Effects:</em>
+If <code>r.get() == nullptr</code>, equivalent to <code>shared_ptr()</code>. Otherwise, if <code>D</code> is not a reference type, equivalent to <code>shared_ptr(r.release(), r.get_deleter())</code>. Otherwise, equivalent to <code>shared_ptr(r.release(), ref(r.get_deleter()))</code>. If an exception is thrown, the constructor has no effect.
+<ins>When <code>T</code> is not an array type</ins><del>If <code>r.get() != nullptr</del></code>, enables <code>shared_from_this</code> with the value that was returned by <code>r.release()</code>.</p></blockquote>
+
+<p>Change 20.11.2.2.7 <code>shared_ptr</code> comparison [util.smartptr.shared.cmp]:</p>
+
+<blockquote><pre><code>    template&lt;class T, class U&gt; bool operator&lt;(const shared_ptr&lt;T&gt;&amp; a, const shared_ptr&lt;U&gt;&amp; b) noexcept;
+</code></pre>
+
+<p>-2-
+<em>Returns:</em> <code>less&lt;V&gt;()(a.get(), b.get())</code>, where <code>V</code> is the composite pointer type (Clause 5) of <code><ins>shared_ptr&lt;</ins>T<ins>&gt;::element_type</ins>*</code> and <code><ins>shared_ptr&lt;</ins>U<ins>&gt;::element_type</ins>*</code>.</p>
+
+<p>[...]</p>
+
+<pre><code>    template &lt;class T&gt;
+      bool operator&lt;(const shared_ptr&lt;T&gt;&amp; a, nullptr_t) noexcept;
+    template &lt;class T&gt;
+      bool operator&lt;(nullptr_t, const shared_ptr&lt;T&gt;&amp; a) noexcept;
+</code></pre>
+
+<p>-6-
+<em>Returns:</em> The first function template returns <code>less&lt;<ins>shared_ptr&lt;</ins>T<ins>&gt;::element_type</ins>*&gt;()(a.get(), nullptr)</code>. The second function template returns <code>less&lt;<ins>shared_ptr&lt;</ins>T<ins>&gt;::element_type</ins>*&gt;()(nullptr, a.get())</code>.</p></blockquote>
+
+<p>Change 20.11.2.3.1 <code>weak_ptr</code> constructors [util.smartptr.weak.const]:</p>
+
+<blockquote><pre><code>  weak_ptr(weak_ptr&amp;&amp; r) noexcept;
+  template&lt;class Y&gt; weak_ptr(weak_ptr&lt;Y&gt;&amp;&amp; r) noexcept;
+</code></pre>
+
+<p>-3-
+<em>Remark:</em> The second constructor shall not participate in overload resolution unless <code>Y*</code> is <del>implicitly convertible to</del> <ins> <em>compatible with</em> </ins> <code>T*</code>.</p></blockquote>
+
+<h2>Acknowledgments</h2>
+
+<p>Thanks to Peter Dimov for reviewing these suggestions.</p>
+</body></html>

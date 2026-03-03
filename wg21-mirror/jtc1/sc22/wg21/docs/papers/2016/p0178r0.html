@@ -1,0 +1,601 @@
+<html>
+
+<head>
+<title>Allocators and swap</title>
+<style type="text/css">
+  p {text-align:justify}
+  li {text-align:justify}
+  blockquote.note
+  {
+    background-color:#E0E0E0;
+    padding-left: 15px;
+    padding-right: 15px;
+    padding-top: 1px;
+    padding-bottom: 1px;
+  }
+  ins {background-color:#A0FFA0}
+  del {background-color:#FFA0A0}
+</style>
+</head>
+
+<body>
+<table>
+<tr>
+  <td align="left">Doc. no.</td>
+  <td align="left">P0178R0</td>
+</tr>
+<tr>
+  <td align="left">Date:</td>
+  <td align="left">2016-02-15</td>
+</tr>
+<tr>
+  <td align="left">Project:</td>
+  <td align="left">Programming Language C++</td>
+</tr><tr>
+  <td align="left">Audience:</td>
+  <td align="left">Library Evolution Working Group</td>
+</tr>
+<tr>
+  <td align="left">Reply to:</td>
+  <td align="left">Alisdair Meredith &lt;<a href="mailto:ameredith1@bloomberg.net">ameredith1@bloomberg.net</a>&gt;</td>
+</tr>
+</table>
+
+<h1>Allocators and swap</h1>
+
+<h2>Table of Contents</h2>
+<ol>
+<li><a href="#0.0">Revision History</a></li>
+  <ul>
+  <li><a href="#0.1">Revision 0</a></li>
+  </ul>
+<li><a href="#1.0">Introduction</a></li>
+<li><a href="#2.0">The Basic Problem</tt></a></li>
+  <ul>
+  <li><a href="#2.1">Feedback from field experience</a></li>
+  </ul>
+<li><a href="#3.0">Proposed Solution</a></li>
+<li><a href="#4.0">Acknowledgements</a></li>
+<li><a href="#5.0">References</a></li>
+</ol>
+
+
+<h2><a name="0.0">Revision History</a></h2>
+
+<h3><a name="0.1">Revision 0</a></h3>
+<p>
+Original version of the paper for the 2016 pre-Jacksonville mailing.
+</p>
+
+<!--
+<h6>To be done:</h6>
+<ul>
+  <li>Cross-reference LWG issues by number and link</li>
+  <li>(note original[98] was an optimization from quadratic to linear, not a new semantic)</li>
+  <li>Discuss how <i>unified call syntax</i>(?) (does not) interact with this direction</li>
+</ul>
+-->
+
+<h2><a name="1.0">Introduction</a></h2>
+<p>
+The C++11 standard introduced <tt>allocator_traits</tt> as a way to easily support
+a variety of allocator models, especially those where allocators hold some kind of
+state that might affect allocator, such as a pointer to a memory resource,
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n3916">N3916</a>.
+One of the problems that had to be tackled was the effect of calling <tt>swap</tt>
+on containers (or other allocator-aware types) that have allocators that do not
+compare equal.  The committee at the time took the conservative option of simply
+making this undefined behavior, and a couple of issues have since been filed
+regarding some of the problems this causes:
+<a href="http://cplusplus.github.io/LWG/lwg-active.html#2152">LWG #2152</a>,
+<a href="http://cplusplus.github.io/LWG/lwg-active.html#2153">LWG #2153</a>.
+The last time the Library Working Group looked at these issues, it called for a
+paper to better describe the issues and propose a solution (with wording!)  This
+is that paper.
+</p>
+
+<h2><a name="2.0">The Basic Problem</a></h2>
+<p>
+When support for stateful allocators was added to C++11, it became important to
+answer the question of what should happen when two containers with allocators
+that cannot allocate/deallocate memory on behalf of the other are <tt>swap</tt>ped.
+The conservative position adopted at the time was to simply declare such calls
+out of contract, and make them undefined behavior.  This gave us the maximum
+freedom to revise our position later, if necessary.  It also matched the contract
+Bloomberg documented for their library, which was one of the code bases known to
+make widespread use of stateful allocators.
+</p>
+
+<p>
+The problem with giving the free-function swap a <i>narrow</i> contract is that
+it does not satisfy the contract of the generic <tt>swap</tt> function in the
+same namespace.  This greatly harms the ability to use <tt>std::swap</tt> in
+generic code, as the calling template must now be aware if the type it is
+instantiated for is a standard library container, and if so, whether its
+allocators compare equal.  Conversely, this is not a problem for the <tt>swap</tt>
+member function, as the caller either knows exactly which container they are
+dealing with, or should document the container concept they are dealing with
+if it differs in some way from the standard.  In some sense, the generic free
+function is more fundamental than the member function.
+</p>
+
+<p>
+There has been some concern raised that the standard library cannot make arbitrary
+constraints on <tt>swap</tt> function found via ADL, so this exercise is vain.
+That is not entirely true, as if we assume the container requirements apply to user
+code, then we are already changing their <tt>swap</tt> contract by introducing
+undefined behavior.  However, in practice, the current Container Requirements tables
+do not document Concepts, but are rather a form of common documentation to avoid
+redundant wording through each of the container sub-clauses.  In this context, the
+standard library has broken its own <tt>swap</tt> function by adding an overload
+in its own namespace that, if not present, would allow the container to &quot;do
+the right thing&quot;, and with move-semantics enabled for each container, do so
+efficiently with the correct exception-safety guarnatees.  The optimization offered
+by the overload, in a modern compiler, is tiny (but still worth taking, especially
+for containers with additional predicates).
+</p>
+
+<p>
+The breakage of <tt>swap</tt> has more subtle implications too.  The author of
+generic code could, by defining their own <tt>is_standard_container</tt> trait,
+rewrite their algorithm to allow for exchanging states of containers with
+unequal allocators.  In fact, this is necessary for any generic algorithm that
+expects to work with containers unless the contract explicitly calls out this
+problem.  The standard library offers no support for users trying to help
+their users in this manner.  However, the further subtlety is that
+<tt>is_standard_container</tt> is not sufficient, as <tt>swap</tt> for
+<tt>pair</tt> and <tt>tuple</tt> is similarly undefined, and would need to be
+detected and supported separately.  This problem further eats into any other
+type that wraps a standard container and can support stateful allocators.
+</p>
+
+<h3><a name="2.1">Feedback from field experience</a></h3>
+<p>
+Bloomberg have over a decade of experience with a stateful allocator model in
+their standard library.  When this was first introduced, the undefined behavior
+described by the current standard was added to all of our <tt>swap</tt>
+contracts, but the (undocumented) implementation performs the double-copy/swap
+described in this paper.  This allowed existing code, written without stateful
+allocators in mind, to continue to function while the new contract was slowly
+adopted.  A decade on, we still get large resistance any time we try to enable
+assertions on these narrow contracts, as perfectly sensible use-cases exist
+(frequently, not always, in generic code) for continuing to support this
+behavior.  Given the choice between linear and potentially-throwing <tt>swap</tt>
+vs. undefined behavior, our users have been very clear which they prefer -
+as long as the constant-time, non-throwing behavior remains when the allocators
+do compare equal.
+</p>
+
+<h2><a name="3.0">Proposed Solution</a></h2>
+<p>
+The simplest implementation of the <tt>swap</tt> overload (for a given
+<i><tt>CONTAINER_TYPE</tt></i>) should be efficient and correct, without
+preconditions:
+</p>
+<blockquote><pre>
+void swap(CONTAINER_TYPE &amp; left, CONTAINER_TYPE &amp; right) {
+   std::swap&lt;TYPE&gt;(left, right);
+}
+</pre></blockquote>
+
+<p>
+However, the optimal algorithm for swapping containers (or any other
+allocator-aware type) might be more like:
+</p>
+
+<blockquote><pre>
+void swap(CONTAINER_TYPE &amp; left, CONTAINER_TYPE &amp; right) {
+   if (<i>allocators are compatible</i>) {
+      left.swap(right);
+   }
+   else if (<i>allocator propagation traits are sane</i>) {
+      std::swap&lt;TYPE&gt;(left, right);
+   }
+   else {
+      CONTAINER_TYPE tempLeft {std::move(right), left.get_allocator() };
+      CONTAINER_TYPE tempRight{std::move(left ), right.get_allocator()};
+      swap(left,  tempLeft );
+      swap(right, tempRight);
+   }
+}
+</pre></blockquote>
+
+<p>
+We assume that containers provide a <tt>swap</tt> member function, which has
+the precondition that allocators must compare equal (otherwise behavior is
+undefined, as today).  The check that <i>allocators are compatible</i> is that
+they propagate on swap (a compile-time check), or if they are always equal (a
+compile-time check added as part of C++17), or if they compare equal at
+run-time.  The check that <i>allocator propagation traits are sane</i> is a
+compile-time test which really means that they are the same; either both derive
+from <tt>true_type</tt>, or both derive from <tt>false_type</tt>.  See P0177r0
+for more details on this problem, and a proposed resolution that would simplify
+what we need to consider in this paper (without changing the conclusion).
+</p>
+
+<p>
+The final branch is clearly expensive, making two copies of each container, but
+has the benefit of the strong exception safety guarantee.  This is a nice
+bonus, although not something guaranteed by <tt>std::swap</tt>, and something
+we prefer to not pay for if we do not need it.  However, if we consider the
+middle branch, what are we really saving, when the allocators do not compare
+equal?  Here is a typical implementation of <tt>std::swap</tt>, with comments
+of anticipated costs when allocators are different.
+</p>
+
+<blockquote><pre>
+template &lt;typename TYPE&gt;
+void swap(TYPE &amp; left, TYPE &amp; right) {
+   TYPE temp{std::move(right)};  <i>// Efficient move construction</i>
+   right = std::move(left);      <i>// move-assign-with-different-allocator, copy-swap implementation</i>
+   left  = std::move(temp);      <i>// move-assign-with-different-allocator, copy-swap implementation</i>
+}
+</pre></blockquote>
+
+<p>
+Observant readers will want to consider the case that allocators propagate on
+move-assignment, so that the two assignments in this implementation would be
+efficient.  However, to get to this middle option, we have already considered
+the case that allocators are <i>compatible</i>, which includes the case that
+they propagate.  Hence, we do not get here if allocators propagate for both
+move-assignment and swap, nor do we get here if they differ due to the sanity
+check.  Likewise, if the container allocators compared equal, we would also
+have taken the first branch, so we end up in the middle branch only in the case
+that the allocators are different, and never propagate.  In such cases, the
+logic of the third and final branch is actually a slight unrolling of what
+would otherwise take place, while re-ordering work so that the strong exception
+safety guarantee holds (for free) so the proposed solution is to drop that
+middle branch.
+</p>
+
+<p>
+One final note on exception-safety guarantees are that we do not quite get the
+strong guarantee in all cases.  Associative and unordered associative containers
+store function objects that are permitted to have throwing swap and assignment
+operators.  The proposed resolution is no worse in such cases, but offers only
+the basic exception-safety guarantee.  The LEWG may separately want to consider
+whether such support is still warranted as a separate issue, paying particular
+attention to
+<a href="http://cplusplus.github.io/LWG/lwg-active.html#2189">LWG #2189</a>.
+</p>
+
+<p>
+How does this proposal compare to the existing contract?  If the allocator
+propagate on swap, or always compare equal (such as <tt>std::allocator</tt>)
+then this has exactly the same effect, only we define the free-function
+<tt>swap</tt> in terms of the member-function, rather than the other way
+around.  If the allocator is stateful, and compares equal at runtime, we have
+mandated one extra run-time branch to check that allocators compare equal
+before yielding either the exact same algorithm as before.  However, if the
+allocators do not compare equal, we turn undefined (library) behavior into
+well-defined behavior.  Given the presence of the runtime-check is not
+observable behavior, this implementation would be perfectly conforming for
+C++11, or even C++98.  Note that this does not mean that existing
+implementations would not have to change, merely that portable code could not
+be relying on any of the differences that are exposed.
+</p>
+
+<p>
+Also, see paper
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0177r0">P0177R0</a>
+for a possible direction to simplify further, by requiring all allocators
+to have <i>sane</i> propagation traits.
+</p>
+
+<h2><a name="4.0">Proposed Wording</a></h2>
+<p>
+Make the following edits to clause 23 [containers]:
+</p>
+
+<blockquote>
+<h4>23.2.1 General container requirements [container.requirements.general]</h4>
+<h5>Table 95 — Container requirements</h5>
+<table border="1" cellpadding="0" cellspacing="0">
+<tr>
+  <td><b>Expression</b></td>
+  <td><b>Return type</b></td>
+  <td><b>Opertional semantics</b></td>
+  <td><b>Assertion/note pre-/post-condition</b></td>
+  <td><b>Complexity</b></td>
+</tr>
+<tr>
+  <td><tt>a.swap(b)</tt></td>
+  <td><tt>void</tt</td>
+  <td><tt></tt</td>
+  <td>
+<ins><i>Requires:</i>
+<tt>a.get_allocator() == b.get_allocator() || allocator_traits&lt;allocator_type&gt;::propagate_on_container_swap::value</tt>.
+<i>post:</i> Exchanges the contents of <tt>a</tt> and <tt>b</tt>.</ins>
+  </td>
+  <td>(Note A)</td>
+</tr>
+<tr>
+  <td><tt>swap(a,b)</tt></td>
+  <td><tt>void</tt</td>
+  <td><tt><del>a.swap(b)</del></tt</td>
+  <td>
+<ins><i>post:</i></ins> <del>e</del><ins>E</ins>xchanges the contents of <tt>a</tt>
+and <tt>b</tt><ins>.</ins>
+  </td>
+  <td><del>(Note A)</del></td>
+</tr>
+</table>
+<p>
+9 The expression <tt>a.swap(b)</tt>, for containers <tt>a</tt> and <tt>b</tt>
+of a standard container type other than <tt>array</tt>, shall exchange the
+values of <tt>a</tt> and <tt>b</tt> without invoking any move, copy, or swap
+operations on the individual container elements. Lvalues of any
+<tt>Compare</tt>, <tt>Pred</tt>, or <tt>Hash</tt> types belonging to <tt>a</tt>
+and <tt>b</tt> shall be swappable and shall be exchanged by calling
+<tt>swap</tt> as described in 17.6.3.2. If
+<tt>allocator_traits&lt;allocator_type&gt;::propagate_on_container_swap::value</tt>
+is <tt>true</tt>, then lvalues of type <tt>allocator_type</tt> shall be
+swappable and the allocators of <tt>a</tt> and <tt>b</tt> shall also be
+exchanged by calling <tt>swap</tt> as described in 17.6.3.2.  Otherwise, the
+allocators shall not be swapped, and the behavior is undefined unless
+<tt>a.get_allocator() == b.get_allocator()</tt>.  Every iterator referring to
+an element in one container before the swap shall refer to the same element in
+the other container after the swap. It is unspecified whether an iterator with
+value <tt>a.end()</tt> before the <del>swap</del><ins><tt>swap</tt></ins> will
+have value <tt>b.end()</tt> after the <del>swap</del><ins><tt>swap</tt></ins>.
+<ins>No exceptions shall be thrown, unless thrown by the <tt>swap</tt> called
+for a <tt>Compare</tt>, <tt>Pred</tt>, or <tt>Hash</tt> object.</ins>
+</p>
+<p><ins>
+10 The expression <tt>swap(a,b)</tt>, for containers <tt>a</tt> and <tt>b</tt>
+of a standard allocator-aware container type, shall exchange the values of
+<tt>a</tt> and <tt>b</tt>. Lvalues of any <tt>Compare</tt>, <tt>Pred</tt>, or
+<tt>Hash</tt> types belonging to <tt>a</tt> and <tt>b</tt> shall be swappable
+and shall be exchanged by calling <tt>swap</tt> as described in 17.6.3.2.  If
+<tt>allocator_traits&lt;allocator_type&gt;::propagate_on_container_swap::value</tt>
+is <tt>true</tt>, then lvalues of type <tt>allocator_type</tt> shall be
+swappable and the allocators of <tt>a</tt> and <tt>b</tt> shall also be
+exchanged by calling <tt>swap</tt> as described in 17.6.3.2; otherwise, the
+allocators shall not be swapped and, unless <tt>a.get_allocator() ==
+b.get_allocator()</tt>, iterators into <tt>a</tt> and <tt>b</tt> are
+invalidated.  No exceptions shall be thrown unless <tt>a.get_allocator() !=
+b.get_allocator() &amp;&amp;
+!allocator_traits&lt;allocator_type&gt;::propagate_on_container_swap::value</tt>,
+or unless thrown by the <tt>swap</tt> called for a <tt>Compare</tt>,
+<tt>Pred</tt>, or <tt>Hash</tt> object.  Unless iterators were invalidated,
+every iterator referring to an element in one container before the
+<tt>swap</tt> shall refer to the same element in the other container after the
+<tt>swap</tt>, no move, copy, or swap operations on the individual container
+elements shall be invoked, and the whole <tt>swap</tt> operation will have
+constant complexity; otherwise the <tt>swap</tt> operation has linear
+complexity.  It is unspecified whether an iterator with value <tt>a.end()</tt>
+before the <tt>swap</tt> will have value <tt>b.end()</tt> after the
+<tt>swap</tt>.
+</ins></p>
+<p>
+<del>10</del><ins>11</ins> If the iterator type of a container belongs to the
+bidirectional or random access iterator categories (24.2), the container is
+called <i>reversible</i> and satisfies the additional requirements in Table 96.
+</p>
+<p>
+<del>11</del><ins>12</ins> Unless otherwise specified (see 23.2.4.1, 23.2.5.1,
+23.3.3.4, and 23.3.6.5) all container types defined in this Clause meet the
+following additional requirements:
+<ol>
+  <li>- if an exception is thrown by an <tt>insert()</tt> or <tt>emplace()</tt>
+      function while inserting a single element, that function has no effects.</li>
+  <li>- if an exception is thrown by a <tt>push_back()</tt>, <tt>push_front()</tt>,
+      <tt>emplace_back()</tt>, or <tt>emplace_front()</tt> function, that function
+      has no effects.</li>
+  <li>- no <tt>erase()</tt>, <tt>clear()</tt>, <tt>pop_back()</tt> or
+      <tt>pop_front()</tt> function throws an exception.</li>
+  <li>- no copy constructor or assignment operator of a returned iterator throws an
+      exception.</li>
+  <li><del>- no <tt>swap()</tt> function throws an exception.</del></li>
+  <li><del>- no <tt>swap()</tt> function invalidates any references, pointers, or
+      iterators referring to the elements of the containers being swapped.
+      [<i>Note:</i> The <tt>end()</tt> iterator does not refer to any element, so
+      it may be invalidated. <i>- end note</i>]</del></li>
+</ol>
+</p>
+
+<h5>Table 98 — Allocator-aware container requirements</h5>
+<table border="1" cellpadding="0" cellspacing="0">
+<tr>
+  <td><b>Expression</b></td>
+  <td><b>Return type</b></td>
+  <td><b>Assertion/note pre-/post-condition</b></td>
+  <td><b>Complexity</b></td>
+</tr>
+<tr>
+  <td><del><tt>a.swap(b)</tt></del></td>
+  <td><del><tt>void</tt></del></td>
+  <td><del>exchanges the contents of <tt>a</tt> and <tt>b</tt>.</del>
+  <td><del>Constant</del></td>
+</tr>
+</table>
+
+
+<h3>23.2.4.1 Exception safety guarantees [associative.reqmts.except]</h3>
+<p><del>
+3 For associative containers, no <tt>swap</tt> function throws an exception
+unless that exception is thrown by the swap of the container’s <tt>Compare</tt>
+object (if any).
+</del></p>
+
+
+<h3>23.2.5.1 Exception safety guarantees [unord.req.except]</h3>
+<p><del>
+3 For unordered associative containers, no <tt>swap</tt> function throws an
+exception unless that exception is thrown by the swap of the container’s Hash
+or Pred object (if any).
+</del></p>
+
+</blockquote>
+
+<p>
+Note that only sequence containers lack <tt>Compare</tt>, <tt>Pred</tt>, or
+<tt>Hash</tt> types, so only sequence containers have a requirement to not
+throw.  This constrains only the member function, which retain the no-throw
+guarantee on <tt>swap</tt> for all sequence containers in this paper - as
+member-<tt>swap</tt> with unequal non-propagating allocators remains undefined
+behavior.
+</p>
+<blockquote>
+<h4>23.3.2.7 array::swap  [array.swap]</h4>
+<p>
+3 <ins>[</ins><i>Note:</i> Unlike the <tt>swap</tt> function for other
+<ins>sequence</ins> containers, <tt>array::swap</tt> takes linear time, may exit
+via an exception, and does not cause iterators to become associated with the
+other container.<ins> <i>- end note</i>]</ins>
+</p>
+</blockquote>
+
+
+<p>
+For the remaining containers, the namespace-scope <tt>swap</tt> function is
+completely specified by the container requirements, and does not need to be
+restated.  It is simpler to delete these clauses rather than risk contradictory
+wording to the general requirements.
+</p>
+
+<blockquote>
+
+<h4><del>23.3.3.5 <tt>deque</tt> specialized algorithms [deque.special]</del></h4>
+<pre><del>template &lt;class T, class Allocator&gt;</del>
+  <del>void swap(deque&lt;T, Allocator&gt;&amp; x, deque&lt;T, Allocator&gt;&amp; y)</del>
+    <del>noexcept(noexcept(x.swap(y)));</del></pre>
+<p><del><i>Effects:</i></del></p>
+<pre><blockquote><del>x.swap(y);</del></blockquote></pre>
+
+<h4><del>23.3.4.7 <tt>forward_list</tt> specialized algorithms [forwardlist.spec]</del></h4>
+<pre><del>template &lt;class T, class Allocator&gt;</del>
+  <del>void swap(forward_list&lt;T, Allocator&gt;&amp; x, forward_list&lt;T, Allocator&gt;&amp; y)</del>
+    <del>noexcept(noexcept(x.swap(y)));</del></pre>
+<p><del><i>Effects:</i></del></p>
+<pre><blockquote><del>x.swap(y);</del></blockquote></pre>
+
+<h4><del>23.3.5.6 <tt>list</tt> specialized algorithms [list.special]</del></h4>
+<pre><del>template &lt;class T, class Allocator&gt;</del>
+  <del>void swap(list&lt;T, Allocator&gt;&amp; x, list&lt;T, Allocator&gt;&amp; y)</del>
+    <del>noexcept(noexcept(x.swap(y)));</del></pre>
+<p><del><i>Effects:</i></del></p>
+<pre><blockquote><del>x.swap(y);</del></blockquote></pre>
+
+<h4><del>23.3.6.6 <tt>vector</tt> specialized algorithms [vector.special]</del></h4>
+<pre><del>template &lt;class T, class Allocator&gt;</del>
+  <del>void swap(vector&lt;T, Allocator&gt;&amp; x, vector&lt;T, Allocator&gt;&amp; y)</del>
+    <del>noexcept(noexcept(x.swap(y)));</del></pre>
+<p><del><i>Effects:</i></del></p>
+<pre><blockquote><del>x.swap(y);</del></blockquote></pre>
+
+<h4><del>23.4.4.5 <tt>map</tt> specialized algorithms [map.special]</del></h4>
+<pre><del>template &lt;class Key, class T, class Compare, class Allocator&gt;</del>
+  <del>void swap(map&lt;Key, T, Compare, Allocator&gt;&amp; x,</del>
+            <del>map&lt;Key, T, Compare, Allocator&gt;&amp; y)</del>
+    <del>noexcept(noexcept(x.swap(y)));</del></pre>
+<p><del><i>Effects:</i></del></p>
+<pre><blockquote><del>x.swap(y);</del></blockquote></pre>
+
+<h4><del>23.4.5.4 <tt>multimap</tt> specialized algorithms [multimap.special]</del></h4>
+<pre><del>template &lt;class Key, class T, class Compare, class Allocator&gt;</del>
+  <del>void swap(multimap&lt;Key, T, Compare, Allocator&gt;&amp; x,</del>
+            <del>multimap&lt;Key, T, Compare, Allocator&gt;&amp; y)</del>
+    <del>noexcept(noexcept(x.swap(y)));</del></pre>
+<p><del><i>Effects:</i></del></p>
+<pre><blockquote><del>x.swap(y);</del></blockquote></pre>
+
+<h4><del>23.4.6.3 <tt>set</tt> specialized algorithms [set.special]</del></h4>
+<pre><del>template &lt;class Key, class Compare, class Allocator&gt;</del>
+  <del>void swap(set&lt;Key, Compare, Allocator&gt;&amp; x,</del>
+            <del>set&lt;Key, Compare, Allocator&gt;&amp; y)</del>
+    <del>noexcept(noexcept(x.swap(y)));</del></pre>
+<p><del><i>Effects:</i></del></p>
+<pre><blockquote><del>x.swap(y);</del></blockquote></pre>
+
+<h4><del>23.4.7.3 <tt>multiset</tt> specialized algorithms [multiset.special]</del></h4>
+<pre><del>template &lt;class Key, class Compare, class Allocator&gt;</del>
+  <del>void swap(multiset&lt;Key, Compare, Allocator&gt;&amp; x,</del>
+            <del>multiset&lt;Key, Compare, Allocator&gt;&amp; y)</del>
+    <del>noexcept(noexcept(x.swap(y)));</del></pre>
+<p><del><i>Effects:</i></del></p>
+<pre><blockquote><del>x.swap(y);</del></blockquote></pre>
+
+<h4><del>23.5.4.5 <tt>unordered_map</tt> swap [unord.map.swap]</del></h4>
+<pre><del>template &lt;class Key, class T, class Hash, class Pred, class Allocator&gt;</del>
+  <del>void swap(unordered_map&lt;Key, T, Hash, Pred, Allocator&gt;&amp; x,</del>
+            <del>unordered_map&lt;Key, T, Hash, Pred, Allocator&gt;&amp; y)</del>
+    <del>noexcept(noexcept(x.swap(y)));</del></pre>
+<p><del><i>Effects:</i></del></p>
+<pre><blockquote><del>x.swap(y);</del></blockquote></pre>
+
+<h4><del>23.5.5.4 <tt>unordered_multimap</tt> swap [unord.multimap.swap]</del></h4>
+<pre><del>template &lt;class Key, class T, class Hash, class Pred, class Allocator&gt;</del>
+  <del>void swap(unordered_multimap&lt;Key, T, Hash, Pred, Allocator&gt;&amp; x,</del>
+            <del>unordered_multimap&lt;Key, T, Hash, Pred, Allocator&gt;&amp; y)</del>
+    <del>noexcept(noexcept(x.swap(y)));</del></pre>
+<p><del><i>Effects:</i></del></p>
+<pre><blockquote><del>x.swap(y);</del></blockquote></pre>
+
+<h4><del>23.5.6.3 <tt>unordered_set</tt> swap [unord.set.swap]</del></h4>
+<pre><del>template &lt;class Key, class Hash, class Pred, class Allocator&gt;</del>
+  <del>void swap(unordered_set&lt;Key, Hash, Pred, Allocator&gt;&amp; x,</del>
+            <del>unordered_set&lt;Key, Hash, Pred, Allocator&gt;&amp; y)</del>
+    <del>noexcept(noexcept(x.swap(y)));</del></pre>
+<p><del><i>Effects:</i></del></p>
+<pre><blockquote><del>x.swap(y);</del></blockquote></pre>
+
+<h4><del>23.5.7.3 <tt>unordered_multiset</tt> swap [unord.multiset.swap]</del></h4>
+<pre><del>template &lt;class Key, class Hash, class Pred, class Allocator&gt;</del>
+  <del>void swap(unordered_multiset&lt;Key, Hash, Pred, Allocator&gt;&amp; x,</del>
+            <del>unordered_multiset&lt;Key, Hash, Pred, Allocator&gt;&amp; y)</del>
+    <del>noexcept(noexcept(x.swap(y)));</del></pre>
+<p><del><i>Effects:</i></del></p>
+<pre><blockquote><del>x.swap(y);</del></blockquote></pre>
+
+</blockquote>
+
+<p>
+The container adapters are not covered under the general
+container requirements clause, so we do need to revise
+the wording to use an ADL-lookup swap function.
+</p>
+
+<blockquote>
+
+<h4>23.6.3.5 <tt>queue</tt> specialized algorithms [queue.special]</h4>
+<pre>template &lt;class T, class Container&gt;
+  void swap(queue&lt;T, Container&gt;&amp; x, queue&lt;T, Container&gt;&amp; y)
+    noexcept(noexcept(x.swap(y)));</pre>
+<p><i>Effects:</i></p>
+<pre><blockquote><del>x.</del>swap(<ins>x.c, </ins>y<ins>.c</ins>);</blockquote></pre>
+
+<h4>23.6.4.4 <tt>priority_queue</tt> specialized algorithms [priqueue.special]</h4>
+<pre>template &lt;class T, class Container, class Compare&gt;
+  void swap(priority_queue&lt;T, Container, Compare&gt;&amp; x,
+            priority_queue&lt;T, Container, Compare&gt;&amp; y) noexcept(noexcept(x.swap(y)));</pre>
+<p><i>Effects:</i></p>
+<pre><blockquote><del>x.</del>swap(<ins>x.c, </ins>y<ins>.c</ins>);
+<ins>swap(x.comp, y.comp);</ins></blockquote></pre>
+
+<h4>23.6.5.6 <tt>stack</tt> specialized algorithms [stack.special]</h4>
+<pre>template &lt;class T, class Container&gt;
+  void swap(stack&lt;T, Container&gt;&amp; x, stack&lt;T, Container&gt;&amp; y)
+    noexcept(noexcept(x.swap(y)));</pre>
+<p><i>Effects:</i></p>
+<pre><blockquote><del>x.</del>swap(<ins>x.c, </ins>y<ins>.c</ins>);</blockquote></pre>
+
+</blockquote>
+
+<h2><a name="4.0">Acknowledements</h2>
+<p>
+</p>
+
+
+<h2><a name="5.0">References</h2>
+<ul>
+  <li><a href="http://cplusplus.github.io/LWG/lwg-active.html#2151">LWG #2151</a> <tt>basic_string&lt;&gt;::swap</tt> semantics ignore allocators</li>
+  <li><a href="http://cplusplus.github.io/LWG/lwg-active.html#2152">LWG #2152</a> Instances of standard container types are not swappable</li>
+  <li><a href="http://cplusplus.github.io/LWG/lwg-active.html#2153">LWG #2153</a> Narrowing of the non-member <tt>swap</tt> contract</li>
+
+  <li><a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/n4511">N4511</a> Adding [nothrow-]swappable traits, Daniel Krügler</li>
+</ul>
+
+
+</body>
+</html>

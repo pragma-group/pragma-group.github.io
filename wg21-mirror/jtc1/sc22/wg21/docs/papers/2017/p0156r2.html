@@ -1,0 +1,266 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html><head>
+<meta http-equiv="content-type" content="text/html; charset=windows-1252">
+  <style type="text/css">
+
+.comment { color: #999999; font-style: italic; }
+.pre { color: #000099; }
+.string { color: #009900; }
+.char { color: #009900; }
+.float { color: #996600; }
+.int { color: #999900; }
+.bool { color: #000000; font-weight: bold; }
+.type { color: #FF6633; }
+.flow { color: #FF0000; }
+.keyword { color: #990000; }
+.operator { color: #663300; font-weight: bold; }
+.operator { color: #663300; font-weight: bold; }
+pre.code {
+    border: 2px solid #666;
+    background-color: #F4F4F4;
+    padding-left: 10px;
+    padding-top: 0px;
+}
+code {
+    border: 2px solid #d0d0d0;
+    background-color: LightYellow;
+    padding: 2px;
+    padding-left: 10px;
+    display:table;
+    white-space:pre;
+    margin:2px;
+    margin-bottom:10px;
+}
+dt {
+    font-weight: bold;
+}
+.ins {
+    background-color:#A0FFA0;
+}
+.del {
+    background-color:#FFA0A0;
+    text-decoration:line-through
+}    
+</style>
+
+<title>Variadic lock_guard (Rev. 5)</title>
+</head>
+
+<body>
+<p>P0156R2<br>
+Mike Spertus, Symantec<br>
+<a href="mailto:mike_spertus@symantec.com">mike_spertus@symantec.com</a><br>
+revision of P0156R1<br>
+2017-03-03<br>
+Audience: Library Working Group
+</p>
+
+<h1>Variadic <tt>lock_guard</tt> (Rev. 5)</h1>
+<h2>Changes from P0156R0</h2>
+In response to concerns about ABI breakage expressed in national body
+comments GB 61 and FI 8, the variadic lock guard construct proposed
+    in this paper is given the new name <tt>scoped_lock</tt>. The wording
+    below has been updated to reflect this.
+<h2>Introduction</h2>
+<p>The basic idea of this proposal is that <tt>std::lock_guard</tt> would benefit from
+    being variadic to support multiple locks analogously to how <tt>std::lock</tt> does.</p>
+    <p><tt>lock_guard</tt> is a very useful and widely used way to manage the lifetimes
+        of lock ownership.
+<code>std::mutex mtx;
+void f(){
+  std::lock_guard&lt;mutex&gt; lck(mtx); <span class="comment">// Mutex will be unlocked however scope is exited</span>
+&nbsp;&nbsp;<span class="comment">/* ... */</span>
+}
+        </code></p>
+<p>Unfortunately, if more than one lock needs to be required, life gets unnecessarily complicated</p>
+<code>void swap(MyType const &amp;l, MyType const &amp;r)
+{
+    std::lock(l.mtx, r.mtx);
+    std::lock_guard&lt;std::mutex&gt; llck(l.mtx, std::adopt_lock);
+    std::lock_guard&lt;std::mutex&gt; rlck(r.mtx, std::adopt_lock);
+    <span class="comment">/* ... */</span>
+}</code><p></p>
+<p>This is a lot more advanced and error-prone than the single lock case. For example,
+you often see the deadlock-inviting<code>void swap(MyType const &amp;l, MyType const &amp;r)
+{
+    std::lock_guard&lt;std::mutex&gt; llck(l.mtx);
+    std::lock_guard&lt;std::mutex&gt; rlck(r.mtx);
+    <span class="comment">/* ... */</span>
+}</code> or the exception-unsafe <code>void swap(MyType const &amp;l, MyType const &amp;r)
+{
+    std::lock(l.mtx, r.mtx);
+    <span class="comment">/* ... */</span>
+    l.mtx.unlock();
+    r.mtx.unlock();
+}</code>
+    </p>
+<p>These are exactly the kinds of complexities that are easily avoided by <tt>std::lock_guard</tt>
+    in the single-lock case. Wouldn't it be great if <tt>std::lock_guard</tt> was variadic
+    so it also worked
+    with multiple locks?</p><p>
+    </p><p>This paper proposes a class <tt>scoped_lock</tt> that
+    does exactly that.</p>
+    <code>void swap(MyType const &amp;l, MyType const &amp;r)
+{
+    std::scoped_lock lck(l.mtx, r.mtx);  <span class="comment">// Leverages P0091R3, Template argument deduction for constructors</span><br>
+        <span class="comment">/* ... */</span>
+}</code> <p></p>
+<p>This can work in the presence of shared locking as well (just like <tt>std::lock</tt> does) as 
+shown in the following example shared by Howard Hinnant<code>#include &lt;mutex&gt;
+#include &lt;shared_mutex&gt;
+
+class X
+{
+    using Mutex = std::shared_timed_mutex;
+    using ReadLock = std::shared_lock&lt;Mutex&gt;;
+
+    mutable Mutex mut_;
+    <span class="comment">// more data</span>
+public:
+    <span class="comment">// ...</span>
+    X&amp; operator=(const X&amp; x)
+    {
+        if (this !=&amp;x)
+            ReadLock  rl(x.mut_, std::defer_lock);
+            std::scoped_lock lck(mut_, rl);
+            // assign data ...
+        }
+        return *this;
+    }
+    <span class="comment">// ...</span>
+};
+</code>
+<h2>Wording</h2>
+Modify &sect;30.4 [thread.mutex] as follows
+    <blockquote><pre>template &lt;class<span class="del">...</span> Mutex<span class="del">Types</span>&gt; class lock_guard;
+<span class="ins">template &lt;class... MutexTypes&gt; class scoped_lock;</span></pre></blockquote>
+    <p></p>
+Revert &sect;30.4.2.1 [thread.lock.guard] to match its form in
+the C++14 standard ISO/IEC 14882:2014.<p>
+Add a new section &sect;30.4.2.x [thread.lock.scope]as follows
+    </p><blockquote><span class="ins"><pre style="padding:0;margin:0"><span class="ins">namespace std {
+  template &lt;class... MutexTypes&gt;
+  class scoped_lock {
+  public:
+    using mutex_type = Mutex;  // If MutexTypes... consists of the single type Mutex
+    
+    explicit scoped_lock(MutexTypes&amp;... m);
+    explicit scoped_lock(MutexTypes&amp;... m, adopt_lock_t);
+    ~scoped_lock();
+    
+    scoped_lock(scoped_lock const&amp;) = delete;
+    scoped_lock&amp; operator=(scoped_lock const&amp;) = delete;
+  private:
+    tuple&lt;MutexTypes&amp;...&gt; pm; <span class="comment">// exposition only</span>
+  };
+}</span></pre>
+An object of type <tt>scoped_lock</tt> controls the ownership of 
+lockable objects within a scope. A <tt>scoped_lock</tt> object
+maintains ownership of 
+lockable objects throughout the <tt>scoped_lock</tt> object's
+lifetime (3.8). The behavior of a program is undefined if the lockable objects
+referenced by <tt>pm</tt> do not exist for the entire lifetime of
+        the <tt>scoped_lock</tt> object. When <tt>sizeof...(MutexTypes)</tt> is 1, the supplied <tt>Mutex</tt> type shall meet the <tt>BasicLockable</tt> requirements. Otherwise, each of the mutex types shall meet the
+<tt>Lockable</tt> requirements. (30.2.5.2).
+        <pre style="padding:0;margin:0"><span class="ins">
+
+explicit scoped_lock(MutexTypes&amp;... m);</span></pre>
+<blockquote><span class="ins"><i>Requires:</i> If a <tt>MutexTypes</tt> type is not a recursive mutex,
+    the calling thread does not own the corresponding mutex
+        element of <tt>m</tt>.<br>
+<i>Effects:</i>Initializes <tt>pm</tt> with <tt>tie(m...)</tt>. 
+    Then if <tt>sizeof...(MutexTypes)</tt> is 0, no effects. Otherwise 
+    if <tt>sizeof...(MutexTypes)</tt> is 1, then <tt>m.lock()</tt>. Otherwise, then <tt>lock(m...)</tt>.<br></span></blockquote>
+<pre style="padding:0;margin:0"><span class="ins">explicit scoped_lock(MutexTypes&amp;... m, adopt_lock_t);</span></pre>
+<blockquote><span class="ins"><i>Requires:</i> The calling thread owns all the mutexes in <tt>m</tt>.<br>
+<i>Effects:</i>Initializes <tt>pm</tt> with <tt>tie(m...)</tt>.<br>
+<i>Throws:</i> Nothing.</span></blockquote>
+<pre style="padding:0;margin:0"><span class="ins">~scoped_lock();</span></pre>
+<blockquote><span class="ins"><i>Effects:</i> For all <tt>i</tt> in <tt>[0, sizeof...(MutexTypes))</tt>, 
+<tt>get&lt;i&gt;(pm).unlock()</tt></span></blockquote></span>
+</blockquote>
+<h2>Appendix: Example implementation</h2>
+    We implement using the
+<tt>for_each_in_tuple</tt> infrastructure <a href="http://stackoverflow.com/questions/16387354/template-tuple-calling-a-function-on-each-element">posted</a> by Andy Prowl on Stack Overflow
+    to lock and unlock all the mutexes in the <tt>tuple</tt>.
+<code>#include&lt;mutex&gt;
+#include&lt;tuple&gt;
+using std::tuple;
+<span class="comment">// Taken from http://stackoverflow.com/questions/16387354/template-tuple-calling-a-function-on-each-element</span>
+namespace detail
+{
+  template&lt;int... Is&gt;
+  struct seq { };
+
+  template&lt;int N, int... Is&gt;
+  struct gen_seq : gen_seq&lt;N - 1, N - 1, Is...&gt; { };
+
+  template&lt;int... Is&gt;
+  struct gen_seq&lt;0, Is...&gt; : seq&lt;Is...&gt;{};
+
+  template&lt;typename T, typename F, int... Is&gt;
+  void for_each(T&amp;&amp; t, F f, seq&lt;Is...&gt;) {
+    auto l = { (f(std::get&lt;Is&gt;(t)), 0)... };
+  }
+}
+
+template&lt;typename... Ts, typename F&gt;
+void for_each_in_tuple(std::tuple&lt;Ts...&gt; const&amp; t, F f) {
+  detail::for_each(t, f, detail::gen_seq&lt;sizeof...(Ts)&gt;());
+}
+<span class="comment">// End of <tt>for_each_in_tuple</tt> implementation</span>
+
+template&lt;typename ...Ts&gt;
+struct scoped_lock {
+public:
+  explicit scoped_lock(Ts&amp;... ts) : mutexes(ts...) {
+    lock(ts...);
+  }
+
+  scoped_lock(Ts&amp;... ts, std::adopt_lock_t) : mutexes(ts...) {}
+
+  ~scoped_lock() {
+    for_each_in_tuple(mutexes, [](auto &amp;m) { m.unlock(); } );
+  }
+
+  lock_guard(const lock_guard&amp;) = delete;
+  lock_guard&amp; operator=(const lock_guard&amp;) = delete;
+
+private:
+  tuple&lt;Ts&amp;...&gt; mutexes;
+};
+
+template&lt;typename T&gt;
+struct scoped_lock&lt;T&gt; {
+public:
+  typedef T mutex_type;
+
+  explicit scoped_lock(T&amp; _Mtx) : mtx(_Mtx) {
+     mtx.lock();
+  }
+
+  scoped_lock(T&amp; _Mtx, std::adopt_lock_t) : mtx(_Mtx) {}
+
+  ~scoped_lock() { 
+     mtx.unlock();
+  }
+
+  scoped_lock(const scoped_lock&amp;) = delete;
+  scoped_lock&amp; operator=(const scoped_lock&amp;) = delete;
+
+private:
+  T&amp; mtx;
+};
+    
+template&lt;&gt;
+struct scoped_lock&lt;&gt; {
+  explicit scoped_lock()  {}
+  scoped_lock(std::adopt_lock_t) {}
+  ~scoped_lock() {}
+  scoped_lock(const scoped_lock&amp;) = delete;
+  scoped_lock&amp; operator=(const scoped_lock&amp;) = delete;
+};
+</code>
+<h2>Feature test macro</h2>
+<p>For the purpose of SG10, we recommend the feature test macro <tt>__cpp_lib_scoped_lock</tt></p>
+</body></html>

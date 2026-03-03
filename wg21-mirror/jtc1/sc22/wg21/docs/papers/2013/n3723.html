@@ -1,0 +1,180 @@
+<html>
+<head>
+<title>Extend operator-&gt; to support rvalues.</title>
+</head>
+<body>
+<table>
+  <tr>
+	<td>Document number:</td>
+	<td>N3723</td>
+  </tr>
+  <tr>
+	<td>Date:</td>
+	<td>2013-08-23</td>
+  </tr>
+  <tr>
+	<td>Project:</td>
+	<td>Programming Language C++</td>
+  </tr>
+  <tr>
+	<td>Reply-to:</td>
+	<td>Pascal Costanza, ExaScience Lab, Intel Belgium, &lt;<a href=mailto:pascal.costanza@intel.com>pascal.costanza@intel.com</a>&gt;</td>
+  </tr>
+</table>
+<h1>Extend <tt>operator-&gt;</tt> to support rvalues.</h1>
+
+<h2>Problem</h2>
+
+<p>C++11 substantially improved performance of passing objects around through move semantics and rvalue references. However, the specification for <tt>operator-&gt;</tt> exhibits a corner case that does not support move semantics very well.</p>
+
+<p>Section 13.3.1.2, paragraph 8 [N3690] specifies that when "<tt>operator-&gt;</tt> returns, the <tt>operator-&gt;</tt> is applied to the value returned, with the original second operand." Further (in footnote 133): "If the value returned by the <tt>operator-&gt;</tt> function has class type, this may result in selecting and calling another <tt>operator-&gt;</tt> function. This process repeats until an <tt>operator-&gt;</tt> function returns a value of non-class type." According to Section 5.2.5, paragraph 2 [N3690], the only kind of value of non-class type to which <tt>operator-&gt;</tt> is applicable is a pointer to a complete class type. This precludes a user-provided definition for <tt>operator-&gt;</tt> from constructing an rvalue as a result, since it is semantically not meaningful to take the address of an rvalue according to Section 5.3.1, paragraph 3 [N3690], which is what would need to be returned.</p>
+
+<h2>Example</h2>
+
+<p>Assume you want to define an iterator class for iterating over two arrays where the result of dereferencing an iterator provides the illusion of a single object with members that refer to entries of the separate containers. The following code illustrates this idea.</p>
+
+<pre>
+constexpr auto N = 256;
+
+class coord {
+public:
+  int x, y;
+
+  coord(int x, int y) :
+	x(x), y(y)
+  {}
+};
+
+class arrays_iterator {
+private:
+  int *a0, *a1; size_t i;
+
+public:
+  arrays_iterator(int* a0, int* a1, size_t i) :
+	a0(a0), a1(a1), i(i)
+  {}
+
+  coord operator*() {
+	return coord(a0[i], a1[i]);
+  }
+
+  coord* operator-&gt;() {
+	return &coord(a0[0],a1[i]); // invalid!!!
+  }
+
+  arrays_iterator operator++() {
+	++i; return *this;
+  }
+
+  arrays_iterator operator++(int) {
+	arrays_iterator result(a0,a1,i);
+	i++; return result;
+  }
+
+  bool operator!=(const arrays_iterator& that) const {
+	return (a0 != that.a0) || (a1 != that.a1) || (i != that.i);
+  }
+};
+
+arrays_iterator beginArrays(int* a0, int* a1) {
+  return arrays_iterator(a0,a1,0);
+}
+
+arrays_iterator endArrays(int* a0, int* a1) {
+  return arrays_iterator(a0,a1,N);
+}
+
+void test(int* x, int* y) {
+  for (auto it = beginArrays(x,y); it != endArrays(x,y); ++it) {
+	std::cout &lt;&lt; it-&gt;x &lt;&lt; ", " &lt;&lt; it-&gt;y &lt;&lt; std::endl;
+  }
+}
+</pre>
+
+<p>The definition for <tt>operator-&gt;</tt> in the code above is invalid because it attempts to take the address of an rvalue. However, some definition for <tt>operator-&gt;</tt> is necessary to fulfill the requirements for input iterators (cf. Section 24.2.3, paragraph 2 [N3690]) and their supersets.</p>
+
+<p>We encountered a very similar situation in a library that we plan to open source, which relies heavily on the performance offered by move semantics. The lack of support for move semantics in <tt>operator-&gt;</tt> currently prevents us from implementing fully conforming, efficient iterator classes in that library.</p>
+
+<h2>Possible workaround</h2>
+
+<p>A possible workaround to enable fulfilling the requirements for input iterators is to create an instance of the desired class on the heap and wrap it in a <tt>unique_ptr</tt> to manage its lifetime. This allows us to provide the following definition for <tt>operator-&gt;</tt>.</p>
+
+<pre>
+class arrays_iterator {
+  ...
+
+  std::unique_ptr&lt;coord&gt; operator-&gt;() {
+	return std::unique_ptr&lt;coord&gt;(new coord(a0[i], a1[i]));
+  }
+
+  ...
+}
+</pre>
+
+<p>However, the drawback of this workaround is the added overhead of allocating and almost immediately deallocating a temporary object on the heap. As a consequence, this workaround also makes it impossible for a compiler to completely compile away the temporary object, which would be possible if <tt>operator-&gt;</tt> would somehow support move semantics.</p>
+
+<h2>Proposed solution</h2>
+
+<p>We propose the following extension of C++ to enable user-provided definitions for <tt>operator-&gt;</tt> that support move semantics:</p>
+<ul>
+<li>A user can choose to implement <tt>operator-&gt;</tt> with an additional parameter of type <tt>int</tt>. If this definition is called, the parameter will have the value zero. A user can either implement <tt>operator-&gt;</tt> with or without this additional parameter for a given class. It is invalid to provide both definitions for a given class.</i>
+<li>The return value of <tt>operator-&gt;</tt> with the additional parameter is a complete class type, and the compiler generates a member access with the dot <tt>.</tt> operator on that return value instead of using the arrow <tt>-&gt;</tt> operator.</li>
+</ul>
+
+<h2>Example resolved</h2>
+
+<p>With the solution proposed above, we can now provide a valid definition for <tt>operator-&gt;</tt> for the example given above:</p>
+
+<pre>
+class arrays_iterator {
+  ...
+
+  coord operator-&gt;(int) {
+	return coord(a0[i], a1[i]);
+  }
+
+  ...
+}
+</pre>
+
+<p>This solution works because we do not need to take the address of an rvalue anymore. The additional parameter, whose value can be ignored in the implementation, gives a syntactic hint to the compiler that it should use the dot operator on the result rather than the arrow operator. This proposal does not suggest to enable users to provide definitions for some kind of <tt>operator.</tt>. Instead, a definition for <tt>operator-&gt;</tt> with the additional parameter effectively ends the "search" for the object on which the final low-level member access using the dot operator is performed.</p>
+
+<h2>Discussion</h2>
+
+<p>C++ programmers are already aware of the practice of using an additional ignorable <tt>int</tt> parameter to provide syntactic hints about the meaning of expressions in the case of <tt>operator++</tt> and <tt>operator--</tt>, specifically to determine whether these are prefix or postfix increment or decrement operators (cf. Section 13.5.7 [N3690]). This is why I believe that this would be an acceptable way to extend C++. However, a disadvantage of this suggestion is that overload resolution would need to be changed for <tt>operator-&gt;</tt> to ensure that only one of the possible <tt>operator-&gt;</tt> implementations exists per class type. This may be a too invasive change in the C++ language specification.</p>
+
+<p>However, there are also other ways to provide syntactic hints to the compiler. Here are some possible alternatives I can think of (there may be more):</p>
+
+<ol>
+<li><p>One could give the new variant of <tt>operator-&gt;</tt> a different name, like <tt>operator-&gt;.</tt>.</p>
+<pre>
+coord operator-&gt;. () {
+  return coord(a0[i], a1[i]);
+}
+</pre>
+<p>However, this still requires changes to overload resolution rules to ensure that an implementation of only either <tt>operator-&gt;</tt> or <tt>operator-&gt;.</tt> exists.</p></li>
+<li><p>One could indicate the variant by way of an attribute (cf. Section 7.6 [N3690]):</p>
+<pre>
+coord operator-&gt; [[dotted]] () {
+  return coord(a0[i], a1[i]);
+}
+</pre>
+<p>However, this contradicts the notion that attributes should not change the meaning of a program</p></li>
+<li><p>According to Section 13.3.1.2, footnote 133 [N3690], if a class type is returned by <tt>operator-&gt;</tt>, then another <tt>operator-&gt;</tt> function is applied to the result again. However, an <tt>operator-&gt;</tt> function may not be defined on the resulting class type, which currently results in a compile-time error. One way to make this proposal for extending <tt>operator-&gt;</tt> work would be to revert to the dot operator in this case.</p>
+<pre>
+coord operator-&gt; () {
+  return coord(a0[i], a1[i]);
+}
+</pre>
+<p>In this alternative, the compiler would revert to the dot operator when accessing the member in the return value, because <tt>coord</tt> does not implement <tt>operator-&gt;</tt>. This effectively turns what used to be a compile-time error into meaningful semantics, which may be the least invasive change to the C++ language specification, but which potentially breaks programmers' existing intuitions what does and does not constitute a compile-time error.</p>
+<p>Furthermore, this alternative does not allow the programmer to choose how the result is accessed: There may or may not be situations where sometimes a programmer wants the result to be accessed with another call to <tt>operator-&gt;</tt>, and sometimes by the dot operator, when both options are available. All the other options discussed above allow programmers to make that distinction when implementing <tt>operator-&gt;</tt>, while this alternative does not.</p></li>
+</ol>
+
+<h2>References</h2>
+
+<ul>
+<li>[N3690] ISO/IEC JTC1 SC22 WG21, Programming Languages - C++, working draft, May 2013.</li>
+</ul>
+
+</body>
+</html>

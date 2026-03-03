@@ -1,0 +1,228 @@
+<html>
+<head>
+    <title>Additional std::async Launch Policies</title>
+    <style type="text/css">
+        ins { background-color: #A0FFA0; }
+        del { background-color: #FFA0A0; }
+    </style>
+</head>
+<body>
+    <address>
+        Document Number: N3632</address>
+    <address>
+        Programming Language C++</address>
+    <address>
+        Subgroup SG1, Concurrency and Parallelism</address>
+    <address>
+        &nbsp;</address>
+    <address>
+        Peter Dimov, &lt;<a href="mailto:pdimov@pdimov.com">pdimov@pdimov.com</a>&gt;</address>
+    <address>
+        &nbsp;</address>
+    <address>
+        2013-04-11</address>
+    <h1>
+        Additional std::async Launch Policies</h1>
+    <p>
+        This paper proposes the addition of two new launch policies to <code>std::async</code>,
+        one sychronous (<code>launch::sync</code>) and one asynchronous (<code>launch::task</code>).
+        It also suggests changes to the default launch policy.</p>
+    <h2>
+        launch::task</h2>
+    <p>
+        <code>launch::task</code> is an asynchronous execution policy that is
+        similar to the existing <code>launch::async</code>, except that it doesn't
+        require the creation of a new thread for each task.</p>
+    <h3>
+        Motivation and Rationale</h3>
+    <p>
+        The current asynchronous policy, <code>launch::async</code>, specifies that
+        execution occurs "as if in a new thread". The implementation is thus required
+        to create a new thread for each task. This is expensive.</p>
+    <p>
+        The motivation for this imposed cost is that the task is guaranteed to start
+        with fresh, default-constructed, thread local variables, and that those thread
+        local variables are guaranteed to be destroyed immediately after completion.</p>
+    <p>
+        A common use of thread local variables is to locally cache objects that are
+        expensive to recreate. For such uses, destroying and reinitializing the thread
+        local variables imposes an additional source of inefficiency on top of the mandated
+        thread creation. Reuse of such thread locals is actually desirable.</p>
+    <p>
+        In most other cases, reusing thread local variables across tasks is harmless.</p>
+    <p>
+        Therefore, a launch policy that would allow the implementation to reuse a thread for
+        more than one task execution would be a significant performance enhancement.</p>
+    <p>
+        The common concerns about such thread reuse are:</p>
+    <ul>
+        <li>Does this grant the implementation the license to introduce deadlocks when an
+        earlier task waits for a later one and a thread is not available to run the later task?</li>
+        <li>Does this introduce a lifetime problem at program termination?</li>
+    </ul>
+    <p>
+        The answers, in this proposal, are no and no.</p>
+    <p>
+        Implementation-induced deadlocks are specifically disallowed, by introducing a requirement
+        that a task using the <code>task</code> (and <code>async</code>) policy shall be assigned a
+        thread no later than the first call to a <code>wait</code> function. The implementation may
+        avoid spawning too many threads and oversubscribing the CPU by taking advantage of its freedom
+        to use deferred or synchronous execution, if the user has included <code>launch::deferred</code>
+        or <code>launch::sync</code> as an allowed policy for the <code>std::async</code> call.</p>
+    <p>
+        At program termination, completed or running tasks using the proposed <code>launch::task</code>
+        policy have the thread local variables of their corresponding threads destroyed before static
+        destruction takes place. This implies that <code>exit</code> may need to wait for the currently
+        running tasks to complete. Tasks that are launched after static destruction starts behave as if
+        <code>launch::async</code> has been used.</p>
+    <h2>
+        launch::sync</h2>
+    <p>
+        <code>launch::sync</code> is a synchronous policy that executes the task
+        directly in the <code>std::async</code> call.</p>
+    <h3>
+        Motivation and Rationale</h3>
+    <p>
+        On its surface, a policy that executes the task immediately may seem superfluous; the user could
+        have just executed the task instead of going through the trouble of using <code>std::async</code>.
+        Its advantages become more apparent if we consider that a routine may take a launch policy as a
+        parameter, as in the following pseudocode:</p>
+    <blockquote>
+    <pre>void routine( std::launch policy, <em>args...</em>)
+{
+    <em>/* ... */</em>
+
+    std::future&lt;X&gt; fx = std::async( policy, <em>...</em> );
+
+    <em>/* ... */</em>
+}</pre>
+    </blockquote>
+    <p>
+        Such parameterization is desirable, for example, if we want to be able to experiment with different
+        launch policies and pick the one that delivers the best performance.</p>
+    <p>
+        In such cases, it is very convenient to be able to tell <code>routine</code> to execute everything
+        synchronously, for the following reasons:</p>
+    <ul>
+        <li>Debugging: If <code>routine</code> does not work as intended, the problem may have something to
+        do with the asynchronous execution, or it may not. Switching to <code>launch::sync</code> allows us
+        to quickly determine which of these two is the case.</li>
+        <li>Performance assessment: Measuring the performance of <code>routine</code> with <code>launch::sync</code>
+        can be very useful both as a sanity check (is it by chance faster than the supposedly parallel version?)
+        and as a baseline (how well does it scale?)</li>
+        <li>Control over parallelism: In a recursive parallel algorithm, passing <code>launch::sync</code>
+        for some of the recursive calls allows us finer control over which branches is executed in parallel
+        and which aren't.</li>
+    </ul>
+    <p>
+        In addition, <code>launch::sync</code> can be combined with other policies, to grant the implementation
+        the option to execute in the calling thread. This allows the implementation to better balance the load if,
+        for example, it detects that the task queue has grown too big.</p>
+    <p>
+        Half-seriously, the policy also allows one to obtain a ready <code>future</code> holding a specific value or
+        exception:</p>
+    <blockquote>
+    <pre>std::future&lt;int&gt; x = std::async( std::launch::sync, []{ return 42; } );
+std::future&lt;int&gt; y = std::async( std::launch::sync, [] -&gt; int { throw std::runtime_error( "Hello exceptional world!" ); } );</pre>
+    </blockquote>
+    <h2>
+        The Default Launch Policy</h2>
+    <p>
+        The default launch policy is currently <code>launch::async | launch::deferred</code> and is unnamed.
+        This proposal suggest two changes. First, the default policy should be given a name, <code>launch::default_</code>.
+        Second, the default should be <code>launch::sync | launch::async | launch::task | launch::deferred</code>.</p>
+    <h3>
+        Motivation and Rationale</h3>
+    <p>
+        The default policy should be given a name both to simplify the specification and isolate any eventual
+        changes to a single place, and to allow users to name it without spelling it out.</p>
+    <p>
+        The plain <code>std::async</code> call, which implicitly uses the default policy, is, for many programmers,
+        their first encounter with parallelism in C++. It should make a good first impression, and good performance
+        is essential. The default policy should afford the implementation maximum flexibility in meeting the
+        performance expectations of a C++ programmer. That is why this paper suggests that the implementation should
+        be free to choose among all of the available policies.</p>
+    <p>
+        Currently, there is still not much code that depends on the default, so the change will be relatively painless.
+        As more and more programmers take advantage of <code>std::async</code>, the default policy will progressively
+        become more entrenched and harder to change. The time for a change is now.</p>
+    <h2>
+        Proposed Text</h2>
+    <p>
+        <em>(All edits are relative to ISO/IEC 14882-2011.)</em></p>
+    <p>
+        Change <code>enum class launch</code> in the synopsis of <code>&lt;future&gt;</code> in 30.6.1
+        [futures.overview] p1 as follows:</p>
+    <blockquote>
+    <pre>enum class launch : <em>unspecified</em> {
+    async = <em>unspecified</em>,
+    deferred = <em>unspecified</em>,
+    <ins>task = <em>unspecified</em>,</ins>
+    <ins>sync = <em>unspecified</em>,</ins>
+    <ins>default_ = sync | async | task | deferred,</ins>
+    <em>implementation-defined</em>
+};</pre>
+    </blockquote>
+    <p>
+        Change the first sentence of 30.6.1 [futures.overview] p2 as follows:</p>
+    <blockquote>
+        The enum type <code>launch</code> is an implementation-defined bitmask type (17.5.2.1.3) with
+        <code>launch::async</code><ins>,</ins> <del>and </del><code>launch::deferred</code><ins>,
+        <code>launch::task</code>, and <code>launch::sync</code></ins> denoting individual bits.
+    </blockquote>
+    <p>
+        Change the first sentence of 30.6.8 [futures.async] p3 as follows:</p>
+    <blockquote><em>Effects:</em> The first function behaves the same as a call to the second function
+    with a policy argument of <del><code>launch::async | launch::deferred</code></del>
+    <ins><code>launch::default_</code></ins> and the same arguments for <code>F</code> and <code>Args</code>.
+    </blockquote>
+    <p>
+        Add the following two bullets to 30.6.8 [futures.async] p3:</p>
+    <ul>
+        <li>if <code>policy &amp; launch::task</code> is non-zero &mdash; equivalent to the
+        <code>policy &amp; launch::async</code> case, except that the task may inherit the
+        <code>thread_local</code> variables from a previous completed task execution, and the
+        <code>thread_local</code> variables of the current execution are not necessarily destroyed immediately
+        after its completion. If the <code>async</code> call happens before a call to <code>exit</code> or return
+        from <code>main</code>, destructors for <code>thread_local</code> variables corresponding to the task's
+        thread will run before those for static duration objects. The call to <code>exit</code> or the return from
+        <code>main</code> may implicitly wait for currently running tasks using the <code>launch::task</code> policy to
+        complete. If the <code>exit</code> call or return from <code>main</code> happens before an <code>std::async</code>
+        call with <code>launch::task</code> policy then that call behaves as though it had used
+        <code>launch::async</code> policy. [<em>Note:</em> in a long-lived program, implementations are encouraged
+        to eventually destroy the <code>thread_local</code> variables of completed executions. <em>&mdash; end note.</em>]</li>
+
+        <li>if <code>policy & launch::sync</code> is non-zero &mdash; calls
+        <code><em>INVOKE</em>(<em>DECAY_COPY</em>(std::forward&lt;F&gt;(f)), <em>DECAY_COPY</em>(std::forward&lt;Args&gt;(args))...)</code>.
+        Any return value is stored as the result in the shared state. Any exception propagated from the execution of
+        <code><em>INVOKE</em>(<em>DECAY_COPY</em>(std::forward&lt;F&gt;(f)), <em>DECAY_COPY</em>(std::forward&lt;Args&gt;(args))...)</code>
+        is stored as the exceptional result in the shared state.</li>
+    </ul>
+    <p>
+        Add the following paragraph to 30.6.8 [futures.async] p3, after the bullets:</p>
+    <blockquote>
+        Tasks using the <code>launch::async</code> and <code>launch::task</code> policies
+        shall be assigned a thread and begin execution no later than the first call to a
+        <code>wait</code> function (30.6.4). [<em>Note:</em> In other words, the implementation
+        is not allowed to deadlock if an earlier task waits for a later one. <em>&mdash; end note.</em>]</blockquote>
+    <p>
+        Change 30.6.8 [futures.async] p6 as follows:</p>
+    <blockquote>
+        <em>Throws:</em> <code>system_error</code> if <code>policy</code> is <code>launch::async</code><ins> or
+        <code>launch::task</code></ins> and the implementation is unable to start a new thread.</blockquote>
+    <p>
+        Change 30.6.8 [futures.async] p7 as follows:</p>
+    <blockquote>
+        <em>Error conditions:</em>
+        <ul>
+        <li><code>resource_unavailable_try_again</code> &mdash; if <code>policy</code> is <code>launch::async</code><ins> or
+        <code>launch::task</code></ins> and the system is unable to start a new thread.</li>
+        </ul>
+    </blockquote>
+    <hr />
+    <p>
+        <em>Thanks to Hans Boehm, Herb Sutter, Niklas Gustafsson and Anthony Williams.</em></p>
+    <p>
+        <em>&mdash; end</em></p>
+</body>
+</html>

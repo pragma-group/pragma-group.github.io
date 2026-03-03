@@ -1,0 +1,607 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+
+<meta http-equiv="Content-Type" content="text/html;charset=US-ASCII">
+
+<style type="text/css">
+
+body {
+  color: #000000;
+  background-color: #FFFFFF;
+}
+
+del {
+  text-decoration: line-through;
+  color: #8B0040;
+}
+ins {
+  text-decoration: underline;
+  color: #005100;
+}
+
+p.example {
+  margin: 2em;
+}
+pre.example {
+  margin: 2em;
+}
+div.example {
+  margin: 2em;
+}
+
+code.extract {
+  background-color: #F5F6A2;
+}
+pre.extract {
+  margin: 2em;
+  background-color: #F5F6A2;
+  border: 1px solid #E1E28E;
+}
+
+p.function {
+}
+
+p.attribute {
+  text-indent: 3em;
+}
+
+blockquote.std {
+  color: #000000;
+  background-color: #F1F1F1;
+  border: 1px solid #D1D1D1;
+  padding: 0.5em;
+}
+
+blockquote.stddel {
+  text-decoration: line-through;
+  color: #000000;
+  background-color: #FFEBFF;
+  border: 1px solid #ECD7EC;
+  padding: 0.5em;
+}
+
+blockquote.stdins {
+  text-decoration: underline;
+  color: #000000;
+  background-color: #C8FFC8;
+  border: 1px solid #B3EBB3;
+  padding: 0.5em;
+}
+
+table {
+  border: 1px solid black;
+  border-spacing: 0px;
+  margin-left: auto;
+  margin-right: auto;
+}
+th {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.2em;
+  border: none;
+}
+td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.2em;
+  border: none;
+}
+
+</style>
+
+<title>C++ Stream Mutexes</title>
+</head>
+<body>
+<h1>C++ Stream Mutexes</h1>
+
+<p>
+ISO/IEC JTC1 SC22 WG21 N3535 - 2013-03-06
+</p>
+
+<p>
+Lawrence Crowl, crowl@google.com, Lawrence@Crowl.org
+</p>
+
+<p>
+<a href="#Introduction">Introduction</a><br>
+<a href="#Solution">Solution</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#stream_mutex">Stream Mutex</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#implicit_locking">Implicit Locking</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#explicit_locking">Explicit Locking</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#block_locking">Block Locking</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#normal_locking">Using Normal Locking</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#recursive_locking">Recursive Locking</a><br>
+<a href="#Critique">Critique and Suggestions</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#flockfile">Posix Stream Locks</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#internal">Internal Stream Locks</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#replace">Replace Streams</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#summary">Summary</a><br>
+<a href="#Implementation">Implementation</a><br>
+<a href="#Synopsis">Synopsis</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#stream_mutex_decl">Stream Mutex</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#stream_guard_decl">Stream Guard</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#operator_shift">Stream Operators</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#predefined_objects">Predefined Objects</a><br>
+<a href="#Revision">Revision History</a><br>
+<a href="#References">References</a><br>
+</p>
+
+
+<h2><a name="Introduction">Introduction</a></h2>
+
+<p>
+At present,
+stream output operations guarantee that they will not produce race conditions,
+but do not guarantee that the effect will be sensible.
+Some form of external synchronization is required.
+Unfortunately, without a standard mechanism for synchronizing,
+independently developed software will be unable to synchronize.
+</p>
+
+<p>
+This paper proposes a standard mechanism for locking streams.
+</p>
+
+<p>
+We found the proposed mechanism extremely helpful
+in making sense of debugging logs in multi-thread tests.
+When numbers are randomly streamed together,
+teasing out which digit went with which number can be very frustrating.
+</p>
+
+
+<h2><a name="Solution">Solution</a></h2>
+
+<p>
+First, we propose a <code>stream_mutex</code>,
+analogous to <code>mutex</code>,
+that serves as a mutex for a stream.
+Unlike normal mutexes, though,
+<code>stream_mutex</code> is a proxy for an anonymous mutex
+for each distinct stream used as a constructor parameter.
+Second, we propose a <code>stream_guard</code>,
+analogous to <code>lock_guard</code>,
+that provides scoped lock control.
+These classes are distinct from existing classes
+to support streaming through the mutex/lock objects,
+which substantially simplifies locking I/O expressions.
+</p>
+
+
+<h3><a name="stream_mutex">Stream Mutex</a></h3>
+
+<p>
+A stream mutex is declared with a reference to the stream to be locked.
+Each stream to be locked
+may have more than one simultaneous associated stream mutex object.
+Two independent threads creating two stream mutex objects on the same stream
+will mutually exclude operations on the stream.
+</p>
+
+<pre class="example">
+<code>std::ostringstream stream;
+stream_mutex&lt;std::ostream&gt; mstream(stream);</code>
+</pre>
+
+
+<h3><a name="implicit_locking">Implicit Locking</a></h3>
+
+<p>
+Stream operations may simply be directed to the stream mutex.
+All operations in a single expression chain will be locked as a unit.
+The lock will be released at the end of the full expression.
+</p>
+
+<pre class="example">
+<code>mstream &lt;&lt; "1" &lt;&lt; "2" &lt;&lt; "3" &lt;&lt; "4" &lt;&lt; "5" &lt;&lt; std::endl;</code>
+</pre>
+
+
+<h3><a name="explicit_locking">Explicit Locking</a></h3>
+
+<p>
+The locking may be made explicit with the <code>hold</code> member function.
+The lock will be released at the end of the full expression.
+</p>
+
+<pre class="example">
+<code>mstream.hold() &lt;&lt; "1" &lt;&lt; "2" &lt;&lt; "3" &lt;&lt; "4" &lt;&lt; "5" &lt;&lt; std::endl;</code>
+</pre>
+
+
+<h3><a name="block_locking">Block Locking</a></h3>
+
+<p>
+Locking across more than one expression is needed,
+and the stream guard serves that purpose.
+The lock is released on destruction of the guard.
+</p>
+
+<pre class="example">
+<code>{
+stream_guard&lt;std::ostream&gt; gstream(mstream);
+gstream &lt;&lt; "1";
+gstream &lt;&lt; "2";
+gstream &lt;&lt; "3";
+gstream &lt;&lt; "4";
+gstream &lt;&lt; "5";
+gstream &lt;&lt; std::endl;
+}</code>
+</pre>
+
+
+<h3><a name="normal_locking">Using Normal Locking</a></h3>
+
+<p>
+While <code>stream_guard</code> is convenient,
+still the normal locking facilities must work.
+Hence, <code>stream_mutex</code> supports the mutex interface.
+To provide non-locking access through the <code>stream_mutex</code>,
+it provides a <code>bypass</code> operation.
+</p>
+
+<pre class="example">
+<code>{
+lock_guard&lt;stream_mutex&lt;std::ostream&gt; &gt; lck(mstream);
+std::ostream& rawstream = mstream.bypass();
+rawstream &lt;&lt; "1";
+rawstream &lt;&lt; "2";
+rawstream &lt;&lt; "3";
+rawstream &lt;&lt; "4";
+rawstream &lt;&lt; "5";
+rawstream &lt;&lt; std::endl;
+}
+
+{
+unique_lock&lt;stream_mutex&lt;std::ostream&gt; &gt; lck(mstream, defer_lock);
+lck.lock();
+std::ostream& rawstream = mstream.bypass();
+rawstream &lt;&lt; "1";
+rawstream &lt;&lt; "2";
+rawstream &lt;&lt; "3";
+rawstream &lt;&lt; "4";
+rawstream &lt;&lt; "5";
+rawstream &lt;&lt; std::endl;
+}
+
+{
+unique_lock&lt;stream_mutex&lt;std::ostream&gt; &gt; lck(mstream, defer_lock);
+if ( lck.try_lock() ) {
+    std::ostream& rawstream = mstream.bypass();
+    rawstream &lt;&lt; "1";
+    rawstream &lt;&lt; "2";
+    rawstream &lt;&lt; "3";
+    rawstream &lt;&lt; "4";
+    rawstream &lt;&lt; "5";
+    rawstream &lt;&lt; std::endl;
+}
+}</code>
+</pre>
+
+
+<h3><a name="recursive_locking">Recursive Locking</a></h3>
+
+<p>
+Streams may be locked in uncoordinated code,
+and so recursive locking must work.
+</p>
+
+<pre class="example">
+<code>{
+lock_guard&lt;stream_mutex&lt;std::ostream&gt; &gt; lck(mstream);
+mstream.hold() &lt;&lt; "1" &lt;&lt; "2" &lt;&lt; "3";
+mstream &lt;&lt; "4" &lt;&lt; "5" &lt;&lt; std::endl;
+}</code>
+</pre>
+
+<p>
+A consequence of this tolerance for recursion is that
+the <code>bypass</code> operation is a performance optimization.
+</p>
+
+
+<h2><a name="Critique">Critique and Suggestions</a></h2>
+
+<p>
+There are three problems with the proposal above,
+and the current implementation.
+</p>
+
+<ol>
+<li>
+<p>
+The <code>stream_mutex</code> object
+must maintain a (static duration) mapping from streams to mutexes.
+The constructor of a stream mutex
+will look for the stream address in the map.
+If the address is present, it will use the associated mutex.
+Otherwise, the constructor will insert an entry.
+The locking operations on the <code>stream_mutex</code>
+will be forwarded to the appropriate entry.
+</p>
+</li>
+
+<li>
+<p>
+Because accesses to this map will be concurrent,
+they must be protected against races.
+In the simple case, the number of lock operations could double.
+</p>
+</li>
+
+<li>
+<p>
+To prevent resource leakage
+in programs that create and destroy many streams,
+the stream mutex would likely also need to
+maintain a reference count on each entry.
+The reference count is incremented on stream mutex construction,
+and decremented on stream mutex destruction.
+An initial implementation need not go this far, though,
+as unbounded creation of streams is unusual.
+</p>
+</li>
+</ol>
+
+
+<h3><a name="flockfile">Posix Stream Locks</a></h3>
+
+<p>
+One suggestion to avoid this problem
+was that the implementation should use a
+Posix stream lock <a href="#PSL">[PSL]</a>.
+</p>
+
+<blockquote><pre>
+<code>#include &lt;stdio.h&gt;
+void flockfile(FILE *file);
+int ftrylockfile(FILE *file);
+void funlockfile(FILE *file);</code>
+</pre></blockquote>
+
+<p>
+However, that solution is not generally available.
+</p>
+
+<ul>
+<li>
+There is no interface for obtaining the <code>FILE*</code>
+from the <code>iostream</code>,
+so the <code>stream_mutex</code> implementation cannot get to it.
+</li>
+<li>
+The <code>iostream</code>s can and do open files
+without using <code>FILE*</code>.
+The Posix facility is thus inapplicable.
+</li>
+<li>
+The <code>iostream</code> facilies enable streams without corresponding files.
+Again, the Posix facility is thus inapplicable.
+</li>
+</ul>
+
+
+<h3><a name="internal">Internal Stream Locks</a></h3>
+
+<p>
+Another suggestion is to require
+<code>streambuf</code> to export its own locking interface,
+which would then be propogated through the other types.
+There are at least two problems here.
+</p>
+
+<ul>
+<li>
+Exposing new virtual member functions might break the ABI.
+As long as the new functions do not overload with any other,
+this problem may be solvable.
+</li>
+<li>
+Allocating space within the <code>streambuf</code> for the mutex
+will change the class size and hence the ABI.
+</li>
+</ul>
+
+
+<h3><a name="replace">Replace Streams</a></h3>
+
+<p>
+One suggestion has been to replace streams
+with something that does not have streams known weaknesses.
+While this approach has merit for future code,
+it does not help existing code that is committed to streams.
+</p>
+
+
+<h3><a name="summary">Summary</a></h3>
+
+<p>
+In summary,
+the proposed <code>stream_mutex</code> mechanism is not ideal.
+In the absence of ABI considerations,
+putting a mutex into the streambuf itself is ideal.
+However, ABI considerations are very important.
+Achieving that solution may not happen,
+and if it does, may take considerable time.
+The proposed mapping approach is workable,
+though less efficient than desireable.
+Therefore, we present this proposal for C++14.
+</p>
+
+
+<h2><a name="Implementation">Implementation</a></h2>
+
+<p>
+The open-source implementation is freely available at
+<a href="http://code.google.com/p/google-concurrency-library/source/browse/include/stream_mutex.h">
+http://code.google.com/p/google-concurrency-library/source/browse/include/stream_mutex.h</a>.
+The current implementation
+does not reference count the stream to mutex mapping.
+</p>
+
+
+<h2><a name="Synopsis">Synopsis</a></h2>
+
+
+<h3><a name="stream_mutex_decl">Stream Mutex</a></h3>
+
+<pre>
+<code>template &lt;class Stream &gt;
+class stream_mutex
+{
+  public:
+    constexpr stream_mutex(Stream&amp; stm);
+    ~stream_mutex();
+    void lock();
+    void unlock();
+    bool try_lock();
+    stream_guard&lt;Stream&gt; hold();
+    Stream&amp; bypass();
+};</code>
+</pre>
+
+
+<h3><a name="stream_guard_decl">Stream Guard</a></h3>
+
+<pre>
+<code>template &lt;class Stream&gt;
+class stream_guard
+{
+  public:
+    stream_guard(stream_mutex&lt;Stream&gt;&amp; mtx);
+    ~stream_guard();
+    Stream&amp; bypass() const;
+};</code>
+</pre>
+
+
+<h3><a name="operator_shift">Stream Operators</a></h3>
+
+<pre>
+<code>template &lt;typename Stream, typename T&gt;
+const stream_guard&lt;Stream&gt;&amp;
+operator&lt;&lt;(const stream_guard&lt;Stream&gt;&amp; lck, T arg);
+
+template &lt;typename Stream&gt;
+const stream_guard&lt;Stream&gt;&amp;
+operator&lt;&lt;(const stream_guard&lt;Stream&gt;&amp; lck, Stream&amp; (*arg)(Stream&amp;));
+
+template &lt;typename Stream, typename T&gt;
+const stream_guard&lt;Stream&gt;&amp;
+operator&gt;&gt;(const stream_guard&lt;Stream&gt;&amp; lck, T&amp; arg);
+
+template &lt;typename Stream, typename T&gt;
+stream_guard&lt;Stream&gt;
+operator&lt;&lt;(stream_mutex&lt;Stream&gt;&amp; mtx, T arg);
+
+template &lt;typename Stream&gt;
+stream_guard&lt;Stream&gt;
+operator&lt;&lt;(stream_mutex&lt;Stream&gt;&amp; mtx, Stream&amp; (*arg)(Stream&amp;));
+
+template &lt;typename Stream, typename T&gt;
+stream_guard&lt;Stream&gt;
+operator&gt;&gt;(stream_mutex&lt;Stream&gt;&amp; mtx, T&amp; arg);</code>
+</pre>
+
+
+<h3><a name="predefined_objects">Predefined Objects</a></h3>
+
+<pre>
+<code>extern stream_mutex&lt;istream&gt; mcin;
+extern stream_mutex&lt;ostream&gt; mcout;
+extern stream_mutex&lt;ostream&gt; mcerr;
+extern stream_mutex&lt;ostream&gt; mclog;
+
+extern stream_mutex&lt;wistream&gt; mwcin;
+extern stream_mutex&lt;wostream&gt; mwcout;
+extern stream_mutex&lt;wostream&gt; mwcerr;
+extern stream_mutex&lt;wostream&gt; mwclog;</code>
+</pre>
+
+
+<h2><a name="Revision">Revision History</a></h2>
+
+<p>
+This paper revises N3395 = 12-0085 - 2012-09-23 as follows.
+</p>
+
+<ul>
+
+<li><p>
+Choose the approach of maintaining a stream to mutex mapping,
+which allows multiple stream_mutex objects to manage a single stream.
+</p></li>
+
+<li><p>
+Add an elaboration of the consequences of the above decision
+to the 'Critique and Suggestions' section.
+</p></li>
+
+<li><p>
+Add a discussion of replacing streams
+to the 'Critique and Suggestions' section.
+</p></li>
+
+<li><p>
+Add a 'Revision History' section.
+</p></li>
+
+</ul>
+
+<p>
+N3395 revised N3354 = 12-0044 - 2012-01-14 as follows.
+</p>
+
+<ul>
+
+<li><p>
+Clarify usefulness of stream mutexes in debugging, testing, and diagnostics.
+</p></li>
+
+<li><p>
+Apply common subexpression elimination
+on calls to <code>bypass()</code> in the examples.
+</p></li>
+
+<li><p>
+Add a 'Critique and Suggestions' section
+discussing the topics of
+Posix stream locks, internal stream locks, and
+maintaining a stream to mutex mapping.
+</p></li>
+
+<li><p>
+Add an 'Implementation' section.
+</p></li>
+
+<li><p>
+Add a section on 'Predefined Objects'
+corresponding to the standard streams.
+</p></li>
+
+<li><p>
+Add a 'References' section.
+</p></li>
+
+</ul>
+
+
+<h2><a name="References">References</a></h2>
+
+<dl>
+
+<dt><a name="PSL">[PSL]</a></dt>
+<dd>
+<cite>The Open Group Base Specifications Issue 6,
+IEEE Std 1003.1, 2004 Edition</cite>,
+functions, flockfile,
+<a href="http://pubs.opengroup.org/onlinepubs/009695399/functions/flockfile.html">
+http://pubs.opengroup.org/onlinepubs/009695399/functions/flockfile.html</a>
+</dd>
+
+</dl>
+
+</body>
+</html>

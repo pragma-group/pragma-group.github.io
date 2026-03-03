@@ -1,0 +1,895 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+
+<meta http-equiv="Content-Type" content="text/html;charset=US-ASCII">
+
+<style type="text/css">
+
+body { color: #000000; background-color: #FFFFFF; }
+del { text-decoration: line-through; color: #8B0040; }
+ins { text-decoration: underline; color: #005100; }
+
+p.example { margin-left: 2em; }
+pre.example { margin-left: 2em; }
+div.example { margin-left: 2em; }
+
+code.extract { background-color: #F5F6A2; }
+pre.extract { margin-left: 2em; background-color: #F5F6A2;
+  border: 1px solid #E1E28E; }
+
+p.function { }
+.attribute { margin-left: 2em; }
+.attribute dt { float: left; font-style: italic;
+  padding-right: 1ex; }
+.attribute dd { margin-left: 0em; }
+
+blockquote.std { color: #000000; background-color: #F1F1F1;
+  border: 1px solid #D1D1D1;
+  padding-left: 0.5em; padding-right: 0.5em; }
+blockquote.stddel { text-decoration: line-through;
+  color: #000000; background-color: #FFEBFF;
+  border: 1px solid #ECD7EC;
+  padding-left: 0.5empadding-right: 0.5em; ; }
+
+blockquote.stdins { text-decoration: underline;
+  color: #000000; background-color: #C8FFC8;
+  border: 1px solid #B3EBB3; padding: 0.5em; }
+
+table { border: 1px solid black; border-spacing: 0px;
+  margin-left: auto; margin-right: auto; }
+th { text-align: left; vertical-align: top;
+  padding-left: 0.8em; border: none; }
+td { text-align: left; vertical-align: top;
+  padding-left: 0.8em; border: none; }
+
+</style>
+
+<title>Experience with Pre-Parsed Headers</title>
+</head>
+<body>
+<h1>Experience with Pre-Parsed Headers</h1>
+
+<p>
+ISO/IEC JTC1 SC22 WG21 N3426 = 12-0116 - 2012-09-23
+</p>
+
+<address>
+Lawrence Crowl, crowl@google.com, Lawrence@Crowl.org
+<br>
+Diego Novillo, dnovillo@google.com
+</address>
+
+<p>
+<a href="#Introduction">Introduction</a><br>
+<a href="#Problem">Problem</a><br>
+<a href="#Prior">Prior Approaches</a><br>
+<a href="#Pre-Parsed">The Pre-Parsed Header Approach</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Constraints">Approach Constraints</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Implementation">Implementation of the Approach</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Status">Implementation Status</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Problems">GCC Implementation Problems</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Build">Google Build Problems</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Inherent">Inherent Implementation Problems</a><br>
+<a href="#Changes">Changes to the Problem</a><br>
+<a href="#Alterate">Alternate Approaches</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Chainable">Reduce Project Scope to a Chainable PCH</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Actions">Stream Parser Actions</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Exclusive">Make Definitions Exclusive to a Package</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Aggressive">More Aggressively Compile Inline Functions</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Export">Implement Export Control</a><br>
+<a href="#Summary">Summary</a><br>
+</p>
+
+
+<h2><a name="Introduction">Introduction</a></h2>
+
+<p>
+Google's build system is highly parallel.
+As a consequence, the dominant factors in interactive programming latency
+are the time to compile the longest translation unit
+and the time to link the executable.
+In this paper,
+we briefly describe some of our efforts to reduce interactive compile time.
+We go into further detail on our latest effort,
+&ldquo;Pre-Parsed Headers&rdquo;,
+which can be considered a precursor to C++ modules.
+In particular, the lessons arising from our effort
+have implications on the pending C++ standards effort on modules.
+</p>
+
+
+<h2><a name="Problem">Problem</a></h2>
+
+<p>
+The compilation model of C/C++ is a large number of translation units,
+each textually including headers
+that are often used by many other translation units.
+This model causes two problems.
+</p>
+
+<dl>
+<dt>
+Conditional Meaning
+</dt>
+<dd>
+<p>
+Because header files are textually included,
+the meaning of a header file
+can be affected, intentionally or otherwise,
+by the headers that happened to be included before it.
+E.g.,
+the system header file <tt>stddef.h</tt> accepts &ldquo;parameters&rdquo;
+in the form of <tt>#define</tt>s specified before the <tt>#include</tt>.
+These <tt>#define</tt>s
+and their consequences within <tt>stddef.h</tt>
+go on to spread over all the other header files
+included downstream.
+As a consequence, the parametric nature of some headers
+makes the meaning of all headers potentially unreliable.
+</p>
+<p>
+It is clear that large systems are being built with the current approach,
+and therefore that the problem is manageable.
+However, programmer productivity would be better if the problem did not exist.
+</p>
+</dd>
+
+<dt>
+Large Build Times
+</dt>
+<dd>
+<p>
+In C++,
+headers include a large number of
+inline function definitions and template definitions,
+which dramatically increases the size of headers.
+Indeed,
+in the limiting case,
+C++ compilation time is proportional to
+the product of header files and compilation units.
+In practice,
+the complexity is not that bad,
+but compilation is still one of the largest components of build latency.
+Generally, though, much of build work is redundant.
+</p>
+<p>
+In addition to redundant work between translation units,
+there is redundant work in one translation unit
+as it is recompiled during the edit-compile-debug cycle.
+Only very rarely do most headers change meaning in that cycle,
+and textual header recompilation contributes to the latency of the cycle.
+</p>
+</dd>
+</dl>
+
+<p>
+Google's codebase is somewhat different from many
+in that we follow an &ldquo;include what you use&rdquo; approach.
+As a consequence, Google compilation units
+tend to use a high fraction of symbols included.
+We have measured symbols use rates in the range of 70%.
+</p>
+
+
+<h2><a name="Prior">Prior Approaches</a></h2>
+
+<p>
+The primary prior approach to reducing compile time
+is pre-compiled headers (PCH).
+The compiler can load a PCH file
+instead of parsing the first header file inclusion.
+When any file included from that first header file changes,
+then the entire PCH file must be rebuilt.
+PCH is effective when translation units
+use a common, large, and stable header
+that represents a substantial portion of parse time.
+In Google's environment, no such header exists.
+In general, we found that any PCH header
+that represented a substantial portion of parse time
+was too unstable to provide any net benefit.
+</p>
+
+<p>
+As an experiment,
+we tried Pre-tokenized Headers (PTH).
+In this approach,
+the compiler saves the tokens from a header into a state file.
+The next time a header is included,
+instead of tokenizing the text,
+the compiler reads the previously saved stream of tokens.
+This approach was relatively straightforward to implement,
+but the savings were negligible.
+In the meantime,
+normal optimizations to the preprocessor
+and increased effort in the parser and code generator
+have further reduced the benefit.
+</p>
+
+<p>
+We next explored an Incremental Compiler Server.
+In this approach,
+some roles of the build system and the compiler are reversed.
+The compiler lives as a server in the nodes of the build cluster.
+The compiler uses
+an in-memory database of previously seen header files
+to determine whether a header
+needs to be re-parsed or recovered from the database.
+Long before implementation was complete,
+we determined that the approach would be
+too difficult to maintain in our build system,
+primarily due to issues in the repeatability of failures.
+</p>
+
+
+<h2><a name="Pre-Parsed">The Pre-Parsed Header Approach</a></h2>
+
+<p>
+The fundamental change in this approach over earlier approaches
+is that it uses a factored representation,
+so that a typical compilation unit
+will read multiple pre-parsed header (PPH) files.
+With this approach,
+a change in a header will only cause invalidation of the PPH files
+that either directly include that header
+or depend on a PPH file that was invalidated.
+Thus in the DAG of header inclusions,
+PPH only requires recompiling the PPH files
+that are on a path of includes from the changed header to the compilation unit.
+The majority of PPH files would be unchanged by most source changes.
+</p>
+
+
+<h3><a name="Constraints">Approach Constraints</a></h3>
+
+<p>
+The approach had significant constraints as well
+-- the primary being to minimize the change to existing sources.
+The PPH approach reinterprets a <tt>#include</tt> directive
+to read a PPH file instead when a PPH file exists for that header.
+Otherwise,
+the header is read and parsed as normal.
+</p>
+
+<p>
+While the semantics of PPH are not identical to regular compilation,
+they are nearly identical for "modular" headers.
+In PPH,
+we call a header H <dfn>modular</dfn> if it meets the following requirements:
+</p>
+
+<ol>
+<li>
+<p>
+H is guarded against multiple inclusion.
+That is,
+the file contains:
+</p>
+<pre class="example">
+<tt>#ifndef SOME_LABEL
+#define SOME_LABEL
+...
+#endif</tt>
+</pre>
+</li>
+<li>
+<p>
+H can be pre-processed and parsed in isolation.
+This means that the file must not depend on symbols/types
+defined by the environment or another file included before it.
+</p>
+</li>
+<li>
+<p>
+H is always included from the global namespace.
+</p>
+</li>
+</ol>
+
+<p>
+These requirements meet common practice for header design,
+and most headers meet these requirement without change.
+Indeed, PPH makes the meaning of header files more stable,
+as the author of the header can be assured that
+client inclusion environments will not change header semantics.
+</p>
+
+<p>
+Significantly,
+some headers are not modular.
+In particular,
+system headers are often very far from modular.
+These headers must be included textually.
+As a consequence,
+two different PPH files may have the same textual header included within them,
+requiring the parser to merge, or unify,
+the multiply defined symbols and types contained in the two PPH files.
+This merge operation is never needed in regular compilations.
+</p>
+
+
+<h3><a name="Implementation">Implementation of the Approach</a></h3>
+
+<p>
+Since Pre-Parsed Headers are headers,
+they must provide the preprocessor semantics of headers.
+In particular,
+PPH files export the same set of preprocessor macros that the headers export.
+Those macro definitions must be replayed when PPH files are read.
+</p>
+
+<p>
+Because the compilation of a header
+will bind any preprocessor conditionals or substitutions,
+PPH files must validate the macro environment
+against which they were compiled
+with the macro environment in which they were included.
+In particular, we must keep the set of identifiers used
+within a header within its PPH file
+so that we can ensure that an identifier
+also has no macro definition when that PPH file is included.
+</p>
+
+<p>
+The implementation streams GCC internal data structures to the PPH file.
+Because of the need to handle two PPH files including the same textual header,
+symbols in the two PPH files that represent the same C++ symbol
+must be merged into a single C++ symbol.
+</p>
+
+<p>
+The compiler walks the C++ data structures
+and identifies those symbols that may possibly be merged.
+These are streamed first with identifying information,
+so that upon read,
+the compiler can search for an earlier load of that same symbol.
+After these potentially mergeable symbols are streamed,
+the compiler streams the dependent internal data structures.
+</p>
+
+
+<h3><a name="Status">Implementation Status</a></h3>
+
+<p>
+PPH implementation status
+is measured against an internal Google application
+using a fast build mode.
+All the metrics referenced in this section correspond
+to the compilation of the main translation unit for that application.
+</p>
+
+<p>
+The initial performance measurements are a qualified success.
+We have halved effective parse time
+even with an implementation that has not been tuned.
+Of the remaining time,
+nearly half is attributed to hash table lookup for template specializations.
+That expense is not incurred in regular compilations,
+and is therefore almost certainly a bug.
+</p>
+
+<p>
+Furthermore,
+in PPH files,
+close to half of all pointers emitted are null,
+which means that we could save significant further time
+by simply not saving or restoring them.
+Overall,
+we suspect that with minimal effort,
+PPH parse time will be less than a quarter of regular parse time.
+</p>
+
+<p>
+We find that application headers are predominantly compatible with PPH,
+thus meeting our goal of requiring few source changes.
+However,
+system headers are both often incompatible and very heavily used.
+</p>
+
+<p>
+Current functionality measurements are less successful.
+We are currently able to reuse less than a fifth of the PPH files we create.
+Of the error messages emitted,
+three quarters are a single error.
+There are likely few root causes to that error,
+and a particularly likely root is
+the template specialization bug mentioned above.
+As a further example,
+the fourth most common error messages
+all come from a single built-in function in a widely used system header.
+</p>
+
+<p>
+The primary development concern is that
+we do not know how many root causes are shadowed by the current root causes.
+</p>
+
+
+<h3><a name="Problems">GCC Implementation Problems</a></h3>
+
+<p>
+A significant number of implementation problems arise from the structure of GCC.
+</p>
+
+<p>
+GCC has a test on preprocessor state
+to avoid unnecessarily reading a header file.
+Unfortunately,
+this test is not isomorphic to &ldquo;not multiply included&rdquo;.
+In particular,
+if the guarding symbol is conditionally set,
+the header may be included multiple times.
+Such headers require a manual exception to work with our system.
+</p>
+
+<p>
+The parser updates symbols as it parses.
+At the end of the compilation,
+when it comes time to write out a PPH file,
+the data structures are circular.
+While it is possible to stream circular structures,
+breaking the circularity at different points can have different effects.
+In contrast,
+the C++ source files have already broken that circularity simply because,
+for the most part,
+the language requires the programmer to do so.
+</p>
+
+<p>
+The state necessary for parsing and some code generation
+is mixed into a single data structure.
+Furthermore,
+the parser often provides code generation information
+in the data structures as it is parsing.
+The code generation information is not essential to PPH files,
+but neither is it easily removed.
+</p>
+
+<p>
+The GCC compiler has received significant micro-optimizations
+towards the goal of making traditional compilation fast.
+Many of these optimizations
+interfere with the process of repurposing the compiler.
+In particular,
+tokens point to the symbols that they may reference.
+When the scope changes,
+the tokens are updated to point to different symbols.
+As a consequence,
+tokens are not immutable and streaming the tokens requires extra processing.
+</p>
+
+<p>
+The compiler has instances where its representation loses fidelity with C++.
+For example,
+on parsing a tagless struct,
+GCC creates a counter-based unique tag name.
+It then does a lookup to see if the tag has been defined before.
+Of course, it has not.
+Later,
+GCC pattern matches on the tag name
+to see if it is one of the names assigned to tagless structs,
+so that it can infer the struct is tagless.
+While all this divergence from fidelity works in a normal parse,
+it does not work with PPH.
+PPH merges the results of multiple files,
+all using the same initial counter sequence.
+Thus,
+lookups do find a prior definition.
+The problem is solvable with a different strategy of creating unique tags.
+However,
+the problem appeared,
+required debugging,
+required a workaround,
+and occupies space in the PPH file.
+</p>
+
+
+<h3><a name="Build">Google Build Problems</a></h3>
+
+<p>
+Other problems arise from the structure of Google's build system,
+which is highly parallel.
+With multi-core systems available as commodity desktop systems,
+we believe that future build systems will be increasingly parallel.
+So, while Google's build system is unusual,
+it is relevant.
+</p>
+
+<p>
+The build system creates a graph of actions necessary to build a target.
+The introduction of PPH will create a deeper action graph,
+and in the limit,
+have twice as many nodes.
+These larger graphs will take longer to compute.
+Most of those nodes will already be complete,
+so we have every expectation that using the PPH files will more than pay for the increased graph computation.
+However,
+an edit that invalidates a PPH file near the base of the graph will create a deeper serial dependence in compilations,
+which extends compilation time when concurrency is essentially free.
+</p>
+
+<p>
+PPH,
+as well as many other approaches,
+requires that we save some form of state
+and that state needs to be exposed to the build system.
+This additional state generates additional work in the build system,
+which contributes to latency.
+</p>
+
+<p>
+The essential tradeoff in the build
+is increased effort in building a PPH file
+versus decreased effort in using a PPH file.
+If this additional build overhead is more expensive
+than the savings provided by the generated compilation state,
+the approach is a net loss.
+As yet we do not know the effect of PPH, or other approaches,
+on the build system.
+We likely will not know until we have a working system and can experiment.
+</p>
+
+<p>
+The current implementation approach
+requires manually changing the streaming code
+whenever the data structures change.
+Thus, PPH, in its present state,
+represents a burden to continued compiler development in GCC.
+</p>
+
+
+<h3><a name="Inherent">Inherent Implementation Problems</a></h3>
+
+<p>
+The current approach has some fundamental implementation problems.
+These problems are independent of the compiler chosen for PPH implementation.
+</p>
+
+<p>
+The structure of system headers makes many of them unsuitable to PPH.
+While many of these can be wrapped or multiply included;
+doing so has the effect of replicating symbols in multiple PPH files.
+That replication costs both space and time
+for the very headers that are most often used.
+</p>
+
+<p>
+The replication requires that PPH be able to merge identical symbols.
+Being able to merge symbols costs roughly 1/4 to 1/3 of the PPH load time.
+The information necessary to merge symbols is slow to create
+and occupies a significant amount of PPH file space.
+</p>
+
+<p>
+More importantly,
+merging is the primary source of bugs in the implementation.
+Restructuring of PPH,
+due to the discovery of yet more information needed for merging,
+is common.
+</p>
+
+<p>
+The primary compile-time benefit of PPH
+is the ability of the compiler to avoid symbol lookup and type analysis
+required during header parsing.
+Unfortunately,
+PPH does not avoid creating the same number of symbols,
+along with all of the memory allocation and content recreation implied.
+In essence,
+PPH files contain as much information as the original headers,
+and that information takes time to load into the compiler data structures.
+</p>
+
+
+<h2><a name="Changes">Changes to the Problem</a></h2>
+
+<p>
+The detailed performance characteristics
+that started the PPH project have changed in the meantime.
+While the changes are specific to our benchmark,
+we believe the trends are general to the industry.
+</p>
+
+<ol>
+<li>Preprocessing takes a significantly smaller portion of compile time.</li>
+<li>Code generation takes a significantly larger portion of compile time.</li>
+<li>The benchmark program size has grown by 3.4x.</li>
+<li>The benchmark compilation time has grown by 3.6x.</li>
+<li>We now run other tools in parallel with GCC.</li>
+<li>We now have tools to automate large-scale source changes.</li>
+</ol>
+
+<p>
+Combining the first four characteristics,
+the parser is now 60% of compilation time rather than 80%.
+As a consequence,
+maximum possible PPH speedup is now 2.5x rather than 5x.
+</p>
+
+<p>
+The compiler is now only one tool in a build.
+Static analysis tools may run in parallel with the compiler.
+Build times may be limited by other tools.
+Specifically,
+our builds now use Clang for C++ diagnostics,
+and this parallel tool has two effects.
+</p>
+
+<ul>
+<li>
+<p>
+Our builds now do syntax checking with Clang
+in parallel with doing the regular compile with GCC.
+The build latency is the maximum of those two components,
+which means that making GCC faster than Clang
+will not improve latency over making it the same speed.
+Our maximum speedup without modifying Clang is now roughly 3x-4x.
+</p>
+</li>
+
+<li>
+<p>
+A major benefit of PPH is that the build system need only ship the PPH files,
+not header files from which they were built.
+However,
+with Clang syntax checking,
+we must ship headers through the build system,
+thus losing that potential performance gain.
+</p>
+</li>
+</ul>
+
+<p>
+Finally,
+at the inception of PPH,
+large-scale source changes were unlikely to ever be implemented.
+However,
+we now have tools that help us to automate large-scale changes.
+The restriction on minimum source change seems less necessary.
+</p>
+
+
+<h2><a name="Alterate">Alternate Approaches</a></h2>
+
+<p>
+For this section,
+we use the term &ldquo;package&rdquo;
+to indicate something like a compiled header.
+A package could be a PPH file,
+a full module,
+or something else.
+</p>
+
+<p>
+There are several alternate approaches
+that might improve the effectiveness of a package feature.
+However, one must be careful when judging effectiveness
+to consider several criteria.
+</p>
+
+<ol>
+<li>package compilation time</li>
+<li>package reuse time</li>
+<li>time over which packages are stable</li>
+<li>size of packages</li>
+<li>fidelity of package semantics to what programmers have with headers</li>
+<li>fidelity of package semantics to what programmers need</li>
+</ol>
+
+
+<h3><a name="Chainable">Reduce Project Scope to a Chainable PCH</a></h3>
+
+<p>
+Much of the problem with the current PPH implementation is merging.
+If we were to not support merging,
+the result would be something like PCH,
+but with the ability to chain one package off of the end of another.
+Such an approach would avoid the problem that
+one change invalidates the entire PCH file.
+So,
+packages would be more stable than PCH files.
+</p>
+
+<p>
+In our benchmark,
+uncompressed PPH files are 41% of the size of PCH files
+and compressed by 7:1 to 51% of compressed PCH files.
+PPH files would be even smaller in a tuned implementation
+and without the need to support merging.
+However,
+we would need more of them
+because each package would represent a portion of a full linear context,
+not just a local context.
+Aggregate file sizes are unknown.
+</p>
+
+<p>
+The generation of PPH files is 24% faster than PCH for our benchmark,
+and would be even faster without the need to support merging.
+However,
+reuse speed is slower by 31% to 57%.
+As a mitigating task,
+a chained package reuse would also require less time than PPH reuse.
+(E.g., macro validation is not needed.)
+</p>
+
+<p>
+The primary problem with this approach
+is that it would require source changes to our codebase to be effective.
+We would need a canonical order for commonly used headers.
+Some headers would need to be aggregated into a single header
+to avoid explosion of package files.
+</p>
+
+<p>
+This approach is most likely to achieve feature status in GCC in the short term,
+but deployment within Google will likely take longer than deployment of PPH.
+The reason is that the changes to the source base
+to exploit chained PCH are not trivial.
+</p>
+
+
+<h3><a name="Actions">Stream Parser Actions</a></h3>
+
+<p>
+The current implementation streams the data structures
+after the parser has completed their construction.
+Instead,
+we could stream the parser actions that create the data structures.
+Unlike in regular parsing,
+we would need extra code to accept but ignore duplicate definitions.
+</p>
+
+<p>
+With careful restructuring of GCC,
+these actions could be near an alternate pluggable implementation
+of the regular parser internal API.
+Doing so would at least
+reduce lag between functional modification and working streaming,
+and at best enable automatic streamer generation.
+The primary problem here would be in identifying those actions
+and building an API that encapsulates them.
+</p>
+
+
+<h3><a name="Exclusive">Make Definitions Exclusive to a Package</a></h3>
+
+<p>
+The primary problem with the current PPH implementation
+is that it needs to merge symbols.
+We can avoid that problem
+if we require each symbol to be defined in at most one package.
+Given the existing structure of system headers,
+such an approach would require defining and implementing
+a new set of system packages.
+Users would then be required to use these new packages
+in place of existing #includes.
+</p>
+
+
+<h3><a name="Aggressive">More Aggressively Compile Inline Functions</a></h3>
+
+<p>
+PPH essentially captures parser state.
+Any inline functions in a PPH file are not re-parsed on use,
+but they are compiled on each use.
+We can shift work into package compilation
+by representing inline functions in the optimizer's internal form.
+</p>
+
+<p>
+This shift is reasonable with GCC because
+its front end does not do inlining.
+Other compilers may require more care.
+</p>
+
+
+<h3><a name="Export">Implement Export Control</a></h3>
+
+<p>
+One of the problems with the current approach is that
+including a PPH file entails including all of the PPH files
+that were used in its construction.
+We must do so because all types in the chain of PPH files
+are implicitly exported.
+</p>
+
+<p>
+If instead,
+the package exported only the packages interface,
+the each package would need to contain only enough information
+to compile and reuse the interface.
+Within the package,
+all non-exported types and variables
+would be lowered to the code generator level,
+with enough information to enable correct and optimizable code,
+but without the extra C++-level information.
+(Effectively packages would meet ABI constraints
+in their representation of non-exported symbols,
+but not API constraints.)
+Such an approach would avoid nested module reads
+and substantially reduce the bulk of information used.
+It would also enforce include-what-you-use.
+</p>
+
+
+<h2><a name="Summary">Summary</a></h2>
+
+<p>
+<b>The problem needs a solution.</b>
+The C++ header model is becoming a serious drag on productivity.
+Our free ride on sequential processor improvements is over,
+and we need a more scalable solution.
+All alternate approaches should be carefully considered,
+even if they require non-trivial changes to the source base.
+</p>
+
+<p>
+<b>Automated source conversion changes compatibility.</b>
+In the past,
+compatibility meant compiling the same code in the same way.
+With automated source code modification tools,
+compatibility means
+identifying an automatable transformation from old code to new code.
+</p>
+
+<p>
+<b>Modules should not ignore the build system.</b>
+The performance effects of detailed module semantics
+can have significant complexity impact on the build of large systems.
+Indeed,
+we are struggling now with the consequences of textual inclusion.
+</p>
+
+<p>
+<b>PPH can deliver
+significant, but not revolutionary, compile-time improvements.</b>
+We anticipate an overall doubling of compile-time performance.
+However, we are unlikely to get order-of-magnitude improvements.
+</p>
+
+<p>
+<b>Export control will yield better performance.</b>
+The primary limit to the compile-time performance of PPH is that
+it must load the transitive closure of symbols in a PPH file.
+By limiting the set of symbols exported from a module,
+the amount of information imported can be substantially reduced.
+</p>
+
+<p>
+<b>Merging symbols is technically difficult.</b>
+The problems are not theoretically difficult,
+but have proven to be so in practice.
+This difficulty will be reflected in slower implementations.
+Furthermore, our implementation problems
+have been largely the result of merging.
+At any one time, we have had few known bugs.
+However, fixing one bug has moved the frontier to yet another bug.
+It is difficult to anticipate
+when we will cross the threshold to general functionality.
+If we were not merging symbols,
+we believe we would have already deployed a successful PPH.
+</p>
+
+<p>
+<b>One module per symbol will likely yield better systems.</b>
+Given the merge performance issues and bugs discussed above,
+we believe that a module system
+will be more performant and more reliable
+if prohibits multiple definitions.
+</p>
+
+<p>
+<b>System headers must be redefined as modules.</b>
+Application headers are generally well-structured
+and their conversion to a module system
+will likely be not too painful.
+Unfortunately, current system headers
+are often highly tied to the textual inclusion model.
+Any attempt to reuse them unmodified
+in a module system will constitute a significant burden
+to both implementers and users.
+</p>
+
+</body></html>

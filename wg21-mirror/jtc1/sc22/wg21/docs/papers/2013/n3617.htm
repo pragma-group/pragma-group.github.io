@@ -1,0 +1,150 @@
+<html>
+<head>
+<TITLE>
+ISO/IEC JTC1/SC22/WG21
+N3617
+</TITLE>
+</head>
+<body>
+<h1>
+<img align=top src="/pics/iso44.gif" alt="ISO/">
+<img align=top src="/pics/iec44.gif" alt="IEC">
+JTC1/SC22/WG21
+N3617
+</h1>
+<pre>
+ï»¿Document number: 	N3617
+Date: 	2013-03-14
+Project: 	Programming Language C++, Core Working Group
+Reply-to: 	Philipp Juschka &lt;p.juschka at hotmail dot de>
+
+Lifting overload sets into function objects
+
+### I. Introduction
+
+Many generic libraries, including the standard library, draw from the functional programming paradigm, where passing around functions is a common occurence. This proposal aims to allow the usage of functional techniques with plain old overloaded functions and function templates without needing to create a function object by hand.
+
+### II. Motivation and Scope
+
+When dealing with generic algorithms, like the function templates in &lt;algorithm>, it can be quite cumbersome to pass an overloaded function or a function template, because the user needs to either
+
+* specify the exact type of the resulting function pointer through a cast or binding it to an appropriate variable first; or
+* wrap the function in a lambda, still having to specify the argument types [note: the polymorphic lambda proposal will lessen the burden here, but this proposal aims to go farther than regular syntactic sugar]
+
+This doesn't lend itself to clean code or high genericity, especially when aiming to write code in a functional style.
+
+### III. Impact on the Standard
+
+No impact on the current standard, no other dependencies. This paper only references the polymorphic lambda proposal[2] and the polymorphic operator functors proposal[3] for explanations.
+[note. It would, help implementations tremendously if member templates of local class-types were allowed. Such a proposal, however, is not out of the scope for this paper.]
+
+IV. Impact on existing code
+
+The proposed '[]id-expression' syntax is currently ill-formed, so no impact on existing code.
+
+V. Design Decisions
+
+The main goal is to provide a concise and unobtrusive syntax, while yielding an intuitive result. For that purpose, the semantics borrow from INVOKE's cases, while the grammar borrows from the existing *lambda-expression* syntax. The '[]id-expression' syntax is open to bikeshedding discussions, of course, but I chose it as a first option because it seems rather natural, and others[2] also seem to have reached this conclusion independently.
+
+The `[]operator-function-id` special case may be seen as a generalization to 'Making Operator Functors greater&lt;>'[3], although I personally would use those for clarity. It may be worth considering which operators would actually be allowed by this form, as `[]operator++` and `[]operator--` are inherently ambiguous. These denote both prefix and postfix versions, and would need a way to disambiguate. One idea is that `[]operator++(int)` and `[]operator--(int)` as a special syntax would denote the postfix versions, but this will likely have to be investigated further.
+
+Another thing that must be considered is mirroring the data-member cases of INVOKE. These can be ambiguous with free function overloads / templates, as in the following example:
+
+    template&lt;class T>
+    void foo(T){}
+
+    struct X{
+      int foo;
+    };
+
+    void f(){
+      X x;
+      []foo(x); // would currently return X::foo, maybe not intended
+    }
+    
+One idea that came up in a discussion was to allow `[].id-expression` to denote members-only.
+
+### VI. Discussion
+
+The envisioned syntax would be a simple '[]id-expresson', which I call a *lifting-expression* or *lifting-lambda*. The idea started out as just having a short-hand notation for the following polymorphic lambda, if that proposal was to be adopted:
+
+    [](auto&&... vs){ return id-expression(std::forward&lt;decltype(vs)>(vs)...); }
+    
+The above allows the user to pass any overloaded function or function template as if it were a function object, bypassing the main issues mentioned in the motivation. However, there are drawbacks:
+
+* writing out the whole lambda expression is tedious and introduces unnecessary clutter
+* it only allows exactly that invokation form and dismisses member functions and member data
+* the above points become even more prevalent with operators
+
+These drawbacks, especially the third one, can not be solved in a "library"-way (say, with a #define), the solution needs to be at the language level since it partly depends on what grammar-elements are used as the *id-expression*.
+
+The question then becomes what the '[]id-expression' should represent, and how the resulting object should behave. The semantics of 'INVOKE' sounded like a good starting point, but since 'INVOKE' only deals with objects and not with *id-expressions* themselves, it can only serve as a rough basis for behaviour. Special handling only needs to be done for *operator-function-ids* that are *unqualified-ids*, as far as I can see. With that, a *lifting-expression* can be described in terms of 'LIFTED_INVOKE', similar to how 'std::bind' and others are described in terms of 'INVOKE'.
+
+### VII. Technical Specification
+
+Define LIFTED_INVOKE(id-expression, a1, a2, ..., aN) as follows:
+* LIFTED_INVOKE_OP(id-expression, a1, a2, ..., aN) when the *id-expression* is an *unqualified-id* and represents an *operator-function-id*;
+* a1.id-expression(a2, ..., aN) when the expression would represent a member function invokation;
+* (*a1).id-expression(a2, ..., aN) when the previous item does not apply and the expression the expression would represent a member function invokation;
+* a1.id-expression when N == 1 and the *id-expression* names a data-member of a1;
+* (*a1).id-expression when N == 1, the *id-expression* names a data-member of the result of (*a1) and the previous item does not apply;
+* id-expression(a1, a2, ..., aN) in all other cases.
+
+Define LIFTED_INVOKE_OP(operator-function-id, a1, a2, ..., aN) as follows, where @ represents the respective operator:
+* @a1 when N == 1;
+* a1 @ a2 when N == 2;
+* a1[a2] when N == 2 and the *operator-function-id* is 'operator[]';
+* a1(a2, ..., aN) when N >= 1 and the *operator-function-id* is 'operator()';
+* (a1->*a2)(a3, ..., aN) when N >= 2, the *operator-function-id* is 'operator->*' and 'a2' is a pointer-to-member-function;
+* a1->*a2 when N == 2, the *operator-function-id* is 'operator->*' and 'a2' is a pointer-to-member-data;
+
+[note: The split between LIFTED_INVOKE and LIFTED_INVOKE_OP is deliberate and intended for clarity.]
+
+Extend the grammar rule for *primary-expression*:
+
+    primary-expression:
+        [...]
+        lifting-expression
+    
+Add a new grammar rule:
+
+    lifting-expression:
+        [] id-expression
+
+A *lifting-expression* would then evaluate to a *lifting-lambda* h and the effects of 'h(a1, a2, ..., aN)' shall be 'LIFTED_INVOKE(id-expression, a1, a2, ..., aN)' if the resulting expression is well-formed. Otherwise, the operator() of the *lifting-lambda* shall not participate in overload resolution. [note: This makes the lifting-lambda usable in code that employs expression SFINAE.]
+The operator() shall be *perfect-returning*. This means that prvalues of the final expression are returned as prvalues, xvalues as xvalues, and lvalues as lvalues. [note: A simple 'auto&& operator()(...)' (assuming deduced return types were in the language) will not suffice, as that would return dangling rvalue references if the final expression evaluates to a prvalue.]
+[note: The intent is that the *lifting-lambda* acts as much as the substituted expression would, meaning it perfect-forwards all arguments and also evaluates to the same value-category. The *perfect-returning* semantics are basically mirroring the 'decltype' semantics.]
+
+Usage example:
+
+    struct user{
+      int id;
+      std::string name;
+    };
+
+    void f()
+      std::vector&lt;user> users{ {4, "Bjarne"}, {1, "Herb"}, {3, "Scott"}, {0, "Stephan"}, {2, "Andrei"} };
+     
+      // ordered_by implementation left as an exercise to the reader 
+      std::sort(users.begin(), users.end(), ordered_by([]id));
+      // [(0, "STL"), (1, "Herb"), (2, "Andrei"), (3, "Scott"), (4, "Bjarne")]
+      std::sort(users.begin(), users.end(), ordered_by([]name));
+      // [(2, "Andrei"), (4, "Bjarne"), (1, "Herb"), (3, "Scott"), (0, "Stephan")]
+    }
+
+### VIII. Acknowledgements
+
+Many thanks to R. Martinho Fernandes, DeadMG and others from the StackOverlow Lounge&lt;C++> chat room, aswell as Richard Smith and others from the #llvm channel on irc.oftc.net, for their helpful suggestions and input on discussions.
+
+### IX. References
+
+[1] Proposal for Generic (Polymorphic) Lambda Expressions, F. Vali, H. Sutter, D. Abrahams
+    <a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3418.pdf">http://open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3418.pdf</a>
+    
+[2] C++Next blog <a href="http://cpp-next.com/archive/2011/11/having-it-all-pythy-syntax/#q-1732">http://cpp-next.com/archive/2011/11/having-it-all-pythy-syntax/#q-1732</a>
+    And also the polymorphic lambda proposal above, albeit with different semantics.
+    
+[3] Making Operator Functors greater&lt;>, Stephan T. Lavavej
+    <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3421.htmÿ">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3421.htm</a>ÿ</pre>
+</body>
+</html>

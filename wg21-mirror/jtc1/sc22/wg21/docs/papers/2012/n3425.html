@@ -1,0 +1,692 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN">
+<!-- taken from url=(0079)http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3325.html -->
+<HTML><HEAD><TITLE>Concurrent Unordered Associative Containers for C++</TITLE>
+<META content="text/html; charset=iso-8859-1" http-equiv=Content-Type>
+<STYLE type="text/css">
+BODY {
+	BACKGROUND-COLOR: #ffffff; COLOR: #000000
+}
+DEL {
+	COLOR: #8b0040; TEXT-DECORATION: line-through
+}
+INS {
+	COLOR: #005100; TEXT-DECORATION: underline
+}
+P.example {
+	MARGIN-LEFT: 2em
+}
+PRE.example {
+	MARGIN-LEFT: 2em
+}
+DIV.example {
+	MARGIN-LEFT: 2em
+}
+ADDRESS {
+	float: right
+}
+ADDRESS P {
+	margin: 0; text-align: right
+}
+</STYLE>
+<META name=GENERATOR content="MSHTML 8.00.7601.17824"></HEAD>
+<BODY>
+<P>ISO/IEC JTC1 SC22 WG21 N3425 = 12-0115 - 2012-09-20
+<ADDRESS>
+<P>Arch D. Robison, Intel Corp.,    (arch.robison@intel.com)   </P>
+<P>Anton Malakhov, Intel Corp.,     (anton.malakhov@intel.com) </P>
+<P>Artur Laksberg, Microsoft Corp., (arturl@microsoft.com)     </P>
+</ADDRESS>
+<H1>Concurrent Unordered Associative Containers for C++</H1>
+
+<p>
+<A HREF="#Introduction">Introduction</A><br>
+<A HREF="#Interfaces">Interfaces</A><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<A HREF="#Erasure">Why Concurrent Erasure Is Not Supported</A><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<A HREF="#deferred-destruction">Deferred Destruction</A><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<A HREF="#GC-Based">Alternative: GC-Based Deferred Destruction</A><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<A HREF="#Copy-Based">Alternative: Copy-Based Interface</A><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<A HREF="#unsafe-bucket">Bucket Interface</A><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<A HREF="#safe-bucket">Alternative: Concurrency-Safe Bucket Interface</A><br>
+<A HREF="#synopsis">Synopsis</A><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<A HREF="#synopsis-map">Header <TT>&lt;concurrent_unordered_map&gt;</TT> synopsis</A><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<A HREF="#synopsis-set"> Header <TT>&lt;concurrent_unordered_set&gt;</TT> synopsis</A><br>
+<A HREF="#concurrency-guarantees">Concurrency Guarantees</A><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<A HREF="#concurrency-safe">Concurrency-Safe Operations</A><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<A HREF="#nonblocking">Non-Blocking</A><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<A HREF="#partial-linearizability">Partial Linearizability</A><br>
+<A HREF="#References">References</A><br>
+</p>
+
+<H2><A NAME="Introduction">Introduction</A></H2>
+
+<P>
+We propose adding concurrent variants of the unordered associative containers
+that guarantee concurrency safety of insertion operations and lookup operations.
+By <EM>concurrency safety</EM>, 
+we mean that concurrent execution of the operations does not introduce a data race.
+Though the existing specifications of STL unordered associative containers 
+<EM>permit</EM> concurrency safety, 
+they do not require it.
+We also propose allowing concurrency-safe erasure as an option.
+<P>
+Currently a programmer must serialize insertions with respect to
+themselves and other operations,
+even though often there is no logical conflict.
+For example, consider multiple threads that need to insert keys into a set.  
+Logically, the resulting set should be independent of whether the insertions
+are concurrent or not.
+The proposed containers enable the insertions to proceed concurrently.
+<P>
+The concurrent variants can be efficiently implemented using <EM>split-ordered lists</EM> 
+<A HREF="#SplitOrder">[SplitOrder]</A>,
+an established technique for implementing lock-free hash tables.
+Versions of these concurrent variants have been shipping with Intel Threading Building Blocks and the Microsoft Parallel Patterns Libraries.
+
+<H2><A NAME="Interfaces">Interfaces</A></H2>
+The interfaces of the concurrent variants are close to the existing unordered associative containers. 
+Insertion, lookup, and traversal work just they do for the existing containers, 
+except that they are now permitted to operate concurrently.
+Traversal might skip some items that are inserted concurrently with the traversal.  
+A later section on <A href="partial-linearizability">partial linearizability</A> 
+describes guarantees on how the concurrent operations interact.
+<P>
+The significant syntactic difference is that the prefix <TT>unsafe_</TT> is added to 
+some of the methods that are unsafe to invoke concurrently with mutating operations.
+These methods are:
+<UL>
+	<LI> Methods for erasure.  E.g., <TT>unsafe_erase</TT>.</LI>
+	<LI> Methods for inspecting buckets.  
+             E.g., <TT>unsafe_bucket_count</TT> and <TT>unsafe_begin(size_type bucket)</TT>.</LI>
+</UL>
+The prefix serves as a reminder that these are not concurrency-safe.
+<P>
+There are a few unprefixed operations that not concurrency safe:
+<UL>
+<LI><TT>clear</TT></LI>
+<LI><TT>swap</TT></LI>
+</UL>
+Prefixing these names seemed too far a departure from existing practice,
+and the wholesale nature of these operations made it easy to remember that they were not concurrency safe.
+
+A <A HREF="#concurrency-guarantees">later section</A> describes the concurrency guarantees in more detail.
+
+<H3><A NAME="Erasure">Why Concurrent Erasure Is Not Supported</A></H3>
+Concurrent erasure is not supported in the base proposal 
+because of the difficulty (and overhead)
+of resolving what to do if one thread has looked up an item (and is holding a reference to it) 
+while another thread is concurrently erasing the item.
+<P>
+There are several solutions to this problem, each with inherent costs.
+If the committee wishes to support concurrent erasure,
+we recommend the ``deferred destruction'' approach outlined in the next section,
+since it is non-blocking and offers the fewest surprises.
+However, it has a high performance cost,
+and therefore we recommend that it be an optional feature enabled by a template parameter to the container,
+to preserve ``pay as you go'' for cases not needing concurrent erasure.
+
+<H4><A NAME="deferred-destruction">Deferred Destruction</A></H4>
+<P>
+Deferred destruction enables safe concurrent erasure with non-blocking semantics.
+When an item is erased, 
+it is unlinked from the container so that subsequent lookups cannot find it,
+but destruction of the item is deferred until no container iterators pointing to it.
+<P>
+A minor drawback of deferred destruction is that it permits a thread
+to continue operating on item that is no longer in the table.
+However, the alternative of blocking erasure seems worse,
+since it can lead to deadlock.
+Clients wanting blocking erasure can add the necessary synchronization themselves,
+such as by embedding a mutex in each item.
+Note that the converse, 
+providing a blocking container and making clients who need non-blocking semantics
+<EM>subtract</EM> synchronization, is not viable.
+<P>
+Any support for concurrency-safe erasure is not cheap, 
+because it requires thread synchronization to avoid races.
+Deferred destruction requires,
+at a minimum, two atomic operations for the acquisition and release of an item.
+These operations can generate much coherence traffic since they require modifying a cache line.
+The cost is not pay-as-you-go since these modifications are required if concurrent erasure <EM>might</EM> happen,
+even if it never happens.
+Hence our recommendation is that the feature be enabled or disabled on a per-instantiation basis.
+
+<H4><A NAME="GC-Based">Alternative: GC-Based Deferred Destruction</A></H4>
+
+In principle, deferred destruction could also be implemented using garbage collection 
+instead of reference counting, 
+and thus avoid the expensive atomic operations for acquisition and release of an item.
+Iterators pointing to items can be freely copied, 
+and so the garbage collection would have to track all these copies.
+<P>
+If implementations <EM>relying</EM> on garbage collection are to be permitted,
+the specification of <TT>erase</TT> and consequent deferred destruction 
+need to permit an item to remain alive after the last reference to it is removed,
+until the garbage collector can reclaim it.
+
+<H4><A NAME="Copy-Based">Alternative: Copy-Based Interface</A></H4>
+
+Another solution to the concurrent erasure problem 
+is to depart from STL conventions and provide a <EM>copy-access</EM> interface.
+A lookup/insert operation would return a copy of an item instead of an abstract pointer (iterator) to it.
+A copy-based interface would require a traits parameter for specifying how to copy an item
+in a concurrency-safe way, 
+since copy construction is not necessarily thread-safe for types of interest (e.g. instances of <TT>shared_ptr</TT>).
+<P>
+The big advantage of a copy-access interface is that 
+there is no need for expensive atomic operations to track acquisition/release 
+of an item as in in the deferred destruction approach.
+However, since the underlying data structure still involves links to things
+that might be concurrently erased,
+fully avoidance of mutating atomic operations in the internal implementation
+will have to rely on advanced software techniques for safe memory reclamation
+(e.g. hazard pointers) or hardware support such as transactional memory,
+<P>
+Copy-based interfaces can also have significant performance advantages because the underlying implementation 
+is free to repack storage on the fly, and pack them densely,
+which is particularly helpful for single-word items.
+<P>
+The big drawback of a copy-based interface is that it is a 
+significant departure from existing practice in the standard library.
+Thus we are proposing a non-copying interface.
+
+<H3><A NAME="unsafe-bucket">Bucket Interface</A></H3>
+
+Our bucket interface is weakly concurrency safe in the sense that 
+concurrent execution of bucket operations with <TT>insert</TT> operations
+will not corrupt the container. 
+We nonetheless mark these operations as <TT>unsafe_</TT> because
+concurrent insertion can cause semantic surprises.
+For example, consider the following routine for dumping a concurrent unordered set.
+<pre class="example">
+<code>template&lt;typename Set&gt;
+void DumpSet(const Set&amp; s) {
+    using namespace std;
+    for(typename Set::size_type i=0; i!=s.<INS>unsafe_</INS>bucket_count(); ++i) {
+        cout &lt;&lt; "bucket " &lt;&lt; i &lt;&lt; endl;  
+        for( auto j=s.<INS>unsafe_</INS>begin(i); j!=s.<INS>unsafe_</INS>end(i); ++j)
+            cout &lt;&lt; *j &lt;&lt; endl;
+    }
+}</code>
+</pre>
+If a concurrent <TT>insert</TT> happens while the dump is running, 
+the dump may list some of the other elements <EM>twice</EM>.
+<P>
+To see how this can happen, suppose that
+the inner loop has dumped each item in bucket 0 
+and is about to evaluate <TT>j==unsafe_end(0)</TT>.
+If an <TT>insert</TT> happens and causes the number of buckets to increase,
+the number of buckets doubles, from some value N to 2N.
+Bucket 0 splits into two buckets, bucket 0 and bucket N.
+The dumping routine will eventually dump bucket n,
+re-outputting items that were in bucket 0.
+<P>
+If the outer loop takes a snapshot of <TT>unsafe_bucket_count</TT> 
+at the start and does not re-evaluate it, then problem of duplication
+is replaced by the problem of omission, since a concurrent insertion
+might move items to buckets beyond those known at the point of the snapshot.
+
+<H4><A NAME="safe-bucket">Alternative: Concurrency-Safe Bucket Interface</A></H4>
+
+Split-order lists make it possible to provide a bucket inspection interface 
+with stronger guarantees,
+though the interface must necessarily depart from the serial equivalent.
+Each method that looks up a bucket must know how many buckets 
+there were originally.
+For example, suppose that <TT>bucket_count()</TT> returns N and
+afterwards insertions cause the number of buckets to increase.
+The original bucket boundaries are still embedded in the split-order list,
+but now there are new bucket boundaries within the original bucket.
+Knowing the original N suffices to find them.
+<P>
+Here is what the alternative interface would look like:
+<pre class="example">
+<code>    // bucket interface
+    size_type bucket_count() const noexcept;
+    size_type max_bucket_count() const noexcept;
+    size_type bucket_size(size_type n<INS>, size_type c</INS>);
+    size_type bucket(const key_type&amp; key<INS>, size_type c</INS>) const;
+
+    local_iterator begin(size_type n<INS>, size_type c</INS>);
+    const_local_iterator begin(size_type n<INS>, size_type c</INS>) const;
+    local_iterator end(size_type n<INS>, size_type c</INS>);
+    const_local_iterator end(size_type n<INS>, size_type c</INS>) const;
+    const_local_iterator cbegin(size_type n) const;
+    const_local_iterator cend(size_type n<INS>, size_type c</INS>) const;</code>
+</pre>
+With this kind of interface, the following code does a reasonable dump
+of a concurrent unordered set in the presence of concurrent <TT>insert</TT> operations. 
+<pre class="example">
+<code>template&lt;typename Set&gt;
+void DumpSet(const Set&amp; s) {
+    using namespace std;
+    auto c = s.bucket_count();
+    for(typename Set::size_type i=0; i!=c; ++i) {
+        cout &lt;&lt; "bucket " &lt;&lt; i &lt;&lt; endl;  
+        for( auto j=s.begin(i,c); j!=s.end(i,c); ++j)
+            cout &lt;&lt; *j &lt;&lt; endl;
+    }
+}</code>
+</pre>
+It is reasonable in the sense that all items already in the table are output exactly once.
+Any concurrently inserted items might or might not be output.
+<P>
+We seek the committee's opinion on whether the concurrency-safety gains of this alternative 
+bucket interface over our baseline proposal are worth the cost,
+particularly since we believe the interface is used primarily for debugging.
+The costs are:
+<UL>
+<LI> The extra ``original bucket count'' parameter that must be passed to various bucket methods.
+<LI> Precluding implementation techniques other than split-order lists.
+</UL>
+
+<H2><A NAME="synopsis">Synopsis</A></H2>
+
+This section specifies the interfaces in synopsis form.
+Syntactic differences with the corresponding non-concurrent classes are underlined.
+To avoid tedium, only the synopses for <TT>concurrent_unordered_map</TT> and <TT>concurrent_unordered_set</TT> are shown explicitly.
+
+<P>
+The Intel implementations have some addition methods for recursively divisible ranges,
+which are useful for parallel traversal of the containers.
+These are omitted from the proposal since they make sense only within larger framework for recursively divisible ranges.
+
+<H3><A NAME="synopsis-map">Header <TT>&lt;concurrent_unordered_map&gt;</TT> synopsis</A></H3>
+
+<pre class="example">
+<code>namespace std {
+
+  template &lt;class Key, 
+            class T, 
+            class Hash = hash&lt;Key&gt;, 
+            class Pred = std::equal_to&lt;Key&gt;, 
+            class Allocator = std::allocator&lt;std::pair&lt;const Key, T&gt; &gt; &gt;
+  class concurrent_unordered_map 
+  {
+public:
+    // types
+    typedef Key                                         key_type;
+    typedef std::pair&lt;const Key, T&gt;                     value_type;
+    typedef T                                           mapped_type;
+    typedef Hash                                        hasher;
+    typedef Pred                                        key_equal;
+    typedef Allocator                                   allocator_type;
+    typedef typename allocator_type::pointer            pointer;
+    typedef typename allocator_type::const_pointer      const_pointer;
+    typedef typename allocator_type::reference          reference;
+    typedef typename allocator_type::const_reference    const_reference;
+    typedef <EM>implementation-defined  </EM>                    size_type;
+    typedef <EM>implementation-defined  </EM>                    difference_type;
+
+    typedef <EM>implementation-defined  </EM>                    iterator;
+    typedef <EM>implementation-defined  </EM>                    const_iterator;
+    typedef <EM>implementation-defined  </EM>                    local_iterator;
+    typedef <EM>implementation-defined       </EM>               const_local_iterator;
+
+    // construct/destroy/copy
+    explicit concurrent_unordered_map(size_type n = <EM>see below</EM>, 
+                                      const hasher&amp; hf = hasher(),
+                                      const key_equal&amp; eql = key_equal(), 
+                                      const allocator_type&amp; a = allocator_type());
+
+    template &lt;typename Iterator&gt;
+      concurrent_unordered_map(Iterator first, Iterator last, 
+                               size_type n = <EM>see below</EM>,
+                               const hasher&amp; hf = hasher(),
+                               const key_equal&amp; eql = key_equal(), 
+                               const allocator_type&amp; a = allocator_type());
+    concurrent_unordered_map(const concurrent_unordered_map&amp;);
+    concurrent_unordered_map(const concurrent_unordered_map&amp;&amp;);
+    explicit concurrent_unordered_map(const Allocator&amp;);
+    concurrent_unordered_map(const concurrent_unordered_map&amp;, const Allocator&amp;);
+    concurrent_unordered_map(const concurrent_unordered_map&amp;&amp; table, const Allocator&amp;);
+    concurrent_unordered_map(initializer_list&lt;value_type&gt;,
+      size_type = <EM>see below</EM>,
+      const hasher&amp; hf = hasher(),
+      const key_equal&amp; eql = key_equal(),
+      const allocator_type&amp; a = allocator_type());
+    ~concurrent_unordered_map();
+    concurrent_unordered_map&amp; operator=(const concurrent_unordered_map&amp;);
+    concurrent_unordered_map&amp; operator=(concurrent_unordered_map&amp;&amp;);
+    concurrent_unordered_map&amp; operator=(initializer_list&lt;value_type&gt;);
+    allocator_type get_allocator() const noexcept;
+    
+    // size and capacity
+    bool empty() const noexcept;
+    size_type size() const noexcept;
+    size_type max_size() const noexcept;
+    
+    // iterators
+    iterator begin() noexcept;
+    const_iterator begin() const noexcept;
+    iterator end() noexcept;
+    const_iterator end() const noexcept;
+    const_iterator cbegin() const noexcept;
+    const_iterator cend() const noexcept;
+
+    // modifiers
+    template &lt;class... Args&gt; pair&lt;iterator, bool&gt; emplace(Args&amp;&amp;... args);
+    template &lt;class... Args&gt; iterator emplace_hint(const_iterator position, Args&amp;&amp;... args);
+    pair&lt;iterator, bool&gt; insert(const value_type&amp; obj);
+    template &lt;class P&gt; pair&lt;iterator, bool&gt; insert(P&amp;&amp; obj);
+    iterator insert(const_iterator hint, const value_type&amp; obj);
+    template &lt;class P&gt; iterator insert(const_iterator hint, P&amp;&amp; obj);
+    template &lt;class InputIterator&gt; void insert(InputIterator first, InputIterator last);
+    void insert(initializer_list&lt;value_type&gt;);
+    
+    iterator <INS>unsafe_</INS>erase(const_iterator position);
+    size_type <INS>unsafe_</INS>erase(const key_type&amp; key);
+    iterator <INS>unsafe_</INS>erase(const_iterator first, const_iterator last);
+    void clear() noexcept;
+
+    void swap(concurrent_unordered_map&amp;);
+
+    // Observers
+    hasher hash_function() const;
+    key_equal key_eq() const;
+
+    // lookup
+    iterator find(const key_type&amp; key);
+    const_iterator find(const key_type&amp; key) const;
+    size_type count(const key_type&amp; key) const;
+    std::pair&lt;iterator, iterator&gt; equal_range(const key_type&amp; key);
+    std::pair&lt;const_iterator, const_iterator&gt; equal_range(const key_type&amp; key) const;
+
+    mapped_type&amp; operator[](const key_type&amp; key);
+    mapped_type&amp; operator[](key_type&amp;&amp; key);
+    mapped_type&amp; at(const key_type&amp; key);
+    const mapped_type&amp; at(const key_type&amp; key) const;
+
+    // bucket interface 
+    size_type <INS>unsafe_</INS>bucket_count() const noexcept;
+    size_type <INS>unsafe_</INS>max_bucket_count() const noexcept;
+    size_type <INS>unsafe_</INS>bucket_size(size_type n);
+    size_type <INS>unsafe_</INS>bucket(const key_type&amp; key) const;
+
+    local_iterator <INS>unsafe_</INS>begin(size_type n);
+    const_local_iterator <INS>unsafe_</INS>begin(size_type n) const;
+    local_iterator <INS>unsafe_</INS>end(size_type n);
+    const_local_iterator <INS>unsafe_</INS>end(size_type n) const;
+    const_local_iterator <INS>unsafe_</INS>cbegin(size_type n) const;
+    const_local_iterator <INS>unsafe_</INS>cend(size_type n) const;
+
+    // hash policy
+    float load_factor() const noexcept;
+    float max_load_factor() const noexcept;
+    void max_load_factor(float newmax);
+    void rehash(size_type buckets);
+    void reserve(size_type n);
+
+  };
+
+  template &lt;class Key, class T, class Hash, class Pred, class Alloc&gt;
+  void swap(concurrent_unordered_map&lt;Key, T, Hash, Pred, Alloc&gt;&amp; x,
+  concurrent_unordered_map&lt;Key, T, Hash, Pred, Alloc&gt;&amp; y);
+  template &lt;class Key, class T, class Hash, class Pred, class Alloc&gt;
+  bool operator==(const concurrent_unordered_map&lt;Key, T, Hash, Pred, Alloc&gt;&amp; a,
+  const concurrent_unordered_map&lt;Key, T, Hash, Pred, Alloc&gt;&amp; b);
+  template &lt;class Key, class T, class Hash, class Pred, class Alloc&gt;
+  bool operator!=(const concurrent_unordered_map&lt;Key, T, Hash, Pred, Alloc&gt;&amp; a,
+  const concurrent_unordered_map&lt;Key, T, Hash, Pred, Alloc&gt;&amp; b);
+} </code>
+</pre>
+<P>
+The synopsis for <TT>concurrent_unordered_multimap</TT> is analogous,
+and omitted for brevity.
+
+<H3><A NAME="synopsis-set"> Header <TT>&lt;concurrent_unordered_set&gt;</TT> synopsis</A></H3>
+
+<pre class="example">
+<code>namespace std {
+
+  template &lt;class Key, 
+            class Hash = hash&lt;Key&gt;, 
+            class Pred = std::equal_to&lt;Key&gt;, 
+            class Allocator = std::allocator&lt;Key&gt; &gt;
+  class concurrent_unordered_set 
+  {
+public:
+    // types
+    typedef Key                                         key_type;
+    typedef Key                                         value_type;
+    typedef Hash                                        hasher;
+    typedef Pred                                        key_equal;
+    typedef Allocator                                   allocator_type;
+    typedef typename allocator_type::pointer            pointer;
+    typedef typename allocator_type::const_pointer      const_pointer;
+    typedef typename allocator_type::reference          reference;
+    typedef typename allocator_type::const_reference    const_reference;
+    typedef <EM>implementation-defined  </EM>                    size_type;
+    typedef <EM>implementation-defined  </EM>                    difference_type;
+
+    typedef <EM>implementation-defined  </EM>                    iterator;
+    typedef <EM>implementation-defined  </EM>                    const_iterator;
+    typedef <EM>implementation-defined  </EM>                    local_iterator;
+    typedef <EM>implementation-defined       </EM>               const_local_iterator;
+
+    // construct/destroy/copy
+    explicit concurrent_unordered_set(size_type n = <EM>see below</EM>, 
+                                      const hasher&amp; hf = hasher(),
+                                      const key_equal&amp; eql = key_equal(), 
+                                      const allocator_type&amp; a = allocator_type());
+
+    template &lt;typename Iterator&gt;
+      concurrent_unordered_set(Iterator first, Iterator last, 
+                               size_type n = <EM>see below</EM>,
+                               const hasher&amp; hf = hasher(),
+                               const key_equal&amp; eql = key_equal(), 
+                               const allocator_type&amp; a = allocator_type());
+    concurrent_unordered_set(const concurrent_unordered_set&amp;);
+    concurrent_unordered_set(const concurrent_unordered_set&amp;&amp;);
+    explicit concurrent_unordered_set(const Allocator&amp;);
+    concurrent_unordered_set(const concurrent_unordered_set&amp;, const Allocator&amp;);
+    concurrent_unordered_set(const concurrent_unordered_set&amp;&amp; table, const Allocator&amp;);
+    concurrent_unordered_set(initializer_list&lt;value_type&gt;,
+      size_type = <EM>see below</EM>,
+      const hasher&amp; hf = hasher(),
+      const key_equal&amp; eql = key_equal(),
+      const allocator_type&amp; a = allocator_type());
+    ~concurrent_unordered_set();
+    concurrent_unordered_set&amp; operator=(const concurrent_unordered_set&amp;);
+    concurrent_unordered_set&amp; operator=(concurrent_unordered_set&amp;&amp;);
+    concurrent_unordered_set&amp; operator=(initializer_list&lt;value_type&gt;);
+    allocator_type get_allocator() const noexcept;
+    
+    // size and capacity
+    bool empty() const noexcept;
+    size_type size() const noexcept;
+    size_type max_size() const noexcept;
+    
+    // iterators
+    iterator begin() noexcept;
+    const_iterator begin() const noexcept;
+    iterator end() noexcept;
+    const_iterator end() const noexcept;
+    const_iterator cbegin() const noexcept;
+    const_iterator cend() const noexcept;
+
+    // modifiers
+    template &lt;class... Args&gt; pair&lt;iterator, bool&gt; emplace(Args&amp;&amp;... args);
+    template &lt;class... Args&gt; iterator emplace_hint(const_iterator position, Args&amp;&amp;... args);
+    pair&lt;iterator, bool&gt; insert(const value_type&amp; obj);
+    template &lt;class P&gt; pair&lt;iterator, bool&gt; insert(P&amp;&amp; obj);
+    iterator insert(const_iterator hint, const value_type&amp; obj);
+    template &lt;class P&gt; iterator insert(const_iterator hint, P&amp;&amp; obj);
+    template &lt;class InputIterator&gt; void insert(InputIterator first, InputIterator last);
+    void insert(initializer_list&lt;value_type&gt;);
+    
+    iterator <INS>unsafe_</INS>erase(const_iterator position);
+    size_type <INS>unsafe_</INS>erase(const key_type&amp; key);
+    iterator <INS>unsafe_</INS>erase(const_iterator first, const_iterator last);
+    void clear() noexcept;
+
+    void swap(concurrent_unordered_set&amp;);
+
+    // Observers
+    hasher hash_function() const;
+    key_equal key_eq() const;
+
+    // lookup
+    iterator find(const key_type&amp; key);
+    const_iterator find(const key_type&amp; key) const;
+    size_type count(const key_type&amp; key) const;
+    std::pair&lt;iterator, iterator&gt; equal_range(const key_type&amp; key);
+    std::pair&lt;const_iterator, const_iterator&gt; equal_range(const key_type&amp; key) const;
+
+    // bucket interface 
+    size_type <INS>unsafe_</INS>bucket_count() const noexcept;
+    size_type <INS>unsafe_</INS>max_bucket_count() const noexcept;
+    size_type <INS>unsafe_</INS>bucket_size(size_type n);
+    size_type <INS>unsafe_</INS>bucket(const key_type&amp; key) const;
+
+    local_iterator <INS>unsafe_</INS>begin(size_type n);
+    const_local_iterator <INS>unsafe_</INS>begin(size_type n) const;
+    local_iterator <INS>unsafe_</INS>end(size_type n);
+    const_local_iterator <INS>unsafe_</INS>end(size_type n) const;
+    const_local_iterator <INS>unsafe_</INS>cbegin(size_type n) const;
+    const_local_iterator <INS>unsafe_</INS>cend(size_type n) const;
+
+    // hash policy
+    float load_factor() const noexcept;
+    float max_load_factor() const noexcept;
+    void max_load_factor(float newmax);
+    void rehash(size_type buckets);
+    void reserve(size_type n);
+
+  };
+
+  template &lt;class Key, class Hash, class Pred, class Alloc&gt;
+  void swap(concurrent_unordered_set&lt;Key, Hash, Pred, Alloc&gt;&amp; x,
+  concurrent_unordered_set&lt;Key, Hash, Pred, Alloc&gt;&amp; y);
+  template &lt;class Key, class Hash, class Pred, class Alloc&gt;
+  bool operator==(const concurrent_unordered_set&lt;Key, Hash, Pred, Alloc&gt;&amp; a,
+  const concurrent_unordered_set&lt;Key, Hash, Pred, Alloc&gt;&amp; b);
+  template &lt;class Key, class Hash, class Pred, class Alloc&gt;
+  bool operator!=(const concurrent_unordered_set&lt;Key, Hash, Pred, Alloc&gt;&amp; a,
+  const concurrent_unordered_set&lt;Key, Hash, Pred, Alloc&gt;&amp; b);
+} </code>
+</pre>
+<P>
+The synopsis for <TT>concurrent_unordered_multiset</TT> is analogous,
+and omitted for brevity.
+
+<H2><A NAME="concurrency-guarantees">Concurrency Guarantees</A></H2>
+
+The following subsections describe concurrency guarantees for our concurrent
+unordered associative containers.
+
+<H3><A NAME="concurrency-safe">Concurrency-Safe Operations</A></H3>
+
+For serialized execution, the operations behave the same as their current STL counterparts.
+The only change is allowance for concurrency.
+Executing any of the following operations concurrently on a concurrent unordered container
+does <EM>not</EM> introduce a data race:
+<PRE>
+	get_allocator
+	empty, size, max_size
+	begin, end, cbegin, cend
+	insert
+	find, count, equal_range, operator[], at
+	load_factor
+	max_load_factor() 
+	<TT>operator==</TT>, <TT>operator!=</TT> 
+</PRE>
+assuming that the requisite operations on the key type 
+(and mapped_type if applicable) are concurrency safe.
+
+<H3><A NAME="nonblocking">Non-Blocking</A></H3>
+No concurrency-safe operation shall cause another concurrency-safe operation to block.
+
+<H3><A NAME="partial-linearizability">Partial Linearizability</A></H3>
+
+Linearizability<A HREF="#Linearizabilty">[Linearizability]</A> is an important  property 
+that simplifies reasoning about concurrent objects.
+It means that each operation appears to take effect at some instant between its invocation and return.
+See the reference for a formal exposition.
+A fully linearizable implementation of our containers seems impractical,
+because it requires that both the content and size of the container appear to be updated in the same instant.
+<P>
+Hence we recommend a weaker guarantee where the container is split into two
+abstract parts, and require that each part be a linearizable object.  
+The two parts are:
+<UL>
+	<LI>A ``content'' part that supports all of the functionality except <TT>empty</TT> and <TT>size</TT>.
+	<LI>A ``size'' part that supports only the methods <TT>empty</TT> and <TT>size</TT>.
+</UL>
+An operation on the container behaves as if 
+it operates on the content part first 
+and then operates on the size part.
+For example, <TT>insert</TT> first attempts insertion of an item into the content part,
+and then updates the size part if the item was inserted.
+
+<P>
+The order of operations on the parts guarantees that, 
+in the absence of concurrent erasure,
+that if a thread inspects the size of the container, 
+then that size is a lower bound on the number of items that it can find in the container.
+For example, let <TT>a</TT> be a freshly constructed concurrent associative container,
+and consider the following execution:
+<CENTER>
+<TABLE border="2">
+<THEAD><TR><TH>Thread 1</TH>        <TH>Thread 2</TH></TR></THEAD>
+<TBODY>
+<TR><TD>a.insert(t);  // modify "content"; modify "size" </TD>
+    <TD>s = a.size(); &nbsp; &nbsp // inspect "size" <BR>
+	c = a.count(t); // inspect "content" </TD></TR>
+<TR><TD colspan="2"> Disallowed outcome: s==1 && c==0 </TD></TR>
+</TBODY>
+</TABLE>
+</CENTER>
+<P>
+Our requirement for partial linearizability minimizes surprises 
+and delineates where they might occur.
+Each abstract part behaves in an intuitive manner, 
+and surprises can exist only for properties relating both parts as a whole.
+
+<P>
+Because linearizability of the entire container is not guaranteed,
+it <EM>is</EM> possible for a thread to find an item and subsequently retrieve a count
+that does <EM>not</EM> include that item yet.
+For example, following execution has four possible outcomes.
+<CENTER>
+<TABLE border="2">
+<THEAD><TR><TH>Thread 1</TH>        <TH>Thread 2</TH></TR></THEAD>
+<TBODY>
+<TR><TD>a.insert(t); // modify "content"; modify "size" </TD>
+    <TD>c = a.count(t); // inspect "content" <BR>
+        s = a.size();  &nbsp; &nbsp;  // inspect "size"
+</TD></TR>
+<TR><TD colspan="2">Allowed outcomes: c&isin;{0,1}, s&isin;{0,1}</TD></TR>
+</TBODY>
+</TABLE>
+</CENTER>
+The outcome c==1 && s==0 <EM>is</EM> allowed here. 
+It would be prohibited by a fully linearizable implementation of container a
+because it would not correspond to an outcome allowed by any serial interleaving of the operations.
+<P>
+In the absence of concurrent erasure, 
+the comparison operations <TT>operator==</TT> or <TT>operator!=</TT> on
+concurrent containers are linearizable.
+Though these comparison operations were omitted from the TBB/PPL products,
+they should be straightforward to implement by walking the underlying split-ordered lists.
+Indeed these walks are probably faster than the means necessary for comparing
+their non-concurrent counterparts.
+
+<H2><A NAME="References">References</A></H2>
+<DL>
+	<DT><A NAME="SplitOrder">[SplitOrder]</A></DT>
+	<DD>
+	Ori Shalev and Nir Shavit. 2006. 
+	``Split-ordered lists: Lock-free extensible hash tables.'' 
+	J. ACM 53, 3 (May 2006), 379-405. <A HREF="http://doi.acm.org/10.1145/1147954.1147958">DOI=10.1145/1147954.1147958</A>.
+	</DD>
+	
+	<DT><A NAME="Linearizabilty">[Linearizability]</A></DT>
+	<DD>
+	Maurice P. Herlihy and Jeannette M. Wing. 1990. 
+	``Linearizability: a correctness condition for concurrent objects.'' 
+	ACM Trans. Program. Lang. Syst. 12, 3 (July 1990), 463-492. 
+	<A HREF="http://doi.acm.org/10.1145/78969.78972">DOI=10.1145/78969.78972</A>
+	</DD>
+</DL>
+</BODY>
+</HTML>

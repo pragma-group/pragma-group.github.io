@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+
+<html>
+<head>
+<meta charset="UTF-8">
+<title>A Proposal to Add Y&nbsp;Combinator to the Standard Library</title>
+<style type="text/css">
+    ins { background-color: #cfc; }
+    del { background-color: #fcc; }
+</style>
+</head>
+<body>
+
+<table border="1">
+<tr>
+<th>Doc. No.:</th>
+<td>P0200R0</td>
+</tr>
+<tr>
+<th>Date:</th>
+<td>2016-01-22</td>
+</tr>
+<tr>
+<th>Audience:</th>
+<td>Library Evolution Working Group</td>
+</tr>
+<tr>
+<th>Reply to:</th>
+<td><a href="mailto:yegor.derevenets@gmail.com">Yegor Derevenets</a></td>
+</tr>
+</table>
+
+<h1>A Proposal to Add Y&nbsp;Combinator to the Standard Library</h1>
+
+<p>This document proposes to add Y&nbsp;combinator to the C++ standard library.
+<a href="https://en.wikipedia.org/wiki/Fixed-point_combinator">Y&nbsp;combinator</a> is a well-known high-order function used to implement recursion.
+Y&nbsp;combinator, accompanied by <a href="http://en.cppreference.com/w/cpp/language/lambda">C++14 generic lambdas</a>, provides a convenient way to define recursive lambda functions.</p>
+
+<h2>Motivation</h2>
+
+<p>C++11/14 lambdas do not encourage recursion: there is no way to reference the lambda object from the body of the lambda function.</p>
+
+<p>A common workaround for this problem is to use <code>std::function</code>, as suggested, e.g., in <a href="http://stackoverflow.com/questions/2067988/recursive-lambda-functions-in-c11">these</a> <a href="http://stackoverflow.com/questions/14531993/can-lambda-functions-be-recursive">discussions</a>:</p>
+
+<pre><code>#include &lt;functional&gt;
+#include &lt;iostream&gt;
+
+int main() {
+    std::function&lt;int(int, int)&gt; gcd = [&amp;](int a, int b) {
+        return b == 0 ? a : gcd(b, a % b);
+    };
+    std::cout &lt;&lt; gcd(20, 30) &lt;&lt; std::endl;
+}</code></pre>
+
+<p>The solution has several disadvantages:</p>
+<ul>
+<li>Verbosity: we have to write the signature of the lambda function twice: in <code>std::function</code> and in the lambda itself.</li>
+<li>Unnecessary overhead: we resort to type erasure, which leads to the likely use of the heap and indirect function calls.</li>
+<li>The solution does not work with generic lambdas.</li>
+<li>The resulting <code>std::function</code> object has broken copy semantics: its copies refer to the original object through the lambda capture and become largely useless once the original object is destroyed.</li>
+</ul>
+
+<p>We propose adding to the standard library a <code>std::y_combinator</code> function that enables the following fast and clean code, free from the above problems:</p>
+
+<pre><code>#include &lt;functional&gt;
+#include &lt;iostream&gt;
+
+int main() {
+    auto gcd = std::y_combinator([](auto gcd, int a, int b) -&gt; int {
+        return b == 0 ? a : gcd(b, a % b);
+    });
+    std::cout &lt;&lt; gcd(20, 30) &lt;&lt; std::endl;
+}</code></pre>
+
+<h2>Impact on the Standard</h2>
+
+<p>The proposal is a pure library extension.
+It does not require changes to the standard components.
+The extension can be implemented in C++11 and C++14.</p>
+
+<h2>Design Decisions</h2>
+
+<p>The <code>std::y_combinator</code> function is a helper function accepting the input callable object of type <code>Fun</code> and returning a callable object of type <code>std::y_combinator_result&lt;Fun&gt;</code> containing a copy of the input callable.
+When called, the <code>std::y_combinator_result&lt;Fun&gt;</code> object forwards all the arguments to the copy of the input callable, prepending them by a single argument — a wrapped reference to itself.</p>
+
+<p>To construct a <code>std::y_combinator_result</code> instance storing a reference to the input callable object, one can combine <code>std::y_combinator</code> with <code>std::ref</code>:</p>
+<pre><code>#include &lt;functional&gt;
+#include &lt;iostream&gt;
+
+int main() {
+    auto almost_gcd = [](auto gcd, int a, int b) -&gt; int {
+        return b == 0 ? a : gcd(b, a % b);
+    };
+    auto gcd = std::y_combinator(std::ref(almost_gcd));
+    std::cout &lt;&lt; gcd(20, 30) &lt;&lt; std::endl;
+}</code></pre>
+
+<h2>Technical Specification</h2>
+
+<p>Changes are relative to <a href="http://open-std.org/JTC1/SC22/WG21/docs/papers/2015/n4567.pdf">n4567</a>.
+An example implementation of the specification is provided in the <a href="#example_implementation">appendix</a>.</p>
+
+<h3>20.9 Function objects [function.objects]</h3>
+<p><sup>2</sup> <strong>Header <code>&lt;functional&gt;</code> synopsis</strong></p>
+
+<pre><code>namespace std {
+    ...
+
+<ins>    // 20.9.X, Y&nbsp;combinator
+    template&lt;class Fun&gt; class y_combinator_result;
+    template&lt;class Fun&gt; y_combinator_result&lt;decay_t&lt;Fun&gt;&gt; y_combinator(Fun &amp;&amp;fun);</ins>
+}</code></pre>
+
+<h4><ins>20.9.X Class template y_combinator_result [yc]</ins></h4>
+
+<pre><code><ins>template&lt;class Fun&gt;
+class y_combinator_result {
+public:
+    template&lt;class T&gt;
+    explicit y_combinator_result(T &amp;&amp;fun);
+
+    template&lt;class ...Args&gt;
+    decltype(auto)
+    operator()(Args &amp;&amp;...args);
+};</ins></code></pre>
+
+<p><ins><sup>1</sup> <code>y_combinator_result</code> template class is a forwarding call wrapper around a target callable object of type <code>Fun</code>.</ins></p>
+
+<h5><ins>20.9.X.1 y_combinator_result construct [yc.const]</ins></h5>
+
+<pre><code><ins>template&lt;class T&gt;
+explicit y_combinator_result(T &amp;&amp;fun);</ins></code></pre>
+
+<p><ins><sup>1</sup> <em>Effects:</em> Constructs the target callable object of <code>*this</code> from <code>std::forward&lt;T&gt;(fun)</code>.</ins></p>
+
+<h5><ins>20.9.X.2 y_combinator_result invocation [yc.invoke]</ins></h5>
+
+<pre><code><ins>template&lt;class ...Args&gt;
+decltype(auto)
+operator()(Args &amp;&amp;...args);</ins></code></pre>
+
+<p><ins><sup>1</sup> <em>Returns:</em> <code>f(std::ref(*this), std::forward&lt;Args&gt;(args)...)</code>, where <code>f</code> is the target callable object of <code>*this</code>.</ins></p>
+
+<h5><ins>20.9.X.3 y_combinator_result helper function [yc.helper]</ins></h5>
+
+<pre><code><ins>template&lt;class Fun&gt; y_combinator_result&lt;decay_t&lt;Fun&gt;&gt; y_combinator(Fun &amp;&amp;fun);</ins></code></pre>
+
+<ins><sup>1</sup> <em>Returns:</em> <code>y_combinator_result&lt;decay_t&lt;Fun&gt;&gt;(std::forward&lt;Fun&gt;(fun))</code>.</ins>
+
+<h2>Discussion</h2>
+
+<ul>
+<li>Unlike <code>reference_wrapper</code> and <code>function</code>, <code>y_combinator_result</code> deliberately does not define <code>result_type</code>, <code>argument_type</code>, <code>first_argument_type</code>, <code>second_argument_type</code> typedefs.
+It is generally impossible to infer the corresponding types for an arbitrary target function object type.
+One can do this reliably only for function types and function pointer types.
+However, functions already have a name that they can use to call themselves.
+So, it is unclear why one would like to use Y&nbsp;combinator with them.</li>
+<li><code>y_combinator_result</code> deliberately does not support member function pointers.
+The reason, as in the previous item, is the lack of sensible use cases: member functions have a name and can call themselves.</li>
+<li>As <a href="https://groups.google.com/a/isocpp.org/forum/#!topic/std-proposals/7p7J1C5jFzk">noted</a> by Richard Smith, an alternative way to support recursive lambdas is to extend the core language, e.g.:
+<pre><code>auto gcd = [] self (int a, int b) -&gt; int {
+    return b == 0 ? a : self(b, a % b)
+};</code></pre>
+, where <code>self</code> is the identifier used to refer to the lambda object within the lambda.
+</ul>
+
+<h2><a id="example_implementation">Appendix: Example Implementation</a></h2>
+
+An example implementation of <code>std::y_combinator_result</code> and <code>std::y_combinator</code> follows.
+
+<pre><code>
+#include &lt;functional&gt;
+#include &lt;utility&gt;
+
+namespace std {
+
+template&lt;class Fun&gt;
+class y_combinator_result {
+    Fun fun_;
+public:
+    template&lt;class T&gt;
+    explicit y_combinator_result(T &amp;&amp;fun): fun_(std::forward&lt;T&gt;(fun)) {}
+
+    template&lt;class ...Args&gt;
+    decltype(auto) operator()(Args &amp;&amp;...args) {
+        return fun_(std::ref(*this), std::forward&lt;Args&gt;(args)...);
+    }
+};
+
+template&lt;class Fun&gt;
+decltype(auto) y_combinator(Fun &amp;&amp;fun) {
+    return y_combinator_result&lt;std::decay_t&lt;Fun&gt;&gt;(std::forward&lt;Fun&gt;(fun));
+}
+
+} // namespace std
+</code></pre>
+
+</body>
+</html>

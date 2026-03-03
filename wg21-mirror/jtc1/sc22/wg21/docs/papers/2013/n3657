@@ -1,0 +1,329 @@
+Document number: N3657
+Date: 2013-03-19
+Project: Programming Language C++, Library Working Group
+Reply-to: Jonathan Wakely <cxx@kayari.org>
+Reply-to: Stephan T. Lavavej <stl@microsoft.com>
+Reply-to: Joaquín Mª López Muñoz <joaquin@tid.es>
+
+
+* Adding heterogeneous comparison lookup to associative containers (rev 4)
+
+I. Introduction
+
+This paper revises N3465
+(http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3465.pdf)
+and a later draft by Joaquín Mª López Muñoz
+
+II. Motivation And Scope
+
+The associative container lookup functions (find, lower_bound, upper_bound,
+equal_range) only take an argument of key_type, requiring users to construct
+(either implicitly or explicitly) an object of the key_type to do the lookup.
+This may be expensive, e.g. constructing a large object to search in a set
+when the comparator function only looks at one field of the object.  There
+is strong desire among users to be able to search using other types which
+are comparable with the key_type.
+
+N3465 adds support for this, but changes the behaviour of some existing code.
+
+The LWG had concerns about code like the following:
+
+    std::set<std::string> s = /* ... */;
+    s.find("key");
+
+In C++11 this will construct a single std::string temporary and then
+compare it with elements to find the key.
+
+With the change proposed by N3465 the std::set::find() function would be
+an unconstrained template which would pass the const char* through to the
+comparator function, std::less<std::string>, which would construct a
+std::string temporary for every comparison.  The LWG considered this
+performance problem to be a serious issue.  The template find() function
+would also prevent finding NULL in a container of pointers, which causes
+previously valid code to no longer compile, but this was seen as a less
+serious issue than the silent performance regression.
+
+III. Impact On The Standard
+
+This proposal modifies the associative containers in <map> and <set> by
+overloading the lookup member functions with member function templates.
+There are no language changes.  Almost all existing C++11 code is
+unaffected because the member functions are not present unless new C++14
+library features are used as the comparison functions.
+
+IV. Design Decisions
+
+The original proposal and its revisions describe a number of options and their
+tradeoffs.
+
+Stephan T. Lavavej suggested that the two problems of preserving existing
+behaviour and allowing heterogeneous lookups could both be solved by
+making the containers detect when the comparison object accepts
+heterogeneous arguments and only conditionally overloading the current
+lookup functions with template versions.
+
+The std::less<void> specialization was enhanced to support heterogeneous
+comparisons by N3421 (Making Operator Functors greater<>,
+http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3421.htm) so when
+the containers use that type as the comparator they can define the new
+template functions.  The following variation constructs no temporary
+std::string objects:
+
+    std::set<std::string, std::less<>> s = /* ... */;
+    s.find("key");
+
+In order to allow heterogeneous lookup when using user-defined comparator
+functions Stephan proposed adding a tag type to the function object which
+the container would detect.  The containers would only change their interface
+when the comparator function defines the tag type.  The proposed protocol
+is to check for a nested type called is_transparent.  We propose adding
+a type with that name to all the void specializations of function objects
+which were made "transparent" by N3421. Only some of those function objects
+are suitable for use with associative containers but the proposal is to add
+the type to all of them for consistency and to allow users to check that
+any of them is transparent.
+
+The changes below are taken from N3465 with the addition of the
+is_transparent tag type, and changing the Table 102 replacements to
+additions.
+
+V. Proposed Wording
+
+Add an unspecified tag type to all the void specializations of function
+objects in 20.8.4 [arithmetic.operations], for example the specialization
+before paragraph 8 would become:
+
+    template <> struct plus<void> {
+      template <class T, class U> auto operator()(T&& t, U&& u) const
+      -> decltype(std::forward<T>(t) + std::forward<U>(u));
+    <INS>
+      typedef unspecified is_transparent;
+    </INS>
+    };
+
+Add an unspecified tag type to all the void specializations of function
+objects in 20.8.5 [comparisons], for example the specialization before
+paragraph 8 would become:
+
+    template <> struct equal_to<void> {
+      template <class T, class U> auto operator()(T&& t, U&& u) const
+      -> decltype(std::forward<T>(t) == std::forward<U>(u));
+    <INS>
+      typedef unspecified is_transparent;
+    </INS>
+    };
+
+Add an unspecified tag type to all the void specializations of function
+objects in 20.8.6 [logical.operations], for example the specialization
+before paragraph 5 would become:
+
+    template <> struct logical_and<void> {
+      template <class T, class U> auto operator()(T&& t, U&& u) const
+      -> decltype(std::forward<T>(t) && std::forward<U>(u));
+      <INS>
+        typedef unspecified is_transparent;
+      </INS>
+    };
+
+Add an unspecified tag type to all the void specializations of function
+objects in 20.8.7 [bitwise.operations], for example the specialization
+before paragraph 5 would become:
+
+    template <> struct bit_and<void> {
+      template <class T, class U> auto operator()(T&& t, U&& u) const
+      -> decltype(std::forward<T>(t) & std::forward<U>(u));
+      <INS>
+        typedef unspecified is_transparent;
+      </INS>
+    };
+
+
+Modify 23.2.4 [associative.reqmts] paragraph 8 as follows:
+
+    In Table 102, X denotes an associative container class, a denotes a
+    value of X, a_uniq denotes a value of X when X supports unique keys,
+    a_eq denotes a value of X when X supports multiple keys,
+    <INS>
+    a_tran denotes a value of X when the type X::key_compare::is_transparent
+    exists,
+    </INS>
+    u denotes an identifier, [...] k denotes a value of X::key_type and c
+    denotes a value of type X::key_compare
+    <INS>
+    ; kl is a value such that a is partitioned (25.4) with respect to
+    c(r, kl), with r the key value of e and e in a; ku is a value such that
+    a is partitioned with respect to !c(ku, r); ke is a value such that a is
+    partitioned with respect to c(r, ke) and !c(ke, r), with c(r, ke)
+    implying !c(ke, r)
+    </INS>.  [...]
+
+
+Modify table 102 in section 23.2.4 [associative.reqmts] as follows:
+
+    Expression                | Return type      | Assertion/note/pre- /postcondition | Complexity
+
+    a.find(k)                   iterator;          returns an iterator pointing to an   logarithmic
+                                const_-            element with the key equivalent to
+                                iterator for       k, a.end() if such an element is
+                                constant a         not found
+
+    <INS>
+    a_tran.find(ke)             iterator;          returns an iterator pointing to an   logarithmic
+                                const_-            element with key r such that
+                                iterator for       !c(r, ke) && !(ke, r), or
+                                constant           a_tran.end() if such an element
+                                a_tran.            is not found
+    </INS>
+
+    a.count(k)                  size_type          returns the number of elements       log(a.size())
+                                                   with key equivalent to k             + a.count(k)
+
+    <INS>
+    a_tran.count(ke)            size_type          returns the number of elements       log(a_tran.size())
+                                                   with key r such that !c(r, ke)       + a_tran.count(ke)
+                                                   && !c(r, ke)
+    </INS>
+
+    a.lower_bound(k)            iterator;          returns an iterator pointing to      logarithmic
+                                const_-            the first element with key not less
+                                iterator for       than k, a.end() if
+                                constant a.        such an element is not found.
+
+    <INS>
+    a_tran.lower_bound(kl)      iterator;          returns an iterator pointing to      logarithmic
+                                const_-            the first element with key r such
+                                iterator for       that !c(r, kl), or a_tran.end() if
+                                constant           such an element is not found.
+                                a_tran.
+    </INS>
+
+    a.upper_bound(k)            iterator;          returns an iterator pointing to      logarithmic
+                                const_-            the first element with key greater
+                                iterator for       than k, or a.end()
+                                constant a.        if such an element is not found.
+
+    <INS>
+    a_tran.upper_bound(ku)      iterator;          returns an iterator pointing to      logarithmic
+                                const_-            the first element with key r such
+                                iterator for       that c(ku, r), or a_tran.end() if
+                                constant           such an element is not found.
+                                a_tran.
+    </INS>
+
+    a.equal_range(k)            pair<iterator,     equivalent to make_pair(             logarithmic
+                                iterator>;         a.lower_bound(k),
+                                pair<const_-       a.upper_bound(k)).
+                                iterator,
+                                const_iterator>
+                                for constant a
+
+    <INS>
+    a_tran.equal_range(ke)      pair<iterator,     equivalent to make_pair(             logarithmic
+                                iterator>;         a_tran.lower_bound(ke),
+                                pair<const_-       a_tran.upper_bound(ke)).
+                                iterator,
+                                const_iterator>
+                                for constant
+                                a_tran.
+    </INS>
+
+Add paragraph 13 in 23.2.4 [associative.reqmts]:
+
+    The member function templates find, lower_bound, upper_bound and
+    equal_range shall not participate in overload resolution unless
+    the type Compare::is_transparent does not exist.
+
+Add to the synopsis in 23.4.4.1 [map.overview]:
+
+    template<typename K>
+      iterator find(const K& x);
+    template<typename K>
+      const_iterator find(const K& x) const;
+    template<typename K>
+      size_type count(const K& x) const;
+
+    template<typename K>
+      iterator lower_bound(const K& x);
+    template<typename K>
+      const_iterator lower_bound(const K& x) const;
+    template<typename K>
+      iterator upper_bound(const K& x);
+    template<typename K>
+      const_iterator upper_bound(const K& x) const;
+
+    template<typename K>
+      pair<iterator, iterator> equal_range(const K& x);
+    template<typename K>
+      pair<const_iterator, const_iterator> equal_range(const K& x) const;
+
+Add to the synopsis in 23.4.5.1 [multimap.overview]:
+
+    template<typename K>
+      iterator find(const K& x);
+    template<typename K>
+      const_iterator find(const K& x) const;
+    template<typename K>
+      size_type count(const K& x) const;
+
+    template<typename K>
+      iterator lower_bound(const K& x);
+    template<typename K>
+      const_iterator lower_bound(const K& x) const;
+    template<typename K>
+      iterator upper_bound(const K& x);
+    template<typename K>
+      const_iterator upper_bound(const K& x) const;
+
+    template<typename K>
+      pair<iterator, iterator> equal_range(const K& x);
+    template<typename K>
+      pair<const_iterator, const_iterator> equal_range(const K& x) const;
+
+Add to the synopsis in 23.4.6.1 [set.overview]:
+
+    template<typename K>
+      iterator find(const K& x);
+    template<typename K>
+      const_iterator find(const K& x) const;
+    template<typename K>
+      size_type count(const K& x) const;
+
+    template<typename K>
+      iterator lower_bound(const K& x);
+    template<typename K>
+      const_iterator lower_bound(const K& x) const;
+    template<typename K>
+      iterator upper_bound(const K& x);
+    template<typename K>
+      const_iterator upper_bound(const K& x) const;
+
+    template<typename K>
+      pair<iterator, iterator> equal_range(const K& x);
+    template<typename K>
+      pair<const_iterator, const_iterator> equal_range(const K& x) const;
+
+
+Add to the synopsis in 23.4.7.1 [multiset.overview]:
+
+    template<typename K>
+      iterator find(const K& x);
+    template<typename K>
+      const_iterator find(const K& x) const;
+    template<typename K>
+      size_type count(const K& x) const;
+
+    template<typename K>
+      iterator lower_bound(const K& x);
+    template<typename K>
+      const_iterator lower_bound(const K& x) const;
+    template<typename K>
+      iterator upper_bound(const K& x);
+    template<typename K>
+      const_iterator upper_bound(const K& x) const;
+
+    template<typename K>
+      pair<iterator, iterator> equal_range(const K& x);
+    template<typename K>
+      pair<const_iterator, const_iterator> equal_range(const K& x) const;
+
+

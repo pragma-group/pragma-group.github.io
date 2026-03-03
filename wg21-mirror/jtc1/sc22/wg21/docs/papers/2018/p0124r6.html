@@ -1,0 +1,1631 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+"http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=us-ascii">
+<title>Linux-Kernel Memory Model</title>
+</head>
+<body>
+<h1>Linux-Kernel Memory Model</h1>
+
+<p>
+ISO/IEC JTC1 SC22 WG21 P0124R6 - 2018-09-27 (Informational)
+</p>
+
+<p>
+Paul E. McKenney, paulmck@linux.vnet.ibm.com<br>
+Ulrich Weigand, Ulrich.Weigand@de.ibm.com<br>
+Andrea Parri, parri.andrea@gmail.com<br>
+Boqun Feng (Intel), boqun.feng@gmail.com<br>
+</p>
+
+<h2>History</h2>
+
+<p>
+This is a revision of
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p0124r5.html">P0124R5</a>,
+updated with a discussion of <tt>volatile</tt> and of a couple of aspects
+of the standard that have some relation to control dependencies.
+P0124R5 is in turn a revision of
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/p0124r4.html">P0124R4</a>,
+updated based on the recent de-Alpha-ication of the Linux kernel's
+core code and on the acceptance of LKMM into the Linux kernel, along
+with several fixes and corrections.
+The P0124 series is itself a revision of
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/n4444.html">N4444</a>,
+updated to add Linux-kernel architecture advice and add more commentary
+on optimizations.
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/n4444.html">N4444</a>,
+was a revision of
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/n4374.html">N4374</a>,
+updated to cover the new <tt>READ_ONCE()</tt> and
+<tt>WRITE_ONCE()</tt> API members.
+N4374 was itself a revision of
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n4322.html">N4322</a>,
+with updates based on subsequent discussions.
+This revision adds references to litmus tests in userspace RCU,
+a paragraph stating goals, and a section discussing the relationship
+between volatile atomics and loop unrolling.
+</p>
+
+<h2>Introduction</h2>
+
+<p>
+The Linux-kernel memory model is currently defined very informally in the
+<a href="https://www.kernel.org/doc/Documentation/memory-barriers.txt">memory-barriers.txt</a>,
+<a href="https://www.kernel.org/doc/Documentation/core-api/atomic_ops.rst">atomic_ops.rst</a>,
+<a href="https://www.kernel.org/doc/Documentation/atomic_bitops.txt">atomic_bitops.txt</a>,
+<a href="https://www.kernel.org/doc/Documentation/atomic_t.txt">atomic_t.txt</a>,
+and
+<a href="https://www.kernel.org/doc/Documentation/core-api/refcount-vs-atomic.rst">refcount-vs-atomic.rst</a>
+files in the source tree.
+Although these two files appear to have been reasonably effective at helping
+kernel hackers understand what is and is not permitted, they are not
+necessarily sufficient for deriving the corresponding formal model.
+This document is a first attempt to bridge this gap.
+Up-to-date versions of the Linux-kernel memory model may be found in the
+Linux kernel at
+<tt>git://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git</tt>
+in the directory <tt>tools/memory-model</tt>,
+with installation instructions referenced in the <tt>README</tt> file.
+An earlier version of this model is available from a git archive
+(<tt>https://github.com/aparri/memory-model</tt>),
+with installation instructions provided 
+<a href="http://wiki.linuxplumbersconf.org/2017:linux-kernel_memory_model_workshop">here</a>.
+This model is a successor to the one described in the two-part LWN series
+<a href="https://lwn.net/Articles/718628/">here</a> and
+<a href="https://lwn.net/Articles/720550/">here</a>,
+which is in turn an elaboration of the model described
+<a href="http://www.rdrop.com/users/paulmck/scalability/paper/LinuxMM.2017.01.19a.LCA.pdf">here</a>
+(<a href="https://www.youtube.com/watch?v=ULFytshTvIY">video</a>,
+<a href="http://www.rdrop.com/users/paulmck/scalability/paper/LinuxMM.2017.01.19a-ext.LCA.pdf">extended presentation</a>,
+<a href="https://github.com/paulmckrcu/litmus">litmus-test repository</a>).
+</p>
+
+<p>
+This paper is for informational purposes.
+The hope is that this document will help the C and C++ standard committees
+understand the existing practice and the constraints from the Linux kernel,
+and also that it will help the Linux community evaluate which portions of
+the C11 and C++11 memory models might be useful in the Linux kernel.
+</p>
+
+<p>
+All that said, the Linux kernel does not mark declarations of variables
+and structure fields that are to be manipulated atomically.
+This means that the
+<a href="https://gcc.gnu.org/onlinedocs/gcc/_005f_005fatomic-Builtins.html"><tt>__atomic</tt></a>
+built-ins, which in gcc generate the same code as their C11-atomic counterparts
+are easier to apply to the Linux kernel than are the C11 atomics.
+</p>
+
+<ol>
+<li>	<a href="#Variable Access">Variable Access</a>
+<li>	<a href="#Memory Barriers">Memory Barriers</a>
+<li>	<a href="#Locking Operations">Locking Operations</a>
+<li>	<a href="#Atomic Operations">Atomic Operations</a>
+<li>	<a href="#Control Dependencies">Control Dependencies</a>
+<li>	<a href="#RCU Grace-Period Relationships">RCU Grace-Period Relationships</a>
+<li>	<a href="#Summary of Differences With Examples">Summary of Differences With Examples</a>
+<li>	<a href="#	So You Want Your Arch To Use C11 Atomics...">	So You Want Your Arch To Use C11 Atomics...</a>
+<li>	<a href="#Summary">Summary</a>
+</ol>
+
+<h2><a name="Variable Access">Variable Access</a></h2>
+
+<p>
+Loads from and stores to shared (but non-atomic) variables should be
+protected with the
+<tt>READ_ONCE()</tt>, <tt>WRITE_ONCE()</tt>, and the now-obsolete
+<tt><a href="http://lwn.net/Articles/508991/">ACCESS_ONCE()</a></tt>
+macros, for example:
+</p>
+
+<blockquote>
+<pre>
+r1 = READ_ONCE(x);
+WRITE_ONCE(y, 1);
+r2 = ACCESS_ONCE(x); /* Obsolete. */
+ACCESS_ONCE(y) = 1;  /* Obsolete. */
+</pre>
+</blockquote>
+
+<p>
+A <tt>READ_ONCE()</tt>, <tt>WRITE_ONCE()</tt>, and
+the now-obsolete <tt>ACCESS_ONCE()</tt> accesses may be modeled as a
+<tt>volatile</tt> <tt>memory_order_relaxed</tt> access.
+However, please note that these macros are defined to work properly
+only for properly aligned machine-word-sized variables.
+Applying <tt>ACCESS_ONCE()</tt> to a large array or structure
+is unlikely to do anything useful, and use of <tt>READ_ONCE()</tt>
+and <tt>WRITE_ONCE()</tt> in this situation can result in load-tearing
+and store-tearing, respectively.
+Nevertheless, this is their definition.
+Linux-kernel developers would most certainly not be thankful to the
+compiler for adding locks to <tt>READ_ONCE()</tt>, <tt>WRITE_ONCE()</tt>,
+or <tt>ACCESS_ONCE()</tt> when applied to oversized objects.
+And there has been Linux-kernel use of <tt>READ_ONCE()</tt> and
+<tt>WRITE_ONCE()</tt> to 64-bit variables on 32-bit systems with
+the expectation that the compiler would emit a pair of 32-bit
+accesses, but otherwise respect volatility.
+</p>
+
+<p>
+Note that the <tt>volatile</tt> is absolutely required:
+Non-<tt>volatile</tt> <tt>memory_order_relaxed</tt> is
+not sufficient.
+To see this, consider that <tt>READ_ONCE()</tt> can be used to prevent
+concurrently modified accesses from being hoisted out of a loop or out
+of unrolled instances of a loop.
+For example, given this loop:
+</p>
+
+<pre>
+	while (tmp = atomic_load_explicit(a, memory_order_relaxed))
+		do_something_with(tmp);
+</pre>
+
+<p>
+The compiler would be permitted to unroll it as follows:
+</p>
+
+<pre>
+	while (tmp = atomic_load_explicit(a, memory_order_relaxed))
+		do_something_with(tmp);
+		do_something_with(tmp);
+		do_something_with(tmp);
+		do_something_with(tmp);
+	}
+</pre>
+
+<p>
+This would be unacceptable for real-time applications, which need the
+value to be reloaded from <tt>a</tt> on each iteration, unrolled
+or not.
+The <tt>volatile</tt> qualifier prevents this transformation.
+For example, consider the following loop:
+</p>
+
+<pre>
+	while (tmp = READ_ONCE(a))
+		do_something_with(tmp);
+</pre>
+
+<p>
+This loop could still be unrolled, but the read would also need to be
+unrolled, for example, like this:
+</p>
+
+<pre>
+	for (;;) {
+		if (!(tmp = READ_ONCE(a)))
+			break;
+		do_something_with(tmp);
+		if (!(tmp = READ_ONCE(a)))
+			break;
+		do_something_with(tmp);
+		if (!(tmp = READ_ONCE(a)))
+			break;
+		do_something_with(tmp);
+		if (!(tmp = READ_ONCE(a)))
+			break;
+		do_something_with(tmp);
+	}
+</pre>
+
+<p>
+Note that use of the new <tt>READ_ONCE()</tt> and <tt>WRITE_ONCE()</tt>
+macros are recommended for new code, in fact, <tt>ACCESS_ONCE()</tt>
+has been phased out as of v4.15.
+Of course, this phase-out has the advantage that
+<tt>READ_ONCE()</tt> and <tt>WRITE_ONCE()</tt> are a better
+match for the C and C++ <tt>memory_order_relaxed</tt> loads and
+stores, give or take volatility.
+</p>
+
+<p>
+This raises the question of what exactly the standard guarantees for
+<tt>volatile</tt>.
+A more detailed exposition on <tt>volatile</tt> is said to be in
+preparation, and
+should that ever emerge from the shadows, this paper will defer to it.
+In the meantime, referring to
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/n4762.pdf">N4762</a>:
+</p>
+
+<ol>
+<li>	4.4.1p6.1 says &ldquo;Accesses through volatile glvalues are evaluated
+	strictly according to the rules of the abstract machine.&rdquo;
+<li>	6.8.1p7 states that volatile accesses are side effects.
+<li>	6.8.2.1p21 calls out volatile accesses as one of the
+	four forward-progress indicators.
+<li>	9.1.7.2p5 states that the semantics of an access through a
+	volatile glvalue are implementation-defined.
+	Which should not be a surprise to anyone who does not expect
+	the MMIO registers of every device to be ensconced into the
+	standard.
+<li>	9.1.7.2p6 (a non-normative note) states:
+	<blockquote>
+		<p>
+		volatile is a hint to the implementation to avoid
+		aggressive optimization involving the object because
+		the value of the object might be changed by means
+		undetectable by an implementation. Furthermore, for
+		some implementations, volatile might indicate that
+		special hardware instructions are required to access the
+		object. See 6.8.1 for detailed semantics. In general,
+		the semantics of volatile are intended to be the same
+		in C ++ as they are in C.
+	</blockquote>
+</ol>
+
+<p>
+It is hard to imagine someone intuiting the required semantics of
+volatile based on the above wording.
+However, one helpful guideline is that device drivers must work
+correctly, resulting in the following constraints:
+</p>
+
+<ol>
+<li>	Implementations are forbidden from tearing an aligned volatile
+	access when machine instructions of the access's size and type
+	are available.
+	(Note that this intentionally leaves unspecified what to do with
+	128-bit loads and stores on CPUs having 128-bit CAS but not
+	128-bit loads and stores.)
+	Concurrent code relies on this constraint to avoid unnecessary
+	load and store tearing.
+<li>	Implementations must not assume anything about the semantics of
+	a volatile access, nor, for any volatile access that returns a
+	value, about the possible set of values that might be returned.
+	(This is strongly implied by the implementation-defined
+	semantics called out above.)
+	Concurrent code relies on this constraint to avoid optimizations that
+	are inapplicable given that other processors might be concurrently
+	accessing the location in question.
+<li>	Aligned machine-sized non-mixed-size volatile accesses
+	interact naturally with volatile assembly-code sequences
+	before and after.
+	This is necessary because some devices must be accessed using a
+	combination of volatile MMIO accesses and special-purpose
+	assembly-language instructions.
+	Concurrent code relies on this constraint in order to achieve
+	the desired ordering properties from combinations of volatile
+	accesses and memory-barrier instructions.
+</ol>
+
+<p>
+Concurrent code also relies on the first two constraints to avoid
+undefined behavior that could result due to data races if any of
+the accesses to a given object was either non-atomic or non-volatile,
+assuming that all accesses are aligned and machine-sized.
+The semantics of mixed-size accesses to the same locations are
+more complex, and are outside the current scope of this document.
+</p>
+
+<p>
+At one time, <tt>gcc</tt> guaranteed that properly aligned accesses
+to machine-word-sized variables would be atomic.
+Although <tt>gcc</tt> no longer documents this guarantee, there is
+still code in the Linux kernel that relies on it.
+These accesses could be modeled as non-<tt>volatile</tt>
+<tt>memory_order_relaxed</tt> accesses.
+</p>
+
+<p>
+The Linux kernel provides <tt>atomic_t</tt> and
+<tt>atomic_long_t</tt> types.
+These have <tt>atomic_read()</tt> and <tt>atomic_long_read()</tt>
+operations that provide non-RMW loads from the underlying variable.
+They also have
+<tt>atomic_set()</tt> and <tt>atomic_long_set()</tt>
+operations that provide non-RMW stores into the the underlying
+variable.
+These were originally intended for single-threaded initialization-time
+and cleanup-time accesses to atomic variables, however, they have
+since been adapted to operate in a manner similar to
+<tt>memory_order_relaxed</tt> loads and stores.
+
+<p>
+The <tt>atomic_t</tt> and <tt>atomic_long_t</tt> types
+have quite a few other operations that are described in the
+&ldquo;Atomic Operations&rdquo; section.
+These types could potentially be modeled as volatile atomic <tt>int</tt>
+for <tt>atomic_t</tt> and volatile atomic <tt>long</tt> for
+<tt>atomic_long_t</tt>, however, anyone using such a strategy could
+expect great scrutiny of the code generated at initialization time,
+when there is no possibility of concurrent access.
+(Implementations that implement aligned machine-word-sized relaxed atomic
+loads and stores as normal load and store instructions will pass scrutiny,
+at least assuming that pointers are machine-word-sized.)
+</p>
+
+<p>
+An <tt>smp_store_release()</tt> may be modeled as a
+<tt>volatile</tt> <tt>memory_order_release</tt> store.
+Similarly, an <tt>smp_load_acquire()</tt> may be modeled as a
+volatile <tt>memory_order_acquire</tt> load.
+</p>
+
+<blockquote>
+<pre>
+r1 = smp_load_acquire(x);
+smp_store_release(y, 1);
+</pre>
+</blockquote>
+
+<p>
+Members of the <tt>rcu_dereference()</tt> family can be modeled
+as <tt>memory_order_consume</tt> loads.
+Members of this family include:
+<tt>rcu_dereference()</tt>,
+<tt>rcu_dereference_bh()</tt>,
+<tt>rcu_dereference_sched()</tt>,
+<tt>srcu_dereference()</tt>, and
+<tt>lockless_dereference()</tt>.
+However, <tt>rcu_dereference()</tt> should be representative for
+litmus-test purposes, at least initially.
+Similarly, <tt>rcu_assign_pointer()</tt> can be modeled as a
+<tt>memory_order_release</tt> store.
+(That said, if <tt>rcu_assign_pointer()</tt> is storing a <tt>NULL</tt>
+or a pointer to constant data, for example, compile-time initialized data,
+then <tt>rcu_assign_pointer()</tt> may be modeled as a
+<tt>memory_order_relaxed</tt> store.)
+</p>
+
+<p>
+The <tt>smp_store_mb()</tt> function (<tt>set_mb()</tt> prior to v4.2)
+assigns the specified value to the
+specified variable, then executes a full memory barrier, which is
+described in the next section.
+This isn't as strong as a <tt>memory_order_seq_cst</tt> store because
+the following code fragment does not guarantee that the stores to
+<tt>x</tt> and <tt>y</tt> will be ordered.
+</p>
+
+<blockquote>
+<pre>
+smp_store_release(x, 1);
+smp_store_mb(y, 1);
+</pre>
+</blockquote>
+
+<p>
+That said, <tt>smp_store_mb()</tt> provides exactly the ordering required
+for manipulating task state, which is the job for which it was created.
+</p>
+
+<h2><a name="Memory Barriers">Memory Barriers</a></h2>
+
+<p>
+The Linux kernel has a variety of memory barriers:
+</p>
+
+<ol>
+<li>	<tt>barrier()</tt>, which can be modeled as an
+	<tt>atomic_signal_fence(memory_order_acq_rel)</tt>
+	or an <tt>atomic_signal_fence(memory_order_seq_cst)</tt>.
+<li>	<tt>smp_mb()</tt>, which does not have a direct C11 or
+	C++11 counterpart.
+	On an ARM, PowerPC, or x86 system, it can be modeled as a full
+	memory-barrier instruction (<tt>dmb</tt>, <tt>sync</tt>,
+	and <tt>mfence</tt>, respectively).
+	On an Itanium system, it can be modeled as an <tt>mf</tt>
+	instruction, but this relies on <tt>gcc</tt> emitting
+	an <tt>ld.acq</tt> for an <tt>READ_ONCE()</tt>
+	and an <tt>st.rel</tt> for an <tt>WRITE_ONCE()</tt>.
+	(Peter Zijlstra of Intel notes that although IA64's reference
+	manual claims instructions with acquire and release semantics,
+	the actual hardware implements only full barriers.
+	See commit e4f9bfb3feae (&ldquo;ia64: Fix up
+	smp_mb__{before,after}_clear_bit()&rdquo;) for Linux-kernel
+	changes based on this situation.
+	Tony Luck and Fenghua Yu are the IA64 maintainers for the Linux
+	kernel.)
+<li>	<tt>smp_rmb()</tt>, which can be modeled (overly
+	conservatively) as an
+	<tt>atomic_thread_fence(memory_order_acq_rel)</tt>.
+	One difference is that <tt>smp_rmb()</tt> need not
+	order prior loads against later stores, or prior stores against
+	later stores.
+	Another difference is that <tt>smp_rmb()</tt> need not provide
+	any sort of transitivity, having (lack of) transitivity properties
+	similar to ARM's or PowerPC's address/control/data dependencies.
+<li>	<tt>smp_wmb()</tt>, which can be modeled (again overly
+	conservatively) as an
+	<tt>atomic_thread_fence(memory_order_acq_rel)</tt>.
+	One difference is that <tt>smp_wmb()</tt> need not
+	order prior loads against later stores, nor prior loads against
+	later loads.
+	Similar to <tt>smp_rmb()</tt>, <tt>smp_wmb()</tt> need
+	not provide any sort of transitivity.
+<li>	<tt>smp_read_barrier_depends()</tt>, which is a no-op on
+	all architectures other than Alpha.
+	On Alpha, <tt>smp_read_barrier_depends()</tt> may be modeled
+	as a <tt>atomic_thread_fence(memory_order_acq_rel)</tt> or
+	as a <tt>atomic_thread_fence(memory_order_seq_cst)</tt>.
+	As of v4.16 of the Linux kernel, <tt>READ_ONCE()</tt>
+	includes an <tt>smp_read_barrier_depends()</tt>, which
+	means that <tt>smp_read_barrier_depends()</tt> should not
+	be needed in any other non-Alpha-specific code.
+<li>	<tt>smp_mb__before_atomic()</tt>, which provides a full
+	memory barrier before the immediately following non-value-returning
+	atomic operation.
+<li>	<tt>smp_mb__after_atomic()</tt>, which provides a full
+	memory barrier after the immediately preceding non-value-returning
+	atomic operation.
+	Both <tt>smp_mb__before_atomic()</tt> and
+	<tt>smp_mb__after_atomic()</tt> are described in more
+	detail in the later section on atomic operations.
+<li>	<tt>smp_mb__after_unlock_lock()</tt>, which provides a full
+	memory barrier after the immediately preceding lock
+	operation, but only when paired with a preceding unlock operation
+	by this same thread or a preceding unlock operation on the same
+	lock variable.
+	The use of <tt>smp_mb__after_unlock_lock()</tt> is described
+	in more detail in the section on locking.
+<li>	<tt>smp_mb__after_spinlock()</tt>, which provides full ordering
+	after lock acquisition.
+	The ordering guarantees of <tt>smp_mb__after_spinlock()</tt> are
+	a strict superset of those of <tt>smp_mb__after_unlock_lock()</tt>.
+</ol>
+
+<p>
+There are some additional memory barriers including <tt>mmiowb()</tt>,
+however, these cover interactions with memory-mapped I/O, so have no
+counterpart in C11 and C++11 (which is most likely as it should be for
+the foreseeable future).
+</p>
+
+<p>
+Some use cases for these memory barriers may be found
+<a href="https://lwn.net/Articles/573436/">here</a>.
+These are for the userspace RCU library, so drop the leading <tt>cmm_</tt>
+to get the corresponding Linux-kernel primitive.
+For example, the userspace <tt>cmm_smp_mb()</tt> primitive
+translates to the Linux-kernel <tt>smp_mb()</tt> primitive.
+</p>
+
+<h2><a name="Locking Operations">Locking Operations</a></h2>
+
+<p>
+The Linux kernel features &ldquo;roach motel&rdquo; ordering on
+its locking primitives:
+Prior operations can be reordered to follow a later acquire,
+and subsequent operations can be reordered to precede an
+earlier release.
+The CPU is permitted to reorder acquire and release operations in
+this way, but the compiler is not, as compiler-based reordering could
+result in deadlock.
+</p>
+
+<p>
+Note that a release-acquire pair does not necessarily result in a
+full barrier.
+To see this consider the following litmus test, with <tt>x</tt>
+and <tt>y</tt> both initially zero, and locks <tt>l1</tt>
+and <tt>l3</tt> both initially held by the threads releasing them:
+</p>
+
+<blockquote>
+<pre>
+Thread 1                      Thread 2
+--------                      --------
+y = 1;                        x = 1;
+spin_unlock(&amp;l1);             spin_unlock(&amp;l3);
+spin_lock(&amp;l2);               spin_lock(&amp;l4);
+r1 = x;                       r2 = y;
+
+assert(r1 != 0 || r2 != 0);
+</pre>
+</blockquote>
+
+<p>
+In the above litmus test, the assertion can trigger, meaning that an
+unlock followed by a lock is not guaranteed to be a full memory barrier.
+And this is where <tt>smp_mb__after_unlock_lock()</tt> comes in:
+</p>
+
+<blockquote>
+<pre>
+Thread 1                      Thread 2
+--------                      --------
+y = 1;                        x = 1;
+spin_unlock(&amp;l1);             spin_unlock(&amp;l3);
+spin_lock(&amp;l2);               spin_lock(&amp;l4);
+smp_mb__after_unlock_lock();  smp_mb__after_unlock_lock();
+r1 = x;                       r2 = y;
+
+assert(r1 != 0 || r2 != 0);
+</pre>
+</blockquote>
+
+<p>
+In contrast, after addition of <tt>smp_mb__after_unlock_lock()</tt>,
+the assertion cannot trigger.
+</p>
+
+<p>
+The above example showed how <tt>smp_mb__after_unlock_lock()</tt>
+can cause an unlock-lock sequence in the same thread to act as a full
+barrier, but it also applies in cases where one thread unlocks and
+another thread locks the same lock, as shown below:
+</p>
+
+<blockquote>
+<pre>
+Thread 1              Thread 2                        Thread 3
+--------              --------                        --------
+y = 1;                spin_lock(&amp;l1);                 x = 1;
+spin_unlock(&amp;l1);     smp_mb__after_unlock_lock();    smp_mb();
+                      r1 = y;                         r3 = y;
+                      r2 = x;
+
+assert(r1 == 0 || r2 != 0 || r3 != 0);
+</pre>
+</blockquote>
+
+<p>
+Without the <tt>smp_mb__after_unlock_lock()</tt>, the above assertion
+can trigger, and with it, it cannot.
+The fact that it can trigger without might seem strange at first glance,
+but locks are only guaranteed to give sequentially consistent ordering
+to their critical sections.
+If you want an observer thread to see the ordering without holding
+the lock, you need <tt>smp_mb__after_unlock_lock()</tt>.
+(Note that there is some possibility that the Linux kernel's memory
+model will change such that an unlock followed by a lock forms
+a full memory barrier even without the
+<tt>smp_mb__after_unlock_lock()</tt>.)
+</p>
+
+<p>
+The <tt>smp_mb__after_spinlock()</tt> barrier is similar to
+<tt>smp_mb__after_unlock_lock()</tt>, but also guarantees to order
+accesses preceding the lock acquisition.
+Only PowerPC needs a non-empty <tt>smp_mb__after_unlock_lock()</tt>,
+but a non-empty <tt>smp_mb__after_spinlock()</tt> is required by
+PowerPC, ARMv8, and RISC-V.
+</p>
+
+<p>
+The Linux kernel has an embarrassingly large number of locking primitives,
+but <tt>spin_lock()</tt> and <tt>spin_unlock()</tt> should be
+representative for litmus-test purposes, at least initially.
+</p>
+
+<p>
+Interestingly enough, the Linux kernel's locking operations can
+be argued to be weaker than those of C11.
+This argument is based on interpretation of 29.3p3 of the C++11
+standard, which states in a non-normative note:
+
+<blockquote>
+	<p>
+	Although it is not explicitly required that S include locks,
+	it can always be extended to an order that does include lock and
+	unlock operations, since the ordering between those is already
+	included in the &ldquo;happens before&rdquo; ordering.
+</blockquote>
+
+<p>
+That said,
+<a href="http://svr-pes20-cppmem.cl.cam.ac.uk/cppmem/">current C11 formal memory models</a>
+specify locking primitives to have roughly the same strength as those
+of the Linux kernel, based on the following two litmus tests:
+
+<blockquote>
+<pre>
+ 1 int main()
+ 2 {
+ 3     atomic_int x = 0;
+ 4     atomic_int y = 0;
+ 5     mutex m1;
+ 6     mutex m2;
+ 7     mutex m3;
+ 8     mutex m4;
+ 9
+10     {{{ { m1.lock();
+11           y.store(1, memory_order_relaxed);
+12           m1.unlock();
+13           m2.lock();
+14           r1 = x.load(memory_order_relaxed);
+15           m2.unlock(); }
+16
+17     ||| { m3.lock();
+18           x.store(1, memory_order_relaxed);
+19           m3.unlock();
+20           m4.lock();
+21           r2 = y.load(memory_order_relaxed);
+22           m4.unlock(); }
+23     }}};
+24
+25     return 0;
+26 }
+</pre>
+</blockquote>
+
+<p>
+This first litmus test can observe both <tt>r1</tt> and <tt>r2</tt>
+equal to zero, which would be prohibited if locking primitives enforced
+SC behavior.
+
+<p>
+The second litmus test substitutes a fence for one of the
+unlock-lock pairs:
+
+<blockquote>
+<pre>
+int main()
+ 1 {
+ 2     atomic_int x = 0;
+ 3     atomic_int y = 0;
+ 4     mutex mtx;
+ 5
+ 6     {{{ { mtx.lock();
+ 7           x.store(1, memory_order_relaxed);
+ 8           mtx.unlock();
+ 9           mtx.lock();
+10           r0 = y.load(memory_order_relaxed);
+11           mtx.unlock(); }
+12
+13     ||| { y.store(1, memory_order_relaxed);
+14           atomic_thread_fence(memory_order_seq_cst);
+15           r1 = x.load(memory_order_relaxed); }
+16     }}};
+17
+18     return 0;
+19 }
+</pre>
+</blockquote>
+
+<p>
+This second litmus test can also observe both <tt>r1</tt> and <tt>r2</tt>
+equal to zero, which again would be prohibited if locking primitives
+enforced SC behavior.
+
+<p>
+It is quite possible that the Linux kernel's locking primitives
+will be strengthened so that an unlock-lock pair implies a full
+memory barrier.
+However, the pair of obscure Linux-kernel primitives named
+<tt>spin_unlock_wait()</tt> and <tt>queued_spin_unlock_wait()</tt>
+that might have directly motivated this change have been dropped
+from the Linux kernel, primarily due to the fact that an attempt
+to precisely define their semantics converged on them being
+equivalent to a lock acquisition immediately followed by a
+lock release.
+The calls to these functions were therefore replaced by a
+lock acquisition/release pair.
+
+<p>
+If this lock strengthening happens, the shoe will be on the other foot,
+so that an alternative interpretation of 29.3p3 would provide weaker
+C11 locking primitives.
+
+<h2><a name="Atomic Operations">Atomic Operations</a></h2>
+
+<p>
+Atomic operations have three sets of operations,
+those that are defined on <tt>atomic_t</tt>,
+those that are defined on <tt>atomic_long_t</tt>,
+and those that are defined on aligned machine-sized variables, currently
+restricted to <tt>int</tt> and <tt>long</tt>.
+However, in the near term, it should be acceptable to focus on a
+small subset of these operations.
+</p>
+
+<p>
+Variables of type <tt>atomic_t</tt> may be stored to
+using <tt>atomic_set()</tt> and variables of type
+<tt>atomic_long_t</tt> may be stored to using
+<tt>atomic_long_set()</tt>.
+Similarly, variables of these types may be loaded from using
+<tt>atomic_read()</tt> and <tt>atomic_long_read()</tt>.
+The historical definition of these primitives has lacked any
+sort of concurrency-safe semantics, so the user is responsible
+for ensuring that these primitives are not used concurrently
+in a conflicting manner.
+</p>
+
+<p>
+That said, many architectures treat <tt>atomic_read()</tt> and
+<tt>atomic_long_read()</tt> as <tt>volatile</tt>
+<tt>memory_order_relaxed</tt> loads and a few architectures
+treat <tt>atomic_set()</tt> and <tt>atomic_long_set()</tt>
+as <tt>memory_order_relaxed</tt> stores.
+There is therefore some chance that concurrent conflicting accesses
+will be allowed at some point in the future, at which point
+their semantics will be those of <tt>volatile</tt>
+<tt>memory_order_relaxed</tt> accesses.
+However, as noted earlier, any attempt to implement
+<tt>atomic_t</tt> and <tt>atomic_long_t</tt> as
+volatile atomic <tt>int</tt> and <tt>long</tt>
+can expect great scrutiny of the code generated in cases such as
+initialization where no concurrent accesses are possible.
+</p>
+
+<p>
+The remaining atomic operations are divided into those that return
+a value and those that do not.
+The atomic operations that do not return a value are similar to
+C11 atomic <tt>memory_order_relaxed</tt> operations.
+However, the Linux-kernel atomic operations that do return a value cannot be
+implemented in terms of the C11 atomic operations.
+These operations can instead be modeled as <tt>memory_order_relaxed</tt>
+operations that are both preceded and followed by the Linux-kernel
+<tt>smp_mb()</tt> full memory barrier, which is implemented using
+the <tt>DMB</tt> instruction on ARM and
+the <tt>sync</tt> instruction on PowerPC.
+Alternatively, if appropriate, <tt>smp_mb__before_atomic()</tt>
+and <tt>smp_mb__after_atomic()</tt> could be used in place of
+<tt>smp_mb()</tt>.
+Note that in the case of the CAS operations <tt>atomic_cmpxchg()</tt>,
+<tt>atomic_long_cmpxchg</tt>, and <tt>cmpxchg()</tt>, the
+full barriers are required only in the success case as v4.3
+(before that, full barriers were required in both cases).
+Strong memory ordering can be added to the non-value-returning atomic
+operations using <tt>smp_mb__before_atomic()</tt> before and/or
+<tt>smp_mb__after_atomic()</tt> after.
+</p>
+
+<p>
+For some of the value-returning atomic operations, there are also sets of
+variants introduced in v4.4. These variants use suffixes to indicate their
+ordering guarantees. There are three kinds of variants: <tt>_relaxed</tt>,
+<tt>_acquire</tt> and <tt>_release</tt>, and they are similar to the
+corresponding C11 <tt>memory_order_relaxed</tt>,
+<tt>memory_order_acquire</tt> and <tt>memory_order_release</tt> atomic
+operations, except that they are volatile, which means they won't be optimized
+out or merged with other atomic operations.  Note that in the case of the
+variants of CAS operations <tt>atomic_cmpxchg()</tt>,
+<tt>atomic_long_cmpxchg</tt>, and <tt>cmpxchg()</tt>, the ordering
+guarantees are required only in the success case.
+</p>
+
+<p>
+Note that C11 compilers are within their rights to assume data-race
+freedom when determining what optimizations to carry out.
+This will break the still-common Linux-kernel practice of assuming relaxed
+semantics for normal accesses to non-atomic variables, hence the suggestions
+to disable code-motion optimizations across atomics using full barriers
+and/or Linux-kernel <tt>barrier()</tt> macros.
+</p>
+
+<p>
+The operations are summarized in the following table.
+An initial implementation of a tool could start with <tt>atomic_add()</tt>,
+<tt>atomic_sub()</tt>, <tt>atomic_xchg()</tt>, and
+<tt>atomic_cmpxchg()</tt>.
+</p>
+
+<table cellpadding="3" border=3>
+<tbody><tr><th>Operation Class</th>
+    <th>int</th>
+	<th>long</th>
+</tr>
+<tr class="Even"><th align="left">Add/Subtract</th>
+    <td><tt>void atomic_add(int i, atomic_t *v)</tt><br>
+	<tt>void atomic_sub(int i, atomic_t *v)</tt><br>
+	<tt>void atomic_inc(atomic_t *v)</tt><br>
+	<tt>void atomic_dec(atomic_t *v)</tt></td>
+	<td><tt>void atomic_long_add(long i, atomic_long_t *v)</tt><br>
+	    <tt>void atomic_long_sub(long i, atomic_long_t *v)</tt><br>
+	    <tt>void atomic_long_inc(atomic_long_t *v)</tt><br> 
+	    <tt>void atomic_long_dec(atomic_long_t *v)</tt></td> 
+</tr>
+<tr class="Even"><th align="left">Add/Subtract,<br>Value Returning,<br>(Variants Available)</th>
+    <td><tt>int atomic_inc_return(atomic_t *v)</tt><br>
+	<tt>int atomic_dec_return(atomic_t *v)</tt><br>
+	<tt>int atomic_add_return(int i, atomic_t *v)</tt><br>
+	<tt>int atomic_sub_return(int i, atomic_t *v)</tt><br>
+	<td><tt>long atomic_long_inc_return(atomic_long_t *v)</tt><br>
+	    <tt>long atomic_long_dec_return(atomic_long_t *v)</tt><br>
+	    <tt>long atomic_long_add_return(long i, atomic_long_t *v)</tt><br>
+	    <tt>long atomic_long_sub_return(long i, atomic_long_t *v)</tt><br>
+</tr>
+<tr class="Even"><th align="left">Add/Subtract,<br>Value Returning,<br>(No Variants)</th>
+    <td><tt>int atomic_inc_and_test(atomic_t *v)</tt><br>
+	<tt>int atomic_dec_and_test(atomic_t *v)</tt><br>
+	<tt>int atomic_sub_and_test(int i, atomic_t *v)</tt><br>
+	<tt>int atomic_add_negative(int i, atomic_t *v)</tt></td>
+	<td><tt>long atomic_long_inc_and_test(atomic_long_t *v)</tt><br>
+	    <tt>long atomic_long_dec_and_test(atomic_long_t *v)</tt><br>
+	    <tt>long atomic_long_sub_and_test(long i, atomic_long_t *v)</tt><br>
+	    <tt>long atomic_long_add_negative(long i, atomic_long_t *v)</tt></td> 
+</tr>
+<tr class="Even"><th align="left">Exchange,<br>(Variants Available)</th>
+    <td><tt>int atomic_xchg(atomic_t *v, int new)</tt><br>
+	<tt>int atomic_cmpxchg(atomic_t *v, int old, int new)</tt></td>
+	<td><tt>long atomic_long_xchg(atomic_long_t *v, long new)</tt><br>
+	    <tt>long atomic_long_cmpxchg(atomic_code_t *v, long old, long new)</tt></td> 
+</tr>
+<tr class="Even"><th align="left">Conditional<br>Add/Subtract</th>
+    <td><tt>int atomic_add_unless(atomic_t *v, int a, int u)</tt><br>
+	<tt>int atomic_inc_not_zero(atomic_t *v)</tt></td>
+	<td><tt>long atomic_long_add_unless(atomic_long_t *v, long a, long u)</tt><br>
+	    <tt>long atomic_long_inc_not_zero(atomic_long_t *v)</tt></td> 
+</tr>
+<tr class="Even"><th align="left">Bit Test/Set/Clear<br>(Generic)</th>
+    <td colspan=2><tt>void set_bit(unsigned long nr, volatile unsigned long *addr)</tt><br>
+	<tt>void clear_bit(unsigned long nr, volatile unsigned long *addr)</tt><br>
+	<tt>void change_bit(unsigned long nr, volatile unsigned long *addr)</tt></td>
+</tr>
+<tr class="Even"><th align="left">Bit Test/Set/Clear,<br>Value Returning<br>(Generic, No Variants)</th>
+    <td colspan=2><tt>int test_and_set_bit(unsigned long nr, volatile unsigned long *addr)</tt><br>
+	<tt>int _atomic_dec_and_lock(atomic_t *atomic, spinlock_t *lock)</tt><br>
+	<tt>int test_and_clear_bit(unsigned long nr, volatile unsigned long *addr)</tt><br>
+	<tt>int test_and_change_bit(unsigned long nr, volatile unsigned long *addr)</tt></td>
+<tr class="Even"><th align="left">Lock-Barrier Operations<br>(Generic)</th>
+    <td colspan=2><tt>int test_and_set_bit_lock(unsigned long nr, unsigned long *addr)</tt><br>
+	<tt>void clear_bit_unlock(unsigned long nr, unsigned long *addr)</tt><br>
+	<tt>void __clear_bit_unlock(unsigned long nr, unsigned long *addr)</tt></td>
+</tr>
+<tr class="Even"><th align="left">Exchange<br>(Generic, Variants Available)</th>
+    <td colspan=2><tt>T *xchg(T *v, new)</tt><br>
+	<tt>T *cmpxchg(T *v, T old, T new)</tt></td>
+</tr>
+</tbody></table>
+
+<p>
+The rows marked &ldquo;(Generic)&rdquo; are type-generic, applying to any
+aligned machine-word-sized quantity supported by all architectures that the
+Linux kernel runs on.
+The set of types is currently those of size <tt>int</tt> and
+those of size <tt>long</tt>.
+The &ldquo;Lock-Barrier Operations&rdquo; have <tt>memory_order_acquire</tt>
+semantics for <tt>test_and_set_bit_lock()</tt> and
+<tt>_atomic_dec_and_lock()</tt>, and have
+<tt>memory_order_release</tt> for the other primitives.
+Otherwise, the usual Linux-kernel rule holds: If no value is returned,
+<tt>memory_order_relaxed</tt> semantics apply, otherwise the operations
+behave as if there was <tt>smp_mb()</tt> before and after.  And for those
+value-returning primitives, the rows marked &ldquo;(Variants Available)&rdquo;
+have <tt>_relaxed</tt>/<tt>_acquire</tt>/<tt>_release</tt>
+variants, whereas the rows marked &ldquo;(No Variants)&rdquo; don't.
+</p>
+
+<p>
+The following table gives rough C11 counterparts for the Linux-kernel
+atomic operations called out above:
+</p>
+
+<table cellpadding="3" border=3>
+<tbody><tr><th>Linux-Kernel Operation</th>
+    <th>C11 Counterpart</th>
+</tr>
+<tr><th align="left" colspan=2>Add/Subtract</th></tr>
+<tr class="Even">
+<td><tt>void atomic_add(int i, atomic_t *v)</tt><br>
+    <tt>void atomic_long_add(long i, atomic_long_t *v)</tt></td>
+    <td><tt>atomic_fetch_add_explicit(v, i, memory_order_relaxed)</tt></td>
+</tr>
+<tr class="Odd">
+<td><tt>void atomic_sub(int i, atomic_t *v)</tt><br>
+    <tt>void atomic_long_sub(long i, atomic_long_t *v)</tt></td>
+    <td><tt>atomic_fetch_sub_explicit(v, i, memory_order_relaxed)</tt></td>
+</tr>
+<tr class="Even">
+<td><tt>void atomic_inc(atomic_t *v)</tt><br>
+    <tt>void atomic_long_inc(atomic_long_t *v)</tt></td> 
+    <td><tt>atomic_fetch_add_explicit(v, 1, memory_order_relaxed)</tt></td>
+</tr>
+<tr class="Odd">
+<td><tt>void atomic_dec(atomic_t *v)</tt><br>
+    <tt>void atomic_long_dec(atomic_long_t *v)</tt></td>
+    <td><tt>atomic_fetch_sub_explicit(v, 1, memory_order_relaxed)</tt></td>
+</tr>
+<tr><th align="left" colspan=2>Add/Subtract, Value Returning (Variants Available)</th></tr>
+<tr class="Even">
+<td><tt>int atomic_inc_return(atomic_t *v)</tt><br>
+    <tt>long atomic_long_inc_return(atomic_long_t *v)</tt></td>
+    <td><tt>atomic_fetch_add(v, 1) - 1</tt></td>
+</tr>
+<tr class="Odd">
+<td><tt>int atomic_dec_return(atomic_t *v)</tt><br>
+    <tt>long atomic_long_dec_return(atomic_long_t *v)</tt></td>
+    <td><tt>atomic_fetch_sub(v, 1) + 1</tt></td>
+</tr>
+<tr class="Even">
+<td><tt>int atomic_add_return(int i, atomic_t *v)</tt><br>
+    <tt>long atomic_long_add_return(long i, atomic_long_t *v)</tt></td>
+    <td><tt>atomic_fetch_add(v, i) - i</tt></td>
+</tr>
+<tr class="Odd">
+<td><tt>int atomic_sub_return(int i, atomic_t *v)</tt><br>
+    <tt>long atomic_long_sub_return(long i, atomic_long_t *v)</tt></td>
+    <td><tt>atomic_fetch_sub(v, i) + i</tt></td>
+</tr>
+<tr><th align="left" colspan=2>Value Returning, No Variants</th></tr>
+<tr class="Even">
+<td><tt>int atomic_inc_and_test(atomic_t *v)</tt><br>
+    <tt>long atomic_long_inc_and_test(atomic_long_t *v)</tt></td>
+    <td><tt>atomic_fetch_add(v, 1) == -1</tt></td>
+</tr>
+<tr class="Odd">
+<td><tt>int atomic_dec_and_test(atomic_t *v)</tt><br>
+    <tt>long atomic_long_dec_and_test(atomic_long_t *v)</tt></td>
+    <td><tt>atomic_fetch_sub(v, 1) == 1</tt></td>
+</tr>
+<tr class="Even">
+<td><tt>int atomic_sub_and_test(int i, atomic_t *v)</tt><br>
+    <tt>long atomic_long_sub_and_test(long i, atomic_long_t *v)</tt></td>
+    <td><tt>atomic_fetch_sub(v, i) == i</tt></td>
+</tr>
+<tr class="Odd">
+<td><tt>int atomic_add_negative(int i, atomic_t *v)</tt><br>
+    <tt>long atomic_long_add_negative(long i, atomic_long_t *v)</tt><br> 
+    <td><tt>atomic_fetch_add(v, i) &lt; 0</tt></td>
+</tr>
+<tr><th align="left" colspan=2>Exchange, Variants Available</th></tr>
+<tr class="Even">
+<td><tt>int atomic_xchg(atomic_t *v, int new)</tt><br>
+    <tt>long atomic_long_xchg(atomic_long_t *v, long new)</tt><br>
+    <tt>T *xchg(T *v, new)</tt></td> 
+    <td><tt>atomic_exchange(v, new)</tt></td>
+</tr>
+<tr class="Even">
+<td><tt>int atomic_cmpxchg(atomic_t *v, int old, int new)</tt><br>
+    <tt>long atomic_long_cmpxchg(atomic_code_t *v, long old, long new)</tt><br> 
+    <tt>T *cmpxchg(T *v, T old, T new)</tt></td> 
+    <td><tt>t = old;</tt><br>
+        <tt>atomic_compare_exchange_strong_explicit(v, &amp;t, new, memory_order_seq_cst, memory_order_relaxed)</tt><br>
+        <tt>return t;</tt></td>
+</tr>
+<tr><th align="left" colspan=2>Conditional Add/Subtract</th></tr>
+<tr class="Odd">
+<td><tt>int atomic_add_unless(atomic_t *v, int a, int u)</tt><br>
+    <tt>long atomic_long_add_unless(atomic_long_t *v, long a, long u)</tt></td>
+    <td><tt>t = atomic_load_explicit(v, memory_order_relaxed);</tt><br>
+        <tt>do {</tt><br>
+        <tt>&nbsp;&nbsp;if (t == u) return false;</tt><br>
+        <tt>} while (!atomic_compare_exchange_weak_explicit(a, t, t + a, memory_order_seq_cst, memory_order_relaxed));</tt><br>
+        <tt>return true;</tt></td>
+</tr>
+<tr class="Even">
+<td><tt>int atomic_inc_not_zero(atomic_t *v)</tt><br>
+    <tt>long atomic_long_inc_not_zero(atomic_long_t *v)</tt></td>
+    <td><tt>t = atomic_load_explicit(v, memory_order_relaxed);</tt><br>
+        <tt>do {</tt><br>
+        <tt>&nbsp;&nbsp;if (t == 0) return false;</tt><br>
+        <tt>} while (!atomic_compare_exchange_weak_explicit(a, t, t + 1, memory_order_seq_cst, memory_order_relaxed));</tt><br>
+        <tt>return true;</tt></td>
+</tr>
+<tr><th align="left" colspan=2>Bit Test/Set/Clear/Change</th></tr>
+<tr><td></td>
+    <td><tt>p</tt> and <tt>mask</tt> in below:<br>
+        <tt>unsigned long *p = ((unsigned long *)addr) + nr / (sizeof(unsigned long) * CHAR_BIT);</tt><br>
+        <tt>unsigned long mask = 1u << (nr % (sizeof(unsigned long) * CHAR_BIT)) </tt><td>
+</tr>
+<tr class="Odd">
+<td><tt>void set_bit(unsigned long nr, volatile void *addr)</tt><br>
+    <td><tt>atomic_fetch_or_explicit(p, mask, memory_order_relaxed);</tt></td>
+</tr>
+<tr class="Even">
+<td><tt>void clear_bit(unsigned long nr, volatile void *addr)</tt><br>
+    <td><tt>atomic_fetch_and_explicit(p, ~mask, memory_order_relaxed);</tt></td>
+</tr>
+<tr class="Odd">
+<td><tt>void change_bit(unsigned long nr, volatile void *addr)</tt><br>
+    <td><tt>atomic_fetch_xor_explicit(p, mask, memory_order_relaxed);</tt></td>
+</tr>
+<tr class="Even">
+<td><tt>int test_and_set_bit(unsigned long nr, volatile void *addr)</tt><br>
+    <td><tt>return !!(atomic_fetch_or_explicit(p, mask, memory_order_relaxed) & mask);</tt></td>
+</tr>
+<tr class="Odd">
+<td><tt>int test_and_clear_bit(unsigned long nr, volatile void *addr)</tt><br>
+    <td><tt>return !!(atomic_fetch_and_explicit(p, ~mask, memory_order_relaxed) & mask);</tt></td>
+</tr>
+<tr class="Even">
+<td><tt>int test_and_change_bit(unsigned long nr, volatile void *addr)</tt><br>
+    <td><tt>return !!(atomic_fetch_xor_explicit(p, mask, memory_order_relaxed) & mask);</tt></td>
+</tr>
+<tr><th align="left" colspan=2>Lock Bit Test and Set/Clear</th></tr>
+<tr><td></td>
+    <td><tt>p</tt> and <tt>mask</tt> in below:<br>
+        <tt>unsigned long *p = ((unsigned long *)addr) + nr / (sizeof(unsigned long) * CHAR_BIT);</tt><br>
+        <tt>unsigned long mask = 1u << (nr % (sizeof(unsigned long) * CHAR_BIT)) </tt><td>
+</tr>
+<tr class="Odd">
+<td><tt>int test_and_set_bit_lock(unsigned long nr, volatile void *addr)</tt><br>
+    <td><tt>return !!(atomic_fetch_or_explicit(p, mask, memory_order_acquire) & mask);</tt></td>
+</tr>
+<tr class="Even">
+<td><tt>void clear_bit_unlock(unsigned long nr, volatile void *addr)</tt><br>
+    <td><tt>atomic_fetch_and_explicit(p, ~mask, memory_order_release);</tt></td>
+</tr>
+</tbody></table>
+
+<p>
+The bit test/set/clear and lock-barrier operations map to atomic
+bit operations, but accept very large bit numbers.
+The upper bits of the bit number select the <tt>unsigned long</tt>
+element of an array, and the lower bits select the bit to operate on
+within the selected <tt>unsigned long</tt>.
+</p>
+
+<h2><a name="Control Dependencies">Control Dependencies</a></h2>
+
+<p>
+The Linux kernel provides a limited notion of control dependencies,
+ordering prior loads against control-dependent stores in some
+cases.
+Extreme care is required to avoid control-dependency-destroying compiler
+optimizations.
+The restrictions applying to control dependencies include the following:
+</p>
+
+<ol>
+<li>	Control dependencies can order prior loads against later
+	dependent stores, however, they do <i>not</i> order
+	prior loads against later dependent loads.
+	(Use <tt>memory_order_consume</tt> or
+	<tt>memory_order_acquire</tt> if you require this behavior.)
+<li>	A load heading up a control dependency must use
+	<tt>READ_ONCE()</tt>.
+	Similarly, the store at the other end of a control dependency
+	must also use <tt>WRITE_ONCE()</tt>.
+	As of v4.16 of the Linux kernel, <tt>READ_ONCE()</tt>
+	can also head address and data dependency chains, which
+	allowed Alpha-specific code to be removed from almost all
+	of the core kernel.
+<li>	If both legs of a given <tt>if</tt> or <tt>switch</tt>
+	statement store the same value to the same variable, then
+	those stores cannot participate in control-dependency ordering.
+<li>	Control dependencies require at least one run-time conditional
+	that depends on the prior load and that precedes the following
+	store.
+<li>	The compiler must perceive both the variable loaded from and
+	the variable stored to as being shared variables.
+	For example, the compiler will not perceive an on-stack variable
+	as being shared unless its address has been taken and exported
+	to some other thread (or alias analysis has otherwise been
+	defeated).
+<li>	Control dependencies are not transitive.
+	In this regard, their behavior is similar to ARM or PowerPC
+	control dependencies.
+</ol>
+
+<p>
+The C and C++ standards do not guarantee ordering based on control
+dependencies.
+Therefore, this list of restriction is subject to change as compilers become
+increasingly clever and aggressive.
+Nevertheless, these standards do have some restrictions that are
+at least somewhat related to control dependencies:
+</p>
+
+<ol>
+<li>	The compiler is not permitted to generate data races.
+	In many cases, this can prohibit the compiler from hoisting
+	a normal access out of a conditional.
+<li>	The compiler is not permitted to invent either an atomic store
+	or a volatile access.
+</ol>
+
+<p>
+Note that these restrictions apply even if the conditional depends only
+on normal not-atomic/non-volatile accesses.
+To see this, consider an unadored flag that is set just before
+<tt>main()</tt> spawns its threads.
+Code that is called both during pre-spawn initialization and from
+the threads could load that flag in order to determine whether
+or not data races are possible, and the compiler would need to
+honor such checks.
+</p>
+
+<h2><a name="RCU Grace-Period Relationships">RCU Grace-Period Relationships</a></h2>
+
+<p>
+The publish-subscribe portions of RCU are captured by the combination
+of <tt>rcu_assign_pointer()</tt>, which can be modeled as a
+<tt>memory_order_release</tt> store, and of the
+<tt>rcu_dereference()</tt> family of primitives, which can be
+modeled as <tt>memory_order_consume</tt> loads, as was noted
+earlier.
+</p>
+
+<p>
+Grace periods can be modeled as described in Appendix&nbsp;D of
+<a href="http://www.computer.org/cms/Computer.org/dl/trans/td/2012/02/extras/ttd2012020375s.pdf">User-Level Implementations of Read-Copy Update</a>.
+There are a number of grace-period primitives in the Linux kernel,
+but <tt>rcu_read_lock()</tt>, <tt>rcu_read_unlock()</tt>,
+and <tt>synchronize_rcu()</tt> are good places to start.
+The grace-period relationships can be describe using the following
+abstract litmus test:
+</p>
+
+<blockquote>
+<pre>
+Thread 1                      Thread 2
+--------                      --------
+rcu_read_lock();              S2a;
+S1a;                          synchronize_rcu();
+S1b;                          S2b;
+rcu_read_unlock();
+</pre>
+</blockquote>
+
+<p>
+If either of <tt>S1a</tt> or <tt>S1b</tt> precedes <tt>S2a</tt>,
+then both must precede <tt>S2b</tt>.
+Conversely, if either of <tt>S1a</tt> or <tt>S1b</tt> follows
+<tt>S2b</tt>, then both must follow <tt>S2a</tt>.
+Additional litmus tests may be found
+<a href="https://lwn.net/Articles/573497/">here</a> and
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/p0868r0.pdf">here</a>.
+For the litmus tests using the userspace RCU library, drop the leading
+<tt>cmm_</tt> to get the corresponding Linux-kernel primitives.
+</p>
+
+<p>
+Given a high-quality implementation of <tt>memory_order_consume</tt>,
+RCU can be implemented as a library.
+
+<h2><a name="Summary of Differences With Examples">Summary of Differences With Examples</a></h2>
+
+<p>
+This section looks in more detail at functionality that the Linux kernel
+provides that is not available from the C11 standard.
+
+<ol>
+<li>	<a href="#ACCESS_ONCE()"><tt>ACCESS_ONCE()</tt></a>
+<li>	<a href="#READ_ONCE()"><tt>READ_ONCE()</tt></a>
+<li>	<a href="#WRITE_ONCE()"><tt>WRITE_ONCE()</tt></a>
+<li>	<a href="#smp_mb()"><tt>smp_mb()</tt></a>
+<li>	<a href="#smp_read_barrier_depends()"><tt>smp_read_barrier_depends()</tt></a>
+<li>	<a href="#Locking Operations"><tt>Locking Operations</tt></a>
+<li>	<a href="#Value-Returning Atomics"><tt>Value-Returning Atomics</tt></a>
+<li>	<a href="#Control Dependencies"><tt>Control Dependencies</tt></a>
+</ol>
+
+<h3><a name="ACCESS_ONCE()"><tt>ACCESS_ONCE()</tt></a></h3>
+
+<p>
+There is no C11 syntax corresponding to <tt>ACCESS_ONCE()</tt>,
+which enables both loads and stores.
+However, this problem was solved by the removal of
+<tt>ACCESS_ONCE()</tt> from v4.15 of the
+Linux kernel in favor of
+<tt>READ_ONCE()</tt> and <tt>WRITE_ONCE()</tt>, which are described
+below.
+
+<h3><a name="READ_ONCE()"><tt>READ_ONCE()</tt></a></h3>
+
+<p>
+Although the semantics of <tt>READ_ONCE()</tt> are tantalizingly close
+to those of a C11 <tt>volatile</tt> <tt>memory_order_relaxed</tt> atomic
+read, there are important differences:
+
+<ol>
+<li>	<tt>READ_ONCE()</tt> can head an address, data, or control
+	dependency chain.
+	This is of course more like <tt>memory_order_consume</tt>
+	load, but all known implementations promote such loads to
+	<tt>memory_order_acquire</tt>, which is stronger than needed
+	by <tt>READ_ONCE()</tt>.
+<li>	<tt>READ_ONCE()</tt> is permitted to tear when used on objects
+	too large for the available load instructions.
+	(And yes, there are parts of the Linux kernel that use
+	<tt>READ_ONCE()</tt> in situations where it must tear,
+	and these users would be decidedly unamused by invention and
+	use of locks by the compiler.)
+</ol>
+
+<p>
+Therefore, <tt>READ_ONCE()</tt> cannot be implemented in terms
+of C11 atomics.
+
+<h3><a name="WRITE_ONCE()"><tt>WRITE_ONCE()</tt></a></h3>
+
+<p>
+The semantics of <tt>WRITE_ONCE()</tt> are also quite close
+to those of a C11 <tt>volatile</tt> <tt>memory_order_relaxed</tt> atomic
+store.
+However, as with <tt>READ_ONCE()</tt>, <tt>WRITE_ONCE()</tt> is
+permitted to tear when used on objects too large for the available
+store instructions.
+(And yes, there are parts of the Linux kernel that use
+<tt>WRITE_ONCE()</tt> in situations where it must tear, and these users
+would be decidedly unamused by invention and use of locks by the
+compiler.)
+
+<p>
+Therefore, <tt>WRITE_ONCE()</tt> cannot be implemented in terms
+of C11 atomics.
+
+<h3><a name="smp_mb()"><tt>smp_mb()</tt></a></h3>
+
+<p>
+Quoting 29.3p8 of the C++11 standard:
+
+<blockquote>
+	<p>
+	Fences cannot, in general, be used to restore sequential
+	consistency for atomic operations with weaker ordering
+	specifications.
+</blockquote>
+
+<p>
+In contrast, <tt>smp_mb()</tt> guarantees to restore sequential consistency
+among accesses that use <tt>READ_ONCE</tt>,
+<tt>WRITE_ONCE()</tt>, or stronger.
+For example, the following Linux-kernel code would forbid non-SC
+outcomes:
+
+<blockquote>
+<pre>
+ 1 int x, y, r0, r1, r2, r3;
+ 2 
+ 3 void thread0(void)
+ 4 {
+ 5   WRITE_ONCE(x, 1);
+ 6 }
+ 7 
+ 8 void thread1(void)
+ 9 {
+10   WRITE_ONCE(y, 1);
+11 }
+12 
+13 void thread2(void)
+14 {
+15   r0 = READ_ONCE(x);
+16   smp_mb()
+17   r1 = READ_ONCE(y);
+18 }
+19 
+20 void thread3(void)
+21 {
+22   r2 = READ_ONCE(y);
+23   smp_mb()
+24   r3 = READ_ONCE(x);
+25 }
+</pre>
+</blockquote>
+
+<p>
+In contrast, the closest C11 analog
+can permit the non-SC outcomes and still conform to the standard:
+
+<blockquote>
+<pre>
+ 1 atomic_int x, y;
+ 2 int r0, r1, r2, r3;
+ 3 
+ 4 void thread0(void)
+ 5 {
+ 6   atomic_store_explicit(x, 1, memory_order_relaxed);
+ 7 }
+ 8 
+ 9 void thread1(void)
+10 {
+11   atomic_store_explicit(y, 1, memory_order_relaxed);
+12 }
+13 
+14 void thread2(void)
+15 {
+16   r0 = atomic_load_explicit(x, memory_order_relaxed);
+17   atomic_thread_fence(memory_order_seq_cst);
+18   r1 = atomic_load_explicit(y, memory_order_relaxed);
+19 }
+20 
+21 void thread3(void)
+22 {
+23   r2 = atomic_load_explicit(y, memory_order_relaxed);
+24   atomic_thread_fence(memory_order_seq_cst);
+25   r3 = atomic_load_explicit(x, memory_order_relaxed);
+26 }
+</pre>
+</blockquote>
+
+<p>
+That said, it is not clear that anything in the Linux kernel cares
+whether or not sequential consistency is restored.
+
+<h3><a name="smp_read_barrier_depends()"><tt>smp_read_barrier_depends()</tt></a></h3>
+
+<p>
+Although it is legal C11 to say
+&ldquo;<tt>atomic_thread_fence(memory_order_consume)</tt>&rdquo;,
+all known C11 implementations promote this to an acquire fence.
+Within the Linux kernel, this would have the undesirable effect of
+promoting <tt>rcu_dereference()</tt> to acquire as well.
+Linux therefore needs to continue defining
+<tt>smp_read_barrier_depends()</tt>
+as <tt>smp_mb()</tt> on DEC Alpha and nothingness elsewhere.
+
+<p>
+Note again that as of v4.16 of the Linux kernel, <tt>READ_ONCE()</tt>
+includes <tt>smp_read_barrier_depends()</tt>, which means that
+<tt>smp_read_barrier_depends()</tt> should not be needed anywhere
+else in the Linux kernel aside from Alpha-specific code.
+
+<h3><a name="Locking Operations">Locking Operations</a></h3>
+
+<p>
+Consider the following litmus test:
+
+<blockquote>
+<pre>
+ 1 void thread0(void)
+ 2 {
+ 3   spin_lock(&amp;my_lock);
+ 4   WRITE_ONCE(x, 1);
+ 5   spin_unlock(&amp;my_lock);
+ 6   spin_lock(&amp;my_lock);
+ 7   r0 = READ_ONCE(y);
+ 8   spin_unlock(&amp;my_lock);
+ 9 }
+10 
+11 void thread1(void)
+12 {
+13   WRITE_ONCE(y, 1);
+14   smp_mb();
+15   r1 = READ_ONCE(x);
+16 }
+</pre>
+</blockquote>
+
+<p>
+The Linux kernel is currently within its rights to arrive at the
+non-SC outcome <tt>r0 == 0 &amp;&amp; r1 == 0</tt>.
+This might change in the near future.
+One or the other of these states will be inconsistent with C11.
+
+<h3><a name="Value-Returning Atomics">Value-Returning Atomics</a></h3>
+
+<p>
+Linux's value-returning atomics provide unconditional ordering.
+For example, in the following code fragment, the outcome 
+<tt>r0 == 1 &amp;&amp; r1 == 0</tt> is forbidden:
+
+<blockquote>
+<pre>
+ 1 int x, y, z, dummy;
+ 2 int r0 = 42;
+ 3 int r1 = 43;
+ 4 
+ 5 void thread0(void)
+ 6 {
+ 7   WRITE_ONCE(x, 1);
+ 8   dummy = xchg(&amp;z, 1);
+ 9   WRITE_ONCE(y, 1);
+10 }
+11 
+12 void thread1(void)
+13 {
+14   r0 = smp_load_acquire(&amp;y);
+15   r1 = READ_ONCE(x);
+16 }
+</pre>
+</blockquote>
+
+<p>
+In contrast, the closest C11 analog (from David Majnemer and
+analyzed by Chandler Carruth) does not prohibit this outcome:
+
+<blockquote>
+<pre>
+ 1 atomic_int x, y, z;
+ 2 int r0 = 42;
+ 3 int r1 = 43;
+ 4 
+ 5 void thread0(void)
+ 6 {
+ 7   atomic_store_explicit(x, 1, memory_order_relaxed);
+ 8   atomic_store_explicit(z, 1, memory_order_seq_cst);
+ 9   atomic_store_explicit(y, 1, memory_order_relaxed);
+10 }
+11 
+12 void thread1(void)
+13 {
+14   r0 = atomic_load_explicit(y, memory_order_acquire);
+15   r1 = atomic_load_explicit(x, memory_order_relaxed);
+16 }
+</pre>
+</blockquote>
+
+<p>
+Note that this category includes non-value-returning atomics enclosed within
+<tt>smp_mb__before_atomic()</tt>/<tt>smp_mb__after_atomic()</tt> pairs.
+For example, the Linux-kernel variant of <tt>thread0()</tt> could
+be written as follows with the same outcome, assuming that <tt>z</tt>
+is declared as <tt>atomic_t</tt> instead of <tt>int</tt>:
+
+<blockquote>
+<pre>
+ 1 void thread0(void)
+ 2 {
+ 3   WRITE_ONCE(x, 1);
+ 4   smp_mb__before_atomic();
+ 5   atomic_inc(&amp;z);
+ 6   smp_mb__after_atomic();
+ 7   WRITE_ONCE(y, 1);
+ 8 }
+</pre>
+</blockquote>
+
+<h3><a name="Control Dependencies">Control Dependencies</a></h3>
+
+<p>
+The Linux kernel provides control dependencies and C11 does not,
+so <tt>READ_ONCE()</tt> must either retain its current
+implementation or must be promoted to acquire.
+
+<h2><a name="So You Want Your Arch To Use C11 Atomics...">So You Want Your Arch To Use C11 Atomics...</a></h2>
+
+<p>
+So suppose that you want your Linux-kernel architecture to use C11 atomics.
+How should you go about it?
+This section looks at three scenarios:
+(1)&nbsp;A new architecture,
+(2)&nbsp;Partial conversion of an existing architecture, and
+(3)&nbsp;Full conversion of an existing architecture.
+Each of these is covered by one of the following sections.
+</p>
+
+<h3><a name="New Architecture">New Architecture</a></h3>
+
+<p>
+The potential advantages of using the C11 memory model for a new
+architecture include:
+</p>
+
+<ol>
+<li>	Delegating implementation of atomic primitives to the compiler.
+<li>	If multiple architectures take this approach, a reduction in
+	the amount of architecture-specific code.
+<li>	The compiler can undertake more optimizations.
+	It is left to the reader to decide whether this would be an
+	advantage or a disadvantage.
+</ol>
+
+<p>
+<tt>READ_ONCE()</tt> and <tt>WRITE_ONCE()</tt> should continue to use the
+existing definitions in order to avoid the C11-mandated use of locking
+for oversized objects.
+(As should <tt>ACCESS_ONCE()</tt> in pre-v4.15 kernels.)
+</p>
+
+<p>
+Memory barriers could be implemented in terms of the C11
+<tt>atomic_signal_fence()</tt> and <tt>atomic_thread_fence()</tt>
+functions as follows:
+</p>
+
+<table cellpadding="3" border=3>
+<tbody><tr><th>Linux Operation</th>
+    <th>C11 Implementation</th>
+</tr>
+<tr class="Even"><th align="left"><tt>barrier()</tt></th>
+    <td><tt>atomic_signal_fence(memory_order_seq_cst()</tt> (if safe)<br>
+<tr class="Even"><th align="left"><tt>barrier()</tt></th>
+    <td><tt>__asm__ __volatile__("": : :"memory")</tt> (otherwise)<br>
+<tr class="Odd"><th align="left"><tt>smp_mb()</tt></th>
+    <td><tt>atomic_thread_fence(memory_order_seq_cst)</tt> (if safe)<br>
+<tr class="Odd"><th align="left"><tt>smp_mb()</tt></th>
+    <td>Inline assembly otherwise<br>
+<tr class="Even"><th align="left"><tt>smp_rmb()</tt></th>
+    <td><tt>atomic_thread_fence(memory_order_acq_rel()</tt> (if safe and efficient)<br>
+<tr class="Even"><th align="left"><tt>smp_rmb()</tt></th>
+    <td>Inline assembly otherwise<br>
+<tr class="Odd"><th align="left"><tt>smp_wmb()</tt></th>
+    <td><tt>atomic_thread_fence(memory_order_acq_rel()</tt> (if safe and efficient)<br>
+<tr class="Odd"><th align="left"><tt>smp_wmb()</tt></th>
+    <td>Inline assembly otherwise<br>
+<tr class="Even"><th align="left"><tt>smp_read_barrier_depends()</tt></th>
+    <td>As in the Linux kernel<br>
+<tr class="Odd"><th align="left"><tt>smp_mb__after_atomic()</tt>
+				 <span style="font-weight:normal">and</span>
+				 <tt>smp_mb__before_atomic()</tt></th>
+    <td>Depends on implementation of non-value-returning
+        read-modify-write operations<br>
+<tr class="Odd"><th align="left"><tt>smp_mb__after_unlock_lock()</tt></th>
+    <td>Depends on implementation of locking primitives<br>
+<tr class="Odd"><th align="left"><tt>smp_mb__after_spinlock()</tt></th>
+    <td>Depends on implementation of locking primitives<br>
+</tr>
+</tbody></table>
+
+<p>
+The Linux kernel's locking primitives will likely need to remain as
+hard-coded assembly for some time to come, particularly for the
+locking primitives that interact with irq or bottom-half environments.
+Over time, it might well prove that the compiler can generate
+&ldquo;good enough&rdquo; locking primitives, but careful analysis
+and inspection should be used to make that determination.
+</p>
+
+<p>
+The <tt>atomic_t</tt> and <tt>atomic_long_t</tt> types could
+be implemented as volatile atomic <tt>int</tt> and <tt>long</tt>.
+However, this would require inspecting the code that the compiler emits
+to ensure that the value-returning atomic read-modify-write primitives
+provide full ordering both before and after, as required for the Linux
+kernel.
+Because the C11 compiler might perform optimizations that violate the
+full-ordering requirement (optimizations based on the assumption of
+data-race freedom being but one example), it would be wise to
+add <tt>barrier()</tt> directives at the beginnings and ends of the
+definitions of the value-returning atomic read-modify-write primitives.
+This prevents the compiler from carrying out any code-motion optimizations
+across the <tt>barrier()</tt> directive.
+In addition, because the C11 compiler can in many cases optimize away
+atomic operations whose results are not used, and their ordering properties
+with them, it is wise to place
+<tt>atomic_thread_fence(memory_order_seq_cst)</tt>
+before and after C11 atomics that are used to implement Linux-kernel
+value-returning read-modify-write atomics.
+Note that this assumes that the implementation in question provides
+<tt>atomic_thread_fence(memory_order_seq_cst)</tt> ordering properties
+compatible with <tt>smp_mb()</tt>.
+</p>
+
+<p>
+The generic atomic operations might be implemented by casting to
+volatile atomic objects, and, failing that, inline assembly as
+is currently used in the Linux kernel.
+</p>
+
+<p>
+Until such time as the C11 memory model implements control dependencies,
+the Linux kernel must implement them.
+Similarly, RCU must currently also be implemented by the Linux kernel
+rather than the compiler.
+That said, TSO machines (for example, x86 and the mainframe) can use
+volatile <tt>memory_order_consume</tt> loads to implement
+the <tt>rcu_dereference()</tt> family of primitives without
+incurring performance penalties.
+</p>
+
+<h3><a name="Partial Conversion of Existing Architecture">Partial Conversion of Existing Architecture</a></h3>
+
+<p>
+In some sense, a new architecture has less to lose by letting the
+compiler have a go at implementing atomic operations and memory barriers.
+In contrast, an existing architecture likely already has well-tested
+high-performance primitives implemented with inline assembly.
+Not only that, existing architectures might need to support older
+compilers that do not have robust implementations of C11 atomics.
+Therefore, any change to C11 should be implemented cautiously, if at all.
+One way of proceeding cautiously is to do a partial conversion, preferably
+permitting easy fallback to the original inline assembly.
+The non-value-returning read-modify-write atomics are likely the
+safest and easiest C11 primitives to start with.
+</p>
+
+<h3><a name="Full Conversion of Existing Architecture">Full Conversion of Existing Architecture</a></h3>
+
+<p>
+Full conversion of an existing architecture to C11 requires even more
+bravery, to say nothing of more complete validation of the relevant
+C11 functions.
+For example, it would be wise to provide a Kconfig option selecting
+between the existing inline assembly and the C11 atomics.
+This would permit continued use of old compilers where needed, and
+also allow users to decide when they are ready to trust C11.
+It would also be wise to look into David Howells's experimental
+<a href="https://lwn.net/Articles/691128/">conversion of the Linux kernel x86 architecture to C11 atomics</a>.
+
+</p>
+
+<h2><a name="Summary">Summary</a></h2>
+
+<p>
+This document makes a first attempt to present a formalizable model of
+the Linux kernel memory model, including variable access, memory barriers,
+locking operations, atomic operations, control dependencies, and
+RCU grace-period relationships.
+The general approach is to reduce the kernel's memory model to some
+aspect of memory models that have already been formalized, in particular
+to those of C11, C++11, ARM, and PowerPC.
+A formal Linux-kernel memory model has been accepted into the mainline
+Linux kernel as of April 2, 2018 in the <tt>tools/memory-model</tt>
+directory, and the corresponding
+<a href="http://doi.acm.org/10.1145/3173162.3177156">paper</a>
+has also been presented at
+<a href="https://www.asplos2018.org/">ASPLOS 2018</a>.
+</p>
+
+</body></html>

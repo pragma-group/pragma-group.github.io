@@ -1,0 +1,534 @@
+<html>
+<head>
+<title>Allowing arbitrary literal types for non-type template parameters</title>
+
+<style type="text/css">
+  ins { text-decoration:none; font-weight:bold; background-color:#A0FFA0 }
+  del { text-decoration:line-through; background-color:#FFA0A0 }
+  strong { font-weight: inherit; color: #2020ff }
+</style>
+
+</head>
+
+<body>
+N3413=12-0103<br/>
+Jens Maurer<br/>
+2012-09-19
+
+<h1>Allowing arbitrary literal types for non-type template parameters</h1>
+
+<h2>Motivation</h2>
+
+<p>
+With the introduction of <code>constexpr</code> in C++11, the gap
+between constant expressions and allowable arguments for
+non-type template parameters has widened.  This paper investigates
+how to
+allow arbitrary literal types for non-type template parameters with
+arbitrary constant expressions of the appropriate type as arguments
+for such template parameters.
+</p>
+
+<p>
+Example:
+<pre>
+struct C {
+  constexpr C(int v) : v(v) { }
+  int v;
+};
+
+template&lt;C c>
+struct X {
+  int array[c.v];
+};
+
+int main()
+{
+  X&lt;C(42)> x;
+}
+</pre>
+
+
+<h2>Design Considerations</h2>
+
+<h3>"same type" and name mangling</h3>
+
+A fundamental concept of C++ is the notion of "same type".  Function
+overloading as well as types constructed by template instantiations
+require a definite and context-free determination whether two types T1
+and T2 are the same or not.  Current language rules ensure that this
+question can be unambiguously answered in most cases, even if the
+<var>type-id</var> for the type has lexical differences.  Non-template
+example:
+
+<pre>
+  typedef int T1;
+  typedef signed int T2;
+  void f(T1);
+  void f(T2);   // redeclaration of f(int)
+</pre>
+
+Template example:
+<pre>
+  template&lt;int n>
+  struct S;
+  void f(S&lt;0>);
+  void f(S&lt;2-2>);  // redeclaration of f(S&lt;0>)
+</pre>
+
+The existing expressiveness in this area already allows
+<var>type-id</var>s where a compiler cannot practically determine
+equivalence (see 14.5.6.1 temp.over.link), for example:
+
+<pre>
+  template&lt;int n>
+  struct S;
+  template&lt;int n>
+  void f(S&lt;n>);       // #1
+  template&lt;int n>
+  void f(S&lt;n + 0>);   // ill-formed, no diagnostic required
+</pre>
+
+<p>
+Current rules restrict the type of a non-type
+<var>template-parameter</var> to a built-in simple type, where the
+compiler can determine the equivalence of template arguments by
+built-in value equivalence.  So, even with an implementation with a
+sign-magnitude implementation of integers, <code>S&lt;-0></code> and
+<code>S&lt;+0></code> are required to be the same type.
+</p>
+
+<p>
+The notion of "same type" reaches beyond a single translation unit.
+For example, given:
+</p>
+
+<pre>
+  template&lt;int n>
+  struct S {
+    static int x;
+  };
+</pre>
+<p>
+the expression <code>S&lt;42>::x</code> must be the same lvalue
+(i.e. must refer to the same object) in all translation units.
+</p>
+
+<p>
+Historically, while requiring elaborate compilers, C++ has always
+strived to remain implementable with existing linker technology.
+This implementation approach requires the compiler to devise a
+scheme so that an elaborate expression such as
+<code>S&lt;42>::x</code> can be represented to the linker as a simple
+symbol, satisfying the linker's syntactic constraints on symbols
+(length, allowable characters, etc.).  This is called <em>name
+mangling</em>.
+</p>
+
+<p>
+A fundamental observation about name mangling is that each name can be
+mangled with no context knowledge: Regardless of the context of use,
+an lvalue reference to <code>S&lt;42>::x</code> will be mangled the
+same way.
+</p>
+
+<h3>Restrictions on types for non-type template parameters</h3>
+
+<p>
+When allowing a user-defined type T as the type of a non-type
+<var>template-parameter</var>, the most natural restriction seems to
+be to restrict T to literal types.  After all, the compiler already
+has to be able to deal with values of arbitrary literal types to
+evaluate <code>constexpr</code> expressions.
+</p>
+
+<p>
+That is not enough, though, because the notion of "same type" has to be
+extended.  Currently, 14.4 temp.type reads:
+</p>
+
+<blockquote>
+Two <var>template-id</var>s refer to the same class or function if
+[...] their corresponding non-type template arguments of integral or
+enumeration type have identical values.
+</blockquote>
+
+<p>
+What does it mean for values of a literal type to have "identical values"?
+</p>
+
+<ul>
+<li>Option 1: use <code>operator==</code> on T</li>
+<li>Option 2: use member-wise equivalence
+</ul>
+
+For the following discussion, let us consider the following
+declarations:
+<pre>
+  struct L {
+    constexpr L(int v) : v(v) { }
+    int v;
+  };
+
+  template&lt;L x>
+  struct S
+  {
+    static constexpr int v = x.v;
+  };
+</pre>
+
+<p>
+Given these declarations, both <code>S&lt;L(2)>::v</code> and
+<code>S&lt;L(4)>::v</code> would be valid expressions.
+</p>
+
+<p>
+When the user can declare his own <code>operator==</code> for values
+of type L, we must require that always the same
+<code>operator==</code> ends up being used, and we must require that
+<code>operator==</code> establishes an equivalence relation, at least
+among the values actually used as template arguments.  Of course,
+<code>operator==</code> must be a constant expression to be eligible
+for compile-time evaluation.
+</p>
+
+<p>
+With these restrictions, consider a declaration of
+<code>operator==</code> like the following
+</p>
+
+<pre>
+  constexpr bool operator==(L x, L y) { return true; }
+</pre>
+
+<p>
+On a conceptual level, <code>S&lt;L(1)></code> would be the same type
+as <code>S&lt;L(2)></code>, and therefore the compile-time constants
+<code>S&lt;L(1)>::v</code> and <code>S&lt;L(2)>::v</code> would
+necessarily have the same value.  Which value to pick is for the
+compiler to choose.
+In general, this amounts to picking a unique representative member for
+each of the
+different equivalence sets established by <code>operator==</code>.
+However, the compiler cannot determine these unique members in a 
+context-independent way, because that would require analysis of an
+arbitrarily complex expression in the user-defined
+<code>operator==</code>.  Traditional name mangling, however, requires
+a context-free algorithm to determine the mangled symbol for a name,
+and thus cannot be made to work here.
+</p>
+
+<p>
+If you consider an <code>operator==</code> that always returns "true",
+thus establishing a single equivalence class, not a convincing
+example, let us consider a more realistic example exhibiting the same
+issues.  A key observation when coming up with examples is that a
+user-defined <code>operator==</code> that is semantically different
+from member-wise built-in equality will necessarily establish fewer
+equivalence classes than member-wise built-in equality does.  It
+cannot establish more, because built-in equality already considers the
+full value range for its equivalence, so there are no additional bits
+of information available to base a decision on.
+</p>
+
+<p>
+That said, let us consider a literal sign-magnitude integer type:
+</p>
+
+<pre>
+struct SMI {
+  constexpr SMI(bool n, unsigned long v) : is_negative(n), value(v) { }
+  bool is_negative;
+  unsigned long value;
+};
+</pre>
+
+Let us further define that -0 == +0, i.e. <code>operator==</code>
+looks like this:
+<pre>
+constexpr bool operator==(const SMI& l, const SMI& r)
+{
+  if (l.value == 0)
+    return r.value == 0;
+  return l.is_negative == r.is_negative && l.value == r.value;
+}
+</pre>
+
+<p>
+The analysis offered above about the difficulties in establishing a
+"same type" relationship for L and S now apply to SMI when inspecting
+the actual value of the is_negative member of any SMI instance.  There
+is just one fewer equivalence class than those established by
+member-wise built-in equality.
+</p>
+
+<p>Design sub-options:</p>
+<ul>
+<li>require the compiler to pick a unique instantiation, consistent
+across all translation units</li>
+<li>each mention of the type yields an unspecified value</li>
+<li>such use is undefined
+</ul>
+
+<p>
+The first option needs cross-translation unit analysis capabilities
+way beyond the features of today's linkers, and beyond a simple call
+to a user-defined <code>operator==</code> at link time.
+</p>
+
+<p>
+The second option seems fragile in that it invites ODR violations down
+the road, for example when these compile-time constants are used as a
+non-type template argument in another (unrelated) template.
+</p>
+
+<p>
+The third option severely limits the use of literal types with
+user-defined <code>operator==</code> as types of non-type
+<var>template-parameter</var>s, to an extend that makes option 2
+(member-wise equivalence) attractive.
+</p>
+
+<p>
+With option 2 "member-wise equivalence", name mangling is feasible,
+because values of user-defined compound types can be mangled as the
+values of the subobjects, recursively applied until a built-in type is
+reached.  This procedure is context-free.
+</p>
+
+
+<h3>Restriction on template argument deduction</h3>
+
+<p>
+Template argument deduction involving non-type template parameters of
+literal type can only be made to work in a few cases and thus should
+probably not be attempted at all.
+</p>
+
+<h2>Implementation Experience</h2>
+
+None, as far as I know.
+
+
+<h2>Open Issues</h2>
+
+(none at this time)
+
+<h2>Changes to the Working Draft</h2>
+
+These changes are sketches to record the incomplete discussion on
+arbitrary literal types as non-type template parameters.
+
+<p>
+
+Change in 14.1 temp.param paragraphs 4 and 5:
+<blockquote>
+A non-type <var>template-parameter</var> shall have <ins>literal type
+(3.9 basic.types).</ins>
+<del>one of the following (optionally cv-qualified) types:</del>
+<ul>
+<li><del>integral or enumeration type,</del></li>
+<li><del>pointer to object or pointer to function,</del></li>
+<li><del>lvalue reference to object or lvalue reference to function,</del></li>
+<li><del>pointer to member,</del></li>
+<li><del>std::nullptr_t.</del></li>
+</ul>
+<p>
+<del>[ Note: Other types are disallowed either explicitly below or
+implicitly by the rules governing the form of template-arguments (14.3
+tmep.arg). -- end note ]</del>
+The top-level <var>cv-qualifier</var>s on the
+<var>template-parameter</var>
+are ignored when determining its type.
+
+<ins>For non-type non-reference <var>template-parameter</var>s,
+at each point of instantiation of the template
+(14.6.4.1 temp.point), overload resolution (13.3.1.2 over.match.oper)
+is applied to an equality comparison (5.10 expr.eq) of two values of
+the <var>template-parameter</var>'s type T, and the built-in operator or
+operator function selected shall be the same; no diagnostic required.
+The operator function selected (if any) shall be
+<code>constexpr</code>, and for all values a, b, c of type T used in
+instantiations of the template, <code>a == b</code> shall be a
+constant expression (5.19 expr.const), <code>a == a</code> shall yield
+<code>true</code>, <code>a == b</code> shall yield the same value as
+<code>b == a</code>, and if <code>a == b</code> and <code>b ==
+c</code> both yield <code>true</code>, <code>a == c</code> shall yield
+<code>true</code>; no diagnostic required.
+</blockquote>
+
+Delete 14.1 temp.param paragraph 7:
+
+<blockquote>
+<del>A non-type template-parameter shall not be declared to have
+floating point, class, or void type. [ Example:</del>
+<pre>
+<del>  template&lt;double d> class X;    // error
+  template&lt;double* pd> class Y;    // OK
+  template&lt;double& rd> class Z;    // OK</del>
+</pre>
+<del>-- end example ]</del>
+</blockquote>
+
+Change in 14.3.2 temp.arg.nontype paragraph 1:
+
+<blockquote>
+A <var>template-argument</var> for a non-type, non-template
+<var>template-parameter</var> shall be one of:
+<ul>
+<li>for a non-type <ins>non-reference</ins>
+<var>template-parameter</var> <del>of integral or enumeration type</del>,
+a converted constant expression (5.19 expr.const) of the type of the
+<var>template-parameter</var>; or</li>
+<li><del>the name of a non-type template-parameter; or</del></li>
+<li><ins>an address constant expression (5.19 expr.const)</ins>
+<del>a constant expression (5.19) that designates the address of
+an object with static storage duration external or internal linkage or
+a function with external or internal linkage, including function
+templates and function template-ids but excluding non-static class
+members, expressed (ignoring parentheses) <code>&
+<var>id-expression</var></code>, except that the & may be omitted if
+the name refers to a function or array and shall be omitted if the
+corresponding <var>template-parameter</var> is a reference</del>;
+or</li>
+<li><del>a constant expression that evaluates to a null pointer value
+(4.10 conv.ptr); or</del></li>
+<li><ins>for a non-type reference <var>template-parameter</var>, a
+reference constant expression.</ins></li>
+<li><del>a constant expression that evaluates to a null member pointer
+value (4.11 conv.mem); or</del></li>
+<li><del>a pointer to member expressed as described in
+5.3.1.</del></li>
+</ul>
+</blockquote>
+
+Delete 14.3.2 temp.arg.nontype paragraphs 2 and 3:
+
+<blockquote>
+<del>[ Note: A string literal (2.14.5 lex.string) does not satisfy the
+requirements of any of these categories and thus is not an
+acceptable <var>template-argument</var>. [ Example:</del>
+<pre>
+<del>   template&lt;class T, const char* p> class X {
+     / ... /
+   };
+   X&lt;int, "Studebaker"> x1;            // error: string literal as template-argument
+   const char p[] = "Vivisectionist";
+   X&lt;int,p> x2;                        // OK</del>
+</pre>
+<del> -- end example ] -- end note ]</del>
+<p>
+<del>[ Note: Addresses of array elements and names or addresses of
+non-static class members are not acceptable
+<var>template-arguments</var>. [ Example:</del>
+<pre>
+<del>  template&lt;int* p> class X { };
+  int a[10];
+  struct S { int m; static int s; } s;
+  X&lt;&a[2]> x3;                    // error: address of array element
+  X&lt;&s.m> x4;                     // error: address of non-static member
+  X&lt;&s.s> x5;                     // error: &S::s must be used
+  X&lt;&S::s> x6;                    // OK: address of static member</del>
+</pre>
+<del>-- end example ] -- end note ]</del>
+
+</blockquote>
+
+Delete 14.3.2 temp.arg.nontype paragraph 5:
+
+<blockquote>
+<del>The following conversions are performed on each expression used
+as a non-type <var>template-argument</var>. ...</del>
+</blockquote>
+
+<h3>Alternative 1: use operator==</h3>
+
+Add in 8.4.2 dcl.fct.def.default: (warning: rough change)
+
+<blockquote>
+<ins>An explicitly-defaulted member function <code>operator==</code> of class C
+shall be a non-volatile const member function and shall have a return type
+<code>bool</code> and a single parameter of type C or of type
+"reference to const C".
+The operator function is defined as deleted if C has a variant member.
+Otherwise, an explicitly-defaulted member <code>operator==</code>
+is defined to compare for equality (5.10 expr.eq, 13.5.2 over.binary)
+the corresponding values of each base class and non-static data member
+in the lexical order of appearance in the class definition; it returns
+true if each subobject comparison yields true, and false
+otherwise.</ins>
+<p>
+<ins>An explicity-defaulted non-member function <code>operator==</code> shall
+have a return type <code>bool</code> and two parameters of the same
+type T where T is a class or enumeration type or a reference to const
+such a type.  If the
+parameters have enumeration type or reference to const enumeration
+type, the explicity-defaulted <code>operator==</code> returns true if the
+built-in equality comparison of the promoted type yields true, and
+false otherwise.  If the parameters have class type or reference to const
+class type, the explicitly-defaulted <code>operator==</code> has the
+same definition as-if it were a member operator of the class type.
+</ins>
+</p>
+
+</blockquote>
+
+Change in 14.4 temp.type paragraph 1:
+
+<blockquote>
+Two <var>template-id</var>s refer to the same class or function if
+<ul>
+<li>...</li>
+<li><ins>the values of</ins> their
+corresponding non-type <ins>non-reference</ins> template arguments of
+<del>integral or enumeration</del> <ins>literal</ins> type
+<ins>compare equal (5.10 expr.eq) or <code>operator==</code> (13.5.2
+over.binary) returns true (14.1 temp.param)</ins>
+<del>have identical values</del> and</li>
+<li><del>their corresponding non-type <var>template-argument</var>s of
+pointer type refer to the same external object or function or are both
+the null pointer value and</del></li>
+<li><del>their corresponding non-type <var>template-argument</var>s of
+pointer-to-member type refer to the same class member or are both the
+null member pointer value and</del></li>
+<li>their corresponding non-type <var>template-argument</var>s of reference
+type refer to the same <del>external</del> object or function and</li>
+<li>...</li>
+</ul>
+</blockquote>
+
+Change in 14.8.2.5 temp.deduct.type paragraph 8:
+<blockquote>
+A template type argument T, a template template argument TT or a
+template non-type argument i <ins>whose
+<var>template-parameter</var>'s type uses the built-in equality
+operator (14.1 temp.param)</ins> can be deduced if P and A have one of
+the following forms:
+</blockquote>
+
+
+<h3>Alternative 2: use memberwise equality</h3>
+
+Add in 8.4.2 dcl.fct.def.default:
+
+<blockquote>
+<ins>Two values of the same non-union type T are <var>memberwise
+equal</var> if</ins>
+<ul>
+<li><ins>for T a scalar type, the built-in equality comparison (5.10 expr.eq)
+of the promoted values (4.5 conv.prom) yields true, or</ins></li>
+<li><ins>for T a reference type, both references refer to the same
+object or function, or</ins></li>
+<li><ins>for T an array type, each corresponding element is memberwise
+equal, or</ins></li>
+<li><ins>for T a class type, each base class and non-variant non-static
+data member is memberwise equal.</ins></li>
+</ul>
+</blockquote>
+
+
+
+<h2>Acknowledgements</h2>
+
+Thanks to Richard Smith for some of the more annoying issues with
+allowing a user-defined <code>operator==</code>.

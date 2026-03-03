@@ -1,0 +1,483 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html><head>
+<meta http-equiv="content-type" content="text/html; charset=windows-1252">
+  <style type="text/css">
+
+.comment { color: #999999; font-style: italic; }
+.pre { color: #000099; }
+.string { color: #009900; }
+.char { color: #009900; }
+.float { color: #996600; }
+.int { color: #999900; }
+.bool { color: #000000; font-weight: bold; }
+.type { color: #FF6633; }
+.flow { color: #FF0000; }
+.keyword { color: #990000; }
+.operator { color: #663300; font-weight: bold; }
+.operator { color: #663300; font-weight: bold; }
+pre.code {
+    border: 2px solid #666;
+    background-color: #F4F4F4;
+    padding-left: 10px;
+    padding-top: 0px;
+}
+code {
+    border: 2px solid #d0d0d0;
+    background-color: LightYellow;
+    padding: 2px;
+    padding-left: 10px;
+    display:table;
+    white-space:pre;
+    margin:2px;
+    margin-bottom:10px;
+}
+dt {
+    font-weight: bold;
+}
+.ins {
+    background-color:#A0FFA0;
+}
+.del {
+    background-color:#FFA0A0;
+    text-decoration:line-through
+}    
+</style>
+
+<title>Template argument deduction for class templates (Rev. 4)</title>
+</head>
+
+<body>
+<p>Document number: P0091R1<br>
+Revision of <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/p0091r0.html">P0091R0</a><br>
+Date: 2016-02-15<br>
+Reply-To:<br>
+&nbsp;&nbsp;&nbsp;Mike Spertus, Symantec (<a href="mailto:mike_spertus@symantec.com">mike_spertus@symantec.com</a>)<br>
+&nbsp;&nbsp;&nbsp;Faisal Vali <a href="mailto:faisalv@yahoo.com"> (faisalv@yahoo.com</a>)<br>
+&nbsp;&nbsp;&nbsp;Richard Smith (<a href="mailto:richard@metafoo.co.uk">richard@metafoo.co.uk</a>)<br>
+Audience: Evolution Working Group
+</p>
+
+<h1>Template argument deduction for class templates (Rev. 4)</h1> 
+	<h2>Changes from <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/p0091r0.html">P0091R0</a></h2>
+    <ul>
+        <h3> Editorial</h3>
+        <ul>
+            <li>Added reference to a prototype implementation</li>
+            <li> Terminology change: 'canonical factory functions' are 
+referred to as 'class template deduction guides' (or 'deduction guides 
+or deducers' for short)</li>
+            <li> Replaced several uses of template parameters with 'template arguments'</li>
+            <li> Title modification to be consistent with revised terminology </li>
+        </ul>
+        <h3> Non-Editorial</h3>
+        <ul>
+            <li> Merge the notion of deduction guide - implicit vs explicit, across both our proposed techniques for deduction</li>
+            <li> Added a section on SFINAE interactions that might lead 
+to unstable constructor interfaces if constructors are used for template
+ argument deduction</li>
+        </ul>
+    </ul>
+
+    <h2>Summary</h2>
+    <p> This paper proposes extending template argument deduction for functions
+		to constructors of template classes and incorporates feedback from the EWG review of <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/p0091r0.html">P0091R0</a> and from <a href="https://github.com/faisalv/clang/tree/clang-ctor-deduction">implementation experience</a>.</p>
+<p>Currently, if we want to construct template classes, we need to specify the template arguments. 
+	For example, <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/n4498.html">N4498</a> on Variadic Lock Guards
+	gives an example of acquiring a <tt>lock_guard</tt> on two mutexes inside an <tt>operator=</tt> to properly lock both the
+	source and destination of the assignment. Expanding typedefs, the locks are acquired by the following statement
+	(See the paper for details and rationale).
+	<code>std::lock_guard&lt;std::shared_timed_mutex, std::shared_lock&lt;std::shared_timed_mutex&gt;&gt; lck(mut_, r1);</code>
+	Having to specify the template arguments adds nothing but complexity! 
+If constructors could deduce their template arguments "like we expect 
+from other functions and methods," then the following vastly simpler and
+ more intuitive code could have been used instead.
+	<code>auto lock = std::lock_guard(mut_, r1);</code>
+
+	</p>
+	<p>The sections below first spell out the problem in more detail and 
+then makes precise what "like we expect from other functions and 
+methods" means in this context.</p>
+
+	<h2><a name="Problem">The problem</a></h2>
+	
+	<p>To simplify the examples below, suppose the following definitions are in place.
+
+<code>vector&lt;int&gt; vi1 = { 0, 1, 1, 2, 3, 5, 8 };
+vector&lt;int&gt; vi2;
+std::mutex m;
+unique_lock&lt;std::mutex&gt; ul(m, std::defer_lock);
+template&lt;class Func&gt;
+class Foo() { 
+public: 
+    Foo(Func f) : func(f) {} 
+    void operator()(int i) { 
+      os &lt;&lt; "Calling with " &lt;&lt; i &lt;&lt; endl;
+      f(i); 
+    } 
+private: 
+    Func func; 
+    mutex mtx;
+};</code>
+</p><p>In the current standard, the following objects would be constructed as shown</p>
+<code>pair&lt;int, double&gt; p(2, 4.5);
+auto t = make_tuple(4, 3, 2.5);
+copy_n(vi1, 3, back_inserter(vi2));
+<span class="comment">// Virtually impossible to pass a lambda to a template class' constructor without declaring the lambda</span>
+for_each(vi2.begin(), vi2.end(), Foo&lt;<span class="comment">???</span>&gt;([&amp;](int i) { <span class="comment">...</span>}));
+lock_guard&lt;std::mutex&gt; lck(foo.mtx);
+lock_guard&lt;std::mutex, std::unique_lock&lt;std::mutex&gt;&gt; lck2(foo.mtx, ul); <span class="comment">// Notation from N4470</span>
+auto hasher = [](X const &amp; x) -&gt; size_t { <span class="comment">/* ... */</span> };
+unordered_map&lt;X, int, decltype(hasher)&gt; ximap(10, hasher);
+</code>
+
+There are several problems with the above code:
+<ul>
+
+<li>Creating "make functions" like <tt>make_tuple</tt> is confusing,
+artificial, extra boilerplate, and inconsistent with how non-template classes are constructed.</li>
+
+<li>Since the standard library doesn't follow any consistent convention for
+make functions, users have to scurry through documentation to find they need to
+use <tt>make_tuple</tt> for <tt>tuple</tt>s
+and <tt>back_inserter</tt> for <tt>back_insert_iterator</tt>s. Of course their own
+template classes might not be as consistent or thoroughly-documented as the standard.</li>
+
+<li>Specifying template arguments as in <tt>pair&lt;int, double&gt;(2, 4.5)</tt>
+should be unnecessary since they can be inferred from the type of the arguments, as is
+usual with template functions (this is the reason the standard provides make functions
+for many template classes in the first place!).
+</li>
+	<li>A make function may do more than just deduce constructor template arguments. Unless
+	a detailed study of the documentation is made (which usually only happens when debugging
+	weird unexpected behavior...), subtle changes in semantics may occur. Committee members
+	and other C++ experts are invited to see if they can tell which of the above make functions
+	simply do the "obvious" deduction of template arguments.</li>
+<li>If we don't have a make function, we may not be able to
+create class objects without prior declarations of lambdas as indicated by the <tt><span class="comment">???</span></tt>
+in the code above.</li>
+<li>Using make functions with classes that aren't movable like <tt>std::lock_guard</tt> requires appealing to
+	highly abstruse language features like copy elision for prvalues (<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/p0135r0.html">P0135R0</a>),
+	contributing to the perception that C++' conceptual model is beyond ordinary mortals.</li>
+<li>The useful technique of replacing a large function with a class by 
+organizing its code into methods to reduce cyclomatic complexity can't 
+be used for template functions</li>
+</ul>
+
+If we allowed the compiler to deduce the template arguments for constructors of
+template classes, we could replace the above with:
+
+<code>pair p(2, 4.5);
+tuple t(4, 3, 2.5);
+copy_n(vi1, 3, back_insert_iterator(vi2));
+for_each(vi.begin(), vi.end(), Foo([&amp;](int i) { <span class="comment">...</span>})); <span class="comment">// Now easy instead of virtually impossible</span>
+auto lck = lock_guard(foo.mtx);
+lock_guard lck2(foo.mtx, ul);
+unordered_map&lt;X, int&gt; ximap(10, [](X const &amp; x) -&gt; size_t { <span class="comment">/* ... */</span> }); <span class="comment">// NOTE: template argument deduction deduces the non-explicitly specified template arguments</span>
+
+</code>
+
+We believe this is more consistent and simpler for both users and writers of
+template classes, especially for user-defined classes that might
+not have carefully designed and documented make functions like <tt>pair</tt>,
+<tt>tuple</tt>, and <tt>back_insert_iterator</tt>.
+<h2>The Solution</h2>
+<p>We propose to allow a template name referring to a class template as a
+simple-type-specifier or with partially supplied explicit template arguments in two contexts:
+</p>
+<ul>
+    <li>Simple declarations of variables (or variable templates) that are also definitions whose declarator is a <i>noptr-declarator</i>
+ (i.e. not when declaring functions, template parameters, function 
+parameters, non-static data members, pointers, references etc.), and</li>
+    <code>
+    template&lt;class ... Ts&gt; struct X { X(Ts...) };
+    X x1{1}; <span class="comment">// OK X&lt;int&gt;</span>
+    X x11; <span class="comment">// OK X&lt;&gt;</span>
+    template&lt;class T&gt; X xv{(T*)0}; <span class="comment">// OK decltype(xv&lt;int&gt;) == X&lt;int*&gt;</span>
+    extern X x2; <span class="comment">// NOT OK, needs to be a definition</span>
+    X arr[10];   <span class="comment">// OK X&lt;&gt;</span>
+    X x1{1}, x2{2}; <span class="comment">// OK, deduced to the same type X&lt;int&gt;</span>
+    X&lt;int&gt; x3{1, 'a', "bc"}; <span class="comment">// OK X&lt;int,char,const char*&gt;</span>
+    X *pointer = 0; <span class="comment">// NOT OK</span>
+    X &amp;&amp;reference = X&lt;int&gt;{1};</span>
+    X function(); <span class="comment">// NOT OK</span>
+    </code>
+  <li>Explicit type conversion (functional notation) ([expr.type.conv])</li>
+</ul>
+
+<p>We propose two techniques to support template argument deduction for class templates:</p>
+    <ul>
+       <li><a href="#uec">Using implicitly synthesized deduction guides (from existing constructors)</a></li>
+	   <li><a href="#udg">Using explicitly specified deduction guides</a></li>
+    </ul>
+	These techniques can work well together as will be explained below. They
+	can also be adopted separately. Both forms received consensus straw polls
+        from EWG (although note that the authors did not vote unanimously in support of implicit guides).<p></p>
+
+    
+    <h3><a name="uec">Implicitly synthesized Deduction Guides (from existing constructors)</a></h3><a name="uec">
+<p>
+In the case of a function-notation type conversion (e.g., "<tt>tuple(1, 2.0, false)</tt>") or a direct parenthesized or braced initialization,
+the initialization is resolved as follows.
+First, constructors and constructor templates declared in the named template
+are enumerated.  Let Ci be such a constructor or constructor template;
+together they form an overload set.  A parallel overload set (i.e. the implicitly synthesized deduction guides) <i>F</i> of function templates is then created as follows:</p>
+
+<p>For each Ci a function template is constructed with template parameters that
+include both those of the named class template and if Ci is a constructor
+template, those of that template (default arguments are included too) --
+the function parameters are the constructor parameters, and the return type
+is the template-name followed by the template-parameters of the class template enclosed in &lt;&gt;</p>
+
+Deduction and overload resolution is then performed for an invented call
+to <i>F</i> with the parenthesized or braced expressions used as arguments.
+If that call doesn't yield a "best viable function", the program is ill-formed.
+Otherwise, the return type of the selected <i>F</i> template specialization becomes the deduced class template specialization.
+<p></p>
+Let's look at an example:
+<code>template&lt;typename T&gt; struct UniquePtr {
+    UniquePtr(T* t);
+    <span class="comment">...</span>
+};
+
+UniquePtr dp{new auto(2.0)};
+</code>
+<p>
+In the above example, <tt>UniquePtr</tt> is missing template arguments in the 
+declaration of 'dp' so they have to be deduced. To deduce the 
+initialized type, the compiler then creates an overload set as follows:
+</p>
+        
+<code>
+    template&lt;typename T&gt; 
+        UniquePtr&lt;T&gt; <i>F</i>(UniquePtr&lt;T&gt; const&amp;);
+    template&lt;typename T&gt; 
+        UniquePtr&lt;T&gt; <i>F</i>(UniquePtr&lt;T&gt; &amp;&amp;);
+    template&lt;typename T&gt; 
+        UniquePtr&lt;T&gt; <i>F</i>(T *p);
+    
+</code>
+<p>
+Then the compiler performs overload resolution for a call "<tt><i>F</i>(2.0)</tt>"
+ 
+which in this case finds a unique best candidate in the last synthesized
+ function and after final substitution, deduces the class template 
+specialization as <tt>UniquePtr&lt;double&gt;</tt>
+</p>     
+<p>
+Let's look at a more involved example:
+<code>template&lt;typename T&gt; struct S {
+  template&lt;typename U&gt; struct N {
+    N(T);
+    N(T, U);
+    template&lt;typename V&gt; N(V, U);
+  };
+};
+
+S&lt;int&gt;::N x{2.0, 1};
+</code>
+
+In this example, "<tt>S&lt;int&gt;::N</tt>" in the declaration of <tt>x</tt>
+is missing template arguments, so the approach above kicks in.
+Template arguments can only be left out this way from the "type" of the
+declaration, but not from any name qualifiers used in naming the template;
+i.e., we couldn't replace "<tt>S&lt;int&gt;::N</tt>" by just "<tt>S::N</tt>"
+using some sort of additional level of deduction.
+To deduce the initialized type, the compiler now creates an overload set as
+follows:
+
+<code>
+    template&lt;typename U&gt; 
+        S&lt;int&gt;::N&lt;U&gt; <i>F</i>(S&lt;int&gt;::N&lt;U&gt; const&amp;);
+    template&lt;typename U&gt; 
+        S&lt;int&gt;::N&lt;U&gt; <i>F</i>(S&lt;int&gt;::N&lt;U&gt; &amp;&amp;);
+    template&lt;typename U&gt; 
+        S&lt;int&gt;::N&lt;U&gt; <i>F</i>(int);
+    template&lt;typename U&gt;
+        S&lt;int&gt;::N&lt;U&gt; <i>F</i>(int, U);
+    template&lt;typename U, typename V&gt; 
+        S&lt;int&gt;::N&lt;U&gt; <i>F</i>(V, U);
+</code>
+
+(The first two candidates correspond to the implicitly-declared copy and move
+contructors. Note that template parameter <tt>T</tt> is already known to
+be <tt>int</tt> and is not a template parameter in the synthesized overload
+set.)
+
+Then the compiler performs overload resolution for a call "<tt><i>F</i>(2.0, 1)</tt>" 
+which in this case finds a unique best candidate in the last synthesized function
+with <tt>U = int</tt> and <tt>V = double</tt> and deduced type of <tt>S&lt;int&gt;::N&lt;int&gt;</tt>.  The initialization
+is therefore treated as "<tt>S&lt;int&gt;::N&lt;int&gt; x{2.0, 1};</tt>"
+</p>
+
+
+
+<p>
+Note that after the deduction process described above the initialization may
+still end up being ill-formed.  For example, a selected constructor might be
+inaccessible or deleted, or the selected template instance might have been
+specialized or partially specialized in such a way that the candidate
+constructors will not match the initializer.
+</p>
+
+The case of a <i>simple-declaration</i> with copy-initialization syntax is treated
+similarly to the approach described above, except that explicit constructors
+and constructor templates are ignored, and the initializer expression is
+used as the single call argument during the deduction process.
+
+<h3><a name="udg">Explicitly specified Deduction Guides</a></h3><a name="udg">
+	<p>While the above procedure generates many useful deducible constructors,
+		some constructors that we would like to be deducible are not. For example, 
+		one could imaging a function <tt>make_vector</tt>
+    defined as follows:</p>
+	<code>template&lt;typename Iter&gt;
+vector&lt;Iter::value_type&gt; make_vec(Iter b, Iter e) {
+  return vector&lt;Iter::value_type&gt;(b, e);
+}
+    </code>
+<p>Although there is no constructor in <tt>vector</tt> from which we can deduce the type
+    of the vector from two iterators, one would like to be able to deduce the type of
+	the vector from the value type of the two iterators.
+		For example, some implementations of the STL define their <tt>value_type</tt>
+<tt>typedef</tt> as follows
+<code>template&lt;typename T, typename Alloc=std::allocator&lt;T&gt;&gt;
+struct vector {
+  struct iterator {
+    typedef T value_type;
+    <span class="comment">/* ... */</span>
+  };
+  typedef iterator::value_type value_type;
+  <span class="comment">/* ... */</span>
+};
+</code>
+The detour through <tt>vector&lt;T&gt;::iterator</tt> keeps us from
+deducing that <tt>T</tt> is <tt>char</tt> in a constructor call like <tt>vector(5, 'c')</tt>.
+We would certainly like constructors like that to work.</p>
+
+<p>We suggest a notation to allow explicit specification of a deduction 
+guide in the same semantic scope as the class template using the 
+following syntax:
+	<code>template&lt;typename T, typename Alloc = std::allocator&lt;T&gt;&gt; struct vector {
+  <span class="comment">/* ... */</span>
+};
+template&lt;typename Iter&gt; vector(Iter b, Iter e) -&gt; vector&lt;typename iterator_traits&lt;Iter&gt;::value_type&gt;
+</code>
+ </p><p>In effect, this allows users to leverage all the deduction rules
+ that are specifiable by any function with a standard first-class name 
+and no boilerplate code in the body. It also allows us
+	to suppress a standard deduction from the above process via "<tt>= delete;"</tt></p>  
+
+    <p>Note that a deduction guide is not a function and shall not have a
+ body. It participates in deduction of class template arguments in a 
+similar way to the synthesized deduction guides.</p>
+    <p>Additionally, it is worthwhile to note the following:</p>
+    <ul><li>Deduction guides must name a class template and must be 
+introduced within the same semantic scope of the class template, but 
+they do not becomes members of that scope (i.e if that scope is a class)
+ </li></ul>
+<h4>Alternate notation</h4>
+As an alternative to the above notation for explicit deduction guides, one could consider a &ldquo;declaration
+	notation&rdquo;. E.g., 
+<code>template&lt;typename Iter&gt; vector&lt;typename iterator_traits&lt;Iter&gt;::value_type&gt; vector(Iter b, Iter e); 
+template&lt;typename Iter&gt; auto vector(Iter b, Iter e) -&gt; vector&lt;typename iterator_traits&lt;Iter&gt;::value_type&gt;; 
+</code>
+	<p>The point is that this uses a familiar notation to declare what the canonical &ldquo;make function&rdquo;
+	would look like as a function declaration. As the above lines are not legal C++14 (cf. &sect;14p5),
+	this would not reinterpret existing function declarations, and the compiler or linker would not need to check
+	for a function definition. This could potentially be easier for programmers to learn as they do not need to
+	learn a new grammatical construct, and there is indeed an &ldquo;function&rdquo; instantiated to match the
+	declaration. The downside of the &ldquo;declaration notation&rdquo; is of course the quotes around &ldquo;function&rdquo;, as
+	this is not actually a function declaration.</p>
+	<p>The prototype uses &ldquo;declaration notation&rdquo;, but we believe there are no technical parsing obstacles
+	to either (always a relief when defining new C++ features!) and that it is a matter of the preference of the committee.</p> 
+<h3>A note on injected class names</h3>
+<p>The focus on this paper is on simplifying the interface of a
+	class for its clients. Within a class, one may need to explicitly specify the arguments as 
+	before due to the injected class name:</p>
+<code>template&lt;typename T&gt; struct X {
+  template&lt;typename Iter&gt;
+  X(Iter b, Iter e) { <span class="comment">/* ... */</span> }
+	
+  template&lt;typename Iter&gt;
+  auto foo(Iter b, Iter e) { 
+     return X(b, e); <span class="comment">// X&lt;U&gt; to avoid breaking change</span>
+  }
+	
+  template&lt;typename Iter&gt;
+  auto bar(Iter b, Iter e) { 
+     return X&lt;Iter::value_type&gt;(b, e); <span class="comment">// Must specify what we want</span>
+  }
+};
+</code>
+<h3><a name="CodeCompatibility">Code compatibility</a></h3><a name="CodeCompatibility">
+While we cannot say whether it is a problem in practice, we should point out a 
+scenario where auto-deduction can break compatibility. 
+	
+<p>Suppose I produce a library and I'm under license to preserve source 
+compatibility across all 1.x upgrades, and I have this class template in
+ version 1.0:</p>
+
+<code>template<typename t=""> struct X {
+  X(T);
+};</typename></code>
+
+	<p>... and in version 1.1 I rewrite it as this:</p>
+
+<code>template<typename t=""> struct X {
+  struct iterator { typedef T type; };
+  X(typename iterator::type);
+};</typename></code>
+
+<p>If one of my users upgrades to C++17, with this change in the 
+language, I am no longer complying with the terms of my licensing. 
+Likewise, if this language change happens between me releasing 1.0 and 
+1.1, I can no longer release version 1.1 because it might break some of 
+my existing customers.</p>
+
+<p>The point is: current code does not express any intent about whether 
+class template parameters are deducible, based on whether they use the 
+version 1.0 code or the version 1.1 code. But this change makes that 
+implicit property into part of the de facto interface of the code.</p>
+<h3><a name="ProsConsImplicit">Pros and cons of implicit deduction guides</a></h3>
+<p>In light of the above, we think it is worth calling out the benefits and
+	costs of providing implicit deduction guides versus requiring explicit
+	deduction guides everywhere</p>
+
+<p>Basically, having to manually specify boilerplate for what is obviously expected has an 
+	insidious cost as any (honest) Java programmer can tell you. There are natural
+	implementations of all of the examples in <a href="Problem">The Problem</a> section
+	above where only implicit deduction guides are necessary. (Alternate implementations of
+	those classes may require explicit guides but do not create unnatural deductions). As many classes have
+	dozens of constructors, not only is creating myriad explicit deduction guides tedious and
+	error-prone but will (predictably) drift out of sync with the actual constructors as the class 
+	evolves. While not suitable for all purposes, this is a much-requested feature to
+	simplify routine programming (cf. range-based <tt>for</tt>) and current practice or
+	explicit deduction guides remain available (see next paragraph for exceptions) 
+	if the implicit deduction is not sufficient, mitigating downside.</p>
+	<p>So what is the cost of implicit deduction guides? The <a href="CodeCompatibility">Code compatibility</a>
+	section above shows that equivalent code in C++14 may no longer be equivalent in C++17 (Note that
+	this example does not change the behavior of C++14 code when compiled with a C++17 compiler). This particular
+	incompatibility can be rectified by adding explicit deduction guides as needed.</p>
+	<p>Another cost of implicit deduction guides is that they may trigger instantiations that
+	cause hard errors. For example, consider the following class</p>
+	<code>template&lt;class T&gt; struct X {
+     using ty = T::type;
+     static auto foo() { return typename T::type{} };
+     X(ty); #1
+     X(decltype(foo())); #2
+     X(T);
+  };
+		
+  template&lt;class T&gt;
+  struct X&lt;T*&gt; { 
+    X(...);
+  };
+	</code>
+	<p>For such a class, the prototype implementation allows</p>
+<code>X x{(int *)0};</code>
+<p>but normal instantiation rules suggest a hard error. We plan to discuss implications with
+the committee. Note that
+the current
+<code>X&lt;int *&gt; x{0}</code></p>
+remains legal.
+
+</body></html>

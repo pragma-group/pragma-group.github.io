@@ -1,0 +1,272 @@
+<html>
+<head>
+	<title>Abbreviated Lambdas for Fun and Profit</title>
+
+	<style>
+	p {text-align:justify}
+	li {text-align:justify}
+    html {
+        position: relative;
+        max-width: 1024px;
+        height: 100%;
+    }
+	blockquote.note
+	{
+		background-color:#E0E0E0;
+		padding-left: 15px;
+		padding-right: 15px;
+		padding-top: 1px;
+		padding-bottom: 1px;
+	}
+    code.codeblock {
+        border: 2px solid #d0d0d0;
+        background-color: LightYellow;
+        padding: 2px;
+        padding-left: 10px;
+        width: 100%;
+        display:table;
+        white-space:pre;
+        margin:2px;
+        margin-bottom:10px;
+    }
+    code.inline {
+        border: 2px solid #d0d0d0;
+        background-color: LightYellow;
+        padding-left: 5px;
+        padding-right: 5px;
+    }
+	ins {color:#00A000}
+	del {color:#A00000}
+	</style>
+</head>
+<body>
+
+<address align=right>
+Document number: P0573R1 <br />
+Date: 2017-06-04 <br />
+Audience: Evolution Working Group <br />
+Reply-To: Barry Revzin &lt;barry.revzin@gmail.com>
+</address>
+<hr/>
+<h1 align=center>Abbreviated Lambdas for Fun and Profit</h1>
+
+<h2>Contents</h2>
+
+<ul>
+<li><a href="#Revisions">Revisions</a></li>
+<li><a href="#Motivation">Motivation</a></li>
+<li><a href="#Proposal">Proposal</a></li>
+<li><a href="#SFINAE">SFINAE and <code>noexcept</code></a></li>
+<li><a href="#Examples">Examples</a></li>
+<li><a href="#Hyper">Hyper-abbreviated lambdas</a></li>
+<li><a href="#Priors">Prior Work and Effects on Existing Code</a></li>
+<li><a href="#Acks">Acknowledgements and References</a></li>
+</ul>
+
+<a name="Revisions" /><h2>Revisions</h2>
+
+Since r0, this paper focused on a single syntax for abbreviating lambdas, and includes a stronger motiviation for the need for SFINAE and <code>noexcept</code>. The section on abbreviated forwarding has been pulled out into its own paper, <a href="https://wg21.link/p0644">Forward without <code>forward</code></a>, and a new section has been introduced discussing expression-based lambdas. 
+
+<a name="Motivation" /><h2>Motivation</h2>
+
+<p>The introduction of lambdas in C++11 transformed the landscape of C++ tremendeously by allowing users to write arbitrary functions, predicates, and callbacks in-situ. Suddenly, instead of having to write function objects somewhere far from the code, we could write them inline. C++14 improved lambdas both by expanding their functionality (with generic lambdas) and by making them shorter (by being able to use <code>auto</code> instead of spelling out the full type name of the parameters). 
+
+<p>While lambdas are at the point where nearly arbitrary functionality is possible, it is still cumbersome and at times unnecessarily verbose to write out lambdas in the simplest of cases. A disproportionate number of lambda expressions are extremely short, consisting solely of a single expression in the body. These simple lambdas typically occur in one (or more) of these situations:
+
+<ul>
+<li> Unary/Binary predicates into algorithms.
+<li> Callbacks
+<li> Binding - simply reordering or adding new arguments for other functions. Basically, better <code>std::bind</code>.
+<li> Lifting - taking overloaded functions and lifting them into a generic lambda so that they can be passed into a function.
+</ul>
+
+In all these cases, the amount of code necessary to write a lambda seems excessive compared to the actual functionality being expressed. The lifting of overload sets [1] is a particularly awkward situation. Since we cannot simply write:
+
+<code class="codeblock">template &lt;class T>
+T twice(T x) { return x + x; }
+
+template &lt;class I>
+void f(I first, I last) {
+    transform(first, last, twice); // error
+}
+</code>
+
+we have to instead write, at the very least:
+
+<code class="codeblock">transform(first, last, [](auto&& x) -> decltype(auto) {
+    return twice(std::forward&lt;decltype(x)>(x));
+});
+</code>
+
+Very little of that code adds value to the reader.
+
+<p>Lambdas are unique in C++ in that they often are meaningless in a vacuum - they rely on the immediate context that comes from the expressions that contain them and code that precedes them. Since they often appear as sub-expressions, there is intrinsic value in making them shorter - if we can make them shorter by simply removing aspects of them that do not provide meaning to other readers of our code. In single-expression lambdas, these include:
+
+<ul>
+<li><code>return</code> for returning. The lambas this proposal refers to are single-expression. Can't we just assume that we're returning?
+<li><code>auto&&</code> for arguments. With C++14, this has become the near-default usage for lambdas. It's almost never wrong. Even if the lambda isn't intended to be used polymorphically, it's preferable to use <code>auto&&</code> rather than writing out the full name of the type. But once we're always writing <code>auto&&</code>, it itself doesn't actually have any meaning (if it ever did). Consider a predicate for sorting <code>lib::Widget</code>s by id:
+
+<code class="codeblock">// C++11
+[](lib::Widget const& a, lib::Widget const& b) { return a.id() < b.id(); }
+
+// C++14 - Widget is simply inferred
+[](auto&& a, auto&& b) { return a.id() < b.id(); }
+</code>
+
+It's a full third shorter to just use <code>auto&&</code>, but do we even need that?
+<li>Capture. Typically, this sort of lambda is invoked immediately. It will not be stored and will not last past the full-expression containing it. Similar to how <code>auto&&</code> is the de-facto parameter of choice, <code>[&]</code> is the de-facto capture of choice. 
+<li>Trailing-return type and <code>noexcept</code>. In the <code>twice()</code> example earlier, I used <code>decltype(auto)</code>. This isn't important for predicates (they should just be returning <code>bool</code> anyway), but is very important for binding and lifting. If the underlying function we're wrapping returns a reference type, we want to maintain that. But even this isn't quite sufficient - we want the lambda to be as light a wrapper as possible, and using <code>decltype(auto)</code> hides some of the functionality from metaprogramming contexts. To avoid hiding the functionality, users have to write the function body in triplicate. That is, to really completely lift the <code>twice()</code> function to a lambda, you have to write:
+<code class="codeblock">[](auto&&... args) noexcept(noexcept(twice(std::forward&lt;decltype(args)>(args)...))) -> decltype(twice(std::forward&lt;decltype(args)>(args)...)) { return twice(std::forward&lt;decltype(args)>(args)...); }</code>
+This lambda would be transparent to simply having used <code>twice()</code> by name. But nobody wants to write this ever, this is an unmaintainble monstrosity. The importance of maintaining SFINAE-friendliness and <code>noexcept</code> will be discussed later.
+</ul>
+
+<p>This proposal seeks to eliminate all of unnecessary boilerplate in simple lambdas, without preventing users from writing the arbitrarily complex lambdas that we can today.
+
+<a name="Proposal" /><h2>Proposal</h2>
+
+<p>This paper proposes the creation of a new lambda introducer, <code>=></code>, which allows for a single expression in the body that will be its return statement. The usage of <code>=></code> will address all of the bullet points above.
+
+<p>First, use of <code>=></code> allows for (and requires) omitting the <code>return</code> keyword. The programmer simply provides an expression:
+
+<code class="codeblock">[](auto&& a, auto&& b) { return a.id() < b.id(); } // C++14
+[](auto&& a, auto&& b) => a.id() < b.id()          // this proposal</code>
+
+<p>Second, use of <code>=></code> will allow for omitting types in the parameter list, defaulting to <code>auto&&</code>. This flips the treatment of a single identifer from identifying an unnamed argument of that type to identifying a forwarding reference with that name:
+
+<code class="codeblock">[](x, y) { ... }    // lambda taking two unnamed parameters of types x and y
+[](x,y) => (x > y)  // lambda taking two forwarding references named x and y
+                    // this is equivalent to std::greater<>{}</code>
+
+Or to further the prior example:
+
+<code class="codeblock">[](auto&& a, auto&& b) { return a.id() < b.id(); } // C++14
+[](a, b) => a.id() < b.id()                        // this proposal</code>
+
+<p>While types <i>may be</i> omitted, it is not mandatory.
+
+<p>Third, use of <code>=></code> will allow for omitting the capture for the lambda, defaulting to <code>[&]</code>. This allows for a very natural reading of the lambda's body, as it looks the same as any other code you might write which would naturally have access to all the other names in its scope. Omitting the capture would also allow for omitting parentheses around single-argument lambdas:
+
+<code class="codeblock">[&](auto&& w) { return w.id() == id; } // C++14
+w => w.id() == id                      // this proposal</code>
+
+<p>While capture <i>may be</i> omitted, it is not mandatory, and capture may continue to be used as normal. 
+
+<p>Lastly, use of <code>=></code> will synthesize a SFINAE-friendly, <code>noexcept</code>-correct lambda. That is, the now very concise
+<code class="codeblock">x => test(x)</code>
+shall be exactly equivalent to the C++14 lambda:
+<code class="codeblock">[](auto&& x) noexcept(noexcept(test(x))) -> decltype(test(x)) { return test(x); }</code>
+
+<a name="SFINAE" /><h2>SFINAE and <code>noexcept</code></h2>
+
+The motivation for lambdas is often to transparently wrap an expression and make it usable as a function. If I have an overload set, like:
+
+<code class="codeblock">int& foo(int& ) noexcept;
+std::string foo(char const* );</code>
+
+I can use <code>foo</code> in generic code directly by name and query whether it's invocable with a given argument type and query whether it's <code>noexcept</code> with a given argument type. This is <i>prima facie</i> important and useful. If I naively wrap <code>foo</code> in a lambda that simply returns:
+
+<code class="codeblock">[](auto&& arg) -> decltype(auto) { return foo(arg); }</code>
+
+<p>I immediately lose both abilities. This lambda is <i>never</i> <code>noexcept</code> and advertises itself as being invocable with any argument type. Since the user took the effort to deliberately mark <code>foo(int& )</code> as being <code>noexcept</code>, it seems wasteful to just drop it on the floor. 
+
+<p>Similarly, given that we only have a single expression, there is no advantage to writing <code>decltype(auto)</code> over <code>decltype(foo(arg))</code>. The latter is strictly more expressive, and more useful in more contexts. In contexts where SFINAE doesn't matter, it doesn't matter - the two are equivalent. But in contexts where it does:
+
+<code class="codeblock">bool call_me_maybe(function&lt;bool(int)> );     // #1
+bool call_me_maybe(function&lt;bool(string) > ); // #2
+
+// non-SFINAE-friendly lambda
+call_me_maybe([](auto x) { return x == 2; });                      // error! lots and lots of diagnostic
+
+// SFINAE-friendly C++14 lambda
+call_me_maybe([](auto x) -> decltype(x == 2) { return x == 2; });  // OK, calls #1
+
+// this proposal, single-expression lambdas with => are always SFINAE-friendly
+// no need to copy the whole body of the function
+call_me_maybe(x => x == 2);                                        // OK, calls #1
+</code>
+
+While having the lambdas in this case have a return type of <code>auto</code> and no <code>noexcept</code>-specification is more consistent with the language as it stands, having the lambdas, especially these kinds of lambdas, have a return type of <code>decltype(expression)</code> and <code>noexcept</code>-specification of <code>noexcept(noexcept(expression))</code> saves the user from typing a bunch of repetitive boilerplate, and gets us to the point where we can just write <i>simple</i> code that just does the Right Thing&trade;.
+
+<a name="Examples" /><h2>Examples</h2>
+
+Transparently binding an overloaded member functions <code>func</code> to an instance <code>obj</code>:
+
+<code class="codeblock">// C++14
+[&](auto&&... args) noexcept(noexcept(obj.func(std::forward&lt;decltype(args)>(args)...))) -> decltype(obj.func(std::forward&lt;decltype(args)>(args)...)) { return obj.func(std::forward&lt;decltype(args)>(args)...); }
+
+// this proposal
+(args...) => obj.func(std::forward&lt;decltype(args)>(args)...)</code>
+
+Sorting in decreasing order. Currently, we would rely on one of the many <i>named</i> function objects in the standard library to do this for us. But that involves having to actually remember what these things are named. Why do I need to know about and remember <code>std::greater<></code> if I already know about <code>></code>? The gain here isn't so much in the length (only two characters), but in the readability.
+
+<code class="codeblock">std::sort(v.begin(), v.end(), std::greater<>{}); // C++14
+std::sort(v.begin(), v.end(), (x,y) => x > y);   // this proposal</code>
+
+Once we move from directly working on the elements to working on other functions of the elements, the gain becomes much bigger. Sorting in decreasing order by ID is both shorter and much more readable:
+
+<code class="codeblock">std::sort(v.begin(), v.end(), [](auto&& x, auto&& y) { return x.id() > y.id(); }); // C++14
+std::sort(v.begin(), v.end(), std::greater<>{}, &lib::Widget::id);                 // Ranges TS, with projection
+std::sort(v.begin(), v.end(), (x,y) => x.id() > y.id());                           // this proposal
+</code>
+
+Check if all of the elements have some predicate satisfied - by element directly:
+<code class="codeblock">std::all_of(v.begin(), v.end(), [](auto&& elem) { return elem.done(); }); // C++14, direct
+std::all_of(v.begin(), v.end(), std::mem_fn(&lib::Element::done));        // C++14, with pointers to member functions
+std::all_of(v.begin(), v.end(), e => e.done());                           // this proposal
+</code>or on an external object:
+<code class="codeblock">std::all_of(v.begin(), v.end(), [&](auto&& elem) { return obj.satisfied(elem); });      // C++14, directly
+std::all_of(v.begin(), v.end(), std::bind(&lib::Element::satisfied, std::ref(obj), _1); // C++14, with std::bind*
+std::all_of(v.begin(), v.end(), elem => obj.satisfied(elem));                           // this proposal
+
+// * as long as Element::satisfied() isn't overloaded or a template
+</code>
+Looking for an element by id:
+<code class="codeblock">auto it = std::find_if(v.begin(), v.end(), [&](auto&& elem) { return elem.id() == id; }); // C++14
+auto it = std::find(v.begin(), v.end(), id, &lib::Widget::id);                            // Ranges TS, with projection
+auto it = std::find_if(v.begin(), v.end(), elem => elem.id() == id);                      // this proposal</code>
+
+Number of pairwise matches between two containers, using <code>std::inner_product</code> with two callables. With this proposal, it's negligibly shorter, but importantly you don't have to know the names of things - you just write the expressions you want to write:
+<code class="codeblock">int matches = std::inner_product(as.begin(), as.end(), bs.begin(), 0,   // C++14, example from cppreference.com
+    std::plus<>(), std::equal_to<>()); 
+int matches = std::inner_product(as.begin(), as.end(), bs.begin(), 0,   // this proposal
+    (a,b) => a + b, (a,b) => a == b);</code>
+
+In all of these cases, the lambda is really simple. Which is the point. Let's make it simpler to write simpler things. 
+
+<a name="Hyper" /><h2>Hyper-abbreviated lambdas</h2>
+
+This proposal is about as abbreviated as you can get, without loss of clarity or functionality. But we can always go deeper. Any proposal on abbreviating lambdas would be incomplete without mentioning that numerous languages (including, but not limited to Swift, Elixir, and Scala), as well as the Boost.Lambda library, allow for writing expressions that refer to arguments by number - which would then synthesize a new closure. An example using Swift's syntax with the sorting by id predicate that I have been using throughout:
+
+<code class="codeblock">[](auto&& a, auto&& b) { return a.id() < b.id(); } // C++14 (51 characters)
+(a, b) => a.id() < b.id()                          // this proposal (26)
+$0.id() < $1.id()                                  // even more abbreviation (18)</code>
+
+or checking if an element satsifes an object's test:
+
+<code class="codeblock">[&](auto&& elem) { return obj.satisfies(elem); }; // C++14 (50 characters)
+elem => obj.satisfies(elem);                      // this propsoal (29)
+obj.satisfies($0);                                // even more abbreviation (19)</code>
+
+While <code>$</code> directly is probably not the best choice in C++, there are other chracters currently unusable in this context whose meaning we could overload here (e.g. <code>&</code>). In my opinion, this next step in abbreviation is unnecessary as this proposal gets you most of the way there and now we start moving towards a brevity that sacrifices some clarity. 
+
+<a name="Priors" /><h2>Prior Work and Effects on Existing Code</h2>
+
+<p>The original paper introducing what are now generic lambdas [2] also proposed extensions for omitting the <i>type-specifier</i> and dropping the body of a lambda if it's a single expression. This paper provides a different path towards those that same goal.
+
+<p>The usage of <code>=></code> (or the similar <code>-></code>) in the context of lambdas appears in many, many programming languages of all varieties. A non-exhaustive sampling: C#, D, Erlang, F#, Haskell, Java, JavaScript, ML, OCaml, Swift. The widespread use is strongly suggestive that the syntax is easy to read and quite useful. 
+
+<p>The token <code>=></code> can appear in code in rare cases, such as in the context of passing a the address of the assignment operator as a template non-template parameter, as in <code>X<Y::operator=></code>. However, such usage is incredibly rare, so this proposal would have very limited effect on existing code. Thanks to Richard Smith for doing a search.
+
+<a name="Acks" /><h2>Acknowledgements and References</h2>
+
+<p>Thanks to Andrew Sutton and Tomasz Kaminski for considering and rejecting several bad iterations of this proposal. Thanks to Richard Smith for looking into the practicality of this design. Thanks to Nicol Bolas for refocusing the paper. Thanks to John Shaw for putting up with many crazy ideas.
+
+<p>Thanks especially to Adam Martin for presenting this proposal at Kona, and Nathan Myers for valuable feedback.
+
+
+<p> [1] <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0119r2.pdf">Overload sets as function arguments</a>
+<p> [2] <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3418.pdf">Proposal for Generic (Polymorphic) Lambda Expressions</a>
+
+
+</body>
+</html>

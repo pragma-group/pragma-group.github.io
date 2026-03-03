@@ -1,0 +1,123 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <meta http-equiv="Content-Style-Type" content="text/css" />
+  <meta name="generator" content="pandoc" />
+  <title>P0812R0: copy-list-initialization is inherently un-=</title>
+  <style type="text/css">
+table.sourceCode, tr.sourceCode, td.lineNumbers, td.sourceCode {
+  margin: 0; padding: 0; vertical-align: baseline; border: none; }
+table.sourceCode { width: 100%; }
+td.lineNumbers { text-align: right; padding-right: 4px; padding-left: 4px; color: #aaaaaa; border-right: 1px solid #aaaaaa; }
+td.sourceCode { padding-left: 5px; }
+code > span.kw { color: #007020; font-weight: bold; }
+code > span.dt { color: #902000; }
+code > span.dv { color: #40a070; }
+code > span.bn { color: #40a070; }
+code > span.fl { color: #40a070; }
+code > span.ch { color: #4070a0; }
+code > span.st { color: #4070a0; }
+code > span.co { color: #60a0b0; font-style: italic; }
+code > span.ot { color: #007020; }
+code > span.al { color: #ff0000; font-weight: bold; }
+code > span.fu { color: #06287e; }
+code > span.er { color: #ff0000; font-weight: bold; }
+  </style>
+  <style type="text/css">
+  s { background: #ff8888; }
+  u { background: #88ff88; }
+  </style>
+</head>
+<body>
+<div id="header">
+<h1 class="title">P0812R0: copy-list-initialization is inherently un-<code>=</code></h1>
+</div>
+<p>Audience: EWG<br />S. Davis Herring &lt;<script type="text/javascript">
+<!--
+h='&#108;&#x61;&#110;&#108;&#46;&#x67;&#x6f;&#118;';a='&#64;';n='&#104;&#x65;&#114;&#114;&#x69;&#110;&#x67;';e=n+a+h;
+document.write('<a h'+'ref'+'="ma'+'ilto'+':'+e+'">'+'<code>'+e+'</code>'+'<\/'+'a'+'>');
+// -->
+</script><noscript>&#104;&#x65;&#114;&#114;&#x69;&#110;&#x67;&#32;&#x61;&#116;&#32;&#108;&#x61;&#110;&#108;&#32;&#100;&#x6f;&#116;&#32;&#x67;&#x6f;&#118;</noscript>&gt;<br />Los Alamos National Laboratory<br />October 16, 2017</p>
+<h1 id="problem">Problem</h1>
+<p>Explicit constructors protect against certain silly mistakes:</p>
+<pre class="sourceCode cpp"><code class="sourceCode cpp"><span class="dt">void</span> useInts(std::unique_ptr&lt;<span class="dt">int</span>[]&gt;);
+
+<span class="dt">void</span> f() {
+  vector&lt;<span class="dt">int</span>&gt; v;
+  <span class="co">// ...</span>
+  useInts(v.data());  <span class="co">// oops</span>
+}</code></pre>
+<p>The intent of the restriction to direct-initialization is that explicit constructors (or conversion functions) can be used only where the syntax indicates that (for class types) a constructor is being called:</p>
+<pre class="sourceCode cpp"><code class="sourceCode cpp">f(T(v));         <span class="co">// explicit OK</span>
+f(v);            <span class="co">// not considered</span>
+
+T x(v);          <span class="co">// OK</span>
+T x=v;           <span class="co">// not considered</span>
+T x[]={v,v};     <span class="co">// not considered</span>
+
+<span class="kw">struct</span> A {
+  T t;
+  A() : t(v) {}  <span class="co">// OK</span>
+};</code></pre>
+<p>Note that all these examples are C++03, which has several implications:</p>
+<ol style="list-style-type: decimal">
+<li>The forms with <code>=</code> always initialize with an expression, not an argument list.</li>
+<li>More generally, copy-initialization is always converting a single value, either that being converted or (one of those) being &quot;assigned&quot; in an initializer. (So <code>explicit</code> was meaningful for a constructor only if it could be called with one argument.)</li>
+<li>Only in the mem-initializer case does the syntax indicate object construction without having <code>T</code> textually present.</li>
+</ol>
+<p>C++11 changed all of these:</p>
+<ol style="list-style-type: decimal">
+<li><code>T x={u,v};</code> initializes with an argument list for non-aggregate <code>T</code>.</li>
+<li><code>explicit</code> applies to all constructors to support that case.</li>
+<li>Function arguments (including &quot;constructor calls&quot;, <code>operator[]</code>, and any assignment operator) and return values can be braced-init-lists which construct an object of an inferred type.</li>
+</ol>
+<p>The prohibition ([over.match.list]/1) on the use of explicit constructors for this last case (copy-list-initialization without <code>=</code>) doesn't protect against anything:</p>
+<pre class="sourceCode cpp"><code class="sourceCode cpp">std::unique_ptr&lt;<span class="dt">int</span>[]&gt; getInts() {
+  <span class="dt">const</span> <span class="dt">int</span> count=<span class="co">/* ... */</span>;
+  <span class="kw">return</span> {<span class="kw">new</span> <span class="dt">int</span>[count]};  <span class="co">// ill-formed</span>
+}</code></pre>
+<p>The braces indicate the programmer's intent to construct a new object. Since they prevent the direct use of conversion functions (which might also motivate their use), a constructor must be called. The type being constructed is as obvious as in the mem-initializer case: it is the return type of the function. Yet the constructor called must be non-explicit!</p>
+<p>In C++03, direct-initialization usually involved the type name. C++11 followed that rule of thumb by treating a braced-init-list as if it were an expression to be converted despite it being syntax for object construction. It is telling that the Google C++ Style Guide <a href="https://google.github.io/styleguide/cppguide.html#Implicit_Conversions">calls out</a> this extension of the reach of <code>explicit</code>.</p>
+<h1 id="solution">Solution</h1>
+<h2 id="possibilities">Possibilities</h2>
+<p>When returning a braced-init-list, the type to be constructed is always known. Otherwise, the braced-init-list is a function argument and might be used to construct one of several types to be selected by overload resolution. The simplest change, then, would be to allow the use of any constructor only in the former case. However, consider</p>
+<pre class="sourceCode cpp"><code class="sourceCode cpp"><span class="dt">void</span> f(std::unique_ptr&lt;<span class="dt">int</span>[]&gt;, std::unique_ptr&lt;<span class="dt">float</span>[]&gt;);
+
+<span class="dt">void</span> g() {
+  f(std::make_unique&lt;<span class="dt">int</span>[]&gt;(<span class="dv">9</span>), std::make_unique&lt;<span class="dt">float</span>[]&gt;(<span class="dv">6</span>));
+  f({<span class="kw">new</span> <span class="dt">int</span>[<span class="dv">9</span>]}, {<span class="kw">new</span> <span class="dt">float</span>[<span class="dv">6</span>]});  <span class="co">// ill-formed</span>
+}</code></pre>
+<p>The simpler call to <code>f</code> is disallowed with no more benefit than in the return value case. In particular, C++17 made constructions like this safe by requiring that one of the <code>unique_ptr</code> parameters is initialized before the other <code>new</code> is evaluated.</p>
+<p>The obvious approach is to make all list-initialization without <code>=</code> be direct-list-initialization, but that would adversely affect the single-element braced-init-lists which [dcl.init.list]/3.2 handles differently for copy-list-initialization.</p>
+<h2 id="proposal">Proposal</h2>
+<p>A less pervasive change is to limit, when there is no <code>=</code>, the prohibition on the use of an explicit constructor to cases where a non-explicit constructor is also viable. Then classes can continue to use <code>explicit</code> to mark confusing cases:</p>
+<pre class="sourceCode cpp"><code class="sourceCode cpp"><span class="kw">struct</span> Score {
+  <span class="kw">explicit</span> Score(<span class="dt">const</span> <span class="dt">char</span>*, std::size_t, <span class="dt">double</span> thresh=<span class="dv">1</span>);
+  Score(std::string_view, <span class="dt">double</span> thresh=<span class="dv">1</span>);
+};
+
+Score s() {
+  <span class="kw">return</span> {<span class="st">&quot;foo&quot;</span>, <span class="dv">2</span>};  <span class="co">// error: Score(std::string_view, double) viable</span>
+}</code></pre>
+<p>Explicitness restricts the candidates for copy-initialization, but for copy-list-initialization merely makes it ill-formed to select one. Narrowing the scope of that ill-formed case is therefore a pure language extension that does not change the meaning of any well-formed program.</p>
+<h2 id="limitations">Limitations</h2>
+<p>Because types like <code>in_place_t</code> that define an explicit default constructor are particularly aiming to require <code>in_place</code> instead of just <code>{}</code> as the tag, the permission to use explicit constructors should not be casually extended to empty braced-init-lists.</p>
+<p>Consider also this example which would become well-formed:</p>
+<pre class="sourceCode cpp"><code class="sourceCode cpp"><span class="dt">void</span> f(std::string, <span class="dt">float</span>);  <span class="co">// #1</span>
+<span class="dt">void</span> f(std::ofstream, <span class="dt">int</span>);  <span class="co">// #2</span>
+
+<span class="dt">void</span> g() {f({<span class="st">&quot;foo&quot;</span>}, <span class="dv">1</span>);}    <span class="co">// selects #2</span></code></pre>
+<p>With or without this change, other arguments usually determine which type to instantiate from a braced-init-list (since [over.ics.rank]/3.3 makes almost any two user-defined conversion sequences equivalent). If, however, the newly allowable use of the explicit constructor here is deemed overly surprising, it would be possible to prohibit the use of an explicit constructor for a braced-init-list in a function call where another viable function would not require an explicit constructor for it.</p>
+<h1 id="wording">Wording</h1>
+<p>Based on N4687.</p>
+<p>Change [class.conv.ctor]/2 as follows:</p>
+<blockquote>
+<p>[ <em>Note</em>: An explicit constructor constructs objects just like non-explicit constructors, but does so only where the <s>direct-initialization syntax (11.6) or where casts (8.2.9, 8.4) are explicitly used</s><u>syntax explicitly constructs an object</u>; see also 16.3.1.4.</p>
+</blockquote>
+<p>Change [over.match.list]/1 as follows:</p>
+<blockquote>
+<p>In copy-list-initialization, if an <code>explicit</code> constructor is chosen, the initialization is ill-formed<u> if a non-<code>explicit</code> constructor is also viable, if the initializer list has no elements, or if the initializer begins with <code>=</code> ([dcl.init]/17.1)</u>.</p>
+</blockquote>
+</body>
+</html>

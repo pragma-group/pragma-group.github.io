@@ -1,0 +1,291 @@
+<html>
+<head>
+<TITLE>
+ISO/IEC JTC1/SC22/WG21
+N3898
+</TITLE>
+</head>
+<body>
+<h1>
+<img align=top src="/pics/iso44.gif" alt="ISO/">
+<img align=top src="/pics/iec44.gif" alt="IEC">
+JTC1/SC22/WG21
+N3898
+</h1>
+<pre>
+Doc No:        WG21 N3898
+Date:	       2014-01-20
+Reply to:      Geoff Pike (gpike@google.com)
+
+HASHING AND FINGERPRINTING
+
+I am largely in agreement with <a hRef="../2012/n3333.html">N3333</a> by Jeffrey Yasskin and Chandler
+Carruth.  Some extensions make <a hRef="../2012/n3333.html">N3333</a> even better.
+
+For example, one may desire different types of hash codes in different
+situations.  The commonest hash codes are those used for hash tables
+such as unordered_set.  As discussed in <a hRef="../2012/n3333.html">N3333</a>, these should rely on a
+random key generated early in the lifetime of each process.
+Programmers should not rely on these hash codes being stable from run
+to run or from platform to platform, and varying the key will help
+them understand.
+
+Other types of hash functions, that may or may not rely on keys,
+should be stable and based on fully-specified algorithms.  We mention
+some below, and will happily provide algorithms and reference
+implementations if that would be helpful.
+
+Given that multiple hash functions may traverse objects of some class,
+let's separate the code responsible for "traversing" the right parts
+of objects from the code that computes hashes.
+
+Code to hash a struct should read almost like a serializer of
+the parts relevant for hashing.  It gets interesting when work is
+required to select the right (functions of) the various fields.
+
+Proposal: allow two styles, one for "easy" cases, one more generic.
+
+// Example 1. Easy case.
+namespace my_namespace {
+  struct OtherType { ... };
+  struct MyType {
+    OtherType field1;
+    int field2;
+    char field3[500];
+    float field4;  // Does not contribute to equality.
+  };
+  auto hash_values(const MyType& val) {
+    return std::tie(val.field1, val.field2, val.field3);
+  }
+}
+
+// Example 2: Easy case with optional.
+namespace my_namespace {
+  struct OtherType { ... };
+  struct MyType {
+    bool field0;
+    OtherType field1;
+    int field2;        // Contributes to equality iff field0 is true.
+    char field3[500];
+    float field4;      // Does not contribute to equality.
+  };
+  auto hash_values(const MyType& val) {
+    typedef std::optional&lt;int> Opt;
+    return std::tie(val.field1, val.field3,
+                    val.field0 ? Opt(val.field2) : Opt());
+  }
+}
+
+// Example 3: Generic case, for those rare situations that aren't well-served
+// by "hash_values."  Rather than the "declarative feel" of the easy case, here
+// a hash function is a parameter and we explicitly pass data to it.
+namespace my_namespace {
+  struct U { ... };
+  template &lt;typename H> void polymorphic_hash(const U& u, H& h) {
+    // hash_range() and hash_as_bytes() are defined in <a hRef="../2012/n3333.html">N3333</a>.
+    h.hash_range(u.x.begin(), u.x.end());
+    h.hash_as_bytes(u.y);
+  }
+}
+
+(Or, omit the "easy" method, and require the more verbose version.)
+
+To make this scheme work with basic types we would add things like:
+  template &lt;typename H> void polymorphic_hash(const std::string& s, H& h) {
+    h.hash_range(s.data(), s.data() + s.size());
+  }
+  auto hash_values(char val) { return std::make_tuple(val); }
+  auto hash_values(bool val) { return std::make_tuple(val); }
+  auto hash_values(long val) { return std::make_tuple(val); }
+etc.
+
+DETAILS
+
+To get a hash code, we need a hasher object.  The standard will
+specify some, and implementations/libraries/etc. can add more.
+In the standard I would like to have at least the following:
+.  A basic hasher intended for hash tables and used by std::hash
+.  fingerprint64
+.  fingerprint128
+.  near_universal60
+.  near_universal120
+
+Potential additions:
+.  A faster-but-less-thorough version of the basic hasher?
+.  secure256?
+
+The requirements on the hasher object:
+
+. Must provide hashcode type.
+. Must provide hash(), hash_range(), hash_as_bytes().
+. Must provide get().  The return type of get() is hasher::hashcode.
+
+OPEN QUESTIONS
+
+. Are different ways of feeding the same data to a hash function guaranteed
+  to yield the same hash code?  I'm against.
+  E.g., I think these typically will have different hash codes:
+    hash(3, 7)
+    hash(make_pair(3, 7))
+    hash(make_optional(make_pair(3, 7)))
+
+. Should some hash functions be specified in the standard just as some
+  pseudo-random number generators are?  I'm in favor.  A portable,
+  unchanging fingerprinting function would be useful, for example.
+
+. Should we incorporate a secure hash such as SHA-3?
+
+APPENDIX: More about objects that can hash arbitrary data
+
+Sample hasher (intended for hash tables):
+
+// Intended for hash tables.  May be different on different platforms.
+// Makes no guarantees about whether hash(1, 2) has the same effect
+// as hash(1) followed by hash(2) or hash(make_pair(1, 2)) or similar.
+// Please note this is pseudocode!
+class hasher {
+ public:
+  typedef size_t hashcode;
+
+  hasher() : keys(default_keys_for_process()) { init(); }
+  explicit hasher(const size_t* k) : keys(k) { init(); }
+
+  hashcode get() const {
+    return rehash(internal_state.begin(), internal_state.end());
+  }
+
+  // hash()
+  // N-arg case boils down to N calls to the 1-arg case.
+  // 1-arg case has several options:
+  //   If the arg is a hashcode then mix it lightly into internal_state; or,
+  //   use the arg's polymorphic_hash function, if it exists; or,
+  //   use the arg's hash_values function, if it exists; or,
+  //   invoke hash_as_bytes() if that is legal.
+  // It's a compile-time error if none of those cases applies.
+  template &lt;typename T>
+  void hash(const T& t) {
+    constexpr bool p = has_polymorphic_hash(t);  // use SFINAE
+    constexpr bool v = has_hash_values(t);       // use SFINAE
+    static_assert(!p || !v);                     // shouldn't have both
+    constexpr can_use_hash_as_bytes =
+      is_trivially_copyable&lt;T>::value &&
+      is_standard_layout&lt;T>::value &&
+      is_contiguous_layout&lt;T>::value;
+    static_assert(p || v || can_use_hash_as_bytes);
+    if (p || v) {
+      hash_one_value&lt;p, T>(t);
+    } else {
+      hash_as_bytes(t);
+    }
+  }
+  template &lt;>
+  void hash(hashcode h) {
+    internal_state[h & 1] *= 9;
+    internal_state[0] += h;
+  }
+  template &lt;typename T, typename... U>
+  void hash(const T& arg0, U... args) {
+    hash(arg0);
+    hash(args...);
+  }
+
+  template &lt;typename Iterator>
+  void hash_range(Iterator start, Iterator end) {
+    internal_state[1] ^= internal_state[1] >> 23;
+    while (start != end) {
+      hash(*start++);
+    }
+  }
+
+  template &lt;typename T, typename... U>
+  void hash_as_bytes(const T& t) {
+    unsigned char* addr = reinterpret_cast&lt;const unsigned char*>(&t);
+    internal_state[1] += HashStringThoroughly(addr, addr + sizeof(t));
+    internal_state[1] += internal_state[0];
+    internal_state[0] += internal_state[1];
+  }
+
+ private:
+  void init() { internal_state[0] = keys[3]; internal_state[1] = keys[6]; }
+
+  template &lt;bool polymorphic, typename T> void hash_one_value(const T& t);
+  template &lt;typename T> void hash_one_value&lt;true, T>(const T& t) {
+    internal_state[1] += internal_state[0];
+    internal_state[0] += internal_state[1];
+    polymorphic_hash(t, *this);
+    internal_state[0] += keys[internal_state[1] & 7];
+  }
+  template &lt;typename T> void hash_one_value&lt;false, T>(const T& t) {
+    internal_state[0] ^= internal_state[0] >> 21;
+    internal_state[1] += base_case_hash(hash_values(t));
+    internal_state[0] *= 9;
+  }
+
+  // base_case_hash()
+  // Input: tuple of arbitrary types; may also use keys, but not internal_state
+  // Output: a hash
+  template &lt;typename T> size_t base_case_hash(T t);
+
+  // hash_all&lt;N, ...>(t) is a helper that fills an array of N hashes,
+each with type size_t,
+  // one for each of the first N elements in the tuple t.
+  template &lt;int N, typename T..., typename Array>
+  void hash_all(std::tuple&lt;T...> t, Array& a) {
+    a[N-1] = base_case_hash(std::get&lt;N-1>(t));
+    hash_all&lt;N-1, T..., Array>(t, a);
+  }
+  template &lt;typename T..., typename Array>
+  void hash_all&lt;0, T..., Array>(std::tuple&lt;T...> t, Array& a) {}
+
+  template &lt;typename T...>
+  size_t base_case_hash(std::tuple&lt;T...> t) {
+    constexpr size_t N = std::tuple_size&lt;decltype(t)>::value;
+    std::array&lt;size_t, N> hashes;
+    hash_all&lt;N, T..., decltype(hashes)>(t, hashes);
+    return rehash(hashes.begin(), hashes.end()) * (keys[N & 7] | 1);
+  }
+
+  template &lt;typename Iter>
+  size_t rehash(Iter start, Iter end) {
+    const size_t m = keys[5] | 1;
+    size_t h = end - start - keys[2];
+    while (start != end) {
+      h = Rotate(h, 21) * m + *start++;
+    }
+    return h;
+  }
+
+
+  std::array&lt;size_t, 2> internal_state;
+  const size_t* const keys;
+};
+
+Sample hasher (fingerprint64):
+
+Same idea, but with the hashcode struct storing 64 bits.  Also, must
+be documented as computing the same mathematical function on all
+platforms, and unchanging.  "keys" would default to some forever-fixed
+array of numbers, or not be present at all.
+
+Sample hasher (fingerprint128):
+
+A 128-bit fingerprint.
+
+Sample hasher (near_universal60):
+
+Documented to return a 64-bit hash code, have good avalanching, and
+obey the following: For two objects m != m',
+  Pr(h(m) == h(m')) &lt; about 2^-60,
+where the probability is taken over all possible values for keys.
+Useful for message authentication.
+
+Sample hasher (near_universal120):
+
+etc.
+
+Sample hasher (secure256):
+
+etc.
+</pre>
+</body>
+</html>

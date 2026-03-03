@@ -1,0 +1,264 @@
+<html><head><meta charset="UTF-8">
+<title>Extensions to the Allocator interface</title>
+  <style type='text/css'>
+  body {font-variant-ligatures: none;}
+  p {text-align:justify}
+  li {text-align:justify}
+  blockquote.note, div.note
+  {
+          background-color:#E0E0E0;
+          padding-left: 15px;
+          padding-right: 15px;
+          padding-top: 1px;
+          padding-bottom: 1px;
+  }
+  p code {color:navy}
+  ins p code {color:#00A000}
+  p ins code {color:#00A000}
+  p del code {color:#A00000}
+  ins {color:#00A000}
+  del {color:#A00000}
+  table#boilerplate { border:0 }
+  table#boilerplate td { padding-left: 2em }
+  table.bordered, table.bordered th, table.bordered td {
+    border: 1px solid;
+    text-align: center;
+  }
+  ins.block {color:#00A000; text-decoration: none}
+  del.block {color:#A00000; text-decoration: none}
+  </style>
+</head><body>
+<table id="boilerplate">
+<tr><td>Document number</td><td>P0401R0</td></tr>
+<tr><td>Date</td><td>2015-07-08</td></tr>
+<tr><td>Project</td><td>Programming Language C++, Library Evolution Working Group</td></tr>
+<tr><td>Reply-to</td><td>Jonathan Wakely &lt;cxx&#x40;kayari.org&gt;</td></tr>
+</table><hr>
+<h1>Extensions to the Allocator interface</h1>
+<ul>
+ <li>
+ <ul>
+  <li><a href="#Introduction">Introduction</a></li>
+  <li><a href="#Getting.over.allocation">Getting over allocation</a>
+  <ul>
+   <li><a href="#Interaction.with.N4524">Interaction with N4524</a></li>
+   <li><a href="#Would..realloc..be.better.">Would "realloc" be better?</a></li>
+   <li><a href="#Implementation">Implementation</a></li>
+   <li><a href="#Experimental.results">Experimental results</a></li>
+  </ul>
+  </li>
+  <li><a href="#Nothrow.overload.of.allocate..">Nothrow overload of allocate()</a></li>
+  <li><a href="#Proposed.Wording">Proposed Wording</a></li>
+ </ul>
+ </li>
+</ul>
+<a name="Introduction"></a>
+<h2>Introduction</h2>
+
+<p>Despite all the changes to allocators in each revision of the C++ standard,
+they still have a very limited interface for their main function: allocating
+memory.</p>
+
+<p>This proposal offers some ideas for new <code>allocate()</code> overloads to help
+specific use cases.</p>
+
+<a name="Getting.over.allocation"></a>
+<h2>Getting over allocation</h2>
+
+<p>Many allocators will only allocate fixed-size chunks of memory, rounding up
+requests for smaller sizes to the nearest chunk size. Because the Allocator
+interface doesn't provide any means for an allocator to expose this information
+to code using it, this can lead to very inefficient memory usage. For example a
+<code>vector</code> that allocates 36 bytes might result in a 64-byte chunk being
+allocated, but the vector only uses the 36 bytes it asked for, wasting 43% of
+the memory. If the vector then grows such that it needs 40 bytes it will ask
+the allocator for it and be given a <em>second</em> 64-byte chunk, even though the
+existing one was large enough already.</p>
+
+<p>This could be addressed by adding a new optional overload of <code>allocate</code> that
+returns the size that was actually allocated e.g.</p>
+
+<pre><code>  pointer allocate(size_type n, size_type&amp; result, const_void_pointer hint = {});
+</code></pre>
+
+<p>This would allow allocators to inform the container when they have
+over-allocated and for containers to use the additional capacity.
+<code>std::vector</code> and <code>std::string</code> would use the <code>result</code> parameter as their new
+capacity and so could avoid a re-allocation if the size grows beyond the
+originaly requested capacity but would still fit in the actually-allocated
+capacity.</p>
+
+<a name="Interaction.with.N4524"></a>
+<h3>Interaction with N4524</h3>
+
+<p>The proposal in <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/n4524.pdf">Respect vector::reserve(request) Relative to Reallocation (N4524)</a>
+would not forbid <code>std::vector::reserve(size_type)</code> from taking advantage of
+this new interface.
+All that would be required is for the allocator to guarantee that it won't
+over-allocate optimistically, i.e. it will only return a larger size than
+requested when doing so is an unavoidable consequence of how it obtains
+memory.
+If the allocator is incapable of reserving fewer than N bytes when requested
+to allocate n (where N >= n) then it can't meet the "guarantee" that N4524
+asks for anyway. Informing the <code>vector</code> of that additional amount has no
+downside (except possibly users being confused).</p>
+
+<p>So to meet the aim of N4524, <code>vector::reserve()</code> could guarantee to only <em>ask</em>
+for exactly that number of bytes, and <code>std::allocator</code> could guarantee not to
+over-allocate on the off-chance it might be used (which still allows returning
+a larger size if that's what really gets allocated anyay).  Custom allocators
+should be allowed to over-allocate as much as they like though. If users want a
+guarantee that <code>vector::reserve()</code> doesn't waste memory they should be sure to
+use an allocator that won't waste memory. That should provide a way to please
+everyone, because the decision of whether to over-allocate aggressively will be
+made by the allocator (where such decisions belong), and vector's behaviour can
+be customized by using a different allocator.</p>
+
+<a name="Would..realloc..be.better."></a>
+<h3>Would "realloc" be better?</h3>
+
+<p>An alternative that would address the same problem, at least partially,
+would be to add a <code>realloc</code>-like function as proposed by <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2013/n3495.htm">N3495</a>.
+As proposed that is a very different API to <code>std::realloc</code> which is also
+responsible for "moving" data from the old storage to the new, but that
+should be done by the container not the allocator. The N3495 proposal uses
+an exception of type <code>std::bad_alloc</code> to report when the existing memory
+region cannot be resized, which might be the common case for many allocators
+and for many allocations (e.g. even if the allocator supports the resize
+operation, doubling the size of a vector might require a new memory chunk
+anyway).
+That would also require containers to add extra code to try and resize, and
+then if that throws fall back to allocating and moving elements as done today.
+That adds exceptions and extra branching to the normal control-flow path.
+For fixed-size allocators it makes more sense, and is much simpler for
+containers to adapt to, if the allocator is able to over-allocate on the
+initial request and inform the caller how much memory was made available.
+Note, however, that my proposal doesn't help the shrink-to-fit case where
+resizing would be used to return unused memory (which not all allocators would
+be able to support anyway). It also doesn't help for allocators which don't
+over-allocate initially but might be able to grow the memory region without
+re-allocating (e.g. because the next page in the virtual address space is
+not mapped yet and so could be made available).</p>
+
+<a name="Implementation"></a>
+<h3>Implementation</h3>
+
+<p>The default implementation in <code>allocator_traits</code> would be trivial:</p>
+
+<pre><code>  pointer
+  allocate(allocator_type&amp; a, size_type n, size_type&amp; result, const_void_pointer  hint = {})
+  {
+    pointer p = allocate(a, n, hint);
+    result = n;
+    return p;
+  }
+</code></pre>
+
+<p>Whether <code>std::allocator</code> does anything different would be unspecified and
+depend on the implementation of <code>std::allocator</code>. An allocator that uses
+jemalloc could implement the function like so:</p>
+
+<pre><code>  pointer
+  jemallocator&lt;T&gt;::allocate(size_type n, size_type&amp; result, const void* = nullptr)
+  {
+    void* ptr = mallocx(n * sizeof(T), MALLOCX_ALIGN(alignof(T)));
+    result = sallocx(ptr, 0) / sizeof(T);
+    return static_cast&lt;T*&gt;(ptr);
+  }
+</code></pre>
+
+<a name="Experimental.results"></a>
+<h3>Experimental results</h3>
+
+<p>I modified the libstdc++ <code>vector</code> and <code>allocator_traits</code> to use this new
+overload, implemented the <code>jemallocator</code> function shown above, and ran this
+code in a loop:</p>
+
+<pre><code>    {
+      std::vector&lt;int, jemallocator&lt;int&gt;&gt; v;
+      v.resize(7);
+      for (int i = 0; i &lt; 1000; ++i)
+        v.push_back(1);
+    }
+</code></pre>
+
+<p>The test was run twice, once with <code>allocate</code> calling <code>sallocx</code> to obtain the
+actual size that was allocated, and again with the traditional behaviour
+(i.e. doing <code>result = n</code> instead so that extra space was not available to the
+vector).</p>
+
+<p>When the allocator returned the actual size it was 15% faster and the final
+capacity was 1024 after eight allocations, compared to 1792 after nine
+allocations. (The difference was due to whether the first allocation
+returned <code>result=8</code> or <code>result=7</code>, and so whether subsequent doubling in size
+went up in powers of two until reaching 1024, or as multiples of 7, 14, ...).</p>
+
+<p>Without the initial <code>v.resize(7)</code> the capacity in both tests grew as powers of
+two, and jemalloc always returned exactly what was requested, so there was no
+wasted space that the vector wasn't told about. However the test that returned
+the actual size was 3% slower (probably due to the overhead of calling
+<code>sallocx</code>).  Clearly the benefits will depend on workload, but there is
+potential for significant speedup with a suitable allocator. An allocator which
+doesn't require a separate call to obtain the real size of the allocation might
+avoid that 3% overhead.</p>
+
+<p>Other microbenchmarks showed no significant difference in performance with
+or without the <code>sallocx</code> call. More numbers would be useful.</p>
+
+<a name="Nothrow.overload.of.allocate.."></a>
+<h2>Nothrow overload of allocate()</h2>
+
+<p>Although they're not standard C++ there are exception-free environments
+(i.e. where everything is compiled with an option like <code>-fno-exceptions</code>)
+that range from the smallest systems to the largest.</p>
+
+<p><code>shrink_to_fit()</code> is hard to use in such codebases, because it's supposed
+to be a non-binding request, but if re-allocating fails then a naïve
+implementation will terminate rather than leaving the container unchanged.
+If containers obtained memory using <code>operator new</code> then <code>shrink_to_fit</code>
+could be made to use <code>new(std::nothrow)</code> when exceptions are disabled, but
+the Allocator API has no equivalent.</p>
+
+<p>It's also hard to use allocators in custom containers which don't use
+exceptions for error handling, since allocators can only report failure
+via exceptions. Such containers can in theory catch <code>bad_alloc</code> and report
+an error some other way, but that's impossible if <code>-fno-exceptions</code> is
+used for compilation.</p>
+
+<p>This could be addressed by adding a new optional overload of <code>allocate</code>:</p>
+
+<pre><code>  pointer allocate(nothrow_t, size_type n, const_void_pointer hint = {}) noexcept;
+</code></pre>
+
+<p>and the corresponding function in <code>allocator_traits</code>, which would simply
+call <code>a.allocate(n, hint)</code> if the allocator doesn't support the overload,
+but on failure would swallow any exception and return a null pointer.</p>
+
+<p>Implementations wishing to support exception-free codebases would ensure
+that <code>std::allocator</code> provides an implementation with an exception-free code
+path, and users could use their own allocators that define the overload.</p>
+
+<p>Implementations that don't care about supporting exception-free environments
+don't need to do any extra work, just define the overload with the default
+behaviour. Avoiding exceptions would be a quality of implementation issue,
+not a conformance one.</p>
+
+<p>For the same reasons, the over-allocating overload should also get a nothrow
+variant.</p>
+
+<a name="Proposed.Wording"></a>
+<h2>Proposed Wording</h2>
+
+<p>None at this time, the aim of this paper is only to gauge interest in these
+extensions, and consider the interaction with <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/n4524.pdf">N4524</a>.</p>
+
+<p>Any new overloads are likely to involve changes to:</p>
+
+<ul>
+<li><code>std::allocator</code></li>
+<li><code>std::allocator_traits</code></li>
+<li><code>std::memory_resource</code></li>
+<li><code>std::polymorphic_allocator</code></li>
+</ul>
+
+</body></html>

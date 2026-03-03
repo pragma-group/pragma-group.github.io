@@ -1,0 +1,408 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="content-type" content="text/html; charset=UTF-8">
+<title>N4033: synchronized_value&lt;T&gt; for associating a mutex with a value</title>
+<style type="text/css">
+p {text-align:justify}
+li {text-align:justify}
+blockquote.note
+{
+    background-color:#E0E0E0;
+    padding-left: 15px;
+    padding-right: 15px;
+    padding-top: 1px;
+    padding-bottom: 1px;
+}
+ins, .inserted
+{
+    color: black;
+    background: #a0ffa0;
+    text-decoration: underline;
+}
+del
+{
+    color: black;
+    background: #ffa0a0;
+    text-decoration: line-through;
+}
+</style>
+</head><body>
+<table>
+<tr><td>Document Number:</td><td>N4033</td></tr>
+<tr><td>Date:</td><td>2014-05-23</td></tr>
+<tr><td>Author:</td><td><a href="mailto:anthony@justsoftwaresolutions.co.uk">Anthony
+      Williams</a><br>Just Software Solutions Ltd</td></tr>
+</table>
+    <h1>N4033: <code>synchronized_value&lt;T&gt;</code> for associating a mutex with a value</h1>
+
+<p>A couple of years ago I wrote
+    an <a href="http://www.drdobbs.com/cpp/enforcing-correct-mutex-usage-with-synch/225200269">article
+    for Dr Dobb's Journal discussing a <code>synchronized_value</code>
+    template</a> to associate a mutex with a value. I'd like to
+    propose that template for standardization, with a few
+    modifications.</p>
+
+<p>The basic idea is that <code>synchronized_value&lt;T&gt;</code>
+  stores a value of type <code>T</code> and a mutex. It then exposes a
+  pointer interface, such that derefencing the pointer yields a
+  special wrapper type that holds a lock on the mutex, and that can be
+  implicitly converted to <code>T</code> for reading, and which
+  forwards any values assigned to the assignment operator of the
+  underlying <code>T</code> for writing. There is also an arrow
+  operator which allows member functions on the wrapped value to be
+  called. e.g.</p>
+
+<pre>
+synchronized_value&lt;std::string&gt; s;
+
+std::string readValue()
+{
+    return *s;
+}
+
+void setValue(std::string const&amp; newVal)
+{
+    *s=newVal;
+}
+ 
+void appendToValue(std::string const&amp; extra)
+{
+    s-&gt;append(extra);
+}
+</pre>
+
+<p>All three of these functions can be called by multiple threads
+  concurrently, and the implicit mutex locks will ensure that the
+  calls are serialized so there are no data races.</p>
+
+<p>The proposed interface also provides a
+  separate <code>update_guard&lt;T&gt;</code> template that locks the
+  mutex in a <code>synchronized_value&lt;T&gt;</code> object for a
+  longer period, thus providing the ability to perform multiple
+  operations under a single lock. This can be important for things
+  like message queues, where you want to check if the queue has a
+  value before trying to pop from the queue.</p>
+
+<pre>
+synchronized_value&lt;std::queue&lt;message_type&gt;&gt; queue;
+void process_message(){
+    std::optional&lt;message_type&gt; local_message;
+    {
+        update_guard&lt;std::queue&lt;message_type&gt;&gt; guard(queue);
+        if(!guard-&gt;empty()){
+            local_message.emplace(guard-&gt;front());
+            guard-&gt;pop_front();
+        }
+        else return;
+    }
+    do_processing(local_message.value());
+}
+</pre>
+
+<p>Finally, this proposal adds an <code>apply()</code> member function
+  to the <code>synchronized_value&lt;T&gt;</code> template, which
+  locks the mutex, and passes a reference to the stored value to the
+  supplied function. The previous example could thus be written as follows:</p>
+
+<pre>
+synchronized_value&lt;std::queue&lt;message_type&gt;&gt; queue;
+void process_message(){
+    std::optional&lt;message_type&gt; local_message;
+    queue.apply([&](std::queue&lt;message_type&gt;&amp; q){
+        if(!q.empty()){
+            local_message.emplace(q.front());
+            q.pop_front();
+        }
+    }
+    if(local_message)
+        do_processing(local_message.value());
+}
+</pre>
+
+<h2>Proposed Wording</h2>
+
+<p>Add a new section to chapter 30 as follows.</p>
+
+<blockquote class="inserted">
+  <h3>30.x Synchronized Values</h3>
+  <p>This section describes a class template to associate a mutex
+  (30.4) with a value in order to facilitate the construction of
+    race-free programs.</p>
+
+  <h4>Header &lt;synchronized_value&gt; synopsis</h4>
+
+<pre>
+namespace std {
+    template&lt;typename T&gt;
+    class synchronized_value;
+
+    template&lt;typename T&gt;
+    class update_guard;
+}
+</pre>
+
+<h4>30.x.1 Class template <code>synchronized_value</code></h4>
+
+<pre>
+namespace std
+{
+    template&lt;typename T&gt;
+    class synchronized_value
+    {
+    public:
+        synchronized_value(synchronized_value const&amp;) = delete;
+        synchronized_value&amp; operator=(synchronized_value const&amp;) = delete;
+
+        template&lt;typename ... Args&gt;
+        synchronized_value(Args&amp;&amp; ... args);
+        ~synchronized_value();
+
+        template&lt;typename F&gt;
+        auto apply(F&amp;&amp; func) -&gt; typename std::result_of&lt;F(T&amp;)&gt;::type;
+
+        <em>unspecified</em> operator-&gt;();
+        <em>unspecified</em> operator*();
+    };
+}
+</pre>
+
+  <p>An object of type <code>synchronized_value&lt;T&gt;</code> wraps
+    an object of type <code>T</code> along with a mutex to ensure that
+    only one thread can access the wrapped object at a time. The
+    wrapped object can be accessed through the pointer dereference and
+    member access operators, through an instance of the
+    std::update_guard class template, or by passing a function or
+    callable object to the <code>apply</code> member function. All
+    such accesses are done with the internal mutex locked.</p>
+
+<h5><pre>
+template&lt;typename ... Args&gt;
+synchronized_value(Args&amp;&amp; ... args);
+</pre></h5>
+
+<dl>
+  <dt>Requires:</dt>
+  <dd><code>T</code> is constructible from <code>args</code></dd>
+  <dt>Effects:</dt>
+  <dd>Constructs a <code>std::synchronized_value</code> instance
+  containing an object constructed
+  with <code>T(std::forward&lt;Args&gt;(args)...)</code>. If no
+  arguments are supplied then the wrapped object is
+  default-constructed. </dd>
+
+  <dt>Throws:</dt>
+  <dd>Any exceptions thrown by the construction of the wrapped
+  object. </dd>
+</dl>
+
+<h5><pre>
+~synchronized_value();
+</pre></h5>
+
+<dl>
+  <dt>Effects:</dt>
+  <dd>Destroys <code>*this</code> and the contained object of type <code>T</code>.</dd>
+</dl>
+
+<h5><pre>
+template&lt;typename F&gt;
+auto apply(F&amp;&amp; func) -&gt; typename std::result_of&lt;F(T&amp;)&gt;::type;
+</pre></h5>
+
+<dl>
+  <dt>Effects:</dt>
+  <dd>Locks the internal mutex, calls <code>func(t)</code>,
+    where <code>t</code> is the wrapped object of type <code>T</code>
+    store in <code>*this</code>, then unlocks the internal mutex.</dd>
+
+  <dt>Returns:</dt>
+  <dd>The return value of the call to <code>func</code>.</dd>
+
+  <dt>Throws:</dt>
+  <dd><code>std::system_error</code> if the lock could not be
+    acquired. Any exceptions thrown by the call
+    to <code>func(t)</code>. Note: the internal mutex is unlocked
+    after the call, even if <code>func(t)</code> exits with an
+    exception.</dd>
+
+  <dt>Synchronization:</dt>
+  <dd>Multiple threads may
+    call <code>apply()</code>, <code>operator-&gt;()</code>
+    or <code>operator*()</code> on the same instance
+    of <code>synchronized_value</code> concurrently without external
+    synchronization. If multiple threads
+    call <code>apply()</code>, <code>operator-&gt;()</code>
+    or <code>operator*()</code> concurrently on the same instance then
+    the behaviour is as-if they each made their call in some
+    unspecified order. The completion of the full expression
+    associated with one access synchronizes-with a subsequent access
+    to the wrapped object through <code>*this</code>.
+  </dd>
+</dl>
+
+<h5><pre>
+<em>unspecified</em> operator-&gt;();
+</pre></h5>
+
+<dl>
+  <dt>Requires:</dt>
+  <dd>Given an object <code>sv</code> of
+    type <code>std::synchronized_value&lt;T&gt;</code>, and an
+    object <code>p</code> of
+    type <code>T*</code>, <code>sv-&gt;<em>some-expr</em></code> is
+    valid if and only if <code>p-&gt;<em>some-expr</em></code> would
+    be valid. </code>
+
+    <dt>Effects:</dt>
+  <dd>Locks the internal mutex associated with <code>*this</code> and
+    returns an object that implements the member access operator to
+    access the wrapped <code>T</code> object. Unlocks the internal
+    mutex at the end of the full expression.</dd>
+
+  <dt>Note:</dt>
+  <dd>Multiple accesses to the same <code>synchronized_value</code>
+    object within the same full expression will lead to deadlock. </dd>
+
+  <dt>Throws:</dt>
+
+  <dd><code>std::system_error</code> if the lock could not be
+  acquired. </dd>
+  <dt>Synchronization:</dt>
+
+<dd>Multiple threads may
+    call <code>apply()</code>, <code>operator-&gt;()</code>
+    or <code>operator*()</code> on the same instance
+    of <code>synchronized_value</code> concurrently without external
+    synchronization. If multiple threads
+    call <code>apply()</code>, <code>operator-&gt;()</code>
+    or <code>operator*()</code> concurrently on the same instance then
+    the behaviour is as-if they each made their call in some
+    unspecified order. The completion of the full expression
+    associated with one access synchronizes-with a subsequent access
+    to the wrapped object through <code>*this</code>.
+  </dd>
+</dl>
+
+<h5><pre>
+<em>unspecified</em> operator*();
+</pre></h5>
+
+<dl>
+    <dt>Effects:</dt>
+    <dd><p>Locks the internal mutex associated with <code>*this</code>
+      and returns an object that provides access to the wrapped <code>T</code>
+      object. Unlocks the internal mutex at the end of the full
+        expression.</p>
+
+      <p>The expression <code>*sv=x</code> assigns the
+        value <code>x</code> to the wrapped object, and requires
+        that <code>T</code> is <em>MoveAssignable</em>
+        from <code>x</code>.</p>
+
+      <p><code>*sv</code> is implicitly convertible
+      to <code>T</code>. Such a conversion copy-constructs a new
+        <code>T</code> object from the stored value, and thus requires
+        that <code>T</code> is <em>CopyConstructible</em>.</p></dd>
+
+  <dt>Note:</dt>
+  <dd>Multiple accesses to the same <code>synchronized_value</code>
+    object within the same full expression will lead to deadlock. </dd>
+
+  <dt>Throws:</dt>
+
+  <dd><code>std::system_error</code> if the lock could not be
+  acquired. </dd>
+
+  <dt>Synchronization:</dt>
+
+    <dd>Multiple threads may
+    call <code>apply()</code>, <code>operator-&gt;()</code>
+    or <code>operator*()</code> on the same instance
+    of <code>synchronized_value</code> concurrently without external
+    synchronization. If multiple threads
+    call <code>apply()</code>, <code>operator-&gt;()</code>
+    or <code>operator*()</code> concurrently on the same instance then
+    the behaviour is as-if they each made their call in some
+    unspecified order. The completion of the full expression
+    associated with one access synchronizes-with a subsequent access
+    to the wrapped object through <code>*this</code>.
+  </dd>
+</dl>
+
+<h4>30.x.2 <code>update_guard</code> Class Template</h4>
+
+<pre>
+namespace std {
+    template &lt;class T&gt;
+    class update_guard
+    {
+    public:
+        explicit update_guard(synchronized_value&lt;T&gt;&amp; sv);
+        ~update_guard();
+
+        T&amp; operator*() noexcept;
+        T* operator-&gt;() noexcept;
+
+        update_guard(update_guard const&amp; ) = delete;
+        update_guard&amp; operator=(update_guard const&amp; ) = delete;
+    };
+}
+</pre>
+
+<p>An instance of <code>update_guard</code> locks the internal mutex
+  of the supplied <code>synchronized_value</code> object for the
+  lifetime of the <code>update_guard</code> object. It provides a
+  means of accessing the stored value multiple times without releasing
+  and reacquiring the lock.</p>
+
+<h5><pre>
+update_guard(synchronized_value&amp; sv);
+</pre></h5>
+
+<dl>
+  <dt>Effects:</dt>
+  <dd>Constructs a new <code>update_guard</code> with <code>sv</code>
+  as the associated <code>std::synchronized_value</code>
+    instance. Locks the mutex for <code>sv</code> for the current thread.</dd>
+
+  <dt>Throws:</dt>
+  <dd><code>std::system_error</code> if the lock could not be acquired.</dd>
+</dl>
+
+<h5><pre>
+~update_guard();
+</pre></h5>
+
+<dl>
+  <dt>Effects:</dt>
+  <dd>Destroys <code>*this</code> and unlocks the mutex for the
+    associated <code>synchronized_value</code> object.</dd>
+</dl>
+
+<h5><pre>
+T* operator-&gt;();
+</pre></h5>
+
+<dl>
+    <dt>Returns:</dt>
+    <dd>A pointer to the object of type <code>T</code> stored in the
+    associated
+      <code>synchronized_value</code> object.</dd>
+</dl>
+
+<h5><pre>
+T&amp; operator*();
+</pre></h5>
+
+<dl>
+    <dt>Returns:</dt>
+    <dd>A reference to the object of type <code>T</code> stored in the
+    associated
+      <code>synchronized_value</code> object.</dd>
+</dl>
+
+
+</blockquote>
+
+</body> </html>

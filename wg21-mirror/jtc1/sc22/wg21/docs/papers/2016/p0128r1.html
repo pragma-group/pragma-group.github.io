@@ -1,0 +1,469 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"
+        "http://www.w3.org/TR/html4/loose.dtd">
+<html>
+<head>
+	<title>constexpr if</title>
+
+	<style>
+	p {text-align:justify}
+	li {text-align:justify}
+	blockquote.note
+	{
+		background-color:#E0E0E0;
+		padding-left: 15px;
+		padding-right: 15px;
+		padding-top: 1px;
+		padding-bottom: 1px;
+	}
+	ins {color:#00A000}
+	del {color:#A00000}
+	</style>
+</head>
+<body>
+
+<address align=right>
+Document number: P0128R1
+<br/>
+<br/>
+<a href="mailto:ville.voutilainen@gmail.com">Ville Voutilainen</a><br/>
+<a href="mailto:daveed@edg.com">Daveed Vandevoorde</a><br/>
+2016-02-10<br/>
+</address>
+<hr/>
+<h1 align=center>constexpr if</h1>
+
+<h2>Changes from previous version</h2>
+
+<ul>
+  <li>This paper revises P0128R0.</li>
+  <li>Added a get() example.</li>
+  <li>Replaced the new <tt>constexpr_if</tt> keyword by the sequence of
+      existing keywords <tt>constexpr if</tt>.</li>
+  <li>Added proposed wording.</li>
+</ul>
+
+<h2>Abstract</h2>
+<p>I want to bring back parts of static if; namely bring it back
+in a form where it's
+<ul>
+<li>restricted to block scopes.</li>
+<li>restricted to appear only within templates.</li>
+<li>always going to establish a new scope.</li>
+<li>required that there exists values of the condition so that
+either condition branch is well-formed.</li>
+</ul>
+</p>
+<p>Why? Because it allows making static decisions without
+having to resort to multiple overloads. Having a static
+if allows for simple and local code, without having to
+know the intricacies of overload resolution, partial
+ordering and SFINAE.
+</p>
+
+<a name="Introduction"></a><h2>Introduction</h2>
+
+<p>
+Richard Smith explained the following:
+</p>
+<blockquote>
+<pre>
+The "controversial" parts of N3329 are that:
+1) it does not introduce a new scope, and
+2) the non-selected branch is completely ignored (the tokens aren't even 
+required to be parseable)
+
+This makes it fundamentally incompatible with the template model used by at 
+least two major implementations.
+
+If, instead, it introduced a new scope (as proposed in this thread) and we had 
+a requirement that it is possible to instantiate each arm of the static if 
+(that is, the same requirement we have for other token sequences in templates),
+then I believe the over-my-dead-body objections from implementors would disappear.
+</pre>
+</blockquote>
+<p>
+So, the proposed <tt>constexpr if</tt> statement
+should have the characteristics Richard outlined.
+</p>
+
+<a name="Motivation"></a><h2>Motivation</h2>
+
+<p>
+As the first example, I find it unwieldy to do pack unpacking with 
+multiple overloads.
+</p>
+<pre>
+<code>
+template &lt;class T&gt; 
+void f(T&& t) 
+{
+    /* handle one T */
+} 
+
+template &lt;class T, class... Rest&gt; 
+void f(T&& t, Rest&&... r) 
+{
+    f(t); 
+    /* handle the tail */
+    f(r...); // I think I have a bug here if I don't have a zero-param overload
+}
+</code>
+</pre>
+<p>
+It would be much simpler to be able to handle the unpacking in one
+function template, even though we're still writing recursive code.
+</p>
+<pre>
+<code>
+template &lt;class T, class... Rest&gt; 
+void f(T&& t, Rest&&... r) 
+{
+    /* 
+      handle one T 
+    */
+    constexpr if (sizeof...(r)) {
+    /*
+      handle the tail 
+    */
+        f(r...); // I don't need a zero-param overload to do this
+    }
+}
+</code>
+</pre>
+<p>
+Mutually exclusive constraints would also be arguably easier to grok.
+Instead of
+</p>
+<pre>
+<code>
+template &lt;class T, class... Args&gt; 
+enable_if_t&lt;is_constructible_v&lt;T, Args...&gt;, unique_ptr&lt;T&gt;&gt; 
+make_unique(Args&&... args) 
+{
+    return unique_ptr&lt;T&gt;(new T(forward&lt;Args&gt;(args)...));
+}  
+
+template &lt;class T, class... Args&gt;  
+enable_if_t&lt;!is_constructible_v&lt;T, Args...&gt;, unique_ptr&lt;T&gt;&gt;
+make_unique(Args&&... args) 
+{
+    return unique_ptr&lt;T&gt;(new T{forward&lt;Args&gt;(args)...});
+}
+</code>
+</pre>
+<p>
+we could write
+</p>
+<pre>
+<code>
+template &lt;class T, class... Args&gt; 
+unique_ptr&lt;T&gt;
+make_unique(Args&&... args) 
+{
+    constexpr if (is_constructible_v&lt;T, Args...&gt;) {
+        return unique_ptr&lt;T&gt;(new T(forward&lt;Args&gt;(args)...));
+    } constexpr_else {
+        return unique_ptr&lt;T&gt;(new T{forward&lt;Args&gt;(args)...});
+    }
+}
+</code>
+</pre>
+<p>
+Even if the enable_ifs above are turned into constraints, I daresay the
+single-function solution is much simpler. A "damn sight nicer", if you
+ask me.
+</p>
+<p>
+I expect there are many more good uses for such a facility than I can
+imagine. I have heard users hinting at wanting to write a function template
+that can take both signed and unsigned integral types, and write different
+code for the signed and unsigned cases, without having to worry about
+either branch emitting diagnostics even if never being taken - and those
+users do not think they want to write multiple overloads for integral
+types, since getting something like that right may end up being a heroic
+endeavor...
+</p>
+
+<a name="WithExisting"></a><h2>Can't we do this with existing language features?</h2>
+
+<p>
+  John Spicer suggested in c++std-ext-17099 that polymorphic lambdas
+  combined with a decision-making template would provide an adequate
+  facility without a need to add new language features. The invocation
+  of that decision-making template looks roughly like this:
+</p>
+<p>
+<pre>
+<code>
+template &lt;int arg, typename ... Args&gt; int do_something(Args... args) {
+    return static_if&lt;sizeof...(args)&gt;::get(
+        [](auto x, auto y) { return x+y; },
+        [](auto x) { return *x; })(args...);
+}
+</code>    
+</pre>
+</p>
+
+<p>Now, in comparison, with the proposed language facility, we do</p>
+<p>
+<pre>
+<code>
+template &lt;int arg, typename ... Args&gt; int do_something(Args... args) {
+    constexpr if (sizeof...(args)) {
+        return (args + ...);
+    } constexpr_else {
+        return *args...;
+    }
+}
+</code>    
+</pre>    
+</p>
+<p>
+  Yes, I'm cheating - we nowadays have fold expressions. :) Without them,
+  the equivalent code without would probably be written with a lambda, or
+  by using a temporary tuple or array. I must point out some things here:
+  <ul>
+    <li>
+      I can return, break, continue and goto from within a constexpr if block.
+      I can not do that from within the lambda.
+    </li>
+    <li>
+      While I am a big proponent of using lambdas to create new control
+      facilities, I find the constexpr if solution infinitely more readable.
+    </li>
+  </ul>
+</p>
+
+<p>
+  Richard Smith explained the following:
+</p>
+  <blockquote>
+  <pre>
+    Right, when a function template is instantiated, all of the
+    declarations/statements/expressions within it are instantiated,
+    and that includes pieces inside local classes, generic lambdas, and so on.
+
+    This instantiation of generic lambda bodies is in fact necessary for
+    our language semantics -- computing the captures of a generic lambda
+    within a function template specialization relies on us having already
+    instantiated the complete closure type and its call operator template
+    to the point that we know where the odr-uses are within the non-dependent
+    full-expressions within the body.
+  <pre>
+  </blockquote>
+<p>
+  In contrast, the intent of constexpr if is that the branch not taken is
+  not instantiated.
+</p>
+
+<a name="Concepts"></a><h2>Yes, but don't Concepts provide a superior alternative?</h2>
+
+<p>
+Yes, for expressing the constraints of a function template, they do. No, for
+simplicity and locality of code, they don't. It's certainly easier to
+write (mutually exclusive and other) constraints with concepts, since it's possible to overload
+on concepts. The lack of locality remains, and the need to understand
+overload resolution, partial ordering and SFINAE remains. I posit that
+there are many simple cases where all that is still overly complex
+when a simple block-scope static condition would do much better. Chances
+are, of course, that combining Concepts with a constexpr if can lead to
+expressive designs that are far superior to what either of these facilities 
+can provide in isolation.
+</p>
+
+<a name="Destructuring"></a><h2>Example for tying into a potential destructuring facility</h2>
+
+<p>
+  Somewhat hypothetically, we might one day get a facility that allows
+  destructuring compound objects into individual objects. There's some
+  chance that something like that would be implemented in terms of
+  a <code>get&lt;&gt;</code> function or function template. With constexpr if,
+  I believe I can write the following:
+</p>
+<p>
+<pre>
+<code>
+class X
+{
+    int x;
+    string y;
+    float z;
+public:
+    int get_x() {return x;}
+    string get_y() {return y;}
+    float get_z() {return z;}
+};
+
+template &lt;size_t I&gt;
+auto get(X& x)
+{
+    constexpr if (I == 0)
+        return x.get_x();
+    constexpr if (I == 1)
+        return x.get_y();
+    constexpr if (I == 2)
+        return x.get_z();
+    // static_assert(I <= 2); // not needed in this particular case
+}
+</code>    
+</pre>    
+</p>
+<p>
+  Incidentally, this code relies on the fact that void is NOT a regular
+  type; it is assumed that the destructuring facility that calls it
+  will initialize variables of the return type, or of references to
+  the return type. Therefore the calling code will automatically
+  be ill-formed if the function above is called with I larger than two,
+  since the return type is void, and variables of type void or reference
+  to void are forbidden.
+</p>
+<p>
+  Now, let's write the get part in C++14 code:
+</p>
+<p>
+<pre>
+<code>
+template &lt;size_t I&gt;
+auto get(X& x);
+
+
+template &lt;&gt;
+auto get&lt;0&gt;(X& x)
+{
+    return x.get_x();
+}
+
+template &lt;&gt;
+auto get&lt;1&gt;(X& x)
+{
+    return x.get_y();
+}
+
+template &lt;&gt;
+auto get&lt;2&gt;(X& x)
+{
+    return x.get_z();
+}
+</code>    
+</pre>    
+</p>
+<p>
+  You might say "oh, we need to deal with rvalues, too". I can certainly easily
+  write the one overload for the function using a constexpr if. And sure,
+  I can write the three additional overloads for the rvalue case in C++14.
+  Which one is more palatable is left as an exercise for the reader,
+  but to me, the decision which technique to use would be somewhat
+  obvious. I can also write a template that handles both lvalues and
+  rvalues, or three template overloads for the C++14 case.
+</p>
+<a name="Implementability"></a><h2>Implementability</h2>
+<p>
+  Faisal Vali has implemented a prototype for clang, 
+  <a href="https://github.com/faisalv/clang/tree/static_if">here</a>.
+</p>
+
+<a name="Teachability"></a><h2>Teachability</h2>
+<p>
+Adding this facility will increase the overall complexity of the language,
+and since it's not identical or even very similar to the static if in D,
+it's not trivial to teach. I do have high hopes that it would be much
+simpler to teach for simple cases than using multiple overloads or using
+a metaprogramming facility with lambdas would be.
+</p>
+
+<a name="Wording"></a><h2>Wording</h2>
+
+<p>
+  In [stmt.select], edit the grammar for <i>selection-statement</i> as follows:
+</p>
+<blockquote>
+<pre>
+<i>selection-statement:</i>
+    if ( condition ) statement
+    if ( condition ) statement else statement
+    <ins>constexpr if ( <i>condition</i> ) <i>statement</i></ins>
+    <ins>constexpr if ( <i>condition</i> ) <i>statement</i> constexpr else <i>statement</i></ins>
+    switch ( <i>condition</i> ) <i>statement</i>
+</pre>
+</blockquote>
+
+<p>
+  Insert a new subclause after [stmt.if]:
+</p>
+
+<blockquote>
+<h4>
+<ins>6.4.2 The constexpr if statement</ins>
+</h4>
+
+<p>
+<ins>A <tt>constexpr if</tt> statement shall appear only in the
+<i>function-body</i> of a function template or in the <i>compound-statement</i>
+of a generic lambda.
+The <i>condition</i> shall be a contextually converted constant expression
+of type <tt>bool</tt>.  During an instantiation of the enclosing function
+template or generic lambda, if the converted condition is <tt>true</tt>
+and the statement includes a <tt>constexpr else</tt> substatement, that
+substatement is not instantiated.  Conversely, if the condition is
+<tt>false</tt>, the first substatement is not instantiated.  A label
+(<tt>_stmt.label</tt>) declared in a substatement that is not instantiated
+shall not be referred to by a statement (<tt>_stmt.goto_</tt>,
+<tt>_stmt.switch_</tt>) that is instantiated.
+</p>
+
+<p><ins>[ <i>Example:</i></ins>
+<pre>
+<ins>template&lt;typename T, typename ... Rest &gt; void g(T&& p, Rest&& ...rs) {</ins>
+  <ins>// ... handle p</ins>
+  <ins>constexpr if (sizeof...(rs) &gt; 0) {</ins>
+    <ins>f(rs...);  // Never instantiated with an empty argument list.</ins>
+  <ins>}</ins>
+<ins>}</ins>
+</pre><ins> &mdash; end example]</ins>
+</p>
+
+<p>
+<ins>In all other respects, a <tt>constexpr if</tt> statement is equivalent to
+the ordinary <tt>if</tt> statement obtained by dropping the leading
+<tt>constexpr</tt> keyword.</ins>
+</p>
+</blockquote>
+
+<p>
+  Edit [temp.inst]/11 as follows:
+</p>
+<blockquote>
+<p>
+An implementation shall not implicitly instantiate a function template,
+a variable template, a member template, a non-virtual member function,
+a member class,<del> or</del> a static data member of a class template<ins>,
+or a substatement of a <tt>constexpr if</tt> statement </ins>that
+does not require instantiation.
+</p>
+</blockquote>
+
+<p>
+  Edit [temp.decls]/2 as follows:
+</p>
+<blockquote>
+<p>
+For purposes of name lookup and instantiation, default arguments
+and exception-specifications of function templates and default
+arguments and exception-specifications of member functions of class
+templates are considered definitions; each default argument or
+exception-specification is a separate definition which is
+unrelated to the function template definition or to any other
+default arguments or exception-specifications.
+<ins>For the purpose of instantiation, the substatements of a
+<tt>constexpr if</tt> statement are considered definitions; each such
+statement is a separate definition which is unrelated to the
+surrounding function definition.</ins>
+</p>
+</blockquote>
+
+</body>
+
+</html>
+
+
+

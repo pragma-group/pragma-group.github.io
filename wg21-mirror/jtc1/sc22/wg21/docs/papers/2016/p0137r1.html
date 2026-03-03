@@ -1,0 +1,860 @@
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=windows-1252">
+<title>Core Issue 1776: Replacement of class objects containing reference members (et al)</title>
+
+<style type="text/css">
+  ins, ins * { text-decoration:none; font-weight:bold; background-color:#A0FFA0 }
+  del, del * { text-decoration:line-through; background-color:#FFA0A0 }
+  #hidedel:checked ~ * del, #hidedel:checked ~ * del * { display:none; visibility:hidden }
+
+blockquote { color: #000000; background-color: #F1F1F1;
+  border: 1px solid #D1D1D1;
+  padding-left: 0.5em; padding-right: 0.5em; }
+blockquote.stdins { text-decoration: underline;
+  color: #000000; background-color: #C8FFC8;
+  border: 1px solid #B3EBB3; padding: 0.5em; }
+blockquote.stddel { text-decoration: line-through;
+  color: #000000; background-color: #FFEBFF;
+  border: 1px solid #ECD7EC;
+  padding-left: 0.5empadding-right: 0.5em; ; }
+</style>
+
+</head>
+
+<body>
+<div style="text-align: right; float: right">
+ISO/IEC JTC1 SC22 WG21<br>
+P0137R1<br>
+Richard Smith<br>
+richard@metafoo.co.uk<br>
+2016-06-23<br>
+</div>
+
+<h1>Core Issue <a href="http://wg21.link/cwg1776">1776</a>: Replacement of class objects containing reference members</h1>
+
+And also:<br>
+Core Issue <a href="http://wg21.link/cwg1116">1116</a>: Aliasing of union members
+</p>
+
+<h2>Changes since <a href="http://wg21.link/p0137r0">R0</a></h2>
+<ul>
+  <li>creating a new object that exactly displaces a subobject of an existing object creates a new subobject of that existing object
+  <li>assigning to a union member access expression can change the active union member
+  <li>an array of <tt>unsigned char</tt> can be used to hold other objects
+  <li>reallow casts between pointer types to work in a small handful of C-compatible cases (between a struct and its first member etc)
+</ul>
+
+<!--
+
+TODO:
+
+discuss the "addressable bytes of storage" question
+ - can launder allow us to address bytes of storage we couldn't before?
+   necessary for hubert's object splitting optimization
+proposed answer: no; see launder wording
+
+discuss 2182:
+ - the vector<T> issue: vector<T>::data() and the contiguous iterator
+   guarantees are the problem here (under-encapsulation)
+   to make this work we need to either chnage what pointer arithmetic means, or
+   give the library a way to create a notional array object without initializing
+   its elements; the latter seems superior
+ - the 'struct Base {...}; struct Derived : Base {}; Derived d[20]; Base *p = d;
+   Base *q = &p[10]; ' issue; this is relatively easy to support in [expr.add]
+retain this as separate issue rather than folding it in here?
+
+-->
+
+<h2>Core wording</h2>
+
+<input type="checkbox" id="hidedel">Hide deleted text
+
+<p>
+Change in 1.8 (intro.object) paragraph 1:
+</p>
+
+<blockquote>
+The constructs in a C++
+program create, destroy, refer to, access, and manipulate objects.
+<ins>
+An <em>object</em> is created
+by a <em>definition</em> (3.1),
+by a <em>new-expression</em> (5.3.4),
+when implicitly changing the active member of a union ([class.union]),
+or when a temporary object is created ([conv.rval], [class.temporary]).
+</ins>
+An <del><em>object</em> is</del><ins>object occupies</ins> a region of storage <ins>in its period of construction (12.7 class.cdtor), throughout its lifetime (3.8 basic.life), and in its period of destruction (12.7 class.cdtor)</ins>.
+[&nbsp;<em>Note</em>:
+A function is not an object, regardless of whether or not it occupies storage in the
+way that objects do.
+&mdash;&nbsp;<em>end note</em>&nbsp;]
+<del>
+An object is created by a <em>definition</em> (3.1), by a <em>new-expression</em> (5.3.4)
+or by the implementation (12.2) when needed.
+</del>
+[&hellip;]
+</blockquote>
+
+<em>Drafting note: this maintains the status quo that <tt>malloc</tt> alone is
+  not sufficient to create an object.</em>
+<em>Drafting note: the terms "period of construction" and "period of destruction"
+  are in core issue 1517, which is not yet approved, but their use here seems
+  sufficiently clear with or without that change.</em>
+
+<p>
+Change in 1.8 (intro.object) paragraph 2:
+</p>
+
+<blockquote>
+Objects can contain other objects, called <em>subobjects</em>. A subobject can
+be a <em>member subobject</em> (9.2), a <em>base class subobject</em> (Clause
+10), or an array element. An object that is not a subobject of any other object
+is called a <em>complete object</em>.
+
+<ins>If an object is created in storage associated with a member subobject or
+array element <em>e</em> (which may or may not be within its lifetime),
+the created object is a subobject of <em>e</em>'s containing object if:
+<ul>
+<li>the lifetime of <em>e</em>'s containing object has begun and not ended, and
+<li>the storage for the new object exactly overlays the storage location
+associated with <em>e</em>, and
+<li>the new object is of the same type as <em>e</em> (ignoring cv-qualification).
+</ul>
+[&nbsp;<em>Note</em>: 
+If the subobject contains a reference member or a const subobject,
+the name of the original subobject cannot be used to access the new object
+([basic.life]).
+&mdash;&nbsp;<em>end note</em>&nbsp;]
+[&nbsp;<em>Example</em>:
+<pre>struct X { const int n; };
+union U { X x; float f; };
+void tong() {
+  U u = {{ 1 }};
+  u.f = 5.f;                          // OK, creates new subobject of 'u' (9.5)
+  X *p = new (&amp;u.x) X {2};            // OK, creates new subobject of 'u'
+  assert(p-&gt;n == 2);                  // OK
+  assert(*std::launder(&amp;u.x.n) == 2); // OK
+  assert(u.x.n == 2);                 // undefined behavior, 'u.x' does not name new subobject
+}</pre>
+&mdash;&nbsp;<em>end example</em>&nbsp;]
+</ins>
+</blockquote>
+
+<p>
+Add a new paragraph after 1.8 (intro.object) paragraph 2:
+</p>
+
+<blockquote class=stdins>
+If a complete object is created (5.3.4) in storage associated with another
+object <em>e</em> of type "array of <tt>N unsigned char</tt>",
+that array <em>provides storage</em> for the created object if:
+<ul>
+<li>the lifetime of <em>e</em> has begun and not ended, and
+<li>the storage for the new object fits entirely within <em>e</em>, and
+<li>there is no smaller array object that satisfies these constraints.
+</ul>
+[&nbsp;<em>Note</em>: 
+If that portion of the array previously provided storage for another
+object, the lifetime of that object ends because its storage was reused
+([basic.life]).
+&mdash;&nbsp;<em>end note</em>&nbsp;]
+[&nbsp;<em>Example</em>:
+<pre>template&lt;typename ...T>
+struct AlignedUnion {
+  alignas(T...) unsigned char data[max(sizeof(T)...)];
+};
+int f() {
+  AlignedUnion&lt;int, char> au;
+  int *p = new (au.data) int; // OK, au.data provides storage
+  char *c = new (au.data) char(); // OK, ends lifetime of *p
+  char *d = new (au.data + 1) char();
+  return *c + *d; // OK
+}
+</pre>
+&mdash;&nbsp;<em>end example</em>&nbsp;]
+</ins>
+</blockquote>
+
+<p>
+Add another new paragraph after 1.8 (intro.object) paragraph 2:
+</p>
+
+<blockquote class=stdins>
+An object <tt>a</tt> is <em>nested within</em> another object <tt>b</tt> if:
+<ul>
+  <li><tt>a</tt> is a subobject of <tt>b</tt>, or
+  <li><tt>b</tt> provides storage for <tt>a</tt>, or
+  <li>there exists an object <tt>c</tt> where <tt>a</tt> is nested within
+  <tt>c</tt>, and <tt>c</tt> is nested within <tt>b</tt>.
+</ul>
+</blockquote>
+
+<p>
+Change in 1.8 (intro.object) paragraph 6:
+</p>
+
+<blockquote>
+Unless an object is a bit-field or a base class subobject of zero size,
+the address of that object is the address of the first byte it occupies.
+Two objects <ins><tt>a</tt> and <tt>b</tt> with overlapping lifetimes</ins>
+that are not bit-fields
+may have the same address if
+one is <del>a subobject of</del> <ins>nested within</ins> the other, or
+if at least one is a base class subobject of zero size and they are of different types;
+otherwise, they <del>shall</del> have distinct addresses. [Footnote: &hellip;] [Example: &hellip;]
+</blockquote>
+
+<p>
+Add a new paragraph after 3.7 (basic.stc) paragraph 3:
+</p>
+
+<blockquote class="stdins">
+When the end of the duration of a region of storage is reached,
+the values of all pointers representing the address of
+any part of that region of storage
+become invalid pointer values ([basic.compound]).
+Indirection through
+an invalid pointer value and passing an invalid pointer value to a deallocation
+function have undefined behavior. Any other use of an invalid pointer value has
+implementation-defined behavior.
+[&nbsp;<em>Footnote</em>:
+Some implementations might define that copying an invalid pointer value causes
+a system-generated runtime fault.
+&mdash;&nbsp;<em>end footnote</em>&nbsp;]
+</blockquote>
+
+<em>Drafting note: this should apply to all storage durations that can end,
+  not just to dynamic storage duration. On an implementation supporting threads
+  or segmented stacks, thread and automatic storage may behave in the same
+  way that dynamic storage does.</em>
+
+<p>
+Change in 3.7.4.1 (basic.stc.dynamic.allocation) paragraph 2:
+</p>
+
+<blockquote>
+[&hellip;]
+Furthermore, for the library allocation functions in 18.6.1.1 and
+18.6.1.2, p0 shall <del>point to</del> <ins>represent the address of</ins>
+a block of storage disjoint from the storage for
+any other object accessible to the caller. The effect of indirecting through a
+pointer returned as a request for zero size is undefined.
+</blockquote>
+
+<p>
+Change in 3.7.4.1 (basic.stc.dynamic.allocation) paragraph 2:
+</p>
+
+<blockquote>
+If the argument given to a deallocation function in the standard library is a
+pointer that is not the null pointer value (4.10), the deallocation function
+shall deallocate the storage referenced by the pointer,
+<ins>ending the duration of the region of storage.</ins>
+<del>
+rendering invalid all
+pointers referring to any part of the deallocated storage. Indirection through
+an invalid pointer value and passing an invalid pointer value to a deallocation
+function have undefined behavior. Any other use of an invalid pointer value has
+implementation-defined behavior.
+[&nbsp;<em>Footnote</em>:
+Some implementations might define that copying an invalid pointer value causes
+a system-generated runtime fault.
+&mdash;&nbsp;<em>end footnote</em>&nbsp;]
+</del>
+</ins></ins></blockquote>
+
+<p>
+Change in 3.8 (basic.life) paragraph 1:
+</p>
+
+<blockquote>
+The <i>lifetime</i> of an object is a runtime property of the object. An object is
+said to have <i>non-vacuous initialization</i> if it is of a class or aggregate type
+and it or one of its members is initialized by a constructor other than a
+trivial default constructor.
+[&nbsp;<em>Note</em>: 
+initialization by a trivial copy/move
+constructor is non-vacuous initialization.
+&mdash;&nbsp;<em>end note</em>&nbsp;]
+The lifetime of an object of type <tt>T</tt> begins when:
+<ul>
+<li>storage with the proper alignment and size for type T is obtained, and
+<li>if the object has non-vacuous initialization, its initialization is complete<del>.</del><ins>,</ins>
+</ul>
+<ins>except that if the object is a union member or subobject thereof,
+its lifetime only begins if that union
+member is the initialized member in the union (8.5.1, 12.6.2), or as described in 9.5.</ins>
+<p>
+The lifetime of an object <em>o</em> of type <tt>T</tt> ends when:
+<ul>
+<li>if T is a class type with a non-trivial destructor (12.4), the destructor call starts, or
+<li>the storage which the object occupies is <ins>released, or is</ins> reused <ins>by an object that is not nested within <em>o</em> ([intro.object])</ins> <del>or released</del>.
+</ul>
+</blockquote>
+
+<p>
+Change in 3.8 (basic.life) paragraph 5:
+</p>
+
+<blockquote>
+Before the lifetime of an object has started but after the storage which the object will occupy has been allocated [Footnote: &hellip;] or,
+after the lifetime of an object has ended and before the storage which the object occupied is reused or released,
+any pointer that <del>refers to</del> <ins>represents the address of</ins> the storage location
+where the object will be or was located may be used but only in limited ways.
+[&hellip;]
+</blockquote>
+
+<p>
+Change in 3.8 (basic.life) paragraph 6:
+</p>
+
+<blockquote>
+[&hellip;] The program has undefined behavior if:
+<ul>
+<li><del>an lvalue-to-rvalue conversion (4.1) is applied to such a glvalue</del><ins>the glvalue is used to access the object</ins>, <ins>or</ins>
+<li>the glvalue is used to <del>access a non-static data member or</del> call a non-static member function of the object, or
+</ul>
+</blockquote>
+
+<p>
+Change in 3.8 (basic.life) paragraph 7:
+</p>
+
+<blockquote>
+If, after the lifetime of an object has ended and before the storage which the object occupied is reused or released, a new object is created at the storage location which the original object occupied, a pointer that pointed to the original object, a reference that referred to the original object, or the name of the original object will automatically refer to the new object and, once the lifetime of the new object has started, can be used to manipulate the new object, if:
+<ul><li>[&hellip;]</ul>
+[&nbsp;<em>Example</em>: &hellip; &mdash;&nbsp;<em>end example</em>&nbsp;]
+<ins>
+[&nbsp;<em>Note</em>: 
+If these conditions are not met, a pointer to the new object can be obtained
+from a pointer that represents the address of its storage by calling
+<tt>std::launder</tt> (18.6 [support.dynamic]).
+&mdash;&nbsp;<em>end note</em>&nbsp;]
+</ins>
+</blockquote>
+
+<p>
+Change in 3.8 (basic.life) paragraph 9:
+</p>
+
+<blockquote>
+Creating a new object <del>at the storage location</del> <ins>within the storage</ins> that a <tt>const</tt> <ins>complete</ins> object with static, thread, or automatic storage
+duration occupies<ins>,</ins> or<del>, at the storage location</del> <ins>within the storage</ins> that such a <tt>const</tt> object used to occupy before its lifetime
+ended<ins>,</ins> results in undefined behavior. [Example: &hellip;]
+</blockquote>
+
+<em>This is necessary to allow types such as <tt>std::optional</tt> to contain const subobjects; the existing restriction exists to allow ROMability, and so only affects complete objects.</em>
+
+<p>
+Change in 3.9.2 (basic.compound) paragraph 3:
+</p>
+
+<blockquote>
+[&hellip;]
+<ins>Every value of pointer type is one of the following:
+<ul><li>a <em>pointer to</em> an object or function (the pointer is said to <i>point to</i> the object or function), or
+    </li><li>a <em>pointer past the end of</em> an object (5.7 expr.add), or
+    </li><li>the <em>null pointer value</em> (4.10 conv.ptr) for that type, or
+    </li><li>an <em>invalid pointer value</em>.
+</li></ul>
+</ins>
+A <del>valid</del> value of a<del>n object</del> pointer type <ins>that is a pointer to or past the end of an object</ins> <del>represents either
+the address</del> <ins><em>represents the address</em></ins>
+of <del>a</del> <ins>the first</ins> byte in memory (1.7 intro.memory)
+<ins>occupied by the object
+[&nbsp;<em>Footnote</em>: For an object that is not within its lifetime, this is the
+first byte in memory that it will occupy or used to occupy.&nbsp;]
+or the first byte in memory after the end of the
+storage occupied by the object, respectively</ins>
+<del>or a null pointer (4.10)</del>.
+<del>
+If an object of type T is located at an address A, a pointer of type cv T* whose value is the
+address A is said to point to that object, regardless of how the value was obtained.
+</del>
+[&nbsp;<em>Note</em>:
+<del>For instance, the address one</del> <ins>A pointer</ins> past the
+end of an <del>array</del> <ins>object</ins> (5.7)
+<del>would be</del>
+<ins>is not</ins>
+considered to point to an unrelated object of the
+<del>array's element</del> <ins>object's</ins> type
+that might be located at that address.
+<del>
+There are further restrictions on pointers to
+objects with dynamic storage duration; see 3.7.4.3.</del>
+<ins>
+A pointer value becomes invalid
+when the storage it denotes
+reaches the end of its storage duration; see [basic.stc].
+</ins>
+&mdash;&nbsp;<em>end note</em>&nbsp;]
+<ins>For purposes of pointer arithmetic (5.7 expr.add) and comparison (5.9 expr.rel, 5.10 expr.eq),
+a pointer past the end of the last element of an array <ins><tt>x</tt></ins> of <i>n</i> elements is considered
+to be equivalent to
+a pointer to a hypothetical element <tt>x[n]</tt>.</ins>
+The value representation of pointer types is implementation-defined.
+Pointers to cv-qualified and cv-unqualified versions (3.9.3)
+of layout-compatible types
+shall have the same value representation and alignment requirements (3.11).
+[&nbsp;<em>Note</em>: &hellip; &mdash;&nbsp;<em>end note</em>&nbsp;]
+</blockquote>
+
+<p>
+Add a new paragraph after 3.9.2 (basic.compound) paragraph 3:
+</p>
+
+<blockquote class="stdins">
+Two objects <em>a</em> and <em>b</em> are <em>pointer-interconvertible</em> if:
+<ul>
+<li>they are the same object, or
+<li>one is a standard-layout union object and the other is a non-static data member of that object (9.5), or
+<li>one is a standard-layout class object and the other is the
+first non-static data member of that object, or, if the object has no
+non-static data members, the first base class subobject of that object (9.2),
+or
+<li>there exists an object <em>c</em> such that
+<em>a</em> and <em>c</em> are pointer-interconvertible, and
+<em>c</em> and <em>b</em> are pointer-interconvertible.
+</ul>
+If two objects are pointer-interconvertible, then they have the same address, and it is
+possible to obtain a pointer to one from a pointer to the other via a
+<tt>reinterpret_cast</tt> ([expr.reinterpret.cast]).
+[&nbsp;<em>Note</em>:
+An array object and its first element are not pointer-interconvertible, even
+though they have the same address.
+&mdash;&nbsp;<em>end note</em>&nbsp;]</ins>
+</blockquote>
+
+<p>
+Change in 4.10 (conv.ptr) paragraph 2:
+</p>
+
+<blockquote>
+A prvalue of type "pointer to cv T", where T is an object type, can be
+converted to a prvalue of type "pointer to cv void".
+<del>
+The result
+of converting
+a non-null pointer value of a pointer to object type to a "pointer to cv
+void" represents the address of the same byte in memory
+as the original
+pointer value.
+The null pointer value is converted to the null pointer value
+of the destination type.
+</del>
+<ins>The pointer value (3.9.2) is unchanged by this conversion.</ins>
+</blockquote>
+
+<p>
+Change in 5.2.9 (expr.static.cast) paragraph 13:
+</p>
+
+<blockquote>
+A prvalue of type "pointer to cv1 void" can be converted to a prvalue of type
+"pointer to cv2 T", where T is an object type and cv2 is the same
+cv-qualification as, or greater cv-qualification than, cv1. <del>The null pointer
+value is converted to the null pointer value of the destination type.</del>
+If the original pointer value represents the address A of a byte in memory and
+A <del>satisfies</del> <ins>does not satisfy</ins> the alignment requirement of T,
+then the resulting pointer value <ins>is unspecified</ins>
+<del>represents the same address as the original pointer value, that is, A</del>. 
+<ins>
+Otherwise, if the original pointer value points to an object <em>a</em>,
+and
+there is an object <em>b</em> of type <tt>T</tt> (ignoring cv-qualification)
+that is pointer-interconvertible (3.9.2) with <em>a</em>,
+the result is a pointer to <em>b</em>.
+Otherwise, the pointer value is unchanged by the conversion.
+</ins>
+<del>
+The result of any other such pointer conversion is unspecified.
+A value of type pointer to object converted to "pointer to cv void" and
+back, possibly with different cv-qualification, shall have its original value. 
+</del>
+</blockquote>
+
+<p>
+Change in 5.7 (expr.add) paragraph 4:
+</p>
+
+<blockquote>
+When an expression that has integral type is added to or subtracted from a pointer,
+the result has the type of the pointer operand.
+
+<del>
+If the pointer operand points to an element of an array object [Footnote],
+and the array is large enough,
+the result points to an element offset from the original element
+such that the difference of the subscripts
+of the resulting and original array elements
+equals the integral expression.
+
+In other words, if
+</del><ins>If</ins>
+the expression <tt>P</tt>
+points to <del>the <em>i</em>-th</del> element <ins><tt>x[i]</tt></ins>
+of an array object <ins><tt>x</tt> with <em>n</em> elements
+[&nbsp;<i>Footnote</i>:
+An object that is not an array element is considered to belong to a single-element array for this purpose; see 5.3.1.
+A pointer past the end of the last element of an array <ins><tt>x</tt></ins> of <i>n</i> elements
+is considered to be equivalent to a pointer to a hypothetical element <tt>x[n]</tt>
+for this purpose; see 3.9.2.
+]</ins>,
+the expressions
+
+<del><tt>(P)+N</tt> (equivalently, <tt>N+(P)</tt>) and <tt>(P)-N</tt></del>
+
+<ins><tt>P + J</tt> and <tt>J + P</tt></ins>
+
+(where <tt><del>N</del><ins>J</ins></tt> has the value <i><del>n</del><ins>j</ins></i>)
+point to<del>, respectively,</del>
+the <ins>(possibly hypothetical) element</ins>
+<em>x[i + j]</em><del>-th and <em>x[i - j]</em>-th elements
+of the array object, provided they exist</del>
+<ins>if 0 &#8804; <em>i + j</em> &#8804; <em>n</em></ins><del>
+Moreover, if the expression P points to the last element of an array object,
+the expression (P)+1 points one past the last element of the array object, and if the expression Q points
+one past the last element of an array object, the expression (Q)-1 points to the last element of the array
+object. If both the pointer operand and the result point to elements of the same array object, or one past
+the last element of the array object, the evaluation shall not produce an overflow</del>; otherwise, the behavior is
+undefined.
+
+<ins>Likewise, the expression <tt>P - J</tt> points to the (possibly hypothetical) element <tt>x[i - j]</tt>
+if 0 &#8804; <em>i - j</em> &#8804; <em>n</em>; otherwise, the behavior is undefined.
+</ins>
+</blockquote>
+
+<p>
+Change in 5.7 (expr.add) paragraph 5:
+</p>
+
+<blockquote>
+When two pointers to elements of the same array object are subtracted,
+<del>
+the result is the difference of the subscripts of the two array elements.
+The</del> <ins>the</ins>
+type of the result is an implementation-defined signed integral type;
+this type shall be the same type that is defined as <tt>std::ptrdiff_t</tt> in the <tt>&lt;cstddef&gt;</tt> header (18.2).
+<del>
+As with any other arithmetic overflow, if the result does not fit in the space provided, the behavior is undefined.
+In other words, if
+</del> <ins>If</ins>
+the expressions <tt>P</tt> and <tt>Q</tt> point to, respectively,
+<del>the i-th and j-th</del> elements <ins><tt>x[i]</tt> and <tt>x[j]</tt></ins> of <del>an</del><ins>the same</ins> array object <tt>x</tt>,
+the expression <del>(P)-(Q)</del><ins>P - Q</ins> has the value <i>i - j</i>
+<del>provided the value fits in an object of type <tt>std::ptrdiff_t</tt>.</del>
+<ins>; otherwise, the behavior is undefined.
+[&nbsp;<em>Note</em>:
+If the value <i>i - j</i> is not in the range of representable values of type <tt>std::ptrdiff_t</tt>, the behavior is undefined.
+&mdash;&nbsp;<em>end note</em>&nbsp;]</ins>
+<del>
+Moreover, if the expression P points either to an element of an array object or one past the last element of
+an array object, and the expression Q points to the last element of the same array object, the expression
+((Q)+1)-(P) has the same value as ((Q)-(P))+1 and as -((P)-((Q)+1)), and has the value zero if the
+expression P points one past the last element of the array object, even though the expression (Q)+1 does not
+point to an element of the array object. Unless both pointers point to elements of the same array object, or
+one past the last element of the array object, the behavior is undefined.
+[Footnote: Another way to approach pointer arithmetic &hellip;]
+</del>
+</blockquote>
+
+<p>
+Change in 5.7 (expr.add) paragraph 7:
+</p>
+
+<blockquote>
+If the value 0 is added to or subtracted from a <ins>null</ins> pointer value, the result <del>compares equal to the original pointer
+value</del> <ins>is a null pointer value</ins>.
+If two <del>pointers point to the same object or both point  past the end of the same array or both
+are</del> null<del>, and the two</del> pointer<ins> value</ins>s are subtracted, the result compares equal to the value 0 converted to the type
+<tt>std::ptrdiff_t.</tt>
+</blockquote>
+
+<p>
+Change in 5.9 (expr.rel) paragraph 3:
+</p>
+
+<blockquote>
+Comparing <ins>unequal</ins> pointers to objects
+[&nbsp;<i>Footnote</i>:
+An object that is not an array element is considered to belong to a single-element array for this purpose; see 5.3.1.
+<ins>
+A pointer past the end of the last element of an array of <i>n</i> elements
+is considered to be equivalent to a pointer to a hypothetical element <i>n</i> for this purpose; see 3.9.2.
+</ins>
+]
+is defined as follows:
+<ul>
+<li>If two pointers point to different elements of the same array, or to subobjects thereof, the pointer to
+the element with the higher subscript compares greater.
+</li><li><del>If one pointer points to an element of an array, or to a subobject thereof, and another pointer points
+one past the last element of the array, the latter pointer compares greater.</del>
+</li><li>
+If two pointers point to different non-static data members of the same object, or to subobjects of such
+members, recursively, the pointer to the later declared member compares greater provided the two
+members have the same access control (Clause 11) and provided their class is not a union.
+</li></ul>
+</blockquote>
+
+<em>Drafting note: the change in 3.9.2 affects the semantics of an example like:</em>
+
+  <pre>  struct S {
+    char a;
+    int b;
+  } s;
+  static_assert(static_cast&lt;void*&gt;(&amp;s.b) &gt;= static_cast&lt;void*&gt;(&amp;s.a + 1));</pre>
+
+<em>Prior to this change, the result of the comparison was unspecified; now, it is required to hold, because <tt>&amp;s.a + 1</tt> is treated as a pointer to an element of the "array" <tt>s.a</tt>. The value of <tt>&amp;s.b &gt; &amp;s.a + 1</tt> is now specified and is <tt>false</tt> if and only if the pointers represent the same address.</em>
+
+<p>
+Change in 5.20 expr.const paragraph 2 bullet 8:
+</p>
+
+<blockquote>
+an lvalue-to-rvalue conversion (4.1) <del>or modification (5.18, 5.2.6, 5.3.2)</del> that is applied to a glvalue that refers to a non-active member of a union or a subobject thereof;
+</blockquote>
+
+<p>
+Add a new bullet after 5.20 expr.const paragraph 2 bullet 8:
+</p>
+
+<blockquote class="stdins">
+an assignment expression (5.18) or invocation of an assignment operator (12.8) that would change the active member of a union;
+</blockquote>
+
+<p>
+Change in 9.2 class.mem paragraph 19:
+</p>
+
+<blockquote>
+In a standard-layout union with an active member (9.5) of struct type T1, it is
+permitted to read a non-static data member m of another union member of struct
+type T2 provided m is part of the common initial sequence of T1 and T2<ins>;
+the behavior is as if the corresponding member of T1 were nominated</ins>.
+
+<ins>
+[&nbsp;<em>Example</em>:
+<pre>struct T1 { int a, b; };
+struct T2 { int c; double d; };
+union U { T1 t1; T2 t2; };
+int f() {
+  U u = { { 1, 2 } }; // active member is t1
+  return u.t2.c;      // OK, as if u.t1.a were nominated
+}</pre>
+&mdash;&nbsp;<em>end example</em>&nbsp;]
+</ins>
+</blockquote>
+
+<p>
+Change in 9.2 class.mem paragraph 20:
+</p>
+
+<blockquote>
+If a standard-layout class object
+has any non-static data members,
+its 
+address is the same as the address of
+its first non-static data member.
+Otherwise,
+its
+address is the same as the address of
+its first base class subobject (if any).
+[&nbsp;<em>Note</em>:&nbsp;&hellip;&mdash;<em>end note</em>&nbsp;]
+<ins>
+[&nbsp;<em>Note</em>:&nbsp;
+The object and its
+first subobject are pointer-interconvertible (3.9.2, 5.2.9).
+&mdash;<em>end note</em>&nbsp;]
+</ins>
+</blockquote>
+
+<p>
+Change in 9.5 class.union paragraph 1, splitting it into two paragraphs:
+</p>
+
+<blockquote>
+<p>
+In a union,
+<ins>a non-static data member is <em>active</em>
+if its name refers to an object
+whose lifetime has begun and has not ended ([basic.life]).</ins>
+<del>at</del><ins>At</ins> most one of the non-static data members
+<ins>of an object of union type</ins>
+can be active at any
+time, that is, the value of at most one of the non-static data members can be
+stored in a union at any time.
+[&nbsp;<em>Note</em>:
+One special guarantee is made in order
+to simplify the use of unions:
+If a standard-layout union contains several
+standard-layout structs that share a common initial sequence (9.2),
+and if <ins>a non-static data member of</ins> an object
+of this standard-layout union type
+<del>contains</del> <ins>is active and is</ins>
+one of the standard-layout structs,
+it is permitted to inspect the common initial sequence of any of <ins>the</ins>
+standard-layout struct members; see 9.2.
+&mdash;&nbsp;<em>end note</em>&nbsp;]
+
+</p><p>
+The size of a union is sufficient to contain the largest of its non-static data members.
+Each non-static data member is allocated as if it were the sole member of a struct.
+<ins>
+[&nbsp;<em>Note</em>:&nbsp;
+A union object and its non-static data members are pointer-interconvertible
+(3.9.2, 5.2.9). As a consequence,
+</ins>
+all non-static data members of a union object have the same address.
+<ins>
+&mdash;<em>end note</em>&nbsp;]
+</ins>
+</p></blockquote>
+
+<p>
+Add a new paragraph before 9.5 (class.union) paragraph 4:
+</p>
+
+<blockquote class="stdins">
+When the left operand of an assignment operator involves a member access
+expression (5.2.5 [expr.ref]) that nominates a union member, it may begin the
+lifetime of that union member, as described below.
+For an expression <tt>E</tt>, define the set <i>S(E)</i> of subexpressions
+of <tt>E</tt> as follows:
+<ul>
+  <li>If <tt>E</tt> is of the form <tt>A.B</tt>,
+  <i>S(E)</i> contains the elements of <i>S(A)</i>, and
+  also contains <tt>A.B</tt> if <tt>B</tt> names a union member
+  of a non-class, non-array type, or of a class type with a trivial default
+  constructor that is not deleted, or an array of such types.
+  <li>If <tt>E</tt> is of the form <tt>A[B]</tt> and
+  is interpreted as a built-in array subscripting operator,
+  <i>S(E)</i> is
+  <i>S(A)</i> if <tt>A</tt> is of array type,
+  <i>S(B)</i> if <tt>B</tt> is of array type,
+  and empty otherwise.
+  <li>Otherwise, <i>S(E)</i> is empty.
+</ul>
+In an assignment expression of the form <tt>E1 = E2</tt>
+that uses either the built-in assignment operator (5.18)
+or a trivial assignment operator (12.8),
+for each
+element <tt>X</tt> of <i>S(E1)</i>, if modification of <tt>X</tt>
+would have undefined behavior under 3.8 [basic.life], an object of
+the type of <tt>X</tt> is implicitly created in the nominated storage;
+no initialiation is performed and
+the beginning of its lifetime is sequenced after
+the value computation of the left and right operands and before the
+assignment.
+[&nbsp;<em>Note</em>:
+This ends the lifetime of the previously-active member of the union, if any
+(3.8 [basic.life]).
+&mdash;&nbsp;<em>end note</em>&nbsp;]
+[&nbsp;<em>Example</em>:<pre>
+union A { int x; int y[4]; };
+struct B { A a; };
+union C { B b; int k; };
+int f() {
+  C c;               // does not start lifetime of any union member
+  c.b.a.y[3] = 4;    // OK: S(c.b.a.y[3]) contains c.b and c.b.a.y;
+                     // creates objects to hold union members c.b and c.b.a.y
+  return c.b.a.y[3]; // OK: c.b.a.y refers to newly created object (see 3.8 [basic.life])
+}
+
+struct X { const int a; int b; };
+union Y { X x; int k; };
+void g() {
+  Y y = { { 1, 2 } }; // OK, y.x is active union member (9.2)
+  int n = y.x.a;
+  y.k = 4;   // OK: ends lifetime of y.x, y.k is active member of union
+  y.x.b = n; // undefined behavior: y.x.b modified outside its lifetime,
+             // S(y.x.b) is empty because X's default constructor is deleted,
+             // so union member y.x's lifetime does not implicitly start
+}
+</pre>
+&mdash;&nbsp;<em>end example</em>&nbsp;]
+</blockquote>
+
+<h2>Library wording</h2>
+
+<p>
+Add to 18.6 (support.dynamic) paragraph 1:
+</p>
+
+<blockquote class="stdins"><pre>namespace std {
+  template &lt;class T&gt;
+    constexpr T* launder(T* p) noexcept;
+}
+</pre></blockquote>
+
+<p>
+Add a new subclause under 18.6 (support.dynamic):
+</p>
+
+<blockquote class="stdins">
+  <pre>template &lt;class T&gt; constexpr T* launder(T* p) noexcept;</pre>
+
+<p><em>Requires:</em> <tt>p</tt> represents the address <tt>A</tt> of a byte in
+memory. An object <tt>X</tt> that is within its lifetime ([basic.life])
+and whose type is
+similar ([conv.qual]) to <tt>T</tt> is located at the address <tt>A</tt>.
+All bytes of storage that would be reachable through the result are reachable
+through <tt>p</tt> (see below).
+
+</p><p><em>Returns:</em> A value of type <tt>T *</tt> that points to <tt>X</tt>.
+</p><p><em>Remarks:</em> An invocation of this function may be used in a core constant expression whenever the value of its argument may be used in a core constant expression.
+A byte of storage is reachable through a pointer value that points
+to an object <tt>Y</tt> if it is within the storage occupied by <tt>Y</tt>,
+an object that is pointer-interconvertible with <tt>Y</tt>,
+or the immediately-enclosing array object if <tt>Y</tt> is an array element.
+The program is ill-formed if <tt>T</tt> is a function type or (possibly
+cv-qualified) <tt>void</tt>.
+</p><p><em>Notes:</em> If a new object is created in storage occupied by an
+existing object of the same type, a pointer to the original object can
+be used to refer to the new object unless the type contains const or
+reference members; in the latter cases, this function can be used to
+obtain a usable pointer to the new object. See [basic.life].
+</p><p>
+[&nbsp;<em>Example</em>:
+</p><pre>struct X { const int n; };
+X *p = new X{3};
+const int a = p-&gt;n;
+new (p) X{5};                     // p does not point to new object ([basic.life])
+                                  // because X::n is const
+const int b = p-&gt;n;               // undefined behavior
+const int c = std::launder(p)-&gt;n; // OK
+</pre>
+&mdash;&nbsp;<em>end example</em>&nbsp;]
+</blockquote>
+
+<em>Drafting note: see N4303 for more background on the purpose and intended usage of this function.</em>
+
+<p>
+Change in 20.7.5 (ptr.align) paragraph 1:
+</p>
+
+<blockquote>
+<i>Effects:</i>
+If it is possible to fit <tt>size</tt> bytes of storage aligned by <tt>alignment</tt> into the buffer pointed to by
+<tt>ptr</tt> with length <tt>space</tt>, the function updates <tt>ptr</tt> to
+<del>point to</del> <ins>represent</ins> the first possible
+address of such storage and decreases <tt>space</tt> by the number of bytes
+used for alignment.
+</blockquote>
+
+<p>
+Change in 20.7.5 (ptr.align) paragraph 2:
+</p>
+
+<blockquote>
+<i>Requires:</i>
+<ul><li><tt>alignment</tt> shall be a power of two
+    </li><li><tt>ptr</tt> shall <del>point to</del><ins>represent the address of</ins> contiguous storage of at least <tt>space</tt> bytes
+</li></ul>
+</blockquote>
+ 
+<h2>Feature test macro</h2>
+
+<p>The feature test macro <tt>__cpp_lib_launder</tt> is proposed for the library portion of this paper.
+
+<center><b>ISO/IEC JTC1 SC22 WG21 P0137 EOM</b></center>
+
+</body></html>

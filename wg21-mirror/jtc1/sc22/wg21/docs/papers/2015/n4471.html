@@ -1,0 +1,320 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html><head>
+<meta http-equiv="content-type" content="text/html; charset=windows-1252">
+  <style type="text/css">
+
+.comment { color: #999999; font-style: italic; }
+.pre { color: #000099; }
+.string { color: #009900; }
+.char { color: #009900; }
+.float { color: #996600; }
+.int { color: #999900; }
+.bool { color: #000000; font-weight: bold; }
+.type { color: #FF6633; }
+.flow { color: #FF0000; }
+.keyword { color: #990000; }
+.operator { color: #663300; font-weight: bold; }
+.operator { color: #663300; font-weight: bold; }
+pre.code {
+    border: 2px solid #666;
+    background-color: #F4F4F4;
+    padding-left: 10px;
+    padding-top: 0px;
+}
+code {
+    border: 2px solid #d0d0d0;
+    background-color: LightYellow;
+    padding: 2px;
+    padding-left: 10px;
+    display:table;
+    white-space:pre;
+    margin:2px;
+    margin-bottom:10px;
+}
+dt {
+    font-weight: bold;
+}
+.ins {
+    background-color:#A0FFA0;
+}
+.del {
+    background-color:#FFA0A0;
+    text-decoration:line-through
+}    
+</style>
+
+<title>Template parameter deduction for constructors (Rev. 2)</title>
+</head>
+
+<body>
+<p>N4471<br>
+Revision of <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2013/n3602.html">N3602</a><br>
+2015-04-12<br>
+Mike Spertus, Symantec<br>
+<a href="mailto:mike_spertus@symantec.com">mike_spertus@symantec.com</a><br>
+</p>
+
+<h1>Template parameter deduction for constructors (Rev. 2)</h1> 
+    <p>
+			 This paper proposes extending template parameter deduction for functions
+			 to constructors of template classes. The clearest way to describe
+			 the problem and solution is with some examples.</p><p>Suppose we have
+			 defined the following.
+
+<code>vector&lt;int&gt; vi1 = { 0, 1, 1, 2, 3, 5, 8 };
+vector&lt;int&gt; vi2;
+template&lt;class Func&gt;
+std::mutex m;
+unique_lock&lt;std::mutex&gt; ul(m, std::defer_lock);
+class Foo() { 
+public: 
+    Foo(Func f) : func(f) {} 
+    void operator()(int i) { 
+      os &lt;&lt; "Calling with " &lt;&lt; i &lt;&lt; endl;
+      f(i); 
+    } 
+private: 
+    Func func; 
+    mutex mtx;
+};</code>
+
+Currently, if we want to instantiate template classes, we need to either
+specify the template parameters or use an inconsistently-named "make_*" wrapper, leverage template
+parameter deduction for functions, or punt completely:
+
+<code>pair&lt;int, double&gt; p(2, 4.5);
+auto t = make_tuple(4, 3, 2.5);
+copy_n(vi1, 3, back_inserter(vi2));
+<span class="comment">// Virtually impossible to pass a lambda to a template class' constructor</span>
+for_each(vi.begin(), vi.end(), Foo&lt;<span class="comment">???</span>&gt;([&amp;](int i) { <span class="comment">...</span>}));
+lock_guard&lt;std::mutex&gt; lck(foo.mtx);
+lock_guard&lt;std::mutex, std::unique_lock&lt;std::mutex&gt;&gt; lck2(foo.mtx, ul); <span class="comment">// Notation from N4470</span>
+auto hasher = [](X const &amp; x) -&gt; size_t { <span class="comment">/* ... */</span> };
+unordered_map&lt;X, int, decltype(hasher)&gt; ximap(10, hasher);
+</code>
+
+There are several problems with the above code:
+</p><ul>
+
+<li>Creating &ldquo;make functions&rdquo; like <tt>make_tuple</tt> is confusing,
+artificial, extra boilerplate, and inconsistent with how non-template classes are constructed.</li>
+
+<li>Since the standard library doesn't follow any consistent convention for
+make functions, users have to scurry through documentation to find they need to
+use <tt>make_tuple</tt> for <tt>tuple</tt>s
+and <tt>back_inserter</tt> for <tt>back_insert_iterator</tt>s. Of course their own
+template classes might not be as consistent or thoroughly-documented as the standard.</li>
+
+<li>Specifying template parameters as in <tt>pair&lt;int, double&gt;(2, 4.5)</tt>
+should be unnecessary since they can be inferred from the type of the arguments, as is
+usual with template functions (this is the reason the standard provides make functions
+for many template classes in the first place!).
+
+</li><li>If we don't have a make function, we may not be able to
+create class objects at all as indicated by the <tt><span class="comment">???</span></tt>
+in the code above.</li>
+<li>Make functions can't be used with classes that aren't movable like <tt>std::lock_guard</tt>.</li>
+<li>The useful technique of replacing a large function with a class by organizing its code into methods to reduce cyclomatic complexity can't be used for template functions</li>
+</ul>
+
+If we allowed the compiler to deduce the template parameters for constructors of
+template classes, we could replace the above with:
+
+<code>pair p(2, 4.5);
+tuple t(4, 3, 2.5);
+copy_n(vi1, 3, back_insert_iterator(vi2));
+for_each(vi.begin(), vi.end(), Foo([&amp;](int i) { <span class="comment">...</span>})); <span class="comment">// Now easy to do</span>
+auto lck = lock_guard(foo.mtx);
+lock_guard lck2(foo.mtx, ul);
+unordered_map&lt;X, int&gt; ximap(10, [](X const &amp; x) -&gt; size_t { <span class="comment">/* ... */</span> });
+</code>
+
+We believe this is more consistent and simpler for both users and writers of
+template classes, especially if we were using user-defined classes that might
+not have carefully designed and documented make functions like <tt>pair</tt>,
+<tt>tuple</tt>, and <tt>back_insert_iterator</tt>.
+
+<h2>The Basic Idea of the Deduction Process</h2>
+<p>We propose to allow a template name referring to a class template as a
+simple-type-specifier in two contexts:
+</p><ul>
+
+  <li>Functional-notation simple type conversions ([expr.type.conv], and</li>
+  <li>Simple-declarations of the form
+      "<i>decl-specifier-seq id-expression initializer</i>".</li>
+</ul>
+<p>
+In the case of
+a function-notation type conversion (e.g., "<tt>tuple(1, 2.0, false)</tt>") or
+a direct parenthesized or braced initialization,
+the initialization is resolved as follows.
+First, constructors and constructor templates declared in the named template
+are enumerated.  Let Ci be such a constructor or constructor template;
+together they form an overload set.  A parallel overload set <i>F</i> of
+function templates is then created as follows:
+
+For each Ci a function template is constructed with template parameters that
+include both those of the named class template and if Ci is a constructor
+template, those of that template (default arguments are included too) --
+the function parameters are the constructor parameters, and the return type
+is <tt>void</tt>
+
+Deduction and overload resolution is then performed for a synthesized call
+to <i>F</i> with the parenthesized or braced expressions used as arguments.
+If that call doesn't yield a "best viable function", the program is ill-formed.
+Otherwise, the template name is treated as the class-name that is obtained
+from the named class template with the deduced arguments corresponding to that
+template's parameters.
+</p>
+<p>
+Let's look at an example:
+<code>template&lt;typename T&gt; struct S {
+  template&lt;typename U&gt; struct N {
+    N(T);
+    N(T, U);
+    template&lt;typename V&gt; N(V, U);
+  };
+};
+
+S&lt;int&gt;::N x{2.0, 1};
+</code>
+
+In this example, "<tt>S&lt;int&gt;::N</tt>" in the declaration of <tt>x</tt>
+is missing template arguments, so the approach above kicks in.
+Template arguments can only be left out this way from the "type" of the
+declaration, but not from any name qualifiers used in naming the template;
+i.e., we couldn't replace "<tt>S&lt;int&gt;::N</tt>" by just "<tt>S::N</tt>"
+using some sort of additional level of deduction.
+To deduce the initialized type, the compiler now creates an overload set as
+follows:
+
+<code>
+    template&lt;typename U&gt; void <i>F</i>(S&lt;int&gt;::N&lt;U&gt; const&amp;);
+    template&lt;typename U&gt; void <i>F</i>(S&lt;int&gt;::N&lt;U&gt; &amp;&amp;);
+    template&lt;typename U&gt; void <i>F</i>(int);
+    template&lt;typename U&gt; void <i>F</i>(int, U);
+    template&lt;typename U, typename V&gt; void <i>F</i>(V, U);
+</code>
+
+(The first two candidates correspond to the implicitly-declared copy and move
+contructors. Note that template parameter <tt>T</tt> is already known to
+be <tt>int</tt> and is not a template parameter in the synthesized overload
+set.)
+
+Then the compiler performs overload resolution for a call "<tt><i>F</i>(2.0, 1)</tt>" 
+which in this case finds a unique best candidate in the last synthesized function
+with <tt>U = int</tt> and <tt>V = double</tt>.  The initialization
+is therefore treated as "<tt>S&lt;int&gt;::N&lt;int&gt; x{2.0, 1};</tt>"
+</p>
+
+
+
+<p>
+Note that after the deduction process described above the initialization may
+still end up being ill-formed.  For example, a selected constructor might be
+inaccessible or deleted, or the selected template instance might have been
+specialized or partially specialized in such a way that the candidate
+constructors will not match the initializer.
+</p>
+
+The case of a simple-declaration with copy-initialization syntax is treated
+similarly to the approach described above, except that explicit constructors
+and constructor templates are ignored, and the initializer expression is
+used as the single call argument during the deduction process.
+<h2>Challenges</h2>
+<p>While we do not need to cover every possible case with this feature because one
+can still explicitly specify parameters  or use a factory function, there are some
+challenges that were not adequately analyzed and/or addressed in the initial proposal.</p>
+    
+<p>As Richard Smith has pointed out, some implementations of the STL define their <tt>value_type</tt>
+<tt>typedef</tt> as follows
+<code>template&lt;typename T, typename Alloc=std::allocator&lt;T&gt;&gt;
+struct vector {
+  struct iterator {
+    typedef T value_type;
+    <span class="comment">/* ... */</span>
+  };
+  typedef iterator::value_type value_type;
+  <span class="comment">/* ... */</span>
+};
+</code>
+The detour through <tt>vector&lt;T&gt;iterator</tt> makes it unclear how to
+deduce that <tt>T</tt> is <tt>char</tt> in a constructor call like <tt>vector(5, 'c')</tt>.
+We would certainly like constructors like that to work, which can be addressed in
+    several ways.</p>
+<ul><li><b>Do nothing</b>. The first option is to just &ldquo;ignore&rdquo; the issue,
+which doesn't actually ignore it. &sect;23.3.6.1 [vector.overview]
+    standard currently defines <tt>value_type</tt> to be <tt>T</tt>. If
+    this proposal were to be accepted as above without changes, 
+    defining <tt>value_type</tt> to be <tt>iterator::value_type</tt> would
+    no longer satisfy the &ldquo;as if rule&rdquo; and the <tt>typedef</tt> 
+    would need to be changed to match the standard. Fortunately, this would
+    break neither API or ABI, so it may be a very simple way to avoid this issue. We will get feedback from library
+    vendors before the Lenexa meeting about the impact of this change on the
+    standard library.
+    to 
+    <tt>iterator::value_type</tt></li>
+<li><b>Trace primary templates</b>Since the proposal already calculates the overload
+    sets based on the primary template of the class it is constructing, the
+    above algorithm could look into the primary definition of <tt>vector&lt;T&gt;::iterator</tt> just like it does in <tt>vector&lt;T&gt;</tt>
+    and again reject the ill-formed match in the case where, say, a specialization
+    results in no such constructor being instantiable with the candidate types.</li>
+    <li><b>Typed constructors</b> See below</li>
+    </ul>
+<p>There are a number of natural factory functions that are not deducible in the
+    above framework. For example, one could imaging a function <tt>make_vector</tt>
+    defined as follows:</p><code>template&lt;typename Iter&gt;
+vector&lt;Iter::value_type&gt; make_vec(Iter b, Iter e) {
+  return vector&lt;Iter::value_type&gt;(b, e);
+}
+    </code>
+<p>There is no constructor in <tt>vector</tt> from which we can deduce the type
+    of the vector from two iterators. Again, it may be ok to ignore the issue
+    as the general feature retains its value even if it does not cover this case.
+    Our goal has never been to deduce template parameters for all constructor
+    calls (e.g. <tt>vector{}</tt>). Still, it would be appealing and natural
+    to deduce the template parameter when constructing a <tt>vector</tt> from two iterators.
+    See the section on typed constructors below for a way to do this.</p>
+<p>We also need to consider the interaction with injected class names. For example,
+in the following code, the differing types produced by the two calls to
+<tt>vector&lt;v1.begin(), v1.end()&gt;</tt> can be surprising:</p>
+<code>vector&lt;X&gt; v1 = {<span class="comment">/* ... */</span>};
+auto v2 = vector(v1.begin(), v1.end()); <span class="comment">// We want v2 to be a vector&lt;X&gt;</span>
+template&lt;typename T&gt; struct vector {
+  void foo() { 
+    auto v3 = vector(v1.begin(), v1.end()); <span class="comment">// v3 should be vector&lt;T&gt; to avoid breaking change</span>
+  }
+}
+</code>
+<p>Again, we should discuss whether a change is required as the template parameters
+    could always be specified explicitly. If we do want to deduce them, we 
+suggest allowing something like the following in analogy with Concepts Lite.
+    </p>
+<code>vector&lt;X&gt; v1 = {<span class="comment">/* ... */</span>};
+auto v2 = vector(v1.begin(), v1.end()); <span class="comment">// We want v2 to be a vector&lt;X&gt;</span>
+    
+template&lt;typename T&gt; struct vector {
+  void foo() { 
+    auto v3 = vector(v1.begin(), v1.end()); <span class="comment">// v3 should be vector&lt;T&gt; to avoid breaking change</span>
+    auto v4 = vector&lt;auto&gt;(v1.begin(), v1.end()); <span class="comment">// v4 is vector&lt;X&gt;</span>
+  }
+}
+    </code>
+<p>This example begs the question of whether we should always put in <tt>auto</tt>
+when deducing constructor arguments. We believe that would be a bad choice as the
+injected class case is rather rare, and it is hard to imagine that people would be
+any happier coding things like <tt>tuple&lt;auto, auto, auto, auto, auto&gt;(1, 2, 3, 4, 5)</tt> than they would like saying <tt>make_tuple&lt;auto, auto, auto, auto, auto&gt;(1, 2, 3, 4, 5)</tt>. However, it could be a useful optional feature that could be applied to existing
+function templates as well (as illustrated by the <tt>make_tuple</tt> example above).</p>
+<h3>Typed constructors</h3>
+One idea suggested by Richard Smith is to create a notation to allow constructors
+to specify their template parameters. This creates a fine-grained control that makes
+    it easy to specify constructors like the ones above without needing to change the <tt>typedef</tt>s in the STL or trace through other templates. Possible notations for this are<code>template&lt;typename T, typename Alloc = std::allocator&lt;T&gt;&gt; struct vector {
+  <span class="comment">// Option 1: Typed constructor in primary template only</span>
+  template &lt;typename Iter&gt; vector&lt;iter::value_type&gt;(Iter b, Iter e);
+};
+<span class="comment">// Option 2: Typed constructor given globally</span>
+template&lt;typename Iter&gt; vector&lt;typename iterator_traits&lt;Iter&gt;::value_type&gt;(Iter b, Iter e);
+template&lt;typename Iter&gt; vector(Iter b, Iter e) -&gt; vector&lt;typename iterator_traits&lt;Iter&gt;::value_type&gt;</code>
+    <p><b>Note: </b> It is only necessary to declare typed constructors. Giving a definition is not allowed as they just construct their return type from their arguments according
+to normal rules.</p>
+</body></html>

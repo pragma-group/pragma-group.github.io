@@ -1,0 +1,378 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN">
+<html>
+  <head>
+    <meta content="text/html;charset=UTF-8" http-equiv="Content-Type">
+    <title>Improved insertion interface for std::{unordered_,}map</title>
+    <style type="text/css">
+      html { margin: 0; padding: 0; color: black; background-color: white; }
+      body { padding: 2em; font-size: medium; font-family: "DejaVu Serif", serif; line-height: 150%; }
+      code { font-family: "DejaVu Sans Mono", monospace; color: #006; }
+
+      h1, h2, h3 { margin: 1.5em 0 .75em 0; }
+
+      div.code { white-space: pre-line; font-family: "DejaVu Sans Mono", monospace;
+                 border: thin solid #E0E0E0; background-color: #F8F8F8; padding: 1em;
+                 border-radius: 4px; }
+
+      div.strictpre { white-space: pre; }
+
+      .docinfo { float: right }
+      .docinfo p { margin: 0; text-align:right; }
+      .docinfo address { font-style: normal; }
+
+      .quote { display: inline-block; clear: both; margin-left: 1ex;
+                 border: thin solid #E0E0E0; background-color: #F8F8F8; padding: 1ex; }
+
+      .insert { border-left: thick solid #0A0; border-right: thick solid #0A0; padding: 0 1em; }
+    </style>
+  </head>
+  <body>
+    <div class="docinfo">
+      <p>ISO/IEC JTC1 SC22 WG21 N3873</p>
+      <p>Date: 2014-01-20</p>
+      <address>Thomas K&ouml;ppe &lt;<a href="mailto:tkoeppe@google.com">tkoeppe@google.com</a>&gt;</address>
+    </div>
+
+    <h1>Improved insertion interface for unique-key maps</h1>
+
+    <h2>Contents</h2>
+    <!-- fgrep -e "<h2 id=" map-proposal.html | sed -e 's/.*id="\(.*\)">\(.*\)<\/h2>/<li><a href="#\1">\2<\/a><\/li>/g' -->
+    <ol>
+      <li><a href="#overview">Overview</a></li>
+      <li><a href="#scope">Motivation and scope</a></li>
+      <li><a href="#impact">Impact on the standard</a></li>
+      <li>
+        <a href="#design">Design Decisions</a>
+        <ol>
+          <li><a href="#nonsolutions">Non-solutions</a></li>
+          <li><a href="#existingsolutions">Existing solutions</a></li>
+        </ol>
+      </li>
+      <li><a href="#discussion">Discussion</a></li>
+      <li><a href="#spec">Technical specifications</a></li>
+      <li><a href="#other">Alternative considerations</a>
+        <ol>
+          <li><a href="#insertinterface">An <code>insert</code>-like interface</a></li>
+          <li><a href="#adaptexisting">Adapt the existing standard</a></li>
+        </ol>
+      </li>
+      <li><a href="#ack">Acknowledgements</a></li>
+    </ol>
+
+    <h2 id="overview">Overview</h2>
+
+    <p>The existing interface of unique-keyed map containers (<code>std::map</code>,
+    <code>std::unordered_map</code>) is slightly underspecified, which makes certain
+    container mutations more complicated to write than necessary. This proposal is to
+    add new specialized algorithms:</p>
+
+    <ul>
+      <li><code>emplace_stable()</code>: if the key already exists, does not
+      insert and does not modify the arguments.</li>
+      <li><code>emplace_or_update()</code>: inserts or updates the mapped element if
+      the key already exists.</li>
+    </ul>
+
+    <h2 id="scope">Motivation and scope</h2>
+
+    <p>The existing <code>insert()</code> and <code>emplace()</code>
+    interfaces are underspecified. Consider the following example:</p>
+
+    <div class="code">std::map&lt;std::string, std::unique_ptr&lt;Foo&gt;&gt; m;
+      m["foo"];
+
+      std::unique_ptr&lt;Foo&gt; p(new Foo);
+      auto res = m.emplace("foo", std::move(p));</div>
+
+    <p>What is the value of <code>p</code>? It is currently unspecified whether
+    <code>p</code> has been moved-from. (The answer is that it depends on the
+    library implementation.)</p>
+
+    <p>The remainder of this proposal is motivated by the problem of inserting
+    <code>p</code> so that it does not get moved-from when the key already exists,
+    and of overwriting it unconditionally. We will see that all possible solutions
+    are less than perfect: All of them require boilerplate, some are inefficient,
+    and none are elegant. Under the proposal, we could write:</p>
+
+    <div class="code">auto res1 = m.emplace_stable("foo", std::move(p));
+    assert(p && !res1.second);
+
+    auto res2 = m.emplace_or_update("foo", std::move(p));
+    assert(!p && res2.second);</div>
+
+    <h2 id="impact">Impact on the standard</h2>
+    <p>This is purely an extension of the standard library. Two new functions have to be added to
+    [map.special], and also to a new section &ldquo;specialized algorithms&rdquo; [unord.maps.special]
+    for unordered maps. There is no interference with existing code.</p>
+
+    <h2 id="design">Design Decisions</h2>
+
+    <h3 id="nonsolutions">Non-solutions</h3>
+
+    <p>First, let us consider some pieces of code that may <em>look</em> like a solution,
+    but in fact are not.</p>
+
+    <div class="code strictpre">m.emplace("foo", std::move(p));                                                     // #1
+m.insert(std::make_pair("foo", std::move(p)));                                      // #2
+m.insert(std::pair&lt;std::string &amp;&amp;, std::unique_ptr&lt;Foo&gt; &amp;&amp;&gt;("foo", std::move(p)));  // #3
+m.insert(std::forward_as_tuple("foo", std::move(p));                                // #4</div>
+
+    <p>Both cases <code>#1</code> and <code>#2</code> typically create value-<code>pair</code>
+    objects which unconditionally take ownership, all <em>before</em> looking up the key. The
+    case <code>#3</code> and <code>#4</code> are more insidious, because it looks like they might
+    work. But it is in fact perfectly valid for the implementation to construct a new, intermediate
+    <code>value_type</code> object internally, which unconditionally takes ownership, before
+    comparing keys.</p>
+
+    <p>The signature of <code>insert</code> is <code>template &lt;typename P&gt; insert(P &amp;&amp;)</code>,
+    which suggests to the user that it is possible to pass strictly by reference (as in cases <code>#3</code>
+    and <code>#4</code> above). The problem is that an implementation is not prohibited from constructing
+    further objects, which may move-from the original arguments..</p>
+
+    <p>(Concretely, the behaviour of an implementation may come down to whether an internal
+    auxiliary member template is of the form <code>template &lt;typename _Pair&gt; void __internal_insert(_Pair
+    &amp;&amp;)</code>, in which case there is no ownership transfer, or of the form <code>void
+    __internal_insert(value_type &amp;&amp;)</code>, in which case a temporary value-pair is constructed which takes
+    ownership. These differences have been observed between GCC 4.6 and GCC 4.8.)</p>
+
+    <p>Let us consider how we can program the desired algorithms with the existing library,
+    and examine the relative merits and shortcomings of each case. We continue using the
+    code of the initial example. In each case, we use the term <em>lookup</em> to refer
+    either to the tree traversal in the ordered map or the hashing and bucket lookup in
+    the unordered map.</p>
+
+    <h3 id="existingsolutions">Existing solutions</h3>
+
+    <p>Stable insertion problem: insert the unique pointer and guarantee that it still owns the pointee if
+    the key already exists.</p>
+
+    <p>Insert-or-update problem: Set the map entry for a given key, unconditionally on whether they key already exists.</p>
+
+    <h4><code>find()</code></h4>
+
+    <div class="code">auto it = m.find("foo");
+      if (it == m.end())
+      {
+      &nbsp;&nbsp;&nbsp;&nbsp;it = m.emplace("foo", std::move(p)).first;
+      }
+      // insert-or-update problem only
+      else
+      {
+      &nbsp;&nbsp;&nbsp;&nbsp;it->second = std::move(p));
+      }</div>
+    <p>This solution performs the lookup twice when the key does not exist. It is the most general
+    in terms of the various type requirements. Information on whether the key already existed is
+    implicit in the branching.</p>
+
+    <h4><code>lower_bound()</code> and hint</h4>
+    <div class="code">auto it = m.lower_bound("foo");
+      if (it == m.end() || it->first != "foo")
+      {
+      &nbsp;&nbsp;&nbsp;&nbsp;it = m.emplace_hint(it, "foo", std::move(p)).first;
+      }
+      // insert-or-update problem only
+      else
+      {
+      &nbsp;&nbsp;&nbsp;&nbsp;it->second = std::move(p));
+      }</div>
+    <p>This solution is only available for the ordered map. It is near-perfect for that
+    case, though, except perhaps for the very insignificant fact that slightly more key
+    comparisons than strictly necessary are being performed. Information on whether the
+    key already existed is implicit in the branching.</p>
+
+    <h4><code>operator[]</code></h4>
+    <div class="code">m["foo"] = std::move(p);&nbsp;&nbsp;&nbsp;// insert-or-update problem only</div>
+    <p>For the insert-or-update problem only, this code is perhaps the most natural-looking one.
+    It requires that the <code>mapped_type</code> be default-constructible, and it always default-constructs
+    an element if the key does not exist before assigning the given value. There is no information
+    on whether the key already existed.</p>
+
+    <h2 id="discussion">Discussion</h2>
+
+    <p>With the introduction of move semantics and move-only types in C++11, the standard
+    library containers have evolved naturally to support such types, and by and large this
+    evolution has been seamless. The insertion interface for unique-key maps is one of the
+    few which do not extend naturally. To achieve the desired functionality, a programmer
+    has to wrap the interface, and each of the possible ways of doing so has limitations,
+    costs, or both.</p>
+
+    <p>The acceptance and sucess of C++ and its standard library is largely due to the belief
+    of its users that they could not generally do a better job by writing code &ldquo;by hand&rdquo;
+    (say, in C). It achieves this by being unconstrained, by not imposing arbitrary restrictions
+    and limitations on what a programmer can do where they are not necessary, and by not imposing
+    unwarranted cost (don't pay for what you don't use). The existing map insertion interface is
+    something that <em>can</em> be done better, and in this spirit this proposal is to plug this
+    hole. The proposed interface allows seamless use of move-only types in maps, can easily be
+    implemented so as to not require <em>any</em> redundant lookup or comparison operations, and
+    returns information which already comes out for free (the iterator and the boolean). In fact,
+    the last two points apply equally well to pre-C++11 copyable types, and the new interface
+    offers a previously unavailable guarantee to not make unneeded copies.</p>
+
+    <p>This proposal introduces one idiosyncrasy: Traditionally, we teach that we should universally
+    regard a (potentially) moved-from object as being in an indeterminate, unusable state. The proposed
+    <code>emplace_stable</code> interface has different semantics. However, we feel that this
+    peculiarity is justified. The unique-key maps are already peculiar containers, in the sense that
+    they are the only containers whose <code>value_type</code> has a non-trivial microstructure.
+    Alternatives which would preserve the traditional notion of moving-from objects  might consist of
+    giving the object back optionally if it was not used, but this is too far a departure from the
+    existing library.</p>
+
+    <p>We do not consider the &ldquo;satellite-less&rdquo; associative containers
+      <code>std::{unordered_,}{multi,}set</code>, just as we do not consider movable <em>key</em>
+    types. The notion of a key that only exists as a unique object is rather more unusual; for
+    example, one cannot easily search for something by value which is unique. (Rather, heterogeneous
+    and transparent comparators seem to be the more appropriate notion in that case.) Operations on
+    move-only keys will already require specialized code, and thus present less of an opportunity
+    for improving the existing interface. We are however perfectly open to suggestions to extend the
+    proposal to cover move-only keys, should this turn out to be desirable.</p>
+
+    <h2 id="spec">Technical specifications</h2>
+
+    <h3>Add the following to [maps.special], and to a new subsection under [unord.maps], named
+    &ldquo;<code>unordered_map</code> specialized algorithms [unord.maps.special]&rdquo;:</h3>
+
+    <div class="insert">
+      <div class="code">template &lt;typename M&gt;
+        pair&lt;iterator, bool&gt;
+        emplace_stable(const key_type &amp; k, M &amp;&amp; obj)
+
+        template &lt;typename M&gt;
+        pair&lt;iterator, bool&gt;
+        emplace_stable(const_iterator hint, const key_type &amp; k, M &amp;&amp; obj)</div>
+
+      <p><em>Effects:</em> If the key <code>k</code> already exists in the map, there is no effect, no
+      dynamic allocations are performed and no exceptions are thrown. Otherwise, inserts the element
+      constructed from the arguments as <code>value_type(k, std::forward&lt;M&gt;(obj))</code> into
+      the map. The <code>bool</code> part of the return value is true if and only if the insertion
+      took place, and the <code>iterator</code> part points to the element of the map whose key
+      is equivalent to <code>k</code>. The <code>hint</code> iterator provides an insertion hint.</p>
+
+      <p><em>Complexity:</em> The same as <code>emplace</code> and <code>emplace_hint</code>,
+      respectively.</p>
+
+      <div class="code">template &lt;typename M&gt;
+        pair&lt;iterator, bool&gt;
+        emplace_or_update(const key_type &amp; k, M &amp;&amp; obj)
+
+        template &lt;typename M&gt;
+        pair&lt;iterator, bool&gt;
+        emplace_or_update(const_iterator hint, const key_type &amp; k, M &amp;&amp; obj)</div>
+
+      <p><em>Effects.</em> If the key comparing equal to <code>k</code> does not exist in the map,
+      inserts the element constructed as <code>value_type(k, std::forward&lt;M&gt;(obj))</code>.
+      If the key already exists, the mapped part of the value is assigned <code>std::forward&lt;M&gt;(obj)</code>.
+      The <code>bool</code> part of the return value is true if and only if the key already existed
+      prior to the operation, and the <code>iterator</code> part points to the inserted or updated
+      element. The <code>hint</code> iterator provides an insertion hint.</p>
+
+      <p><em>Complexity:</em> The same as <code>emplace</code> and <code>emplace_hint</code>,
+      respectively.</p>
+    </div>
+
+    <h3><code>emplace_or_update</code> is optional</h3>
+
+    <p>Strictly speaking, once a reliable <code>emplace_stable</code> exists, <code>emplace_or_update</code>
+    could be written generically and efficiently as follows:</p>
+    <div class="code">auto it = m.emplace_stable("foo", std::move(p));
+      if (!it.second)
+      {
+      &nbsp;&nbsp;&nbsp;&nbsp;it.first = std::move(p);&nbsp;&nbsp;// valid move
+      }
+      //&nbsp;&nbsp;equivalent to m.emplace_or_update(std::make_pair("foo", std::move(p)))
+    </div>
+    <p>We propose the addition of <code>emplace_or_update</code> regardless, so as to provide
+    a readable solution for both problems, without making one inferior to the other.</p>
+
+    <h3>Implementation notes</h3>
+
+    <p>The implementation of the stable interface is straight-forward: construction of the element node
+    must simply be deferred until after the key lookup. Until such time, the arguments may be passed
+    along by reference.</p>
+
+    <p>For <code>emplace_or_update</code>, the implementation should first look up the key and then
+    either construct the full <code>value_type</code> or forward-assign the mapped element.</p>
+
+    <h2 id="other">Alternative considerations</h2>
+
+    <h3 id="insertinterface">An <code>insert</code>-like interface</h3>
+
+    <p>We considered a function like &ldquo;<code>insert_stable</code>&rdquo; with a signature like <code>value_type
+    &amp;&amp;</code>, or like the existing template signature of <code>insert</code>. All we
+    require for stable insertion is the ability to pass the arguments by reference, so
+    that we can guarantee that they will not be consumed if the element cannot be inserted.</p>
+
+    <p>However, this would be awkward to use. The common-place
+    construction <code>insert_stable(std::make_pair("foo", std::move(p)))</code> would do the wrong
+    thing and construct a temporary. The correct idiom would
+    be <code>insert_stable(std::forward_as_tuple("foo", std::move(p)))</code>, but there would be no
+    diagnostic if this were done wrong. By separating the key and mapped parts, we embrace the peculiar
+    nature of the map's value type and make it an explicit, deliberate part of the interface. We believe
+    that this aids readability and teachability, as well as making the intended use easy to get right.</p>
+
+    <h3 id="adaptexisting">Adapt the existing standard</h3>
+
+    <p>It is worth considering whether less intrusive changes to the standard can achieve the goals
+    of this proposal. This raises the issue that the current specification is unclear, both the
+    &ldquo;Associative containers&rdquo; requirements ([associative.reqmts, unord.req]) and the
+    &ldquo;<code>{unordered_,}map</code> modifiers&rdquo; ([map.modifiers, unord.map.modifiers]).
+    For example, [unord.map.modifiers] says:</p>
+
+    <p class="quote"><em>Effects:</em> Inserts <code>obj</code> converted to <code>value_type</code>
+    if and only if there is no element in the container with key equivalent to the key
+    of <code>value_type(obj)</code>.</p>
+
+    <p>This does <em>not</em> place any conditions on whether <code>obj</code> is
+    converted or not, only on whether the converted value is <em>inserted</em>. The corresponding
+    text for the ordered map is very different; here is only one excerpt (from [map.modifiers]):</p>
+
+    <p class="quote">Otherwise [if <code>P</code> is not a reference] <code>x</code> is considered
+    to be an rvalue as it is converted to <code>value_type</code> and inserted into the map.</p>
+
+    <p>The problem with this formulation is that it is unclear what &ldquo;is converted and inserted
+    into the map&rdquo; means &ndash; does the conversion happen regardless of the success of the
+    insertion or not?</p>
+
+    <p>This only leaves us with <code>emplace</code>. This function's semantics are not specified as
+    part of the containers, but only as part of the container requirements [associative.reqmts,
+    unord.req]. The language is again unclear; in both cases the wording is:</p>
+
+    <p class="quote"><em>Effects:</em> Inserts a <code>T</code> object <code>t</code> constructed with
+    <code>std::forward&lt;Args&gt;(args)...</code> if and only if there is no element in the container
+    with key equivalent to the key of <code>t</code>.</p>
+
+    <p>Once again, the conflation of &ldquo;construct&rdquo; and &ldquo;insert&rdquo; make the
+    specification too imprecise.</p>
+
+    <p> In all three cases, the standard leaves it unspecified whether further conversions and
+    object constructions are allowed to happen. We believe that the standard wording could
+    benefit from a clarification, regardless of this proposal.</p>
+
+    <p>It is perhaps possible, although we do not have a good suggestion for how to do it, to
+    clarify the existing language <em>and</em> at the same time achieve the goal of this proposal.
+    The fact that the map insert signature has a universal reference,
+    <code>template &lt;typename P&gt; insert(P &amp;&amp;)</code> (as opposed to, say, the
+    corresponding vector interface <code>insert(value_type &amp;&amp;)</code>) suggests that there
+    is some intention in the existing standard to allow the user to pass arguments strictly by
+    reference: the function call expression itself does not construct any objects as a side effect
+    (unlike in the vector interface, where a temporary may be constructed). If some kind of rule
+    were added that implementations must not construct value objects internally before checking the
+    key, then perhaps <code>insert</code> could be given the semantics of the
+    proposed <code>emplace_stable</code>, and <code>emplace_or_update</code> and
+    &ldquo;<code>insert_or_update</code>&rdquo; could be derived from it as described above.</p>
+
+    <p>However, we do not currently have a suggestion for such a change that we would be comfortable with.
+    Changes would have to be made to the container-specific description of <code>insert</code>, as well as
+    to the general associative or unordered container requirements. More importantly yet, if we merely
+    clarified <code>insert</code> and/or <code>emplace</code> to have stable semantics (bearing in mind that
+    for <code>insert</code> to behave stably requires <code>forward_as_tuple</code> and not <code>make_pair</code>!),
+    it would still be difficult for users to rely on the new behaviour, since it would not be easy to detect whether
+    an implementation was conforming, and a non-conforming implementation would silently produce different
+    behaviour.</p>
+
+    <h2 id="ack">Acknowledgements</h2>
+
+    <p>Many thanks to Geoffrey Romer, Jeffrey Yasskin, Billy Donahue and Stuart Taylor for providing
+    invaluable feedback and discussion.</p>
+
+</body>
+</html>

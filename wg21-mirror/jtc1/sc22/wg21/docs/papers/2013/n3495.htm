@@ -1,0 +1,170 @@
+<html>
+<head>
+<TITLE>
+ISO/IEC JTC1/SC22/WG21
+N3495
+</TITLE>
+</head>
+<body>
+<h1>
+<img align=top src="/pics/iso44.gif" alt="ISO/">
+<img align=top src="/pics/iec44.gif" alt="IEC">
+JTC1/SC22/WG21
+N3495
+</h1>
+<pre>
+Doc. No.: N3495
+Date:     2012-12-07
+Reply to: Ariane van der Steldt &lt;ariane@stack.nl>
+Title:    inplace realloc
+
+
+I:	Index
+
+I:	Index:
+II:	Introduction
+III:	Motivation and scope
+IV:	Impact on the standard
+V:	Design decisions
+V.1:	Design decision: ASLR
+VI:	Technical specifications
+VII:	Acknowledgements
+
+
+II:	Introduction:
+
+The C language has realloc(), which allows shrinking and growing of memory previously allocated using malloc().
+
+The C++ language has allocators (refering to the concept, rather than specifically std::allocator), which allow specialization of allocation, but lose the advantages offered by realloc.
+While actually moving memory, as offered by realloc, is often not possible in c++, realloc may extend or shrink without moving data, which is a useful addition to standard allocators.
+
+
+III:	Motivation and scope
+
+The c++ library has several container types using allocators, while implementing shrink_to_fit().
+Looking at std::allocator&lt;> and std::allocator_traits&lt;>, I can not find an allocator-supported function to implement this semantic, which suggests to me that either:
+- libraries do not shrink-to-fit at all (a quick glance suggested to me that nop would be a valid implementation),
+- libraries implement their own internal support in std::allocator, disabling custom allocators from enabling this behaviour.
+
+A bit more esoteric: I work on a network library using udp and serialization, where the code is (unfortunately) unable to know in advance the size of data buffers.
+Without the 'inplace realloc' (i.e. this proposal) I am unable to shrink/grow the buffers when required, requiring me to implement custom allocators for specifically this purpose.
+
+Both issues can be solved using the current allocators, but:
+- the solution may require allocating new storage and copying over each element, invalidation iterators (and other pointers) to this data,
+- in the case of network buffers, growing data would always require a copy (memcpy), while disabling use of realloc for any allocator.
+
+This proposal requires a single function addition to std::allocator_traits, allows optional implementation of an additional function to any allocator, may (optionally/implementation-defined?) require an addition to std::allocator.
+
+
+IV:	Impact on the standard
+
+The proposal requires at least the addition of a new static member function to std::allocator_traits.
+The function would be called 'alloc_resize' (XXX name):
+
+	template&lt;typename Alloc>
+	class std::allocator_traits
+	{
+	public:
+		...	/* Existing definition. */
+
+		static pointer
+		alloc_resize(Alloc& a, pointer p, size_type n_cur, size_type n_new)
+		{
+			/*
+			 * p, having n_cur elements,
+			 * would change to having n_new elements.
+			 * If the allocator does not support this,
+			 * std::bad_alloc() is thrown.
+			 *
+			 * (p, n_cur) must refer to a previous allocation,
+			 * or the behaviour is undefined.
+			 *
+			 * This function is implemented as:
+			 * a.alloc_resize(p, n_cur, n_new)  iff implemented by Alloc,
+			 * or as
+			 * throw std::bad_alloc()  otherwise.
+			 */
+			return p;
+		}
+	};
+
+As can be read from the above comment, any allocator a user (of the standard library) implements, may implement 'pointer alloc_resize(pointer, size_type n_cur, size_type n_new)'.
+The proposal does not deal with std::allocator, for which implementing this function is implementation defined.
+
+
+The proposal would require any container type using contiguous storage to use attempt the reallocation prior to the allocate()-move() semantics currently in use.
+
+Existing users would be impacted minimally:
+- the new function has a fallback to failure, so existing allocators not implementing this functionality will continue to function,
+- the change to containers reduces copying of data on growth/shrink, which would only cause iterators not to be invalidated in cases where they may be otherwise,
+- the change allows non-library-implementators to implement shrink_to_fit() for their collection types, without digging into internals of a specific implementation of the standard library,
+= existing allocators continue to work (provided the library properly uses std::allocator_traits to access them) regardless of an update to the new container.
+
+
+V:	Design decisions
+
+The decision to throw std::bad_alloc on failure:
+- PRO: reduces the chance of users (of std::allocator_traits/any allocator) to mis-use the function (i.e. forgetting to check the return is not going to be a common bug),
+- CON: creates an exception path which could be taken quite often, depending on allocator implementation and memory pressure.
+
+The decision to implement this functionality:
+- PRO: microsoft has a similar function for their heaps
+- PRO: realloc, in the non-memory-moving-case has the same semantics
+- PRO: reduces an O(n) operation to O(1) with certian probability (see below).
+- CON: requires yet another function that will provide a default implementation if the allocator does not provide it, in which case it would always trigger an exception
+  but note that the fallback definition would be inline and a good compiler could detect this and optimize the throw/catch away
+
+Actually a big counter-argument, which I suspect is the cause for this not being in the c++11 standard in the first place:
+- CON: exact semantics not supported by the C standard, nor in new[]/delete[] operators, making an implementation for std::allocator hard.
+
+The decision for the name:
+- PRO: critter needs a name
+- CON: something I came up with at random
+I rejected realloc (since the C library function has different semantics).
+I rejected realloc_inplace (while the semantics are exactly the same, I didn't like it in favour of (rejected) reallocate_inplace (see next line).
+I rejected reallocate_inplace (since it is a very long name)
+I prefered alloc_resize, since the function is basically resizing (shrinking or growing) an existing allocation.
+Functionality is my main motivation, the name is secondary and proposals for better names are welcome (I suck at functionality names). :P
+
+
+V.1:	Design decision: ASLR
+
+Most current allocators nowadays use ASLR (Address Space Layout Randomization) which likely causes gaps between two allocations adjecent to each other in terms of addresses.
+Secondly, existing allocations being released create or extend the gap (free memory) between two concurrent allocations.
+
+The above two mechanics should bias alloc_resize() into more often succeeding than failing for small (n_new - n_cur).
+
+The case where an allocation is shrunk, should rarely fail (depending on the implementation ofcourse) since the act of freeing a part of an allocation would yield a portion of free space.
+With ASLR, the tail section thus freeed, would make subsequent allocations easier, since the free space after the current allocation has grown.
+
+
+VI:	Technical specifications
+
+XXX	not the actual wording in the final standard, mostly intended to illustrate the proposed semantics.
+
+std::allocator may or may not implement std::allocator&lt;T>::alloc_resize(pointer p, size_type n_cur, size_type n_new).
+If the combination (p, n_cur) does not reflect an existing allocation, an std::invalid_argument exception will be thrown.
+If n_cur is zero or n_new is zero, an std::invalid_argument exception will be thrown.
+
+Any other allocator defining alloc_resize may opt to produce undefined behaviour where std::allocator would throw std::invalid_argument.
+
+std::allocator_traits will define std::allocator_traits&lt;Alloc> { static pointer alloc_resize(Alloc& alloc, pointer p, size_type n_cur, size_type n_new); }.
+std::allocator_traits::alloc_resize will invoke alloc().alloc_resize(p, n_cur, n_new) if Alloc defines this function.
+Otherwise, it will throw std::bad_alloc.
+
+Containers implementing shrink_to_fit() will attempt to resize their allocations to the minimum required, by invoking std::allocator_traits&lt;Alloc>::alloc_resize().
+Failures will be ignored.
+
+Containers growing or shrinking their storage, will attempt to resize using std::allocator_traits&lt;Alloc>::alloc_resize(), failing that, they will revert to their current behaviour on these function calls.
+
+
+VII:	Acknowledgements
+
+Currently, this is just me thinking this is a good idea and I did not find a similar proposal on isocpp.org.
+
+However, a word of thanks to isocpp.org for existing, may be in order, since without this website, this proposal would simply live in my personal c++ library only.
+Consequently, a word of thanks to 'Herb Sutter', whose talk directed me to the isocpp.org site.  And ofcourse anyone and everyone making this site possible in the first place!
+(Yeah, I'll remove the above and add actual people if I get feedback.)
+</pre>
+</body>
+</html>

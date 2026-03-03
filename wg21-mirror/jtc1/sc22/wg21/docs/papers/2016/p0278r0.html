@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta http-equiv=Content-Type content="text/html; charset=utf-8" />
+        <title>P0278r0 - volatile solutions</title>
+        <meta name="generator" content="BBEdit 11.5" />
+        <style>
+            ins
+            {
+                color: green;
+            }
+            del
+            {
+                color: red;
+            }
+            .source
+            {
+                font-family: monospace
+            }
+            .source .keyword
+            {
+                color: maroon;
+                font-weight: bold
+            }
+            .source .standard
+            {
+                color: indianred;
+                font-weight: bold
+            }
+            .source .literal
+            {
+                color: green;
+            } 
+            .source .text
+            {
+                color: blue;
+            } 
+            .source .comment
+            {
+                color: dimgray;
+            } 
+            .source .meta
+            {
+                color: lightgray;
+            } 
+        </style>
+    </head>
+    <body>
+        <h1>volatile solutions</h1>
+        <hr />
+        <table id="header">
+            <tr> <td>Project:</td>	<td>ISO JTC1/SC22/WG21: Programming Language C++</td> </tr>
+            <tr> <td>Audience:</td>	<td>Core Working Group</td> </tr>
+            <tr> <td>Document:</td>	<td>P0278r0</td> </tr>
+            <tr> <td>Date:</td>	<td>2016-02-14 <span style="color:red">♥</span>️</td> </tr>
+            <tr> <td rowspan="2">Authors:</td>	<td>Jon Kalb &lt;jon at kalbweb dot com&gt;</td> </tr>
+            <tr> <td>Dan Saks &lt;dan at dansaks dot com&gt;</td> </tr>
+        </table>
+        <h2>I. Introduction</h2>
+        <p>This proposal deals with three issues related to objects declared with the <span class="source">volatile</span> qualifier.</p>
+        <p>The goals are for the standard to say:
+            <ol start="0">
+                <li>that the behavior of reading from an uninitialized volatile object is not undefined.</li>
+                <li>that the implementation can never assume the value of a volatile object, even if it has just written it.</li>
+                <li>that objects qualified with <span class="source">const volatile</span> need not be initialized.</li>
+            </ol>
+        </p>
+        <h2>II. Background</h2>
+        <p>The common use case for objects to be declared with the <span class="source">volatile</span> qualifier is to support memory-mapped I/O. Such ports look to the software as if they are memory at a particular address. This design has a number of implications including:
+            <ul>
+                <li>any access, even a write of the existing value or a read, can have side effects</li>
+                <li>the address may not “hold” a value written to it, that is, the read value of port may be unrelated to the value written, even if it was “just” written</li>
+                <li>some ports, and therefore some objects declared with the <span class="source">volatile</span> qualifier, may be read-only and some may be write-only</li>
+            </ul>
+        </p>
+        <p>Because “regular” memory doesn’t have these properties and we want to allow the implementation to optimize for the common case rather than uncommon case of memory-mapped I/O, we allow the implementation to make assumptions about memory that are true for regular memory, but not true for ports.</p>
+        <p>To support memory-mapped I/O we declare such objects with the <span class="source">volatile</span> qualifier. The implications of this are spelled out in 1.9/8 and 7.1.6.1/7 (of <a href="http://open-std.org/JTC1/SC22/WG21/docs/papers/2015/n4567.pdf" name="draft C++17" title="n4567">n4567</a>), which essentially give the programmer greater control of exactly how the volatile object is accessed and forbid certain optimizations that make sense (only) for regular memory.</p>
+        <h2>III. Motivation and Scope</h2>
+        <h3>Use Case 0: Reading from an uninitialized volatile object</h3>
+
+        <p>Consider a 32-bit read-only port located at location 0x3FF6000 declared and used like this:
+        <pre class="source">
+        <span class="keyword">using</span> reg_t = <span class="standard">uint32_t</span> <span class="keyword">volatile</span>;
+
+        reg_t* readonly_reg{<span class="keyword">new</span> ((<span class="keyword">void</span>*)<span class="literal">0x3FF6000</span>) reg_t};
+
+        <span class="standard">uint32_t</span> current_value{*readonly_reg};
+        </pre></p>
+        <p>In Use Case 0 we have a read from a value (pointed to by readonly_reg) that has not been initialized. Since this is a read-only port, this is correct (and the only permissible) usage. However, according to 8.5/12 reading an uninitialized value is undefined behavior. In current practice, implementations simply perform the read, but a conforming implementation could optimize away any code path on which this happens. <i>We assert that reading from an uninitialized volatile object should be defined behavior.</i></p>
+        <h3>Use Case 1: Assuming a written value is "held" by a volatile object</h3>
+        <p>Consider a byte sized port that is read-write, but the read value is implemented to be the number of bytes that have been written to the port (or some other value that, from the implementation's point of view, is unrelated to the value written).</p>
+        <h4>Use Case 1a</h4>
+        <pre class="source">
+        <span class="keyword">extern char volatile</span> IOPort;
+
+        <span class="keyword">char</span> frob(<span class="keyword">char</span> arg)
+        {
+            IOPort = arg;
+            IOPort = <span class="text">'a'</span>;
+            <span class="keyword">return</span> IOPort;
+        }
+    <span class="meta">~~~</span>
+        <span class="keyword">char</span> value_read = frob(<span class="text">'b'</span>);
+        </pre>
+        <h4>Use Case 1b</h4>
+        <pre class="source">
+        <span class="keyword">char</span> value_read = IOPort = 'a';
+        </pre>
+
+        <p>In Use Cases 1a and 1b, the user expects the value of value_read to be a value actually read from IOPort, but an implementation is allowed to take advantage of the fact that it knows the value of IOPort because it just set it and use 'a' instead of actually reading the port. [Note: A read of the volatile object is required because that is expected of the abstract machine, but the implementation is able to anticipate and use the value before that load is complete.]</p>
+        <p>In this case the assumption is incorrect because the port’s read value is not (necessarily) equal to the last value written to it. (Actually, it isn’t clear whether or not an implementation is free to do this. It doesn’t seem to be in the spirit of volatile, but it doesn’t seem to be forbidden either.) <i>We assert that the standard should specifically forbid the implementation from making assumptions about the read value of volatile objects.</i></p>
+
+        <h3>Use Case 2: Making <span class="source">const volatile</span> read-only</h3>
+
+        <p>Again consider the 32-bit read-only port located at location 0x3FF6000. Because it is read-only, the programmer declares it <span class="source">const</span> so that the implementation will catch writes to the port at compile time, because they are now non-conforming.</p>
+        <pre class="source">
+        <span class="keyword">using</span> ro_reg_t = <span class="standard">uint32_t</span> <span class="keyword">volatile const</span>;
+
+        ro_reg_t* readonly_reg{<span class="keyword">new</span> ((<span class="keyword">void</span>*)<span class="literal">0x3FF6000</span>) ro_reg_t}; <span class="comment">// Error: No intialization of const volatile object.</span>
+        </pre>
+
+        <p>This fails to compile because the value created at the port is declared <span class="source">const</span>, but not given an initializer. But as a read-only port, no initialization is permissible.</p>
+
+        <p>Due to the nature of volatile objects, the implementation should never assume that they are not initialized, nor should it insist that every volatile object be written to. <i>We assert that the standard should not require that objects declared <span class="source">const volatile</span> be initialized.</i></p>
+        <h2>IV. Compatibility</h2>
+        <p>Requiring implementations to treat reads from uninitialized volatile objects as defined behavior, probably results in no changes to existing practice.</p>
+        <p>Requiring implementations to read from volatile objects instead of assume they hold the value assigned them, may “pessimize” some existing code, but for any existing code that yields a different result, the new results will be the expected behavior.</p>
+        <p>Allowing objects declared <span class="source">const volatile</span> to be uninitialized will break no existing code, but will require changes to existing implementations.</p>
+        <h2>V. Technical Specifications</h2>
+        <p>In the last sentence of 8.5/7 specify that the requirement doesn't apply to volatile types:<br>
+        <blockquote>If a program calls for the default initialization of an object of a <ins>non-volatile</ins> const-qualified type T, T shall be a class type with a user-provided default constructor.</blockquote>
+        <p>The intention is that const volatile objects do not need to be initialed. Note: There may also be a required change for non-class type objects.</p>
+        <p>In 8.5/12 (add a new bullet before existing bullet 8.5/12.1):</p>
+        <blockquote><ins>— If an indeterminate value is produced by the evaluation of an uninitialized volatile object, then the result of the operation is an indeterminate value.</ins></blockquote>
+        <p>The intention is that reading from an uninitialized value is not undefined behavior.</p>
+        <p>In 3.9.3 add paragraph 7:</p>
+        <blockquote><ins>The value stored within a volatile object can change between accesses, and it is unspecified whether and when this happens and whether such changes can contribute to a data race.</ins></blockquote>
+        <p>The intention is that the implementation can never assume the read value of volatile.</p>
+        <h2>VI. Acknowledgements</h2>
+        <p>The authors want to think Richard Smith for the early feedback and guidance.</p>
+    </body>
+</html>

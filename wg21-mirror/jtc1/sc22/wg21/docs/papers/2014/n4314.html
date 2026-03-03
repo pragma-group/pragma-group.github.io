@@ -1,0 +1,484 @@
+<html>
+<head>
+<title>N4314: Data-Invariant Functions (revision 2)</title>
+
+<style type="text/css">
+  ins { text-decoration:none; font-weight:bold; background-color:#A0FFA0 }
+  .new { text-decoration:none; font-weight:bold; background-color:#D0FFD0 }
+  del { text-decoration:line-through; background-color:#FFA0A0 }  
+  strong { font-weight: inherit; color: #2020ff }
+</style>
+</head>
+
+<body>
+N4314<br/>
+revision of N4145<br/>
+Jens Maurer &lt;Jens.Maurer@gmx.net><br/>
+2014-11-15<br/>
+
+<h1>N4314: Data-Invariant Functions (revision 2)</h1>
+
+<h2>1 Introduction</h2>
+
+<p>
+One of the hardest challenges when implementing cryptographic
+functionality with well-defined mathematical properties is to avoid
+
+<a href="https://en.wikipedia.org/wiki/Side_channel_attack">side-channel attacks</a>,
+
+that is, security breaches exploiting physical effects dependent on
+secret data when performing a cryptographic operation.  Such effects
+include variances in timing of execution, power consumption of the
+machine, or noise produced by voltage regulators of the CPU.  C++ does
+not consider such effects as part of the observable behavior of the
+abstract machine (C++ 1.9 [intro.execution]), thereby allowing
+implementations to vary these properties in unspecified ways.
+</p>
+
+<p>
+As an example, this fairly recent
+
+<a href="https://github.com/openssl/openssl/commit/adb46dbc6dd7347750df2468c93e8c34bcb93a4b">patch for openssl</a>
+
+replaced some <code>if</code> statements with open-coded operations
+that leak no timing information about the true vs. false outcome.  In
+general, this is a sound approach, but it bears some risk in the
+framework of C and C++, because future optimizations in compilers
+might restore conditional branches under the as-if rule.
+</p>
+
+<p>
+This paper proposes a small set of functions performing common tasks
+with physical execution properties that do not vary with
+(specified parts of) the input values.  Such functions are called
+<em>data-invariant function</em>s.  It is the responsibility of the
+implementation to ensure that they remain data-invariant even when
+optimizing.
+</p>
+
+<p>
+C functions at this abstraction level have recently been added to
+<a href="http://git.openssl.org/gitweb/?p=openssl.git;a=blob;f=crypto/constant_time_locl.h;hb=67b8bcee95f225a07216700786b538bb98d63cfe">OpenSSL</a>
+and
+<a href="https://boringssl.googlesource.com/boringssl/+/e18d821dfcc32532caeeb1a2d15090672f592ce3/crypto/internal.h#157">BoringSSL</a>.
+
+<p>
+This paper addresses parts of
+<a href="https://issues.isocpp.org/show_bug.cgi?id=15">LEWG issue 15</a>.
+</p>
+
+<p>
+The Library Evolution Working Group (LEWG) discussed this paper during
+the Urbana-Champaign (November 2014) meeting, with the following results:
+
+<ul>
+
+<li>use <code>equal</code> algorithm with two ranges</li>
+
+<li>consider whether the algorithms taking less than
+RandomAccessIterator will be data-invariant even for lists and
+hash tables</li>
+
+<li>await evidence of actual use of a library at the abstraction level
+presented [see above]</li>
+
+</ul>
+
+<h3>1.1 Changes</h3>
+
+The following changes were applied to this paper since N4145:
+
+<ul>
+<li>rephrase definition of "data-invariant" in the wording (blue text)</li>
+
+<li>add pointers to existing library approaches in OpenSSL and BoringSSL</li>
+
+<li>change the <code>equal</code> algorithms so that it takes two ranges</li>
+
+<li>add consideration of iterators that may not be data-invariant</li>
+
+<li>removed <code>BinaryPredicate</code> overload of
+<code>equal</code>, since it increases the scope without apparent
+benefit</li>
+
+</ul>
+
+
+<h2>2 Design</h2>
+
+<p>
+Similar to <code>std::atomic&lt;></code>, we introduce a template
+<code>std::constant_time::value&lt;></code> whose (select few)
+operations have the desired properties; see section 5 for details.
+</p>
+
+<p>
+Useful algorithms can be built trivially on top of the building blocks
+provided; see below.
+</p>
+
+<p>
+All values must be cv-unqualified scalar types.
+</p>
+
+<p>
+<strong>Algorithms on lists or hash tables may be constant-time.
+However, the user must take care to ensure that iterator operations
+are data-invariant.  For example, hash tables may have different
+element distributions depending on the actual values of the elements.
+For the user, it is best to limit use of data-invariant functions to
+RandomAccessIterators, but there is no strong reason to restrict the
+interface as provided by the standard.</strong>
+</p>
+
+
+<h2>3 Discussion</h2>
+
+<p>
+This seems to be the most straightforward approach.  The selection of
+standard-mandated operations and algorithms should be limited to the
+bare minimum, since they are only useful for a very narrow target
+audience.
+</p>
+
+<p>
+A prototype implementation for Intel x86 and <code>T = unsigned
+int</code> is available at
+
+<a href="http://jmaurer.awardspace.info/wg21/data-invariant.tar">data-invariant.tar</a>.
+
+It uses gcc inline assembly to guarantee branch-free operations.
+Analysis of the resulting executable code shows that no abstraction
+overhead of <code>value&lt;T></code> over plain <code>T</code> is
+present when optimizing.
+</p>
+
+<p>
+Using the facilities provided, some commonly-used data-invariant
+algorithms can be built on top:
+</p>
+
+<pre>
+template&lt;class InputIterator1, class InputIterator2>
+value&lt;bool> equal(InputIterator1 first1, InputIterator1 last1,
+		  InputIterator2 first2 InputIterator2 last2)
+{
+  value&lt;bool> result(true);
+  using T = typename std::iterator_traits&lt;InputIterator1>::value_type;
+  for ( ; first1 != last1 && first2 != last2; ++first1, ++first2)
+    result = result && (value&lt;T>(*first1) == value&lt;T>(*first2));
+  if (first1 != last1 || first2 != last2)
+    return value&lt;bool>(false);
+  return result;
+}
+
+
+template&lt;class InputIterator1, class InputIterator2, class OutputIterator>
+OutputIterator copy_conditional(value&lt;bool> condition,
+                      InputIterator1 first1, InputIterator1 last1,
+                      InputIterator2 first2, OutputIterator result)
+{
+  using T = typename std::iterator_traits&lt;InputIterator1>::value_type;
+  for ( ; first1 != last1; ++first1, ++first2)
+    *result++ = select(condition, value&lt;T>(*first1), value&lt;T>(*first2)).get();
+}
+
+
+template&lt;class InputIterator>
+value&lt;typename std::iterator_traits&lt;InputIterator>::value_type>
+lookup(InputIterator first, InputIterator last, std::size_t index)
+{
+  using T = typename std::iterator_traits&lt;InputIterator>::value_type;
+  const value&lt;std::size_t> idx(index);
+  value&lt;T> result(0);
+  for (std::size_t i = 0; first != last; ++first, ++i)
+    result = select(value&lt;std::size_t>(i) == idx, value&lt;T>(*first), result);
+  return result;
+}
+</pre>
+
+However, some of these algorithms may have a faster implementation
+using fairly intricate bit operations, so it might be worthwhile to
+provide them in the standard library.  For example, <code>equal</code>
+on a sequence of <code>unsigned int</code> could be written like this:
+
+<pre>
+template&lt;class InputIterator1, class InputIterator2>
+value&lt;bool> equal(InputIterator1 first1, InputIterator1 last1,
+		  InputIterator2 first2, InputIterator2 last2)
+{
+  unsigned int v = 0;
+  for ( ; first1 != last1 && first2 != last2; ++first1, ++first2)
+    v |= *first1 ^ *first2;
+  if (first1 != last1 || first2 != last2)
+    return value&lt;bool>(false);
+  return value&lt;unsigned int>(v) == value&lt;unsigned int>(0);
+}
+</pre>
+
+
+<h2>4 Open Issues</h2>
+
+<ul>
+
+<li>Should we provide the trivial algorithms <code>equal</code>,
+<code>copy_conditional</code>, and <code>lookup</code> in the
+standard?</li>
+
+<li>Choose a header name</li>
+
+<li>Choose a shipment vehicle</li>
+
+<li>Choose names: namespace, <code>value&lt;T></code>, algorithms</li>
+
+</ul>
+
+
+<h2>5 Wording Changes</h2>
+
+Add a new section, for example in clause 20 [utilities]:
+
+<blockquote class="new">
+<b>x.y [datainv] Data-invariant functions</b>
+<p>
+A <strong>function is <em>data-invariant</em> with respect to its
+argument values or a subset thereof if the physical execution
+properties of the function do not depend on those argument
+values</strong>.
+</p>
+
+<p>
+[ Note: In particular, the execution times and memory access patterns
+are independent of the argument values.  Also, branches or loop counts
+do not depend on argument values. ]
+</p>
+
+<pre>
+namespace std {
+  namespace constant_time {
+    template&lt;class T>
+    struct value {
+      explicit value(T);
+      T get() const;
+    };
+
+    template&lt;class T> value&lt;bool> operator==(value&lt;T> x, value&lt;T> y);
+    template&lt;class T> value&lt;bool> operator!=(value&lt;T> x, value&lt;T> y);
+    template&lt;class T> value&lt;bool> operator&lt;(value&lt;T> x, value&lt;T> y);
+    template&lt;class T> value&lt;bool> operator&lt;=(value&lt;T> x, value&lt;T> y);
+    template&lt;class T> value&lt;bool> operator>(value&lt;T> x, value&lt;T> y);
+    template&lt;class T> value&lt;bool> operator>=(value&lt;T> x, value&lt;T> y);
+
+    template&lt;class T> value&lt;T> select(value&lt;bool> condition, value&lt;T> x, value&lt;T> y);
+
+    value&lt;bool> operator&&(value&lt;bool> x, value&lt;bool> y);
+    value&lt;bool> operator||(value&lt;bool> x, value&lt;bool> y);
+  }
+}
+</pre>
+
+<p>
+The template parameter <code>T</code> shall denote a cv-unqualified
+scalar type (3.9 basic.types).
+</p>
+
+<h3>x.y.1 Member functions of value&lt;T></h3>
+
+<p>
+All member functions of <code>value&lt;T></code> are data-invariant
+with respect to the arguments and the value held by
+<code>*this</code>.
+</p>
+
+<pre>explicit value(T x)</pre>
+
+<p>
+<em>Effects:</em> Constructs a <code>value</code> object holding value
+<code>x</code>.
+</p>
+
+<pre>T get()</pre>
+
+<p>
+<em>Returns:</em> The value this <code>value</code> object is holding.
+</p>
+
+
+<h3>x.y.2 Operations on value&lt;T></h3>
+
+<pre>
+template&lt;class T> value&lt;bool> operator==(value&lt;T> x, value&lt;T> y);
+template&lt;class T> value&lt;bool> operator!=(value&lt;T> x, value&lt;T> y);
+template&lt;class T> value&lt;bool> operator&lt;(value&lt;T> x, value&lt;T> y);
+template&lt;class T> value&lt;bool> operator&lt;=(value&lt;T> x, value&lt;T> y);
+template&lt;class T> value&lt;bool> operator>(value&lt;T> x, value&lt;T> y);
+template&lt;class T> value&lt;bool> operator>=(value&lt;T> x, value&lt;T> y);
+</pre>
+
+<p>
+<em>Returns:</em> A <code>value&lt;bool></code> holding the boolean
+result of the corresponding comparison on <code>x.get()</code> and
+<code>y.get()</code> (5.9 [expr.rel], 5.10 [expr.eq]).
+</p>
+
+<p>
+<em>Remarks:</em> These functions are data-invariant with respect to the
+values of <code>x</code> and <code>y</code>.
+</p>
+
+<pre>
+
+template&lt;class T> value&lt;T> select(value&lt;bool> condition, value&lt;T> x, value&lt;T> y);
+</pre>
+
+<p>
+<em>Returns:</em> <code>(condition.get() ? x : y)</code></em>
+</p>
+
+<p>
+<em>Remarks:</em> This function is data-invariant with respect to the
+values of <code>condition</code>, <code>x</code>, and <code>y</code>.
+</p>
+
+<h3>x.y.3 Operations on value&lt;bool></h3>
+
+<pre>
+value&lt;bool> operator&&(value&lt;bool> x, value&lt;bool> y);
+value&lt;bool> operator||(value&lt;bool> x, value&lt;bool> y);
+</pre>
+
+<p>
+<em>Returns:</em> A <code>value&lt;bool></code> holding the boolean
+result of the corresponding operation on <code>x.get()</code> and
+<code>y.get()</code> (5.14 [expr.log.and], 5.15 [expr.log.or]).
+</p>
+
+<p>
+<em>Remarks:</em> These functions are data-invariant with respect to
+the values of <code>x</code> and <code>y</code>. [ Note: In contrast
+to the built-in operations, short-circuit evaluation is not
+performed. ]
+</p>
+
+</blockquote>
+
+
+<h2>6 Backup wording for algorithms</h2>
+
+<blockquote class="new">
+
+<h3>x.y.4 Algorithms</h3>
+
+<strong>The functions in this section are data-invariant only if the
+required operations on the provided iterators are
+data-invariant.</strong>
+
+<pre>
+template&lt;class InputIterator1, class InputIterator2>
+  value&lt;bool> equal(InputIterator1 first1, InputIterator1 last1,
+                    InputIterator2 first2<strong>, InputIterator2 last2</strong>);
+</pre>
+
+<p>
+<em>Requires:</em> <code>InputIterator1</code> and
+<code>InputIterator2</code> have the same scalar and non-volatile
+<code>value_type</code>.
+</p>
+
+<p>
+<em>Returns:</em> See 25.2.11 [alg.equal].
+</p>
+
+<p>
+<em>Remarks:</em> This function is data-invariant with respect to the
+values, but not the length, of the input sequences.
+</p>
+
+<p>
+<em>Complexity:</em> Exactly <code>min(last1-first1<strong>,
+last2-first2</strong>)</code> applications of the corresponding
+predicate.
+</p>
+
+<pre>
+
+template&lt;class InputIterator1, class InputIterator2, class OutputIterator>
+  OutputIterator copy_conditional(value&lt;bool> condition,
+                      InputIterator1 first1, InputIterator1 last1,
+                      InputIterator2 first2, OutputIterator result);
+</pre>
+
+<p>
+<em>Requires:</em> <code>InputIterator1</code> and
+<code>InputIterator2</code> have the same scalar and non-volatile
+<code>value_type</code>.
+</p>
+
+<p>
+<em>Remarks:</em> This function is data-invariant with respect to the
+value of <code>condition</code> and the values of the input sequences,
+but not with respect to the length of the input sequences.
+</p>
+
+<p>
+<em>Returns:</em> If <code>condition.get()</code> is
+<code>true</code>, <code>std::copy(first1, last1, result)</code>,
+otherwise <code>std::copy(first2, first2 + (last1-first1),
+result)</code>.
+</p>
+
+<p>
+<em>Complexity:</em> Exactly <code>last1-first1</code> increments of
+each of <code>InputIterator1</code> and <code>InputIterator2</code>.
+</p>
+
+<pre>
+
+template&lt;class InputIterator>
+  value&lt;/* see below */> lookup(InputIterator first, InputIterator last, std::size_t index);
+</pre>
+
+<p>
+<em>Requires:</em> <code>InputIterator</code> has a scalar and
+non-volatile <code>value_type</code>. The value of <code>index</code>
+is less than <code>last-first</code>.
+</p>
+
+<p>
+<em>Returns:</em> <code>*(first + index)</code>
+</p>
+
+<p>
+<em>Remarks:</em> The return type is <code>value&lt;T></code>, where
+<code>T</code> is the <code>value_type</code> of the
+<code>InputIterator</code> with any top-level cv-qualification
+removed. This function is data-invariant with respect to the values of
+<code>index</code> and the input sequence, but not with respect to the
+length of the input sequence.
+</p>
+
+<p>
+<em>Complexity:</em> Exactly <code>last-first</code> increments of
+<code>InputIterator</code>.
+</p>
+
+</blockquote>
+
+
+<h2>7 Acknowledgements</h2>
+
+Thanks to Adam Langley (Google) for reviewing an earlier version of
+this paper.
+
+<h2>8 References</h2>
+
+<ul>
+
+<li><a href="https://cryptocoding.net/index.php/Coding_rules#Compare_secret_strings_in_constant_time">coding rules for cryptography</a>
+
+<li>package <a href="http://golang.org/pkg/crypto/subtle/">crypto/suble</a> of the Go language</li>
+
+</ul>
+
+</body>
+</html>

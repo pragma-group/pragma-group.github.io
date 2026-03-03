@@ -1,0 +1,564 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+"http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=us-ascii">
+<title>Read-Copy Update (RCU) for C++</title>
+</head>
+<body>
+<h1>Read-Copy Update (RCU) for C++</h1>
+
+<p>
+ISO/IEC JTC1 SC22 WG21 P0279R0 - 2016-02-14
+</p>
+
+<p>
+Paul E. McKenney, paulmck@linux.vnet.ibm.com<br>
+TBD
+</p>
+
+<h2>History</h2>
+
+<p>
+This document is a follow-on to
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/n4483.pdf">N4483</a>,
+based on presentation and discussions at the 2015 Kona meeting.
+
+<h2>Introduction</h2>
+
+<p>
+RCU has seen increasingly heavy use within the Linux kernel, as can be
+seen in the following graph, where it is most frequently used as
+a high-performance and highly scalable replacement for reader-writer locking.
+It has also seen significant uptake in some userspace applications via
+the <a href="http://urcu.so">userspace RCU library</a>, which is available
+on many recent Linux distributions, and has also been tested on a number
+of versions of FreeBSD as well as on Cygwin.
+One example userspace use is the solution to the
+<a href="http://www.rdrop.com/users/paulmck/scalability/paper/Updates.2015.01.16b.LCA.pdf">Issaquah Challenge</a>,
+see slides 63-66 for performance and scalability information.
+</p>
+
+<p><img src="linux-RCU.png" alt="linux-RCU.png"></p>
+
+<p>
+This document gives a brief introduction to RCU and describes one way
+that it might be incorporated into the C and C++ standards.
+</p>
+
+<ol>
+<li>	<a href="#What Is RCU?">What Is RCU?</a>
+<li>	<a href="#Where Is RCU Best Used?">Where Is RCU Best Used?</a>
+<li>	<a href="#RCU API">RCU API</a>
+<li>	<a href="#Alternative API Choices">Alternative API Choices</a>
+<li>	<a href="#Implementation Alternatives">Implementation Alternatives</a>
+<li>	<a href="#Additional References">Additional References</a>
+</ol>
+
+<h2><a name="What Is RCU?">What Is RCU?</a></h2>
+
+<p>
+RCU provides guarantees and desiderata.
+A given implementation must provide the guarantees to qualify as an
+RCU implementation, and should also provide the desiderata if it is
+to be taken seriously.
+</p>
+
+<h3>RCU Guarantees</h3>
+
+<p>
+RCU provides a <i>grace-period guarantee</i>, a <i>publish-subscribe
+guarantee</i>, and <i>memory-ordering guarantees</i>.
+The following paragraphs provide a quick overview of these guarantees,
+with more detail available in the
+<a href="#Additional References">Additional References</a>.
+</p>
+
+<p>
+The grace-period guarantee allows updaters to wait for pre-existing RCU
+readers.
+The &ldquo;pre-existing&rdquo; phrase is important: RCU is not obligated
+to wait for readers that start after the beginning of the grace period.
+Grace periods are frequently used to privatize data elements that
+have been removed from a linked data structure.
+The key point is that once a given data element has been removed, only
+pre-existing readers can have access to it.
+Therefore, removing the element and then waiting for a grace period
+guarantees that no readers can possibly still have access to that
+element: Old readers have completed, and new readers never did have a path
+to the removed element.
+Thus, after the grace period completes, the removed element can
+safely be freed, even in the presence of concurrent readers.
+In this way, grace periods greatly simplify maintenance of data structures
+subject to concurrent lookup and deletion.
+</p>
+
+<p>
+RCU readers are delimited by <code>rcu_read_lock()</code> and
+<code>rcu_read_unlock()</code>, which may be nested.
+RCU updaters wait for all pre-existing readers by invoking
+<code>synchronize_rcu()</code>, which blocks for at least one grace
+period, that is, until all such readers have completed.
+The asynchronous counterpart to <code>synchronize_rcu()</code> is
+<code>call_rcu()</code>, which invokes the specified function
+after a grace period has elapsed.
+</p>
+
+<p>
+The publish-subscribe guarantee is used to simplify insertion into a
+linked data structure that is subject to concurrent lookup.
+For this purpose, RCU provides API members that incorporate any
+compiler directives and memory-barrier instructions that might be
+required to ensure that when a reader encounters a newly inserted
+data element, that reader will be guaranteed to see any initialization
+that might have been applied to that data element prior to its insertion.
+Publication is carried out via <code>rcu_assign_pointer()</code>,
+which could be implemented using a <code>memory_order_release</code>
+store, and subscription is carried out via <code>rcu_dereference()</code>
+which could be implemented using a <code>memory_order_consume</code>
+load, or could be if a high-quality implementation of
+<code>memory_order_consume</code> existed.
+</p>
+
+<p>
+The memory-ordering guarantee is a direct consequence of the grace-period
+guarantee, but is well worth discussing separately.
+The general principle is illustrated in the following figure:
+</p>
+
+<p><img src="memorybarrierRCU.svg" width="40%" alt="memorybarrierRCU.svg"></p>
+
+<p>
+In you can see from the figure, if any reference in a given RCU
+read-side critical section preceds a given grace period, then all
+references in that RCU read-side critical section are guaranteed to
+precede any reference following that grace period.
+</p>
+
+<p>
+The next figure illustrates the same principle, but uses relaxed
+assignments, and guarantees <code>r2 != 0 || r1 == 0</code>.
+</p>
+
+<p><img src="memorybarrierRCUex.svg" width="40%" alt="memorybarrierRCUex.svg"></p>
+
+<p>
+These ordering guarantees also operate in reverse, so that if any
+reference in a given RCU read-side critical section follows any
+reference following a given grace period, then all references in
+that RCU read-side critical section are guaranteed to follow any
+reference preceding that grace period.
+In particular, given the relaxed accesses in the following figure,
+it is guaranteed that <code>r1 == 1 || r2 != 1</code>.
+</p>
+
+<p><img src="memorybarrierRCUexr.svg" width="40%" alt="memorybarrierRCUexr.svg"></p>
+
+<p>
+It is important to note that these ordering guarantees apply to <i>all</i>
+accesses in the RCU read-side critical section, regardless of ordering.
+As expected, the following litmus test guarantees
+<code>r1 != 1 || r2 == 1</code>:
+</p>
+
+<blockquote>
+<pre>
+CPU 0                    CPU 1
+
+rcu_read_lock();         Y = 1;
+r1 = X;                  synchronize_rcu();
+r2 = Y;                  X = 1;
+rcu_read_unlock();
+</pre>
+</blockquote>
+
+<p>
+However, the following litmus test also provides this exact same guarantee,
+despite the loads in the RCU read-side critical section having been
+interchanged:
+</p>
+
+<blockquote>
+<pre>
+CPU 0                    CPU 1
+
+rcu_read_lock();         Y = 1;
+r2 = Y;                  synchronize_rcu();
+r1 = X;                  X = 1;
+rcu_read_unlock();
+</pre>
+</blockquote>
+
+<p>
+It is important to note that these guarantees are based on an interaction
+between the readers' <code>rcu_read_lock()</code> and
+<code>rcu_read_unlock()</code> on the one hand and the updater's
+<code>synchronize_rcu()</code> on the other.
+In particular, in the absence of <code>synchronize_rcu()</code>,
+<code>rcu_read_lock()</code> and <code>rcu_read_unlock()</code> offer
+no ordering guarantees whatsoever.
+For example, consider the following litmus test, again with <code>X</code> and
+<code>Y</code> both initially equal to zero:
+</p>
+
+<blockquote>
+<pre>
+CPU 0                    CPU 1
+
+rcu_read_lock();         rcu_read_lock();
+X = 1;                   r1 = Y;
+rcu_read_unlock();       rcu_read_unlock();
+rcu_read_lock();         rcu_read_lock();
+Y = 1;                   r2 = X;
+rcu_read_unlock();       rcu_read_unlock();
+</pre>
+</blockquote>
+
+<p>
+In this case, because <code>rcu_read_lock()</code> and
+<code>rcu_read_unlock()</code> offer no ordering guarantees,
+all four outcomes are possible for the values of
+<code>r1</code> and <code>r2</code>.
+</p>
+
+<p>
+Finally, if any part of a given RCU read-side critical section is ordered
+before a given grace period, and if any part of some other RCU read-side
+critical section is ordered after that same grace period, then there are
+no guarantees.
+The accesses in CPU&nbsp;0's RCU read-side critical section can be reordered
+down to the end of the grace period, and the accesses in CPU&nbsp;2's
+RCU read-side critical section can be reordered up to the beginning of
+the grace period, so the accesses to <tt>X</tt> can overlap.
+This overlap could be prevented, if desired, by having CPU&nbsp;1
+execute a pair of back-to-back grace periods in place of the single
+grace period shown in the figure.
+</p>
+
+<p><img src="memorybarrierRCUex2.svg" width="65%" alt="memorybarrierRCUex2.svg"></p>
+
+<p>
+More details on RCU's memory-ordering guarantees may be found in
+the an <a href="https://lwn.net/Articles/573497/">LWN article entitled &ldquo;The RCU-barrier menagerie&rdquo;</a>.
+</p>
+
+<h3>RCU Desiderata</h3>
+
+<p>
+A high-quality RCU implementation will in addition satisfy the following
+desiderata:
+</p>
+
+<ol>
+<li>	RCU's read-side primitives should deterministic and extremely
+	small overheads.
+	Here, &ldquo;extremely small&rdquo; will typically rule out
+	use of locks, atomic instructions, explicit memory-barrier
+	instructions, and, in many cases, conditional branches.
+	At a minimum, deterministic overhead should be provided to
+	the highest-priority thread in a strict-priority environment.
+	This desideratum helps avoid most deadlocks.
+<li>	RCU's primitives, both read-side and update-side, should be
+	unconditional.
+	They should therefore avoid failure returns and retry operations.
+	This desideratum helps avoid most livelocks and greatly simplifies
+	use of these primitives.
+<li>	Although RCU's update-side primitives are not required to
+	have deterministic overheads, given a fair scheduler,
+	it should not be possible to
+	starve them, even given a massive influx of RCU read-side
+	critical sections.
+	Starvation should only occur in the presence of an unfair
+	scheduler (for example, a fixed-priority scheduler) or
+	in the presence of at least one RCU read-side critical
+	section containing an infinite loop.
+<li>	RCU read-side critical sections should be permitted to contain
+	any operation, with the exception of those operations that wait,
+	either directly or indirectly, for an RCU grace period to complete.
+<li>	RCU read-side critical sections should be permitted to modify
+	RCU-protected data structures, for example, by acquiring the
+	update-side lock from within an RCU read-side critical section.
+<li>	RCU's semantics and implementation should not be closely
+	intertwined with those of the memory allocators.
+<li>	Concurrent requests for an RCU grace period should be satisfied
+	by a single RCU grace period.
+	(Within the Linux kernel, it is not difficult to arrange for
+	more than 1,000 requests to be satisfied by a single grace
+	period.)
+</ol>
+
+<p>
+Meeting these desiderata greatly simplifies use of RCU, however, this
+list is not necessarily complete.
+</p>
+
+<h2><a name="Where Is RCU Best Used?">Where Is RCU Best Used?</a></h2>
+
+<p>
+When used properly, RCU can be a very powerful tool, however,
+it gains its power through specialization.
+The following figure gives a rough guide to where RCU may be profitably
+applied:
+</p>
+
+<p><img src="RCUApplicability.svg" alt="RCUApplicability.svg" width="75%"></p>
+
+<p>
+More information on how RCU is used in the Linux kernel may be found
+<a href="http://www2.rdrop.com/users/paulmck/techreports/survey.2012.09.17a.pdf">here</a>
+and
+<a href="http://www2.rdrop.com/users/paulmck/techreports/RCUUsage.2013.02.24a.pdf">here</a>.
+</p>
+
+<h2><a name="RCU API">RCU API</a></h2>
+
+<p>
+The minimal RCU API is straightforward:
+</p>
+
+<ol>
+<li>	<code>rcu_read_lock()</code>:  Begin an RCU read-side critical
+	section.
+<li>	<code>rcu_read_unlock()</code>:  End an RCU read-side critical
+	section.
+	RCU read-side critical sections may be nested.
+<li>	<code>atomic_load_explicit(p, memory_order_consume)</code>:
+	Fetch a pointer to an RCU-protected data element.
+	This is <code>rcu_dereference()</code> in the Linux kernel
+	and in the userspace RCU library.
+<li>	<code>atomic_store_explicit(p, newp, memory_order_release)</code>:
+	Store a pointer to an RCU-protected data element.
+	This is <code>rcu_assign_pointer()</code> in the Linux kernel
+	and in the userspace RCU library.
+<li>	<code>synchronize_rcu()</code>: Wait for an RCU grace period
+	to elapse.
+	In other words, for every thread within an RCU read-side critical
+	section at the beginning of <code>synchronize_rcu()</code>'s
+	execution, wait for that thread to exit its RCU read-side
+	critical section.
+	Note that <code>synchronize_rcu()</code> need not wait
+	for RCU read-side critical sections that were entered after
+	the beginning of <code>synchronize_rcu()</code>'s execution.
+	Note also that it is permissible for <code>synchronize_rcu()</code>
+	to wait somewhat longer than needed.
+<li>	<code>void call_rcu(struct rcu_head *head,
+	void (*func)(struct rcu_head *head))</code>:
+	After a grace period elapses, invoke <code>func(head)</code>.
+	The <code>head</code> structure is normally embedded within
+	the RCU-protected data element.
+	Both the Linux kernel and usermode RCU implement
+	<code>struct rcu_head</code> as a pair of pointers, one to hold
+	<code>func</code> and the other to link a series of such structures
+	together.
+	The <i>RCU callback function</i> <code>func</code> is responsible
+	for mapping from the address of <code>head</code> to the beginning
+	of the enclosing structure.
+	Both the Linux kernel and the userspace RCU library use an
+	address-arithmetic macro named <code>container_of()</code>
+	to do this mapping.
+</ol>
+
+<p>
+For a view of how elaborate an RCU API can become, see the
+<a href="http://lwn.net/Articles/609904/">2014 edition of the Linux-kernel RCU API</a>
+or the
+<a href="http://lwn.net/Articles/573439/">user-space RCU API</a>.
+Much of the added complexity is due to the addition of some RCU-protected
+data structures.
+</p>
+
+<h2><a name="Alternative API Choices">Alternative API Choices</a></h2>
+
+<p>
+RCU has heretofore been used almost exclusively in C programs, so
+it is likely that some adjustment of API is desirable for C++ use.
+Here are some likely adjustments:
+
+<ol>
+<li>	Scoped readers.
+	This is similar to scoped locks, where an object invokes
+	<tt>rcu_read_lock()</tt> in its constructor and
+	<tt>rcu_read_unlock()</tt> in its destructor.
+<li>	In the C-language userspace RCU library, there is an additional
+	<tt>rcu_register_thread()</tt>
+	function that must be called by each thread prior to its first
+	invocation of <tt>rcu_read_lock()</tt>, as well as an
+	<tt>rcu_unregister_thread)()</tt> that must be called by each
+	thread following its last invocation of <tt>rcu_read_unlock()</tt>.
+	In C++, these might be implicit in the constructors of an
+	RCU-reading subclass of </tt>std::thread</tt>.
+<li>	In the C-language userspace RCU library, there is an additional
+	<tt>rcu_thread_offline()</tt> that is invoked before a given
+	reader thread sleeps for a long time, and and additional
+	<tt>rcu_thread_online()</tt> that is invoke after awakening.
+	In C++, these might be used in scoped extended quiescent state,
+	where an object invokes
+	<tt>rcu_thread_offline()</tt> in its constructor and
+	<tt>rcu_thread_online()</tt> in its destructor.
+	These functions are required by some implementations to allow
+	RCU reader threads to block for extended time periods.
+<li>	The relationship of RCU to other execution agents needs to be
+	worked out.
+<li>	For C++, <tt>call_rcu()</tt> might also be a member function of
+	the <tt>rcu_head</tt> structure.
+</ol>
+
+<p>
+A C++ standardization of RCU should of course follow existing practice.
+Given that most C++ code appears to be in userspace applications and
+libraries, the best example to follow is the C-language
+<a href="http://urcu.so">userspace RCU library</a>.
+This library has seen substantial use in production
+and has been subjected to proofs of correctness
+(<a href="http://doi.ieeecomputersociety.org/10.1109/TPDS.2011.159">here</a>
+and
+<a href="http://www.mpi-sws.org/~dreyer/papers/rcu/paper.pdf">here</a>).
+A reasonable strategy is therefore to wrap this library's C-language
+API in a C++ class library.
+
+<p>
+Given that object-oriented nature of C++, it is only natural to ask if
+a C++ specification of RCU should feature &ldquo;domains&rdquo; that are
+tied to specific objects.
+And within the Linux kernel, there is in fact a variant of RCU called
+&ldquo;sleepable RCU&rdquo;
+(<a href="http://www.rdrop.com/users/paulmck/RCU/srcu.2007.01.14a.pdf">SRCU</a>).
+However, within the Linux kernel, the default RCU implementation is
+used more than 20 times more heavily than is SRCU.
+Futhermore, SRCU tends to be used not because of the ability to provide
+separate domains, but rather because it can be used in contexts where
+the default RCU implementation cannot be, for example, from idle CPUs,
+offline CPUs, and from earlier points in exception handling.
+These contexts do not exist for userspace applications and libraries.
+The other (rare!) use of SRCU is for cases where readers must block
+for extended time periods, in which case the separate domains prevent
+those readers from delaying unrelated updates.
+
+<p>
+In addition, there are a number of reasons why separate RCU domains is
+a particularly bad idea:
+
+<ol>
+<li>	Production-quality RCU implementations promote performance and
+	scalability by batching updates, so that multiple concurrent
+	<tt>synchronize_rcu()</tt> and <tt>call_rcu()</tt> invocations
+	are serviced by a single grace-period computation.
+	In fact, within the Linux kernel, an undemanding workload can
+	easily have a single grace-period computation serve thousands
+	of <tt>synchronize_rcu()</tt> and <tt>call_rcu()</tt> requests.
+	This batching optimization thus reduces the per-updated overhead
+	of the grace-period computation down to nearly zero.
+	Splitting RCU up into domains defeats this important batching
+	optimization.
+<li>	RCU uses a small fixed quantity of TLS.
+	A production-quality per-domain RCU implementation would instead
+	use a small fixed quantity of TLS <i>per domain</i>, which for
+	a large application could easily translate to a very large
+	quantity of TLS.
+	This TLS issues is especially pressing given that domains could be
+	dynamically allocated, as is in fact the case with Linux-kernel
+	SRCU domains.
+	The global RCU implementation is therefore much more amenable
+	to use by lightweight execution agents.
+<li>	In stark contrast to many other synchronization mechanisms,
+	the read-side scalability of RCU is not improved by domains.
+	The common-case overhead of RCU readers is deterministic in
+	that a fixed sequence of instructions is executed, and this
+	fixed sequence is completely independent of the number of
+	CPUs and of the read-side offered load.
+</ol>
+
+<p>
+In short, in common usage, the per-domain style does not help and
+in fact causes significant problems.
+
+<p>
+Therefore, the initial proposal contains only a global RCU, as implemented
+by the userspace RCU library.
+
+<h2><a name="Implementation Alternatives">Implementation Alternatives</a></h2>
+
+<p>
+There are a surprisingly large number of plausible RCU implementations,
+and more are being created all the time.
+The best guide for userspace RCU implementations are in the
+<a href="http://urcu.so">userspace RCU library</a>,
+and the best tutorial for these implementations is Appendix&nbsp;D
+of the
+<a href="http://www.computer.org/cms/Computer.org/dl/trans/td/2012/02/extras/ttd2012020375s.pdf">supplementary materials to &ldquo;User-Level Implementations of Read-Copy Update&rdquo;</a>.
+Simpler (but less useful) implementations may be found 
+in Section 9.3.5 of
+&ldquo;<a href="https://kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook-e1.html">Is Parallel Programming Hard, And, If So, What Can You Do About It?</a>&rdquo;.
+</p>
+
+<p>
+In addition, there is a large number of alternative implementations in
+the Linux kernel.
+
+<p>
+As noted earlier, C++ should start with the userspace RCU library.
+
+<h2><a name="Additional References">Additional References</a></h2>
+
+<p>
+There is a large body of background information on RCU, including the
+following:
+</p>
+
+<ol>
+<li>	The 2013 CACM paper entitled &ldquo;Structured deferral:
+	synchronization via procrastination&rdquo; provides a good
+	overview of the motivation and use of RCU.
+	The CACM paper may be found
+	<a href="http://doi.acm.org/10.1145/2483852.2483867">here</a>,
+	and its ACM Queue predecessor
+	<a href="http://queue.acm.org/detail.cfm?id=2488549">here</a>.
+<li>	The 2013 IEEE TPDS paper entitled
+	&ldquo;User-Level Implementations of Read-Copy Update&rdquo;
+	provides some conceptual background for RCU, performance
+	comparisons, and implementations.
+	The main paper is
+	<a href="http://doi.ieeecomputersociety.org/10.1109/TPDS.2011.159">here</a>
+	(with pre-publication draft
+	<a href="http://www.rdrop.com/users/paulmck/RCU/urcu-main-accepted.2011.08.30a.pdf">here</a>),
+	and the supplementary materials are
+	<a href="http://www.computer.org/cms/Computer.org/dl/trans/td/2012/02/extras/ttd2012020375s.pdf">here</a>.
+<li>	Section 9.3.5 of
+	&ldquo;<a href="https://kernel.org/pub/linux/kernel/people/paulmck/perfbook/perfbook-e1.html">
+	Is Parallel Programming Hard, And, If So, What Can You Do About It?</a>&rdquo;
+	provides a list of low-quality but simple RCU implementations.
+	Section 9.3 covers RCU in general, and Chapters 10 and 13
+	cover some example uses of RCU.
+<li>	The userspace RCU library is available
+	<a href="http://urcu.so">here</a>, and also as part of
+	many Linux distributions.
+<li>	The full user-space RCU API is
+	<a href="http://lwn.net/Articles/573439/">here</a>.
+<li>	The full Linux-kernel RCU API is
+	<a href="http://lwn.net/Articles/609904/">here</a>.
+<li>	Descriptions of how RCU is typically used in the Linux kernel may
+	be found
+	<a href="http://www2.rdrop.com/users/paulmck/techreports/survey.2012.09.17a.pdf">here</a>
+	and
+	<a href="http://www2.rdrop.com/users/paulmck/techreports/RCUUsage.2013.02.24a.pdf">here</a>.
+<li>	The Issaquah Challenge shows how RCU may be used to help
+	orchestrate complex updates, and the most recent presentation is
+	<a href="http://www.rdrop.com/users/paulmck/scalability/paper/Updates.2015.01.16b.LCA.pdf">here</a>.
+<li>	RCU's memory-ordering guarantees are described
+	<a href="https://lwn.net/Articles/573497/">here</a>.
+<li>	A list of requirements for the Linux-kernel RCU implementation may
+	be found in the LWN series
+	<a href="http://lwn.net/Articles/652156/">here</a>,
+	<a href="http://lwn.net/Articles/652677/">here</a>, and
+	<a href="http://lwn.net/Articles/653326/">here</a>.
+	It is quite fortunate that most of these requirements are specific
+	to the complexities of the Linux kernel environment, however,
+	the full list can be quite illuminating.
+<li>	The classic introduction to RCU, still used in some university
+	coursework, is
+	<a href="http://www.rdrop.com/users/paulmck/RCU/rclock_OLS.2001.05.01c.pdf">here</a>.
+<li>	Quite a bit more RCU-related material is available
+	<a href="http://www.rdrop.com/users/paulmck/RCU">here</a>.
+</ol>
+
+</body></html>

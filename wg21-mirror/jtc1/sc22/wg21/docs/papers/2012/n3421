@@ -1,0 +1,654 @@
+Document number: N3421=12-0111
+Date: 2012-09-20
+Project: Programming Language C++, Library Working Group
+Reply-to: Stephan T. Lavavej <stl@microsoft.com>
+
+
+Making Operator Functors greater<>
+
+
+I. Introduction
+
+This is a proposal to make <functional>'s operator functors easier to use and
+more generic.
+
+
+II. Motivation And Scope
+
+The operator functors provided by <functional> are a wonderful time-saver.
+Although we now have C++11's general-purpose lambdas, C++98's special-purpose
+functors (mostly unchanged in C++11) are still more compact. Compare:
+
+sort(v.begin(), v.end(), greater<ValueType>());
+sort(v.begin(), v.end(), [](const ValueType& l, const ValueType& r) { return l > r; });
+
+Operator functors are especially important for containers like map<KeyType,
+ValueType, greater<KeyType>>, where lambdas are difficult to use.
+Unfortunately, the operator functors currently suffer from two major problems.
+
+First, they require their argument types to be explicitly specified. The
+compiler already has this information at the point of functor invocation, so
+requiring the user to provide it results in unnecessary verbosity. (It's also
+fairly easy to imagine how redundantly specified information could lead to
+correctness problems. Consider a vector<uint32_t>, sorted with
+greater<uint32_t>. If the container is changed to vector<uint64_t> without the
+comparator being simultaneously changed, the elements will be truncated before
+being compared. The compiler may emit a truncation warning, but it would be
+better to make this scenario completely impossible.)
+
+To solve this first problem, this proposal introduces the syntax greater<>.
+This functor has a templated function call operator, capable of accepting
+arbitrary argument types. This improves both algorithm calls and container
+types like map<KeyType, ValueType, greater<>>. In fact, compare:
+
+sort(v.begin(), v.end(), greater<>()); // this proposal
+sort(v.begin(), v.end(), [](l, r) { l > r; }); // hypothetical, NOT PROPOSED HERE
+
+Even if they're proposed and accepted in the future, ultra-terse polymorphic
+lambdas would still be more verbose than the operator functors proposed here.
+
+The second problem with the operator functors is that their function call
+operators are homogeneous, with signatures like T (const T&, const T&) for the
+arithmetic operators and bool (const T&, const T&) for the comparators. This is
+problematic in several ways:
+
+* In a units library, Watts * Seconds returns Joules, which is completely
+incompatible with a homogeneous signature.
+
+* Consider vector<const char *> v containing null-terminated strings sorted in
+increasing lexicographic order, and std::string str. In C++11, lower_bound()
+has been carefully specified to accept different element and value types.
+Therefore, lower_bound(v.begin(), v.end(), str) will compare elem < str, which
+is great. Now consider what happens when the strings are sorted in decreasing
+lexicographic order. We have to provide a comparator, and greater<const char *>
+is doubly incorrect (it compares pointers, and str isn't implicitly convertible
+to const char *). lower_bound(v.begin(), v.end(), str, greater<string>())
+works, but is inefficient. Every invocation of greater<string>'s function call
+operator will construct a temporary std::string from elem. This inefficiency is
+a direct result of the homogeneous signature not being "transparent".
+
+* Consider std::plus being invoked with two std::strings, when at least one is
+a modifiable rvalue. The homogeneous signature T (const T&, const T&) will
+perform an unnecessary copy.
+
+To solve this second problem's many manifestations, this proposal's templated
+function call operators are perfectly forwarding and perfectly returning (with
+decltype), which makes them completely transparent.
+
+Finally, while we're in the neighborhood - when bit_and, bit_or, and bit_xor
+were added in C++11, bitwise NOT was left out. This operator is as useful as
+the other unary operators provided by <functional> (std::negate and
+std::logical_not), so this proposal recommends adding bit_not. This is optional
+and can be removed without affecting the rest of the proposal.
+
+This proposal is intended to benefit all users of <functional>'s operator
+functors, from novices to experts. (Learning to say greater<> is strictly
+simpler than learning to say greater<SomeTypeHere>.)
+
+This proposal is not entirely based on existing practice, but a reference
+implementation is available. See "VIII. Implementation" at the end of this
+proposal, which provides examples of using greater<> with set and plus<> with
+transform(). It is essentially a direct copy of the Standardese,
+non-intrusively (and non-conformantly, of course) applied over a C++11 Standard
+Library implementation. Also see "VII. References" for a heterogeneous but
+non-transparent implementation in Origin.
+
+
+III. Impact On The Standard
+
+This proposal has no dependencies beyond a C++11 compiler and Standard Library
+implementation. (It depends on perfect forwarding, decltype, and trailing
+return types.)
+
+Nothing depends on this proposal.
+
+This proposal is almost a pure extension. It doesn't affect C++11 user code at
+all, except that "using namespace std;" will drag in bit_not. It almost
+entirely consists of additions to the C++11 Standard Library, except that it
+modifies the declarations of the operator functors by giving them default
+template arguments.
+
+
+IV. Design Decisions
+
+A. The major difficulty here is that C++98 took all the good names! If we were
+designing the operator functors from scratch, ideally std::greater/etc. would
+be ordinary non-templated structs with the templated function call operators
+proposed here. Unfortunately, we can't simply de-templatize the structs - doing
+so would break the world (far worse than C++11 immutable sets). Nor can we
+"overload" struct templates with non-templated structs (14 [temp]/5), or even
+play games with using-directives (7.3.4 [namespace.udir]/6). There are many
+naming possibilities, for example:
+
+* Providing std::modern::greater. This is problematic because users can't say
+"using namespace std; using namespace std::modern;" for convenience.
+
+* Providing std::Greater. This would avoid the need for this proposal's empty
+angle brackets, but this capitalization style would be novel to the Standard.
+(Also, in the presence of using-directives, the new names could conflict with
+user names, requiring qualification.)
+
+* Providing std::greater<>, chosen by this proposal. This requires empty angle
+brackets, but avoids introducing novel capitalization.
+
+If the names Greater, Plus, etc. are strongly desired, a best-of-both-worlds
+approach would be to simply add "typedef greater<> Greater;" to this proposal.
+That would allow users to choose their preferred style, with trivial costs to
+specification/implementation complexity.
+
+B. The technique of using default template arguments and explicit
+specializations for void was chosen for its non-intrusiveness. greater<void>
+isn't valid C++11 (it would attempt to form a reference to void, forbidden by
+8.3.2 [dcl.ref]/1). Additionally, while users are permitted to specialize
+Standard Library machinery (17.6.4.2.1 [namespace.std]/1), such specializations
+must involve user-defined types.
+
+C. Additional template parameters with default template arguments could be
+added - for example, in order to permit heterogeneous but fixed signatures of
+the form R (X, Y). This was rejected due to its complexity and obscurity. In
+the extremely rare event that neither the completely homogeneous nor the
+completely transparent operator functors are appropriate, and neither is a
+lambda (e.g. lambdas are inconvenient for maps), then handwritten functors are
+the simplest, most direct solution.
+
+D. In this proposal, all of the perfectly forwarding function call operators
+are also perfectly returning, even those for the comparators. While hardcoding
+bool here wouldn't harm 99.9% of code, it wouldn't benefit anything, and it
+would harm the 0.1% of extremely generic code that cares about comparison
+operators returning types other than bool.
+
+E. bit_not's homogeneous signature T (const T&) exactly mirrors negate's. Their
+behavior is nearly identical except that bitwise NOT forbids floating-point
+inputs, 5.3.1 [expr.unary.op]/8, /10:
+
+"The operand of the unary - operator shall have arithmetic or unscoped
+enumeration type and the result is the negation of its operand. Integral
+promotion is performed on integral or enumeration operands. [...] The type of
+the result is the type of the promoted operand."
+
+"The operand of ~ shall have integral or unscoped enumeration type; the result
+is the one's complement of its operand. Integral promotions are performed. The
+type of the result is the type of the promoted operand."
+
+F. Following an argument from symmetry, this proposal adds bit_not. However, it
+doesn't add any other operator functors. Unary plus remains unloved
+(ironically, I believe it was added to C for symmetry). Operator functors for
+left shift, right shift, address-of, and indirection could be useful; consider
+transform(v.begin(), v.end(), back_inserter(ptrs), address_of<>()). They aren't
+currently proposed because I view them as slightly beyond "completely trivial
+to specify". (Should they be completely transparent, or should we continue to
+provide fixed forms? Should address_of use op&, or std::addressof() to get the
+True Address? And so forth.)
+
+G. This proposal leaves implementers no "wiggle room", but none is necessary
+here.
+
+H. I am not aware of any existing libraries that provide transparent operator
+functors like this. (Again, see "VII. References" for a heterogeneous but
+non-transparent implementation in Origin.)
+
+
+V. Standardese
+
+1. In 20.8 [function.objects]/2, change:
+
+// 20.8.4, arithmetic operations:
+template <class T> struct plus;
+template <class T> struct minus;
+template <class T> struct multiplies;
+template <class T> struct divides;
+template <class T> struct modulus;
+template <class T> struct negate;
+
+// 20.8.5, comparisons:
+template <class T> struct equal_to;
+template <class T> struct not_equal_to;
+template <class T> struct greater;
+template <class T> struct less;
+template <class T> struct greater_equal;
+template <class T> struct less_equal;
+
+// 20.8.6, logical operations:
+template <class T> struct logical_and;
+template <class T> struct logical_or;
+template <class T> struct logical_not;
+
+// 20.8.7, bitwise operations:
+template <class T> struct bit_and;
+template <class T> struct bit_or;
+template <class T> struct bit_xor;
+
+to:
+
+// 20.8.4, arithmetic operations:
+template <class T = void> struct plus;
+template <class T = void> struct minus;
+template <class T = void> struct multiplies;
+template <class T = void> struct divides;
+template <class T = void> struct modulus;
+template <class T = void> struct negate;
+template <> struct plus<void>;
+template <> struct minus<void>;
+template <> struct multiplies<void>;
+template <> struct divides<void>;
+template <> struct modulus<void>;
+template <> struct negate<void>;
+
+// 20.8.5, comparisons:
+template <class T = void> struct equal_to;
+template <class T = void> struct not_equal_to;
+template <class T = void> struct greater;
+template <class T = void> struct less;
+template <class T = void> struct greater_equal;
+template <class T = void> struct less_equal;
+template <> struct equal_to<void>;
+template <> struct not_equal_to<void>;
+template <> struct greater<void>;
+template <> struct less<void>;
+template <> struct greater_equal<void>;
+template <> struct less_equal<void>;
+
+// 20.8.6, logical operations:
+template <class T = void> struct logical_and;
+template <class T = void> struct logical_or;
+template <class T = void> struct logical_not;
+template <> struct logical_and<void>;
+template <> struct logical_or<void>;
+template <> struct logical_not<void>;
+
+// 20.8.7, bitwise operations:
+template <class T = void> struct bit_and;
+template <class T = void> struct bit_or;
+template <class T = void> struct bit_xor;
+template <class T = void> struct bit_not;
+template <> struct bit_and<void>;
+template <> struct bit_or<void>;
+template <> struct bit_xor<void>;
+template <> struct bit_not<void>;
+
+This adds "= void" default template arguments, "<void>" explicit
+specializations, and "bit_not".
+
+2. In 20.8.4 [arithmetic.operations], 20.8.5 [comparisons],
+20.8.6 [logical.operations], and 20.8.7 [bitwise.operations], change every
+occurrence of "template <class T>" to "template <class T = void>".
+
+3. At the end of 20.8.4 [arithmetic.operations], add:
+
+template <> struct plus<void> {
+  template <class T, class U> auto operator()(T&& t, U&& u) const
+    -> decltype(std::forward<T>(t) + std::forward<U>(u));
+};
+
+operator() returns std::forward<T>(t) + std::forward<U>(u).
+
+template <> struct minus<void> {
+  template <class T, class U> auto operator()(T&& t, U&& u) const
+    -> decltype(std::forward<T>(t) - std::forward<U>(u));
+};
+
+operator() returns std::forward<T>(t) - std::forward<U>(u).
+
+template <> struct multiplies<void> {
+  template <class T, class U> auto operator()(T&& t, U&& u) const
+    -> decltype(std::forward<T>(t) * std::forward<U>(u));
+};
+
+operator() returns std::forward<T>(t) * std::forward<U>(u).
+
+template <> struct divides<void> {
+  template <class T, class U> auto operator()(T&& t, U&& u) const
+    -> decltype(std::forward<T>(t) / std::forward<U>(u));
+};
+
+operator() returns std::forward<T>(t) / std::forward<U>(u).
+
+template <> struct modulus<void> {
+  template <class T, class U> auto operator()(T&& t, U&& u) const
+    -> decltype(std::forward<T>(t) % std::forward<U>(u));
+};
+
+operator() returns std::forward<T>(t) % std::forward<U>(u).
+
+template <> struct negate<void> {
+  template <class T> auto operator()(T&& t) const
+    -> decltype(-std::forward<T>(t));
+};
+
+operator() returns -std::forward<T>(t).
+
+4. At the end of 20.8.5 [comparisons], add:
+
+template <> struct equal_to<void> {
+  template <class T, class U> auto operator()(T&& t, U&& u) const
+    -> decltype(std::forward<T>(t) == std::forward<U>(u));
+};
+
+operator() returns std::forward<T>(t) == std::forward<U>(u).
+
+template <> struct not_equal_to<void> {
+  template <class T, class U> auto operator()(T&& t, U&& u) const
+    -> decltype(std::forward<T>(t) != std::forward<U>(u));
+};
+
+operator() returns std::forward<T>(t) != std::forward<U>(u).
+
+template <> struct greater<void> {
+  template <class T, class U> auto operator()(T&& t, U&& u) const
+    -> decltype(std::forward<T>(t) > std::forward<U>(u));
+};
+
+operator() returns std::forward<T>(t) > std::forward<U>(u).
+
+template <> struct less<void> {
+  template <class T, class U> auto operator()(T&& t, U&& u) const
+    -> decltype(std::forward<T>(t) < std::forward<U>(u));
+};
+
+operator() returns std::forward<T>(t) < std::forward<U>(u).
+
+template <> struct greater_equal<void> {
+  template <class T, class U> auto operator()(T&& t, U&& u) const
+    -> decltype(std::forward<T>(t) >= std::forward<U>(u));
+};
+
+operator() returns std::forward<T>(t) >= std::forward<U>(u).
+
+template <> struct less_equal<void> {
+  template <class T, class U> auto operator()(T&& t, U&& u) const
+    -> decltype(std::forward<T>(t) <= std::forward<U>(u));
+};
+
+operator() returns std::forward<T>(t) <= std::forward<U>(u).
+
+5. At the end of 20.8.6 [logical.operations], add:
+
+template <> struct logical_and<void> {
+  template <class T, class U> auto operator()(T&& t, U&& u) const
+    -> decltype(std::forward<T>(t) && std::forward<U>(u));
+};
+
+operator() returns std::forward<T>(t) && std::forward<U>(u).
+
+template <> struct logical_or<void> {
+  template <class T, class U> auto operator()(T&& t, U&& u) const
+    -> decltype(std::forward<T>(t) || std::forward<U>(u));
+};
+
+operator() returns std::forward<T>(t) || std::forward<U>(u).
+
+template <> struct logical_not<void> {
+  template <class T> auto operator()(T&& t) const
+    -> decltype(!std::forward<T>(t));
+};
+
+operator() returns !std::forward<T>(t).
+
+6. Change 20.8.7 [bitwise.operations]/1 from:
+
+"The library provides basic function object classes for all of the bitwise
+operators in the language (5.11, 5.13, 5.12)."
+
+to:
+
+"The library provides basic function object classes for all of the bitwise
+operators in the language (5.11, 5.13, 5.12, 5.3.1)."
+
+This adds a reference to 5.3.1 [expr.unary.op], following the order bit_and,
+bit_or, bit_xor, bit_not.
+
+7. At the end of 20.8.7 [bitwise.operations], add:
+
+template <class T = void> struct bit_not {
+  T operator()(const T& x) const;
+  typedef T argument_type;
+  typedef T result_type;
+};
+
+operator() returns ~x.
+
+template <> struct bit_and<void> {
+  template <class T, class U> auto operator()(T&& t, U&& u) const
+    -> decltype(std::forward<T>(t) & std::forward<U>(u));
+};
+
+operator() returns std::forward<T>(t) & std::forward<U>(u).
+
+template <> struct bit_or<void> {
+  template <class T, class U> auto operator()(T&& t, U&& u) const
+    -> decltype(std::forward<T>(t) | std::forward<U>(u));
+};
+
+operator() returns std::forward<T>(t) | std::forward<U>(u).
+
+template <> struct bit_xor<void> {
+  template <class T, class U> auto operator()(T&& t, U&& u) const
+    -> decltype(std::forward<T>(t) ^ std::forward<U>(u));
+};
+
+operator() returns std::forward<T>(t) ^ std::forward<U>(u).
+
+template <> struct bit_not<void> {
+  template <class T> auto operator()(T&& t) const
+    -> decltype(~std::forward<T>(t));
+};
+
+operator() returns ~std::forward<T>(t).
+
+
+VI. Acknowledgements
+
+Thanks to Andrew Sutton, as this proposal was developed as a result of chatting
+with him about this idea at GoingNative and Kona. In particular, he developed
+the void specialization technique and reviewed this proposal. Any deficiencies
+in this proposal, and the monstrous pun in its title, are exclusively my fault.
+
+Thanks to Bill Plauger, Deskin Miller, and James McNellis for reviewing this
+proposal.
+
+
+VII. References
+
+All of the citations in this proposal are to Working Paper N3376:
+http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3376.pdf
+
+For somewhat similar machinery in a previous branch of Origin, see:
+http://code.google.com/p/origin/source/browse/trunk/core/include/origin/functional.hpp?spec=svn417&r=417
+This machinery was heterogeneous, but not transparent; o_greater<>'s function
+call operator had the signature bool (const T&, const U&). It additionally
+permitted T and U to be manually specified.
+
+
+VIII. Implementation
+
+Compiled with Visual C++ 2012 RTM.
+
+C:\Temp>type meow.cpp
+namespace std {
+    template <class T = void> struct plus;
+    template <class T = void> struct minus;
+    template <class T = void> struct multiplies;
+    template <class T = void> struct divides;
+    template <class T = void> struct modulus;
+    template <class T = void> struct negate;
+    template <class T = void> struct equal_to;
+    template <class T = void> struct not_equal_to;
+    template <class T = void> struct greater;
+    template <class T = void> struct less;
+    template <class T = void> struct greater_equal;
+    template <class T = void> struct less_equal;
+    template <class T = void> struct logical_and;
+    template <class T = void> struct logical_or;
+    template <class T = void> struct logical_not;
+    template <class T = void> struct bit_and;
+    template <class T = void> struct bit_or;
+    template <class T = void> struct bit_xor;
+
+    // We don't need to declare bit_not here, as it's new.
+
+    // We don't need to declare the <void> explicit specializations here, as
+    // nothing in the C++11 Standard Library will attempt to instantiate them.
+}
+
+#include <functional>
+#include <utility>
+
+namespace std {
+    template <> struct plus<void> {
+      template <class T, class U> auto operator()(T&& t, U&& u) const
+        -> decltype(std::forward<T>(t) + std::forward<U>(u))
+           { return std::forward<T>(t) + std::forward<U>(u); }
+    };
+
+    template <> struct minus<void> {
+      template <class T, class U> auto operator()(T&& t, U&& u) const
+        -> decltype(std::forward<T>(t) - std::forward<U>(u))
+           { return std::forward<T>(t) - std::forward<U>(u); }
+    };
+
+    template <> struct multiplies<void> {
+      template <class T, class U> auto operator()(T&& t, U&& u) const
+        -> decltype(std::forward<T>(t) * std::forward<U>(u))
+           { return std::forward<T>(t) * std::forward<U>(u); }
+    };
+
+    template <> struct divides<void> {
+      template <class T, class U> auto operator()(T&& t, U&& u) const
+        -> decltype(std::forward<T>(t) / std::forward<U>(u))
+           { return std::forward<T>(t) / std::forward<U>(u); }
+    };
+
+    template <> struct modulus<void> {
+      template <class T, class U> auto operator()(T&& t, U&& u) const
+        -> decltype(std::forward<T>(t) % std::forward<U>(u))
+           { return std::forward<T>(t) % std::forward<U>(u); }
+    };
+
+    template <> struct negate<void> {
+      template <class T> auto operator()(T&& t) const
+        -> decltype(-std::forward<T>(t))
+           { return -std::forward<T>(t); }
+    };
+
+    template <> struct equal_to<void> {
+      template <class T, class U> auto operator()(T&& t, U&& u) const
+        -> decltype(std::forward<T>(t) == std::forward<U>(u))
+           { return std::forward<T>(t) == std::forward<U>(u); }
+    };
+
+    template <> struct not_equal_to<void> {
+      template <class T, class U> auto operator()(T&& t, U&& u) const
+        -> decltype(std::forward<T>(t) != std::forward<U>(u))
+           { return std::forward<T>(t) != std::forward<U>(u); }
+    };
+
+    template <> struct greater<void> {
+      template <class T, class U> auto operator()(T&& t, U&& u) const
+        -> decltype(std::forward<T>(t) > std::forward<U>(u))
+           { return std::forward<T>(t) > std::forward<U>(u); }
+    };
+
+    template <> struct less<void> {
+      template <class T, class U> auto operator()(T&& t, U&& u) const
+        -> decltype(std::forward<T>(t) < std::forward<U>(u))
+           { return std::forward<T>(t) < std::forward<U>(u); }
+    };
+
+    template <> struct greater_equal<void> {
+      template <class T, class U> auto operator()(T&& t, U&& u) const
+        -> decltype(std::forward<T>(t) >= std::forward<U>(u))
+           { return std::forward<T>(t) >= std::forward<U>(u); }
+    };
+
+    template <> struct less_equal<void> {
+      template <class T, class U> auto operator()(T&& t, U&& u) const
+        -> decltype(std::forward<T>(t) <= std::forward<U>(u))
+           { return std::forward<T>(t) <= std::forward<U>(u); }
+    };
+
+    template <> struct logical_and<void> {
+      template <class T, class U> auto operator()(T&& t, U&& u) const
+        -> decltype(std::forward<T>(t) && std::forward<U>(u))
+           { return std::forward<T>(t) && std::forward<U>(u); }
+    };
+
+    template <> struct logical_or<void> {
+      template <class T, class U> auto operator()(T&& t, U&& u) const
+        -> decltype(std::forward<T>(t) || std::forward<U>(u))
+           { return std::forward<T>(t) || std::forward<U>(u); }
+    };
+
+    template <> struct logical_not<void> {
+      template <class T> auto operator()(T&& t) const
+        -> decltype(!std::forward<T>(t))
+           { return !std::forward<T>(t); }
+    };
+
+    template <class T = void> struct bit_not {
+      T operator()(const T& x) const { return ~x; }
+      typedef T argument_type;
+      typedef T result_type;
+    };
+
+    template <> struct bit_and<void> {
+      template <class T, class U> auto operator()(T&& t, U&& u) const
+        -> decltype(std::forward<T>(t) & std::forward<U>(u))
+           { return std::forward<T>(t) & std::forward<U>(u); }
+    };
+
+    template <> struct bit_or<void> {
+      template <class T, class U> auto operator()(T&& t, U&& u) const
+        -> decltype(std::forward<T>(t) | std::forward<U>(u))
+           { return std::forward<T>(t) | std::forward<U>(u); }
+    };
+
+    template <> struct bit_xor<void> {
+      template <class T, class U> auto operator()(T&& t, U&& u) const
+        -> decltype(std::forward<T>(t) ^ std::forward<U>(u))
+           { return std::forward<T>(t) ^ std::forward<U>(u); }
+    };
+
+    template <> struct bit_not<void> {
+      template <class T> auto operator()(T&& t) const
+        -> decltype(~std::forward<T>(t))
+           { return ~std::forward<T>(t); }
+    };
+}
+
+
+#include <algorithm>
+#include <iostream>
+#include <iterator>
+#include <ostream>
+#include <set>
+#include <string>
+#include <vector>
+using namespace std;
+
+int main() {
+    vector<const char *> v;
+    v.push_back("cute");
+    v.push_back("fluffy");
+    v.push_back("kittens");
+
+    set<string, greater<>> s;
+    s.insert("HUNGRY");
+    s.insert("EVIL");
+    s.insert("ZOMBIES");
+
+    vector<string> dest;
+
+    transform(v.begin(), v.end(), s.begin(), back_inserter(dest), plus<>());
+
+    for (const auto& elem : dest) {
+        cout << elem << endl;
+    }
+}
+
+C:\Temp>cl /EHsc /nologo /W4 /MTd meow.cpp
+meow.cpp
+
+C:\Temp>meow
+cuteZOMBIES
+fluffyHUNGRY
+kittensEVIL

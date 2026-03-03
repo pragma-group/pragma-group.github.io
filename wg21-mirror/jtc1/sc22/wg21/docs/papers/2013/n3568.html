@@ -1,0 +1,3010 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"
+        "http://www.w3.org/TR/html4/loose.dtd">
+<html>
+<head>
+    <title>Shared Locking Revision 1</title>
+    <meta name="description" content="read write mutexes, read write locks"/>
+    <style type="text/css">
+    p {text-align:justify}
+    li {text-align:justify}
+    blockquote.note
+    {
+        background-color:#E0E0E0;
+        padding-left: 15px;
+        padding-right: 15px;
+        padding-top: 1px;
+        padding-bottom: 1px;
+    }
+    ins {background-color:#A0FFA0}
+    del {background-color:#FFA0A0}
+    </style>
+</head>
+<body>
+
+<address align=right>
+Document number: N3568<br>
+<br>
+<a href="mailto:howard.hinnant@gmail.com">Howard Hinnant</a><br>
+2013-03-11
+</address>
+<hr>
+<h1 align=center>Shared locking in C++</h1>
+<h2 align=center>Revision 1</h2>
+
+<h2>Status</h2>
+
+<p>
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3427.html">N3427</a>
+was presented at the Fall 2012 meeting in Portland to SG1
+(Concurrency and Parallelism).  The only objection at that meeting was to
+not allowing spurious failure for the try and timed locking and conversion
+locking functions of <code>shared_mutex</code> and <code>upgrade_mutex</code>.
+</p>
+
+<h2>Changes compared to <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3427.html">N3427</a></h2>
+
+<p>
+The remarks about disallowing spurious failures have been removed.
+</p>
+
+<h2>Contents</h2>
+
+<ul>
+<li><a href="#Introduction">Introduction</a></li>
+<li><a href="#OverviewShared">Overview for shared locking</a></li>
+<li><a href="#OverviewUpgrade">Overview for upgrade locking</a></li>
+<li><a href="#Wording">Proposed Wording</a></li>
+</ul>
+
+<h2><a name="Introduction"></a>Introduction</h2>
+
+<p>
+This proposal adds functionality to allow clients to easily code the well-known
+<a href="http://en.wikipedia.org/wiki/Read/write_lock_pattern">multiple-readers / single-writer locking pattern</a>.
+</p>
+<p>
+This proposal adds:
+</p>
+
+<ol>
+<li>
+<p>
+Seven constructors to <tt>unique_lock&lt;Mutex&gt;</tt>.
+</p>
+<blockquote>
+These constructors serve as explicit try and timed conversions from
+<tt>shared_lock</tt> and <tt>upgrade_lock</tt>.
+</blockquote>
+</li>
+<li>
+<p>
+A new header: <tt>&lt;shared_mutex&gt;</tt>, containing:
+</p>
+<ol>
+<li><tt>class shared_mutex;</tt></li>
+<li><tt>class upgrade_mutex;</tt></li>
+<li><tt>template &lt;class Mutex&gt; class shared_lock;</tt></li>
+<li><tt>template &lt;class Mutex&gt; class upgrade_lock;</tt></li>
+</ol>
+</li>
+</ol>
+
+<p>
+This proposal is essentially the same proposal as
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n2094.html">N2094</a>
+which was designed 6 years ago.  The point of bringing this up is that our
+current mutexes and locks were designed with these proposed mutexes and locks
+<b>all as one coherent design</b>.  The shared and upgrade mutexes and locks
+form a hierarchy of concepts based on what we now call <tt>TimedLockable</tt>.
+Thus this proposal is not just a pure addition to the standard library.  It is
+the other half of the original design, including the interactions between these
+two halves.
+</p>
+
+<p>
+The second half of this design (this proposal) was excluded from C++11 based on
+non-technical reasons:  We needed to limit the scope of C++0x in 2007 in hopes
+of shipping a new standard by 2009.  This has become known as the
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2452.html">Kona compromise</a>.
+It is now time to seriously consider the oft-requested functionality of
+"reader/writer locks".
+</p>
+
+<p>
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2406.html#shared_mutex">N2406</a>
+includes extensive rationale for shared and upgrade locking, as well as a high
+quality implementation made portable by our now standard <tt>std::mutex</tt>
+and <tt>std::condition_variable</tt>.  The only difference between this 6 year
+old implementation and what I have today is the use of:
+</p>
+
+<blockquote><pre>
+std::this_thread::disable_interruption _;
+</pre></blockquote>
+
+<p>
+which can be safely ignored since we don't have interruption.
+</p>
+
+<h2><a name="OverviewShared"></a>Overview for shared locking</h2>
+
+<p>
+First a brief review:  Here is the synopsis of our current
+<tt>std::timed_mutex</tt>:
+</p>
+<blockquote><pre>
+class timed_mutex
+{
+public:
+     timed_mutex();
+     ~timed_mutex();
+
+    timed_mutex(const timed_mutex&amp;) = delete;
+    timed_mutex&amp; operator=(const timed_mutex&amp;) = delete;
+
+    void lock();
+    bool try_lock();
+    template &lt;class Rep, class Period&gt;
+        bool try_lock_for(const chrono::duration&lt;Rep, Period&gt;&amp; rel_time);
+    template &lt;class Clock, class Duration&gt;
+        bool try_lock_until(const chrono::time_point&lt;Clock, Duration&gt;&amp; abs_time);
+    void unlock();
+};
+</pre></blockquote>
+
+<p>
+A <tt>shared_mutex</tt> has all of the syntax and functionality of a
+<tt>timed_mutex</tt>, and adds the following members:
+</p>
+
+<blockquote><pre>
+void lock_shared();
+bool try_lock_shared();
+template &lt;class Rep, class Period&gt;
+    bool
+    try_lock_shared_for(const chrono::duration&lt;Rep, Period&gt;&amp; rel_time);
+template &lt;class Clock, class Duration&gt;
+    bool
+    try_lock_shared_until(const chrono::time_point&lt;Clock, Duration&gt;&amp; abs_time);
+void unlock_shared();
+</pre></blockquote>
+
+<p>
+Thus a <tt>shared_mutex</tt> can be locked in one of two ownership modes:
+</p>
+
+<ol>
+<li>Exclusive, using <tt>lock()</tt>, or</li>
+<li>Shared, using <tt>lock_shared()</tt>.</li>
+</ol>
+
+<p>
+One uses the now familiar API of <tt>timed_mutex</tt> to lock a
+<tt>shared_mutex</tt> in exclusive mode (<tt>lock()</tt>, <tt>try_lock()</tt>,
+<tt>try_lock_for()</tt>, <tt>unlock()</tt>, etc.). Not only does this reuse help
+in learning and teaching <tt>shared_mutex</tt>, it is absolutely critical for
+generic code.  One can have generic code lock a mutex in exclusive mode, and
+that code need not know or care whether it is locking a <tt>mutex</tt> or
+(exclusively) locking a <tt>shared_mutex</tt>.  An immediate example of such
+generic code is <tt>lock_guard&lt;shared_mutex&gt;</tt>.  Indeed, the
+recommended pattern for exclusively locking a <tt>shared_mutex</tt> in a scope
+is:
+</p>
+
+<blockquote><pre>
+shared_mutex mut;
+...
+void foo()
+{
+     lock_guard&lt;shared_mutex&gt; _(mut);
+     <font color="#C80000">// mut lock'd here</font>
+     // ...
+}    <font color="#C80000">// mut.unlock() called here</font>
+</pre>
+<p>
+Everything <b>just works</b> with our existing library.  It was all designed
+together.
+</p>
+</blockquote>
+
+<p>
+Now obviously <tt>shared_mutex</tt> has this extra lock ownership mode called
+<i>shared</i> and this new mode is <tt>shared_mutex</tt>'s reason for existing.
+Multiple threads can can lock a <tt>shared_mutex</tt> in shared ownership mode
+at the same time (using e.g. <tt>m.lock_shared()</tt>).  This is typically used
+when several threads have the job of reading (but not modifying) data, but
+should not read while another thread has the job of writing to the data.  In
+such a pattern, greater concurrency can be achieved (<b>higher performance</b>)
+than with serialized access to the data for all threads.
+</p>
+
+<p>
+The recommended pattern for locking a <tt>shared_mutex</tt> in shared ownership
+mode is not to call <tt>m.lock_shared()</tt> directly, but to use
+<tt>shared_lock&lt;shared_mutex&gt;</tt>:
+</p>
+
+<blockquote><pre>
+shared_mutex mut;
+...
+void foo()
+{
+     shared_lock&lt;shared_mutex&gt; _(mut);
+     <font color="#C80000">// mut lock_shared'd here</font>
+     // ...
+}    <font color="#C80000">// mut.unlock_shared() called here</font>
+</pre></blockquote>
+
+<p>
+Furthermore, <tt>shared_lock&lt;shared_mutex&gt;</tt> <b>is a
+<tt>Lockable</tt> type</b>.  This means that more generic code that we
+already have in the standard works with
+<tt>shared_lock&lt;shared_mutex&gt;</tt>.  For example consider writing
+a copy assignment operator for a type protected by a
+<tt>shared_mutex</tt>.  One might want to exclusively lock the lhs,
+while share-locking the rhs.  Here is the wrong way to do it:
+</p>
+
+<blockquote><pre>
+class A
+{
+    mutable shared_mutex mut_;
+    <font color="#C80000">// more data...</font>
+public:
+    A&amp; operator=(const A&amp; a)
+    {
+        if (this != &amp;a)
+        {
+            unique_lock&lt;shared_mutex&gt; lhs(mut_);
+            shared_lock&lt;shared_mutex&gt; rhs(a.mut_);  <font color="#C80000">// Wrong!  Deadlock!</font>
+            <font color="#C80000">// Assign data ...</font>
+        }
+        return *this;
+    }
+}
+</pre></blockquote>
+
+<p>
+The above code can deadlock when one thread assigns <tt>a1 = a2</tt> while
+another assigns <tt>a2 = a1</tt>.  The two threads will lock <tt>a1.mut_</tt>
+and <tt>a2.mut_</tt> in opposite orders.  And it doesn't matter that one of them
+is being locked exclusively and one in shared mode.  There is still a deadlock
+here.
+</p>
+
+<p>
+But use of our existing generic locking algorithm <tt>std::lock</tt> (to avoid
+deadlock) already works for both <tt>unique_lock&lt;shared_mutex&gt;</tt> and
+<tt>shared_lock&lt;shared_mutex&gt;</tt> because they are both
+<tt>Lockable</tt> types:
+</p>
+
+<blockquote><pre>
+class A
+{
+    mutable shared_mutex mut_;
+    <font color="#C80000">// more data...</font>
+public:
+    A&amp; operator=(const A&amp; a)
+    {
+        if (this != &amp;a)
+        {
+            unique_lock&lt;shared_mutex&gt; lhs(mut_, <b>defer_lock</b>);
+            shared_lock&lt;shared_mutex&gt; rhs(a.mut_, <b>defer_lock</b>);
+            <b>lock(lhs, rhs);</b>  <font color="#C80000">// mut_.lock() and a.mut_.lock_shared()</font>
+            <font color="#C80000">// Assign data ...</font>
+        }   <font color="#C80000">// a.mut_.unlock_shared() and mut_.unlock()</font>
+        return *this;
+    }
+}
+</pre>
+<p>
+Everything <b>just works</b> with our existing library.  It was all designed
+together.
+</p>
+</blockquote>
+
+<p>
+Have you ever needed to wait on a condition variable with a mutex locked in
+shared mode?  No?  If you do much low-level concurrent programming, you will
+eventually need to.  A shared ownership lock is just another lock, but allows
+more concurrency (higher performance).  Surely it is not unlikely that a "reader
+thread" will need to sleep until it receives a signal that there is fresh data
+to be read.  With the proposed <tt>shared_mutex</tt> and our existing
+<tt>condition_variable_any</tt> this is practically effortless:
+</p>
+
+<blockquote><pre>
+shared_mutex mut;
+condition_variable_any cv;
+...
+void foo()
+{
+     shared_lock&lt;shared_mutex&gt; sl(mut);
+     <font color="#C80000">// mut share locked here</font>
+     <font color="#C80000">// ...</font>
+     while (not_ready_to_proceed())
+         cv.wait(sl);  <font color="#C80000">// mut unlocked while waiting</font>
+     <font color="#C80000">// mut share locked here</font>
+     <font color="#C80000">// ...</font>
+}    <font color="#C80000">// mut.unlock_shared()</font>
+</pre></blockquote>
+
+<p>
+In the above example if you need to wait on the <tt>shared_mutex</tt> while
+it is exclusively locked instead of share-locked, no problem.  Just use
+<tt>unique_lock&lt;shared_mutex&gt;</tt> instead.
+</p>
+
+<blockquote>
+Everything <b>just works</b> with our existing library.  It was all designed
+together.
+</blockquote>
+
+<p>
+With the addition of <tt>shared_mutex</tt> and <tt>shared_lock</tt> combined
+with our existing <tt>unique_lock</tt>, <tt>std::lock</tt> and
+<tt>condition_variable_any</tt>, the client has the ability to program at an
+abstraction level that is an order of magnitude higher than the pthreads API
+(albeit still far below where many of you want to be). But this is an important
+part of the mid-level foundation needed for building those higher level
+abstractions.  It builds upon what we have.  And enables yet higher level
+abstractions to be <i>efficiently</i> built upon this mid-level layer.
+</p>
+
+<blockquote>
+You <b>do not</b> want to have to figure out how to wait on a
+<tt>pthread_rwlock_t</tt> locked with <tt>pthread_rwlock_rdlock</tt> (or with
+<tt>pthread_rwlock_wrlock</tt> for that matter), using a
+<tt>pthread_cond_t</tt>!!!  It is not directly supported.  But all of this
+functionality has been portably implemented on top of our C++11 std::lib, which
+in turn has been implemented on top of both pthreads and Windows.
+</blockquote>
+
+<h2><a name="OverviewUpgrade"></a>Overview for upgrade locking</h2>
+
+<p>
+It is not uncommon for me to see a question along the lines of:
+</p>
+
+<blockquote>
+<p>
+I have a mutex locked in shared (or read) mode and I need to atomically convert
+it to exclusive mode, without relinquishing the shared ownership.  If I
+relinquish the shared ownership, then when I gain exclusive ownership, I can no
+longer depend on the expensive read operation I did under shared mode.  How can
+I achieve this?
+</p>
+</blockquote>
+
+<p>
+<b>Straight-forward answer:</b>  You can't.
+</p>
+
+<p>
+<b>Elaborations I see too often:</b>  You don't want to anyway.  There must be
+something wrong with your design.
+</p>
+
+<p>
+I see this desire expressed often enough by coders just trying to get their job
+done that I know the elaborations are incorrect.  There <b>is</b> a technical
+solution to this problem.  But the solution can't be properly achieved without a
+holistic design with the exclusive and shared ownership modes of mutexes.  That
+means it is <b>our</b> job to solve this problem, because it isn't practical for
+the coder to solve it in his domain.  The solution involves adding constructors
+to <tt>unique_lock</tt>, which the client obviously can not do.
+</p>
+
+<p>
+The solution for the std::lib is relatively easy, quite economical, integrates
+well with <tt>mutex</tt> and <tt>shared_mutex</tt>, and was designed at the
+same time (6 years ago) as <tt>mutex</tt> and <tt>shared_mutex</tt> as one
+cohesive library.
+</p>
+
+<ul>
+<li><tt>class upgrade_mutex;</tt></li>
+<li><tt>template &lt;class Mutex&gt; class upgrade_lock;</tt></li>
+</ul>
+
+<p>
+The reason you can't upgrade a <tt>shared_mutex</tt> locked in shared ownership
+mode to exclusive ownership is because of deadlock.  What do you do if two
+threads holding shared ownership on the same <tt>shared_mutex</tt> both request
+an atomic upgrade to exclusive ownership?  You can only say yes to one of those
+threads.  You can't guarantee any thread that they will be the chosen one to
+upgrade.
+</p>
+
+<p>
+The answer to this dilemma is deceptively simple:  Let the programmer decide
+which one of the threads with shared ownership will be the "privileged" one
+which is able to atomically upgrade to exclusive ownership.  The mechanism for
+doing this is to add a third ownership mode: <i>upgrade ownership</i>.
+</p>
+
+<p>
+A mutex locked in upgrade ownership mode can share ownership with other threads
+needing shared ownership.  However it can not share with other threads holding
+upgrade ownership.  And naturally it can't share with other threads holding
+exclusive ownership. So when a bunch of threads sharing ownership of a mutex
+exist (but only one of those threads actually has upgrade ownership &mdash;
+enforced by <tt>upgrade_mutex</tt>) then the thread with upgrade ownership can
+request a conversion to exclusive ownership and all it has to do is block until
+all the threads with shared ownership relinquish their shared ownership.  At
+this point the thread with upgrade ownership is the only thread referencing the
+mutex and can atomically convert to exclusive ownership.
+</p>
+
+<p>
+At this point it is good to review:
+</p>
+
+<blockquote>
+<p>
+A <tt>mutex</tt> is capable of two locking states:
+</p>
+
+<ol>
+<li>Exclusively locked.</li>
+<li>Unlocked.</li>
+</ol>
+
+<p>
+A <tt>shared_mutex</tt> is capable of three locking states:
+</p>
+
+<ol>
+<li>Exclusively locked.</li>
+<li>Share locked.</li>
+<li>Unlocked.</li>
+</ol>
+
+<p>
+An <tt>upgrade_mutex</tt> is capable of four locking states:
+</p>
+
+<ol>
+<li>Exclusively locked.</li>
+<li>Upgrade locked.</li>
+<li>Share locked.</li>
+<li>Unlocked.</li>
+</ol>
+
+<p>
+An <i>Upgrade lock</i> is a locked state that can share ownership with share
+locked states, but not with upgrade or exclusive lock states, and has the
+privilege of atomically converting from upgrade ownership to exclusive
+ownership.
+</p>
+
+</blockquote>
+
+<p>
+An <tt>upgrade_mutex</tt> has all of the API and functionality of a
+<tt>shared_mutex</tt> (and thus also of a <tt>timed_mutex</tt>) and adds API
+for locking (and timed/try-locking) in upgrade ownership mode.  And
+<tt>upgrade_mutex</tt> also adds API for converting among the three lock
+ownership modes:
+</p>
+
+<ol>
+<li>Exclusive &lt;-&gt; Upgrade</li>
+<li>Exclusive &lt;-&gt; Shared</li>
+<li>Upgrade &lt;-&gt; Shared</li>
+</ol>
+
+<p>
+One can put these three modes in a graph like so:
+</p>
+
+<blockquote><pre>
+exclusive
+  |   \
+  |    \
+  |    upgrade
+  |    /
+  |   /
+shared
+</pre></blockquote>
+
+<p>
+Conversions traveling down the graph are always non-blocking.
+</p>
+
+<p>
+Conversions traveling up the graph are always try or timed, except that there is
+also a non-try, non-timed, but blocking conversion from upgrade to exclusive.
+Only <tt>upgrade_mutex</tt> contains this conversion functionality among the
+three ownership locking modes.  <tt>shared_mutex</tt> and <tt>mutex</tt>
+purposefully lack this conversion functionality.  If you do not want your
+application to have the possibility of a locking mode conversion, then it can
+not do so if your application makes no use of <tt>upgrade_mutex</tt>.
+</p>
+
+<p>
+With three locking modes, and conversions among the three locking modes, the API
+for <tt>upgrade_mutex</tt> is fairly large.  The good news however is that
+programmers can easily make use of <tt>upgrade_mutex</tt> without having to deal
+with that large API directly.  Instead one uses the three lock types:
+<tt>unique_lock&lt;upgrade_mutex&gt;</tt>,
+<tt>shared_lock&lt;upgrade_mutex&gt;</tt> and
+<tt>upgrade_lock&lt;upgrade_mutex&gt;</tt>.
+</p>
+
+<p>
+If you want to lock an <tt>upgrade_mutex</tt> in exclusive mode you simply:
+</p>
+
+<blockquote><pre>
+void test_exclusive()
+{
+    unique_lock&lt;upgrade_mutex&gt; lk(mut);
+    <font color="#C80000">// mut exclusive locked here</font>
+    <font color="#C80000">// ...</font>
+}   <font color="#C80000">// mut.unlock()</font>
+</pre></blockquote>
+
+<p>
+For the simple example above, <code>lock_guard&lt;upgrade_mutex&gt;</code>
+would have worked just as well.
+</p>
+
+<p>
+To lock an <tt>upgrade_mutex</tt> in upgrade mode you simply:
+</p>
+
+<blockquote><pre>
+void test_upgrade()
+{
+    upgrade_lock&lt;upgrade_mutex&gt; lk(mut);
+    <font color="#C80000">// mut upgrade locked here</font>
+    <font color="#C80000">// ...</font>
+}   <font color="#C80000">// mut.unlock_upgrade()</font>
+</pre></blockquote>
+
+<p>
+And to lock an <tt>upgrade_mutex</tt> in shared mode is just:
+</p>
+
+<blockquote><pre>
+void test_shared()
+{
+    shared_lock&lt;upgrade_mutex&gt; lk(mut);
+    <font color="#C80000">// mut share locked here</font>
+    <font color="#C80000">// ...</font>
+}   <font color="#C80000">// mut.unlock_shared()</font>
+</pre></blockquote>
+
+<p>
+That is, if you already know how to lock and unlock a <tt>mutex</tt> and
+<tt>shared_mutex</tt>, then you also already know how to lock and unlock an
+<tt>upgrade_mutex</tt>.  The template lock classes make the syntax homogeneous. 
+Easy to teach and great for generic code.
+</p>
+
+<p>
+The templated locks also make the syntax of ownership conversion of an
+<tt>upgrade_mutex</tt> homogeneous.  One simply move-converts from one lock type
+to another, using <tt>try_to_lock</tt>, a <tt>duration</tt>, or a
+<tt>time_point</tt> with the conversion as appropriate:
+</p>
+
+<blockquote><pre>
+upgrade_mutex mut;
+<font color="#C80000">// ...</font>
+void foo()
+{
+    shared_lock&lt;upgrade_mutex&gt; sl(mut);
+    <font color="#C80000">// mut share locked here</font>
+    <font color="#C80000">// ...</font>
+    <font color="#C80000">// Try to convert mut from shared to upgrade ownership for 5ms</font>
+    <font color="#C80000">// It can succeed if no other thread has upgrade ownership,</font>
+    <font color="#C80000">//   or is blocked on exclusive ownership.</font>
+    upgrade_lock&lt;upgrade_mutex&gt; ul(std::move(sl), chrono::milliseconds(5));
+    if (ul.owns_lock())
+    {
+        <font color="#C80000">// mut upgrade locked here</font>
+        <font color="#C80000">// This thread will still share with other threads having shared ownership here.</font>
+        <font color="#C80000">// ...</font>
+        <font color="#C80000">// Convert mut from upgrade to exclusive, blocking as necessary</font>
+        unique_lock&lt;upgrade_mutex&gt; el(std::move(ul));
+        <font color="#C80000">// mut exclusive locked here</font>
+        <font color="#C80000">// No other threads have shared, upgrade or exclusive ownership here.</font>
+        <font color="#C80000">// ...</font>
+    }  <font color="#C80000">// mut.unlock()</font>
+    else
+    {
+        <font color="#C80000">// mut still share locked here</font>
+        <font color="#C80000">// ...</font>
+    }
+}  <font color="#C80000">// if mut is share locked, then mut.unlock_shared()</font>
+</pre></blockquote>
+
+<p>
+If you take all of the comments out of the example above you are left with very
+little code, and what's left is efficient, thread safe, exception safe, and self
+documenting.
+</p>
+
+<p>
+If you accidentally attempt an illegal conversion (e.g. a non-timed, non-try
+conversion from shared to exclusive) a compile time error results:
+</p>
+
+<blockquote><pre>
+<font color="#C80000">error:</font> no matching constructor for initialization of 'unique_lock&lt;upgrade_mutex&gt;'
+unique_lock&lt;upgrade_mutex&gt; el(std::move(sl));
+                           <font color="#00C800">^  ~~~~~~~~~~~~~</font>
+</pre></blockquote>
+
+<p>
+And so the quite complex API of <tt>upgrade_mutex</tt> is completely handled by
+constructing and converting among the three lock types in a manner that is
+easy to teach, and is very applicable to generic locking code such as
+<tt>condition_variable_any</tt> and <tt>std::lock(lk1, lk2, lk3, ...)</tt>
+</p>
+
+<blockquote>
+Everything <b>just works</b> with our existing library.  It was all designed
+together.
+</blockquote>
+
+<p>
+It is instructive to look at an example implementation of generic locking
+code that already exists in our C++11 std::library.  This is part of the
+<tt>std::lock</tt> algorithm:
+</p>
+
+<blockquote><pre>
+template &lt;class L0, class L1&gt;
+void
+lock(L0&amp; lk0, L1&amp; lk1)
+{
+    while (true)
+    {
+        {
+            unique_lock&lt;L0&gt; ul(lk0);
+            if (lk1.try_lock())
+            {
+                ul.release();
+                break;
+            }
+        }
+        this_thread::yield();
+        {
+            unique_lock&lt;L1&gt; ul(lk1);
+            if (lk0.try_lock())
+            {
+                ul.release();
+                break;
+            }
+        }
+        this_thread::yield();
+    }
+}
+</pre></blockquote>
+
+<p>
+The above code <b>just works</b> (thread safe, exception safe, efficient, etc.),
+even if <tt>L0</tt> and/or <tt>L1</tt> is a
+<tt>shared_lock&lt;upgrade_mutex&gt;</tt>,
+<tt>upgrade_lock&lt;upgrade_mutex&gt;</tt>, or a simple <tt>mutex</tt>. If you
+look closely, this means that forming a
+<tt>unique_lock&lt;shared_lock&lt;upgrade_mutex&gt;&gt;</tt> is not only ok, it
+is actually useful! This is so because all of these types adhere to the
+<tt>Lockable</tt> requirements. This is true, even though some types will be
+obtaining shared or upgrade ownership while others may be obtaining exclusive
+ownership.
+</p>
+
+<h2><a name="Wording"></a>Proposed Wording</h2>
+
+<p>
+Add a synopsis to 30.4. [thread.mutex] as follows:
+</p>
+
+<blockquote>
+<h4>Header <tt>&lt;shared_mutex&gt;</tt> synopsis</h4>
+<pre>
+namespace std {
+
+class shared_mutex;
+class upgrade_mutex;
+template &lt;class Mutex&gt; class shared_lock;
+template &lt;class Mutex&gt;
+  void swap(shared_lock&lt;Mutex&gt;&amp; x, shared_lock&lt;Mutex&gt;&amp; y) noexcept;
+template &lt;class Mutex&gt; class upgrade_lock;
+template &lt;class Mutex&gt;
+  void swap(upgrade_lock&lt;Mutex&gt;&amp; x, upgrade_lock&lt;Mutex&gt;&amp; y) noexcept;
+
+}  // std
+</pre>
+</blockquote>
+
+<p>
+Modify 30.4.1.2 [thread.mutex.requirements.mutex] as follows:
+</p>
+
+<blockquote>
+<p>
+1 The <i>mutex types</i> are the standard library types <tt>std::mutex</tt>,
+<tt>std::recursive_mutex</tt>, <tt>std::timed_mutex</tt>, <del>and</del>
+<tt>std::recursive_timed_mutex</tt><ins>, <tt>std::shared_mutex</tt>, and
+<tt>std::upgrade_mutex</tt></ins>. They shall meet the requirements set out in
+this section. In this description, <tt>m</tt> denotes an object of a mutex type.
+</p>
+</blockquote>
+
+<p>
+Modify 30.4.1.3 [thread.timedmutex.requirements] as follows:
+</p>
+
+<blockquote>
+1 The <i>timed mutex</i> types are the standard library types
+<tt>std::timed_mutex</tt><ins>,</ins> <del>and</del>
+<tt>std::recursive_timed_mutex</tt><ins>, <tt>std::shared_mutex</tt>, and
+<tt>std::upgrade_mutex</tt></ins>. They shall meet the requirements set out
+below. In this description, <tt>m</tt> denotes an object of a mutex type,
+<tt>rel_time</tt> denotes an object of an instantiation of <tt>duration</tt>
+(20.11.5), and <tt>abs_time</tt> denotes an object of an instantiation of
+<tt>time_point</tt> (20.11.6).
+</blockquote>
+
+<p>
+Insert a new section: 30.4.1.4 Shared mutex types [thread.sharedmutex.requirements]
+</p>
+
+<blockquote>
+<p>
+The <i>shared mutex types</i> are the standard library types
+<tt>std::shared_mutex</tt> and <tt>std::upgrade_mutex</tt>. They shall meet the
+requirements of timed mutex types ([thread.timedmutex.requirements]), and
+additionally shall meet the requirements set out below.  In this description,
+<tt>m</tt> denotes an object of a mutex type, <tt>rel_type</tt> denotes an
+object of an instantiation of <tt>duration</tt> (20.11.5), and <tt>abs_time</tt>
+denotes an object of an instantiation of <tt>time_point</tt> (20.11.6).
+</p>
+
+<p>
+In addition to the exclusive lock ownership mode specified in
+[thread.mutex.requirements.mutex], shared mutex types provide a <i>shared
+lock</i> ownership mode.  Multiple execution agents can simultaneously hold a
+shared lock ownership of a shared mutex type.  But no execution agent shall hold
+a shared lock while another execution agent holds an exclusive lock on the same
+shared mutex type, and vice-versa.  The maximum number of execution agents which
+can share a shared lock on a single shared mutex type is unspecified, but shall
+be at least 10000.  If more than the maximum number of execution agents attempt
+to obtain a shared lock, the excess execution agents shall block until the
+number of shared locks are reduced below the maximum amount by other execution
+agents releasing their shared lock.
+</p>
+
+<p>
+The expression <tt>m.lock_shared()</tt> shall be well-formed and have the
+following semantics:
+</p>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread has no ownership of the mutex.
+</p>
+<p>
+<i>Effects:</i> Blocks the calling thread until shared ownership of the mutex
+can be obtained for the calling thread.
+</p>
+<p>
+<i>Postcondition:</i> The calling thread has a shared lock on the mutex.
+</p>
+<p>
+<i>Return type:</i> <tt>void</tt>.
+</p>
+<p>
+<i>Synchronization:</i> Prior <tt>unlock_shared()</tt> operations on the same
+object shall synchronize with (1.10) this operation.
+</p>
+<p>
+<i>Throws:</i> system_error when an exception is required (30.2.2).
+</p>
+<p>
+<i>Error conditions:</i>
+</p>
+<ul>
+<li><tt>operation_not_permitted</tt> &mdash; if the thread does not have the
+privilege to perform the operation.</li>
+<li><tt>resource_deadlock_would_occur</tt> &mdash; if the implementation detects
+that a deadlock would occur.</li>
+<li><tt>device_or_resource_busy</tt> &mdash;  if the mutex is already locked and
+blocking is not possible.</li>
+</ul>
+</blockquote>
+
+<p>
+The expression <tt>m.unlock_shared()</tt> shall be well-formed and have the
+following semantics:
+</p>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread shall hold a shared lock on the mutex.
+</p>
+<p>
+<i>Effects:</i> Releases a shared lock on the mutex held by the calling thread.
+</p>
+<p>
+<i>Return type:</i> <tt>void</tt>.
+</p>
+<p>
+<i>Synchronization:</i> This operation <i>synchronizes with</i> (1.10)
+subsequent lock operations that obtain ownership on the same object.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+<p>
+The expression <tt>m.try_lock_shared()</tt> shall be well-formed and have the
+following semantics:
+</p>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread has no ownership of the mutex.
+</p>
+<p>
+<i>Effects:</i> Attempts to obtain shared ownership of the mutex for the calling
+thread without blocking. If shared ownership is not obtained, there is no effect
+and <tt>try_lock_shared()</tt> immediately returns.
+</p>
+<p>
+<i>Return type:</i> <code>bool</code>.
+</p>
+<p>
+<i>Returns:</i> <code>true</code> if the shared ownership lock was acquired,
+<code>false</code> otherwise.
+</p>
+<p>
+<i>Synchronization:</i> If <tt>try_lock_shared()</tt> returns <tt>true</tt>,
+prior <tt>unlock_shared()</tt> operations on the same object <i>synchronize
+with</i> (1.10) this operation.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+<p>
+The expression <tt>m.try_lock_shared_for(rel_time)</tt> shall be well-formed and
+have the following semantics:
+</p>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread has no ownership of the mutex.
+</p>
+<p>
+<i>Effects:</i> If the tick <tt>period</tt> of <tt>rel_time</tt> is not exactly
+convertible to the native tick <tt>period</tt>, the <tt>duration</tt> shall be
+rounded up to the nearest native tick <tt>period</tt>. Attempts to obtain shared
+lock ownership for the calling thread within the relative timeout (30.2.4)
+specified by <code>rel_time</code>. If the time specified by <tt>rel_time</tt>
+is less than or equal to <tt>rel_time.zero()</tt>, the function attempts to
+obtain ownership without blocking (as if by calling
+<tt>try_lock_shared()></tt>). The function shall return within the timeout
+specified by <tt>rel_time</tt> only if it has obtained shared ownership of the
+mutex object.
+</p>
+<p>
+<i>Return type:</i> <code>bool</code>.
+</p>
+<p>
+<i>Returns:</i> <code>true</code> if the shared lock was acquired,
+<code>false</code> otherwise.
+</p>
+<p>
+<i>Synchronization:</i> If <tt>try_lock_shared_for()</tt> returns <tt>true</tt>,
+prior <tt>unlock_shared()</tt> operations on the same object <i>synchronize
+with</i> (1.10) this operation.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+<p>
+The expression <tt>m.try_lock_shared_until(abs_time)</tt> shall be well-formed
+and have the following semantics:
+</p>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread has no ownership of the mutex.
+</p>
+<p>
+<i>Effects:</i> The function attempts to obtain shared ownership of the mutex.
+If <tt>abs_time</tt> has already passed, the function attempts to obtain shared
+ownership without blocking (as if by calling <tt>try_lock_shared()</tt>). The
+function shall return before the absolute timeout (30.2.4) specified by
+<tt>abs_time</tt> only if it has obtained shared ownership of the mutex object.
+</p>
+<p>
+<i>Return type:</i> <code>bool</code>.
+</p>
+<p>
+<i>Returns:</i> <code>true</code> if the shared lock was acquired,
+<code>false</code> otherwise.
+</p>
+<p>
+<i>Synchronization:</i> If <tt>try_lock_shared_until()</tt> returns
+<tt>true</tt>, prior <tt>unlock_shared()</tt> operations on the same object
+<i>synchronize with</i> (1.10) this operation.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+</blockquote>
+
+<p>
+Insert a new section: 30.4.1.4.1 Class <tt>shared_mutex</tt> [thread.sharedmutex.class]
+</p>
+
+<blockquote>
+<pre>
+namespace std {
+
+class shared_mutex
+{
+public:
+
+    shared_mutex();
+    ~shared_mutex();
+
+    shared_mutex(const shared_mutex&amp;) = delete;
+    shared_mutex&amp; operator=(const shared_mutex&amp;) = delete;
+
+    // Exclusive ownership
+
+    void lock();  // blocking
+    bool try_lock();
+    template &lt;class Rep, class Period&gt;
+        bool try_lock_for(const chrono::duration&lt;Rep, Period&gt;&amp; rel_time);
+    template &lt;class Clock, class Duration&gt;
+        bool
+        try_lock_until(const chrono::time_point&lt;Clock, Duration&gt;&amp; abs_time);
+    void unlock();
+
+    // Shared ownership
+
+    void lock_shared();  // blocking
+    bool try_lock_shared();
+    template &lt;class Rep, class Period&gt;
+        bool
+        try_lock_shared_for(const chrono::duration&lt;Rep, Period&gt;&amp; rel_time);
+    template &lt;class Clock, class Duration&gt;
+        bool
+        try_lock_shared_until(
+                      const chrono::time_point&lt;Clock, Duration&gt;&amp; abs_time);
+    void unlock_shared();
+};
+
+}  // std
+</pre>
+
+<p>
+The class <tt>shared_mutex</tt> provides a non-recursive mutex with shared
+ownership semantics.
+</p>
+
+<p>
+The class <tt>shared_mutex</tt> shall satisfy all of the <tt>SharedMutex</tt>
+requirements ([thread.sharedmutex.requirements]). It shall be a standard-layout
+class (Clause 9).
+</p>
+
+<p>
+The behavior of a program is undefined if:
+</p>
+
+<ul>
+<li>it destroys a <tt>shared_mutex</tt> object owned by any thread,</li>
+<li>a thread attempts to recursively gain any ownership of a
+<tt>shared_mutex</tt>.</li>
+<li>a thread terminates while possessing any ownership of a
+<tt>shared_mutex</tt>.</li>
+</ul>
+
+</blockquote>
+
+<p>
+Insert a new section: 30.4.1.5 Class <tt>upgrade_mutex</tt> [thread.upgrademutex.class]
+</p>
+
+<blockquote>
+
+<p>
+In addition to the exclusive lock ownership mode specified in
+[thread.mutex.requirements.mutex], and the shared lock ownership specified in
+[thread.sharedmutex.requirements], <tt>upgrade_mutex</tt> provides a third
+ownership mode.  A thread with an upgrade lock ownership does not share
+ownership with other threads holding exclusive or upgrade ownership modes. 
+It does however share ownership with other threads holding shared ownership
+mode.  This mutex type also has the functionality to atomically convert among
+exclusive, upgrade and shared ownership modes.
+</p>
+
+<pre>
+namespace std {
+
+class upgrade_mutex
+{
+public:
+
+    upgrade_mutex();
+    ~upgrade_mutex();
+
+    upgrade_mutex(const upgrade_mutex&amp;) = delete;
+    upgrade_mutex&amp; operator=(const upgrade_mutex&amp;) = delete;
+
+    // Exclusive ownership
+
+    void lock();  // blocking
+    bool try_lock();
+    template &lt;class Rep, class Period&gt;
+        bool try_lock_for(const chrono::duration&lt;Rep, Period&gt;&amp; rel_time);
+    template &lt;class Clock, class Duration&gt;
+        bool
+        try_lock_until(
+                      const chrono::time_point&lt;Clock, Duration&gt;&amp; abs_time);
+    void unlock();
+
+    // Shared ownership
+
+    void lock_shared();  // blocking
+    bool try_lock_shared();
+    template &lt;class Rep, class Period&gt;
+        bool
+        try_lock_shared_for(const chrono::duration&lt;Rep, Period&gt;&amp; rel_time);
+    template &lt;class Clock, class Duration&gt;
+        bool
+        try_lock_shared_until(
+                      const chrono::time_point&lt;Clock, Duration&gt;&amp; abs_time);
+    void unlock_shared();
+
+    // Upgrade ownership
+
+    void lock_upgrade();  // blocking
+    bool try_lock_upgrade();
+    template &lt;class Rep, class Period&gt;
+        bool
+        try_lock_upgrade_for(
+                            const chrono::duration&lt;Rep, Period&gt;&amp; rel_time);
+    template &lt;class Clock, class Duration&gt;
+        bool
+        try_lock_upgrade_until(
+                      const chrono::time_point&lt;Clock, Duration&gt;&amp; abs_time);
+    void unlock_upgrade();
+
+    // Shared &lt;-&gt; Exclusive
+
+    bool try_unlock_shared_and_lock();
+    template &lt;class Rep, class Period&gt;
+        bool
+        try_unlock_shared_and_lock_for(
+                            const chrono::duration&lt;Rep, Period&gt;&amp; rel_time);
+    template &lt;class Clock, class Duration&gt;
+        bool
+        try_unlock_shared_and_lock_until(
+                      const chrono::time_point&lt;Clock, Duration&gt;&amp; abs_time);
+    void unlock_and_lock_shared();
+
+    // Shared &lt;-&gt; Upgrade
+
+    bool try_unlock_shared_and_lock_upgrade();
+    template &lt;class Rep, class Period&gt;
+        bool
+        try_unlock_shared_and_lock_upgrade_for(
+                            const chrono::duration&lt;Rep, Period&gt;&amp; rel_time);
+    template &lt;class Clock, class Duration&gt;
+        bool
+        try_unlock_shared_and_lock_upgrade_until(
+                      const chrono::time_point&lt;Clock, Duration&gt;&amp; abs_time);
+    void unlock_upgrade_and_lock_shared();
+
+    // Upgrade &lt;-&gt; Exclusive
+
+    void unlock_upgrade_and_lock();  // blocking
+    bool try_unlock_upgrade_and_lock();
+    template &lt;class Rep, class Period&gt;
+        bool
+        try_unlock_upgrade_and_lock_for(
+                            const chrono::duration&lt;Rep, Period&gt;&amp; rel_time);
+    template &lt;class Clock, class Duration&gt;
+        bool
+        try_unlock_upgrade_and_lock_until(
+                      const chrono::time_point&lt;Clock, Duration&gt;&amp; abs_time);
+    void unlock_and_lock_upgrade();
+};
+
+}  // std
+</pre>
+
+<p>
+<tt>upgrade_mutex</tt> shall meet the requirements of a shared mutex type
+([thread.sharedmutex.requirements]) in addition to the requirements set out
+below.
+</p>
+
+<pre>
+m.lock_upgrade()
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread has no ownership of the mutex.
+</p>
+<p>
+<i>Effects:</i> Blocks the calling thread until upgrade ownership of the mutex
+can be obtained for the calling thread.
+</p>
+<p>
+<i>Postcondition:</i> The calling thread has an upgrade lock on the mutex.
+</p>
+<p>
+<i>Return type:</i> <tt>void</tt>.
+</p>
+<p>
+<i>Synchronization:</i> Prior <tt>unlock_upgrade()</tt> operations on the same
+object shall synchronize with (1.10) this operation.
+</p>
+<p>
+<i>Throws:</i> system_error when an exception is required (30.2.2).
+</p>
+<p>
+<i>Error conditions:</i>
+</p>
+<ul>
+<li><tt>operation_not_permitted</tt> &mdash; if the thread does not have the
+privilege to perform the operation.</li>
+<li><tt>resource_deadlock_would_occur</tt> &mdash; if the implementation detects
+that a deadlock would occur.</li>
+<li><tt>device_or_resource_busy</tt> &mdash;  if the mutex is already locked and
+blocking is not possible.</li>
+</ul>
+</blockquote>
+
+<pre>
+m.unlock_upgrade()
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread shall hold an upgrade lock on the mutex.
+</p>
+<p>
+<i>Effects:</i> Releases an upgrade lock on the mutex held by the calling thread.
+</p>
+<p>
+<i>Return type:</i> <tt>void</tt>.
+</p>
+<p>
+<i>Synchronization:</i> This operation <i>synchronizes with</i> (1.10)
+subsequent lock operations that obtain ownership on the same object.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+<pre>
+m.try_lock_upgrade()
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread has no ownership of the mutex.
+</p>
+<p>
+<i>Effects:</i> Attempts to obtain upgrade ownership of the mutex for the calling
+thread without blocking. If upgrade ownership is not obtained, there is no effect
+and <tt>try_lock_upgrade()</tt> immediately returns.
+</p>
+<p>
+<i>Return type:</i> <code>bool</code>.
+</p>
+<p>
+<i>Returns:</i> <code>true</code> if the upgrade ownership lock was acquired,
+<code>false</code> otherwise.
+</p>
+<p>
+<i>Synchronization:</i> If <tt>try_lock_upgrade()</tt> returns <tt>true</tt>,
+prior <tt>unlock_upgrade()</tt> operations on the same object <i>synchronize
+with</i> (1.10) this operation.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+<pre>
+m.try_lock_upgrade_for(rel_time)
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread has no ownership of the mutex.
+</p>
+<p>
+<i>Effects:</i> If the tick <tt>period</tt> of <tt>rel_time</tt> is not exactly
+convertible to the native tick <tt>period</tt>, the <tt>duration</tt> shall be
+rounded up to the nearest native tick <tt>period</tt>. Attempts to obtain
+upgrade lock ownership for the calling thread within the relative timeout
+(30.2.4) specified by <code>rel_time</code>. If the time specified by
+<tt>rel_time</tt> is less than or equal to <tt>rel_time.zero()</tt>, the
+function attempts to obtain ownership without blocking (as if by calling
+<tt>try_lock_upgrade()></tt>). The function shall return within the timeout
+specified by <tt>rel_time</tt> only if it has obtained upgrade ownership of the
+mutex object.
+</p>
+<p>
+<i>Return type:</i> <code>bool</code>.
+</p>
+<p>
+<i>Returns:</i> <code>true</code> if the upgrade lock was acquired,
+<code>false</code> otherwise.
+</p>
+<p>
+<i>Synchronization:</i> If <tt>try_lock_upgrade_for()</tt> returns <tt>true</tt>,
+prior <tt>unlock_upgrade()</tt> operations on the same object <i>synchronize
+with</i> (1.10) this operation.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+<pre>
+m.try_lock_upgrade_until(abs_time)
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread has no ownership of the mutex.
+</p>
+<p>
+<i>Effects:</i> The function attempts to obtain upgrade ownership of the mutex.
+If <tt>abs_time</tt> has already passed, the function attempts to obtain upgrade
+ownership without blocking (as if by calling <tt>try_lock_upgrade()</tt>). The
+function shall return before the absolute timeout (30.2.4) specified by
+<tt>abs_time</tt> only if it has obtained upgrade ownership of the mutex object.
+</p>
+<p>
+<i>Return type:</i> <code>bool</code>.
+</p>
+<p>
+<i>Returns:</i> <code>true</code> if the upgrade lock was acquired,
+<code>false</code> otherwise.
+</p>
+<p>
+<i>Synchronization:</i> If <tt>try_lock_upgrade_until()</tt> returns
+<tt>true</tt>, prior <tt>unlock_upgrade()</tt> operations on the same object
+<i>synchronize with</i> (1.10) this operation.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+<pre>
+m.try_unlock_shared_and_lock()
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread shall hold a shared lock on <code>m</code>.
+</p>
+<p>
+<i>Effects:</i> The function attempts to atomically convert the ownership from
+shared to exclusive for the calling thread without blocking.  For this conversion
+to be successful, this thread shall be the only thread holding any ownership of
+the lock.  If the conversion is not successful, the shared ownership of
+<code>m</code> is retained.
+</p>
+<p>
+<i>Return type:</i> <code>bool</code>.
+</p>
+<p>
+<i>Returns:</i> <code>true</code> if the exclusive lock was acquired,
+<code>false</code> otherwise.
+</p>
+<p>
+<i>Synchronization:</i> If <tt>try_unlock_shared_and_lock()</tt> returns
+<tt>true</tt>, prior <tt>unlock()</tt> and subsequent lock operations on the
+same object <i>synchronize with</i> (1.10) this operation.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+<pre>
+m.try_unlock_shared_and_lock_for(rel_time)
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread shall hold a shared lock on <code>m</code>.
+</p>
+<p>
+<i>Effects:</i>  If the tick <tt>period</tt> of <tt>rel_time</tt> is not exactly
+convertible to the native tick <tt>period</tt>, the <tt>duration</tt> shall be
+rounded up to the nearest native tick <tt>period</tt>. The function attempts to
+atomically convert the ownership from shared to exclusive for the calling thread
+within the relative timeout (30.2.4) specified by <code>rel_time</code>.  If the
+time specified by <tt>rel_time</tt> is less than or equal to
+<tt>rel_time.zero()</tt>, the function attempts to obtain exclusive ownership
+without blocking (as if by calling <tt>try_unlock_shared_and_lock()></tt>). The
+function shall return within the timeout specified by <tt>rel_time</tt> only if
+it has obtained exclusive ownership of the mutex object. For this conversion to
+be successful, this thread shall be the only thread holding any ownership of the
+lock at the moment of conversion.  If the conversion is not successful, the
+shared ownership of <code>m</code> is retained.
+</p>
+<p>
+<i>Return type:</i> <code>bool</code>.
+</p>
+<p>
+<i>Returns:</i> <code>true</code> if the exclusive lock was acquired,
+<code>false</code> otherwise.
+</p>
+<p>
+<i>Synchronization:</i> If <tt>try_unlock_shared_and_lock_for()</tt> returns
+<tt>true</tt>, prior <tt>unlock()</tt> and subsequent lock operations on the
+same object <i>synchronize with</i> (1.10) this operation.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+<pre>
+m.try_unlock_shared_and_lock_until(abs_time)
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread shall hold a shared lock on <code>m</code>.
+</p>
+<p>
+<i>Effects:</i> The function attempts to atomically convert the ownership from
+shared to exclusive for the calling thread within the absolute timeout (30.2.4)
+specified by <code>abs_time</code>.  If <tt>abs_time</tt> has already passed,
+the function attempts to obtain exclusive ownership without blocking (as if by
+calling <tt>try_unlock_shared_and_lock()></tt>). The function shall return
+before the absolute timeout (30.2.4) specified by <tt>abs_time</tt> only if it
+has obtained exclusive ownership of the mutex object. For this conversion to be
+successful, this thread shall be the only thread holding any ownership of the
+lock at the moment of conversion.  If the conversion is not successful, the
+shared ownership of <code>m</code> is retained.
+</p>
+<p>
+<i>Return type:</i> <code>bool</code>.
+</p>
+<p>
+<i>Returns:</i> <code>true</code> if the exclusive lock was acquired,
+<code>false</code> otherwise.
+</p>
+<p>
+<i>Synchronization:</i> If <tt>try_unlock_shared_and_lock_until()</tt> returns
+<tt>true</tt>, prior <tt>unlock()</tt> and subsequent lock operations on the
+same object <i>synchronize with</i> (1.10) this operation.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+<pre>
+m.unlock_and_lock_shared()
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread shall hold an exclusive lock on
+<code>m</code>.
+</p>
+<p>
+<i>Effects:</i> The function atomically converts the ownership from
+exclusive to shared for the calling thread.
+</p>
+<p>
+<i>Return type:</i> <code>void</code>.
+</p>
+<p>
+<i>Synchronization:</i> This operation <i>synchronizes with</i> (1.10)
+subsequent lock operations that obtain ownership of the same object.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+<pre>
+m.try_unlock_shared_and_lock_upgrade()
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread shall hold a shared lock on <code>m</code>.
+</p>
+<p>
+<i>Effects:</i> The function attempts to atomically convert the ownership from
+shared to upgrade for the calling thread without blocking.  For this conversion
+to be successful, there shall be no thread holding upgrade ownership of
+this object.  If the conversion is not successful, the shared ownership of
+<code>m</code> is retained.
+</p>
+<p>
+<i>Return type:</i> <code>bool</code>.
+</p>
+<p>
+<i>Returns:</i> <code>true</code> if the exclusive lock was acquired,
+<code>false</code> otherwise.
+</p>
+<p>
+<i>Synchronization:</i> If <tt>try_unlock_shared_and_lock_upgrade()</tt> returns
+<tt>true</tt>, prior <tt>unlock_upgrade()</tt> and subsequent lock operations on
+the same object <i>synchronize with</i> (1.10) this operation.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+<pre>
+m.try_unlock_shared_and_lock_upgrade_for(rel_time)
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread shall hold a shared lock on <code>m</code>.
+</p>
+<p>
+<i>Effects:</i>  If the tick <tt>period</tt> of <tt>rel_time</tt> is not exactly
+convertible to the native tick <tt>period</tt>, the <tt>duration</tt> shall be
+rounded up to the nearest native tick <tt>period</tt>. The function attempts to
+atomically convert the ownership from shared to upgrade for the calling thread
+within the relative timeout (30.2.4) specified by <code>rel_time</code>.  If the
+time specified by <tt>rel_time</tt> is less than or equal to
+<tt>rel_time.zero()</tt>, the function attempts to obtain upgrade ownership
+without blocking (as if by calling
+<tt>try_unlock_shared_and_lock_upgrade()></tt>). The function shall return
+within the timeout specified by <tt>rel_time</tt> only if it has obtained
+exclusive ownership of the mutex object. For this conversion to be successful,
+there shall be no thread holding upgrade ownership of this object at the moment
+of conversion.  If the conversion is not successful, the shared ownership of
+<code>m</code> is retained.
+</p>
+<p>
+<i>Return type:</i> <code>bool</code>.
+</p>
+<p>
+<i>Returns:</i> <code>true</code> if the upgrade lock was acquired,
+<code>false</code> otherwise.
+</p>
+<p>
+<i>Synchronization:</i> If <tt>try_unlock_shared_and_lock_upgrade_for()</tt>
+returns <tt>true</tt>, prior <tt>unlock_upgrade()</tt> and subsequent lock
+operations on the same object <i>synchronize with</i> (1.10) this operation.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+<pre>
+m.try_unlock_shared_and_lock_upgrade_until(abs_time)
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread shall hold a shared lock on <code>m</code>.
+</p>
+<p>
+<i>Effects:</i> The function attempts to atomically convert the ownership from
+shared to upgrade for the calling thread within the absolute timeout (30.2.4)
+specified by <code>abs_time</code>.  If <tt>abs_time</tt> has already passed,
+the function attempts to obtain upgrade ownership without blocking (as if by
+calling <tt>try_unlock_shared_and_lock_upgrade()></tt>). The function shall
+return before the absolute timeout (30.2.4) specified by <tt>abs_time</tt> only
+if it has obtained upgrade ownership of the mutex object. For this conversion to
+be successful, there shall be no thread holding upgrade ownership of this object
+at the moment of conversion.  If the conversion is not successful, the shared
+ownership of <code>m</code> is retained.
+</p>
+<p>
+<i>Return type:</i> <code>bool</code>.
+</p>
+<p>
+<i>Returns:</i> <code>true</code> if the upgrade lock was acquired,
+<code>false</code> otherwise.
+</p>
+<p>
+<i>Synchronization:</i> If <tt>try_unlock_shared_and_lock_for()</tt> returns
+<tt>true</tt>, prior <tt>unlock()</tt> and subsequent lock operations on the
+same object <i>synchronize with</i> (1.10) this operation.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+<pre>
+m.unlock_and_lock_upgrade()
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread shall hold an exclusive lock on
+<code>m</code>.
+</p>
+<p>
+<i>Effects:</i> The function atomically converts the ownership from
+exclusive to upgrade for the calling thread.
+</p>
+<p>
+<i>Return type:</i> <code>void</code>.
+</p>
+<p>
+<i>Synchronization:</i> This operation <i>synchronizes with</i> (1.10)
+subsequent lock operations that obtain ownership of the same object.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+<pre>
+m.unlock_upgrade_and_lock()
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread shall hold an upgrade lock on
+<code>m</code>.
+</p>
+<p>
+<i>Effects:</i> Blocks the calling thread until the ownership can be converted
+from upgrade to exclusive ownership for this mutex. Until exclusive ownership is
+obtained, the calling thread maintains upgrade ownership of the mutex.  Thus no
+other thread can obtain exclusive ownership of the mutex after this call is
+made, until this thread relinquishes all ownership of this mutex object.  All
+other threads holding shared ownership of this mutex object shall call
+<tt>unlock_shared()</tt> prior to this function returning.
+</p>
+<p>
+<i>Return type:</i> <code>void</code>.
+</p>
+<p>
+<i>Synchronization:</i> This operation <i>synchronizes with</i> (1.10)
+prior <tt>unlock_shared()</tt> and
+subsequent lock operations that obtain ownership of the same object.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+
+<p>
+[<i>Note:</i> If a thread is blocked on this call, an implementation is required
+to block other threads calling <tt>lock()</tt> on the same mutex object, and is
+strongly encouraged to block other threads calling <tt>lock_shared()</tt> on
+the same mutex object. &mdash; <i>end note</i>]
+</p>
+</blockquote>
+
+<pre>
+m.try_unlock_upgrade_and_lock()
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread shall hold an upgrade lock on <code>m</code>.
+</p>
+<p>
+<i>Effects:</i> The function attempts to atomically convert the ownership from
+upgrade to exclusive for the calling thread without blocking.  For this conversion
+to be successful, this thread shall be the only thread holding any ownership of
+the lock.  If the conversion is not successful, the upgrade ownership of
+<code>m</code> is retained.
+</p>
+<p>
+<i>Return type:</i> <code>bool</code>.
+</p>
+<p>
+<i>Returns:</i> <code>true</code> if the exclusive lock was acquired,
+<code>false</code> otherwise.
+</p>
+<p>
+<i>Synchronization:</i> If <tt>try_unlock_upgrade_and_lock()</tt> returns
+<tt>true</tt>, prior <tt>unlock()</tt> and subsequent lock operations on the
+same object <i>synchronize with</i> (1.10) this operation.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+<pre>
+m.try_unlock_upgrade_and_lock_for(rel_time)
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread shall hold an upgrade lock on <code>m</code>.
+</p>
+<p>
+<i>Effects:</i>  If the tick <tt>period</tt> of <tt>rel_time</tt> is not exactly
+convertible to the native tick <tt>period</tt>, the <tt>duration</tt> shall be
+rounded up to the nearest native tick <tt>period</tt>. The function attempts to
+atomically convert the ownership from upgrade to exclusive for the calling thread
+within the relative timeout (30.2.4) specified by <code>rel_time</code>.  If the
+time specified by <tt>rel_time</tt> is less than or equal to
+<tt>rel_time.zero()</tt>, the function attempts to obtain exclusive ownership
+without blocking (as if by calling <tt>try_unlock_upgrade_and_lock()></tt>). The
+function shall return within the timeout specified by <tt>rel_time</tt> only if
+it has obtained exclusive ownership of the mutex object. For this conversion to
+be successful, this thread shall be the only thread holding any ownership of the
+lock at the moment of conversion.  If the conversion is not successful, the
+upgrade ownership of <code>m</code> is retained.
+</p>
+<p>
+<i>Return type:</i> <code>bool</code>.
+</p>
+<p>
+<i>Returns:</i> <code>true</code> if the exclusive lock was acquired,
+<code>false</code> otherwise.
+</p>
+<p>
+<i>Synchronization:</i> If <tt>try_unlock_upgrade_and_lock_for()</tt> returns
+<tt>true</tt>, prior <tt>unlock()</tt> and subsequent lock operations on the
+same object <i>synchronize with</i> (1.10) this operation.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+<pre>
+m.try_unlock_upgrade_and_lock_until(abs_time)
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread shall hold an upgrade lock on <code>m</code>.
+</p>
+<p>
+<i>Effects:</i> The function attempts to atomically convert the ownership from
+upgrade to exclusive for the calling thread within the absolute timeout (30.2.4)
+specified by <code>abs_time</code>.  If <tt>abs_time</tt> has already passed,
+the function attempts to obtain exclusive ownership without blocking (as if by
+calling <tt>try_unlock_upgrade_and_lock()></tt>). The function shall return
+before the absolute timeout (30.2.4) specified by <tt>abs_time</tt> only if it
+has obtained exclusive ownership of the mutex object. For this conversion to be
+successful, this thread shall be the only thread holding any ownership of the
+lock at the moment of conversion.  If the conversion is not successful, the
+upgrade ownership of <code>m</code> is retained.
+</p>
+<p>
+<i>Return type:</i> <code>bool</code>.
+</p>
+<p>
+<i>Returns:</i> <code>true</code> if the exclusive lock was acquired,
+<code>false</code> otherwise.
+</p>
+<p>
+<i>Synchronization:</i> If <tt>try_unlock_upgrade_and_lock_until()</tt> returns
+<tt>true</tt>, prior <tt>unlock()</tt> and subsequent lock operations on the
+same object <i>synchronize with</i> (1.10) this operation.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+<pre>
+m.unlock_and_lock_upgrade()
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread shall hold an exclusive lock on
+<code>m</code>.
+</p>
+<p>
+<i>Effects:</i> The function atomically converts the ownership from
+exclusive to upgrade for the calling thread.
+</p>
+<p>
+<i>Return type:</i> <code>void</code>.
+</p>
+<p>
+<i>Synchronization:</i> This operation <i>synchronizes with</i> (1.10)
+subsequent lock operations that obtain ownership of the same object.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+</blockquote>
+
+<p>
+Add to the synopsis of <tt>unique_lock</tt> in [thread.lock.unique]:
+</p>
+
+<blockquote><pre>
+ namespace std {
+    template <class Mutex>
+    class unique_lock {
+    public:
+    ...
+        <ins>unique_lock(shared_lock&lt;mutex_type&gt;&amp;&amp;, try_to_lock_t);</ins>
+        <ins>template &lt;class Clock, class Duration&gt;</ins>
+            <ins>unique_lock(shared_lock&lt;mutex_type&gt;&amp;&amp;,</ins>
+                        <ins>const chrono::time_point&lt;Clock, Duration&gt;&amp;);</ins>
+        <ins>template &lt;class Rep, class Period&gt;</ins>
+            <ins>unique_lock(shared_lock&lt;mutex_type&gt;&amp;&amp;,</ins>
+                        <ins>const chrono::duration&lt;Rep, Period&gt;&amp;);</ins>
+    
+        <ins>explicit unique_lock(upgrade_lock&lt;mutex_type&gt;&amp;&amp;);</ins>
+        <ins>unique_lock(upgrade_lock&lt;mutex_type&gt;&amp;&amp;, try_to_lock_t);</ins>
+        <ins>template &lt;class Clock, class Duration&gt;</ins>
+            <ins>unique_lock(upgrade_lock&lt;mutex_type&gt;&amp;&amp;,</ins>
+                        <ins>const chrono::time_point&lt;Clock, Duration&gt;&amp;);</ins>
+        <ins>template &lt;class Rep, class Period&gt;</ins>
+            <ins>unique_lock(upgrade_lock&lt;mutex_type&gt;&amp;&amp;,</ins>
+                        <ins>const chrono::duration&lt;Rep, Period&gt;&amp;);</ins>
+    ...
+    };
+</pre></blockquote>
+
+<p>
+Add to [thread.lock.unique.cons]:
+</p>
+
+<blockquote>
+
+<pre>
+unique_lock(shared_lock&lt;mutex_type&gt;&amp;&amp; sl, try_to_lock_t);
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The supplied <tt>Mutex</tt> type shall implement
+<tt>try_unlock_shared_and_lock()</tt> ([thread.upgrademutex.class]).
+</p>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>unique_lock</tt>, initializing
+<tt>pm</tt> with <tt>nullptr</tt> and <tt>owns</tt> with <tt>false</tt>. If
+<tt>sl.owns_lock()</tt> returns <tt>false</tt>, sets <tt>pm</tt> to the return
+value of <tt>sl.release()</tt>. Else  <tt>sl.owns_lock()</tt> returns
+<tt>true</tt>, and in this case if
+<tt>sl.mutex()-&gt;try_unlock_shared_and_lock()</tt> returns <tt>true</tt>, sets
+<tt>pm</tt> to the value returned by <tt>sl.release()</tt> and sets
+<tt>owns</tt> to <tt>true</tt>. [<i>Note:</i> If <tt>sl.owns_lock()</tt> returns
+<tt>true</tt> and <tt>sl.mutex()-&gt;try_unlock_shared_and_lock()</tt> returns
+<tt>false</tt>, <tt>sl</tt> is not modified.  &mdash; <i>end note</i>]
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+<pre>
+template &lt;class Clock, class Duration&gt;
+    unique_lock(shared_lock&lt;mutex_type&gt;&amp;&amp; sl,
+                const chrono::time_point&lt;Clock, Duration&gt;&amp; abs_time)
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The supplied <tt>Mutex</tt> type shall implement
+<tt>try_unlock_shared_and_lock_until()</tt> ([thread.upgrademutex.class]).
+</p>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>unique_lock</tt>, initializing
+<tt>pm</tt> with <tt>nullptr</tt> and <tt>owns</tt> with <tt>false</tt>. If
+<tt>sl.owns_lock()</tt> returns <tt>false</tt>, sets <tt>pm</tt> to the return
+value of <tt>sl.release()</tt>. Else  <tt>sl.owns_lock()</tt> returns
+<tt>true</tt>, and in this case if
+<tt>sl.mutex()-&gt;try_unlock_shared_and_lock_until(abs_time)</tt> returns
+<tt>true</tt>, sets <tt>pm</tt> to the value returned by <tt>sl.release()</tt>
+and sets <tt>owns</tt> to <tt>true</tt>. [<i>Note:</i> If
+<tt>sl.owns_lock()</tt> returns <tt>true</tt> and
+<tt>sl.mutex()-&gt;try_unlock_shared_and_lock_until(abs_time)</tt> returns
+<tt>false</tt>, <tt>sl</tt> is not modified.  &mdash; <i>end note</i>]
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+<pre>
+template &lt;class Rep, class Period&gt;
+    unique_lock(shared_lock&lt;mutex_type&gt;&amp;&amp; sl,
+                const chrono::duration&lt;Rep, Period&gt;&amp; rel_time);
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The supplied <tt>Mutex</tt> type shall implement
+<tt>try_unlock_shared_and_lock_for()</tt> ([thread.upgrademutex.class]).
+</p>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>unique_lock</tt>, initializing
+<tt>pm</tt> with <tt>nullptr</tt> and <tt>owns</tt> with <tt>false</tt>. If
+<tt>sl.owns_lock()</tt> returns <tt>false</tt>, sets <tt>pm</tt> to the return
+value of <tt>sl.release()</tt>. Else  <tt>sl.owns_lock()</tt> returns
+<tt>true</tt>, and in this case if
+<tt>sl.mutex()-&gt;try_unlock_shared_and_lock_for(rel_time)</tt> returns
+<tt>true</tt>, sets <tt>pm</tt> to the value returned by <tt>sl.release()</tt>
+and sets <tt>owns</tt> to <tt>true</tt>. [<i>Note:</i> If
+<tt>sl.owns_lock()</tt> returns <tt>true</tt> and
+<tt>sl.mutex()-&gt;try_unlock_shared_and_lock_for(rel_time)</tt> returns
+<tt>false</tt>, <tt>sl</tt> is not modified.  &mdash; <i>end note</i>]
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+<pre>
+explicit unique_lock(upgrade_lock&lt;mutex_type&gt;&amp;&amp; ul);
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The supplied <tt>Mutex</tt> type shall implement
+<tt>unlock_upgrade_and_lock()</tt> ([thread.upgrademutex.class]).
+</p>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>unique_lock</tt>, initializing
+<tt>pm</tt> with <tt>ul.release()</tt> and <tt>owns</tt> with
+<tt>ul.owns_lock()</tt>. If <tt>owns</tt> is <tt>true</tt>, calls
+<tt>pm-&gt;unlock_upgrade_and_lock()</tt>. [<i>Note:</i> This is a blocking
+call.  &mdash; <i>end note</i>]
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+<pre>
+unique_lock(upgrade_lock&lt;mutex_type&gt;&amp;&amp; ul, try_to_lock_t);
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The supplied <tt>Mutex</tt> type shall implement
+<tt>try_unlock_upgrade_and_lock()</tt> ([thread.upgrademutex.class]).
+</p>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>unique_lock</tt>, initializing
+<tt>pm</tt> with <tt>nullptr</tt> and <tt>owns</tt> with <tt>false</tt>. If
+<tt>ul.owns_lock()</tt> returns <tt>false</tt>, sets <tt>pm</tt> to the return
+value of <tt>ul.release()</tt>. Else  <tt>ul.owns_lock()</tt> returns
+<tt>true</tt>, and in this case if
+<tt>ul.mutex()-&gt;try_unlock_upgrade_and_lock()</tt> returns <tt>true</tt>, sets
+<tt>pm</tt> to the value returned by <tt>ul.release()</tt> and sets
+<tt>owns</tt> to <tt>true</tt>. [<i>Note:</i> If <tt>ul.owns_lock()</tt> returns
+<tt>true</tt> and <tt>ul.mutex()-&gt;try_unlock_upgrade_and_lock()</tt> returns
+<tt>false</tt>, <tt>ul</tt> is not modified.  &mdash; <i>end note</i>]
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+<pre>
+template &lt;class Clock, class Duration&gt;
+    unique_lock(upgrade_lock&lt;mutex_type&gt;&amp;&amp; ul,
+                const chrono::time_point&lt;Clock, Duration&gt;&amp; abs_time)
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The supplied <tt>Mutex</tt> type shall implement
+<tt>try_unlock_upgrade_and_lock_until()</tt> ([thread.upgrademutex.class]).
+</p>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>unique_lock</tt>, initializing
+<tt>pm</tt> with <tt>nullptr</tt> and <tt>owns</tt> with <tt>false</tt>. If
+<tt>ul.owns_lock()</tt> returns <tt>false</tt>, sets <tt>pm</tt> to the return
+value of <tt>ul.release()</tt>. Else  <tt>ul.owns_lock()</tt> returns
+<tt>true</tt>, and in this case if
+<tt>ul.mutex()-&gt;try_unlock_upgrade_and_lock_until(abs_time)</tt> returns
+<tt>true</tt>, sets <tt>pm</tt> to the value returned by <tt>ul.release()</tt>
+and sets <tt>owns</tt> to <tt>true</tt>. [<i>Note:</i> If
+<tt>ul.owns_lock()</tt> returns <tt>true</tt> and
+<tt>ul.mutex()-&gt;try_unlock_upgrade_and_lock_until(abs_time)</tt> returns
+<tt>false</tt>, <tt>ul</tt> is not modified.  &mdash; <i>end note</i>]
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+<pre>
+template &lt;class Rep, class Period&gt;
+    unique_lock(upgrade_lock&lt;mutex_type&gt;&amp;&amp; ul,
+                const chrono::duration&lt;Rep, Period&gt;&amp; rel_time);
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The supplied <tt>Mutex</tt> type shall implement
+<tt>try_unlock_upgrade_and_lock_for()</tt> ([thread.upgrademutex.class]).
+</p>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>unique_lock</tt>, initializing
+<tt>pm</tt> with <tt>nullptr</tt> and <tt>owns</tt> with <tt>false</tt>. If
+<tt>ul.owns_lock()</tt> returns <tt>false</tt>, sets <tt>pm</tt> to the return
+value of <tt>ul.release()</tt>. Else  <tt>ul.owns_lock()</tt> returns
+<tt>true</tt>, and in this case if
+<tt>ul.mutex()-&gt;try_unlock_upgrade_and_lock_for(rel_time)</tt> returns
+<tt>true</tt>, sets <tt>pm</tt> to the value returned by <tt>ul.release()</tt>
+and sets <tt>owns</tt> to <tt>true</tt>. [<i>Note:</i> If
+<tt>ul.owns_lock()</tt> returns <tt>true</tt> and
+<tt>ul.mutex()-&gt;try_unlock_upgrade_and_lock_for(rel_time)</tt> returns
+<tt>false</tt>, <tt>ul</tt> is not modified.  &mdash; <i>end note</i>]
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+
+</blockquote>
+
+<p>
+Add a new section 30.4.2.3 Class template <tt>shared_lock</tt> [thread.lock.shared]:
+</p>
+
+<blockquote>
+
+<h4>Class template <code>shared_lock</code> [thread.lock.shared]</h4>
+
+<blockquote><pre>
+namespace std {
+
+template &lt;class Mutex&gt;
+class shared_lock
+{
+public:
+    typedef Mutex mutex_type;
+
+    // Shared locking
+
+    shared_lock() noexcept;
+    explicit shared_lock(mutex_type&amp; m);  // blocking
+    shared_lock(mutex_type&amp; m, defer_lock_t) noexcept;
+    shared_lock(mutex_type&amp; m, try_to_lock_t);
+    shared_lock(mutex_type&amp; m, adopt_lock_t);
+    template &lt;class Clock, class Duration&gt;
+        shared_lock(mutex_type&amp; m,
+                    const chrono::time_point&lt;Clock, Duration&gt;&amp; abs_time);
+    template &lt;class Rep, class Period&gt;
+        shared_lock(mutex_type&amp; m,
+                    const chrono::duration&lt;Rep, Period&gt;&amp; rel_time);
+    ~shared_lock();
+
+    shared_lock(shared_lock const&amp;) = delete;
+    shared_lock&amp; operator=(shared_lock const&amp;) = delete;
+
+    shared_lock(shared_lock&amp;&amp; u) noexcept;
+    shared_lock&amp; operator=(shared_lock&amp;&amp; u) noexcept;
+
+    void lock();  // blocking
+    bool try_lock();
+    template &lt;class Rep, class Period&gt;
+        bool try_lock_for(const chrono::duration&lt;Rep, Period&gt;&amp; rel_time);
+    template &lt;class Clock, class Duration&gt;
+        bool
+        try_lock_until(const chrono::time_point&lt;Clock, Duration&gt;&amp; abs_time);
+    void unlock();
+
+    // Conversion from upgrade locking
+
+    explicit shared_lock(upgrade_lock&lt;mutex_type&gt;&amp;&amp; u);
+
+    // Conversion from exclusive locking
+
+    explicit shared_lock(unique_lock&lt;mutex_type&gt;&amp;&amp; u);
+
+    // Setters
+
+    void swap(shared_lock&amp; u) noexcept;
+    mutex_type* release() noexcept;
+
+    // Getters
+
+    bool owns_lock() const noexcept;
+    explicit operator bool () const noexcept;
+    mutex_type* mutex() const noexcept;
+
+private:
+    mutex_type* pm; <i>// exposition only</i>
+    bool owns;      <i>// exposition only</i>
+};
+
+template &lt;class Mutex&gt;
+  void swap(shared_lock&lt;Mutex&gt;&amp; x, shared_lock&lt;Mutex&gt;&amp; y) noexcept;
+
+}  // std
+</pre></blockquote>
+
+<p>
+An object of type <tt>shared_lock</tt> controls the shared ownership of a lockable object within
+a scope. Shared ownership of the lockable object may be acquired at construction or
+after construction, and may be transferred, after acquisition, to another
+<tt>shared_lock</tt> object. Objects of type <tt>shared_lock</tt> are not copyable but are
+movable. The behavior of a program is undefined if the contained pointer <tt>pm</tt> is
+not null and the lockable object pointed to by <tt>pm</tt> does not exist for the entire
+remaining lifetime (3.8) of the <tt>shared_lock</tt> object. The supplied <tt>Mutex</tt> type
+shall meet the shared mutex requirements ([thread.sharedmutex.requirements]).
+</p>
+
+<p>
+[<i>Note:</i> <tt>shared_lock&lt;Mutex&gt;</tt> meets the TimedLockable
+requirements (30.2.5.4). &mdash; <i>end note</i>]
+</p>
+
+<h5><tt>shared_lock</tt> constructors, destructor, and assignment [thread.lock.shared.cons]</h5>
+
+<pre>
+shared_lock() noexcept;
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>shared_lock</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>pm == nullptr</tt> and <tt>owns == false</tt>.
+</p>
+</blockquote>
+
+<pre>
+explicit shared_lock(mutex_type&amp; m);
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread does not own the mutex for any ownership
+mode.
+</p>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>shared_lock</tt> and calls
+<tt>m.lock_shared()</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>pm == &amp;m</tt> and <tt>owns == true</tt>.
+</p>
+</blockquote>
+
+<pre>
+shared_lock(mutex_type&amp; m, defer_lock_t) noexcept;
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>shared_lock</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>pm == &amp;m</tt> and <tt>owns == false</tt>.
+</p>
+</blockquote>
+
+<pre>
+shared_lock(mutex_type&amp; m, try_to_lock_t);
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread does not own the mutex for any ownership
+mode.
+</p>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>shared_lock</tt> and calls
+<tt>m.try_lock_shared()</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>pm == &amp;m</tt> and <tt>owns == res</tt> where
+<tt>res</tt> is the value returned by the call to <tt>m.try_lock_shared()</tt>.
+</p>
+</blockquote>
+
+<pre>
+shared_lock(mutex_type&amp; m, adopt_lock_t);
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread has shared ownership of the mutex.
+</p>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>shared_lock</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>pm == &amp;m</tt> and <tt>owns == true</tt>.
+</p>
+</blockquote>
+
+<pre>
+template &lt;class Clock, class Duration&gt;
+    shared_lock(mutex_type&amp; m,
+                const chrono::time_point&lt;Clock, Duration&gt;&amp; abs_time);
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread does not own the mutex for any ownership
+mode.
+</p>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>shared_lock</tt> and calls
+<tt>m.try_lock_shared_until(abs_time)</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>pm == &amp;m</tt> and <tt>owns == res</tt> where
+<tt>res</tt> is the value returned by the call to
+<tt>m.try_lock_shared_until(abs_time)</tt>.
+</p>
+</blockquote>
+
+<pre>
+template &lt;class Rep, class Period&gt;
+    shared_lock(mutex_type&amp; m,
+                const chrono::duration&lt;Rep, Period&gt;&amp; rel_time);
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread does not own the mutex for any ownership
+mode.
+</p>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>shared_lock</tt> and calls
+<tt>m.try_lock_shared_for(rel_time)</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>pm == &amp;m</tt> and <tt>owns == res</tt> where
+<tt>res</tt> is the value returned by the call to
+<tt>m.try_lock_shared_for(rel_time)</tt>.
+</p>
+</blockquote>
+
+<pre>
+~shared_lock();
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> If <tt>owns</tt> calls <tt>pm-&gt;unlock_shared()</tt>.
+</p>
+</blockquote>
+
+<pre>
+shared_lock(shared_lock&amp;&amp; sl) noexcept;
+</pre>
+
+<blockquote>
+<p>
+<i>Postconditions:</i> <tt>pm == &amp;sl_p.pm</tt> and <tt>owns == sl_p.owns</tt>
+(where <tt>sl_p</tt> is the state of <tt>sl</tt> just prior to this construction),
+<tt>sl.pm == nullptr</tt> and <tt>sl.owns ==  false</tt>.
+</p>
+</blockquote>
+
+<pre>
+shared_lock&amp; operator=(shared_lock&amp;&amp; sl) noexcept;
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> If <tt>owns</tt> calls <tt>pm-&gt;unlock_shared()</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>pm == &amp;sl_p.pm</tt> and <tt>owns == sl_p.owns</tt>
+(where <tt>sl_p</tt> is the state of <tt>sl</tt> just prior to this assignment),
+<tt>sl.pm == nullptr</tt> and <tt>sl.owns ==  false</tt>.
+</p>
+</blockquote>
+
+<pre>
+ explicit shared_lock(upgrade_lock&lt;mutex_type&gt;&amp;&amp; ul);
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> If <tt>owns</tt> calls <tt>pm-&gt;unlock_upgrade_and_lock_shared()</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>pm == &amp;ul_p.pm</tt> and <tt>owns == ul_p.owns</tt>
+(where <tt>ul_p</tt> is the state of <tt>ul</tt> just prior to this construction),
+<tt>ul.pm == nullptr</tt> and <tt>ul.owns ==  false</tt>.
+</p>
+</blockquote>
+
+<pre>
+explicit shared_lock(unique_lock&lt;mutex_type&gt;&amp;&amp; ul);
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> If <tt>owns</tt> calls <tt>pm-&gt;unlock_and_lock_shared()</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>pm == &amp;ul_p.pm</tt> and <tt>owns == ul_p.owns</tt>
+(where <tt>ul_p</tt> is the state of <tt>ul</tt> just prior to this construction),
+<tt>ul.pm == nullptr</tt> and <tt>ul.owns ==  false</tt>.
+</p>
+</blockquote>
+
+<h5><tt>shared_lock</tt> locking [thread.lock.shared.locking]</h5>
+
+<pre>
+void lock();
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> <tt>pm-&gt;lock_shared()</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>owns == true</tt>.
+</p>
+<p>
+<i>Throws:</i> Any exception thrown by <tt>pm-&gt;lock_shared()</tt>.
+<tt>system_error</tt> if an exception is required (30.2.2).
+<tt>system_error</tt> with an error condition of
+<tt>operation_not_permitted</tt> if <tt>pm</tt> is <tt>nullptr</tt>.
+<tt>system_error</tt> with an error condition of
+<tt>resource_deadlock_would_occur</tt> if on entry <tt>owns</tt> is
+<tt>true</tt>.
+</p>
+</blockquote>
+
+<pre>
+bool try_lock();
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> <tt>pm-&gt;try_lock_shared()</tt>.
+</p>
+<p>
+<i>Returns:</i> The value returned by the call to
+<tt>pm-&gt;try_lock_shared()</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>owns == res</tt>, where <tt>res</tt> is the value
+returned by the call to <tt>pm-&gt;try_lock_shared()</tt>.
+</p>
+<p>
+<i>Throws:</i> Any exception thrown by <tt>pm-&gt;try_lock_shared()</tt>.
+<tt>system_error</tt> if an exception is required (30.2.2).
+<tt>system_error</tt> with an error condition of
+<tt>operation_not_permitted</tt> if <tt>pm</tt> is <tt>nullptr</tt>.
+<tt>system_error</tt> with an error condition of
+<tt>resource_deadlock_would_occur</tt> if on entry <tt>owns</tt> is
+<tt>true</tt>.
+</p>
+</blockquote>
+
+<pre>
+template &lt;class Clock, class Duration&gt;
+    bool
+    try_lock_until(const chrono::time_point&lt;Clock, Duration&gt;&amp; abs_time);
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> <tt>pm-&gt;try_lock_shared_until(abs_time)</tt>.
+</p>
+<p>
+<i>Returns:</i> The value returned by the call to
+<tt>pm-&gt;try_lock_shared_until(abs_time)</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>owns == res</tt>, where <tt>res</tt> is the value
+returned by the call to <tt>pm-&gt;try_lock_shared_until(abs_time)</tt>.
+</p>
+<p>
+<i>Throws:</i> Any exception thrown by
+<tt>pm-&gt;try_lock_shared_until(abs_time)</tt>. <tt>system_error</tt> if an
+exception is required (30.2.2). <tt>system_error</tt> with an error condition of
+<tt>operation_not_permitted</tt> if <tt>pm</tt> is <tt>nullptr</tt>.
+<tt>system_error</tt> with an error condition of
+<tt>resource_deadlock_would_occur</tt> if on entry <tt>owns</tt> is
+<tt>true</tt>.
+</p>
+</blockquote>
+
+<pre>
+template &lt;class Rep, class Period&gt;
+    bool try_lock_for(const chrono::duration&lt;Rep, Period&gt;&amp; rel_time);
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> <tt>pm-&gt;try_lock_shared_for(rel_time)</tt>.
+</p>
+<p>
+<i>Returns:</i> The value returned by the call to
+<tt>pm-&gt;try_lock_shared_for(rel_time)</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>owns == res</tt>, where <tt>res</tt> is the value
+returned by the call to <tt>pm-&gt;try_lock_shared_for(rel_time)</tt>.
+</p>
+<p>
+<i>Throws:</i> Any exception thrown by
+<tt>pm-&gt;try_lock_shared_for(rel_time)</tt>. <tt>system_error</tt> if an
+exception is required (30.2.2). <tt>system_error</tt> with an error condition of
+<tt>operation_not_permitted</tt> if <tt>pm</tt> is <tt>nullptr</tt>.
+<tt>system_error</tt> with an error condition of
+<tt>resource_deadlock_would_occur</tt> if on entry <tt>owns</tt> is
+<tt>true</tt>.
+</p>
+</blockquote>
+
+<pre>
+void unlock();
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> <tt>pm-&gt;unlock_shared()</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>owns == false</tt>.
+</p>
+<p>
+<i>Throws:</i> <tt>system_error</tt> when an exception is required (30.2.2).
+</p>
+<p>
+<i>Error conditions:</i>
+</p>
+<ul>
+<li><tt>operation_not_permitted</tt> &mdash; if on entry <tt>owns</tt> is
+<tt>false</tt>.</li>
+</ul>
+</blockquote>
+
+<h5><tt>shared_lock</tt> modifiers [thread.lock.shared.mod]</h5>
+
+<pre>
+void swap(shared_lock&amp; sl) noexcept;
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> Swaps the data members of <tt>*this</tt> and <tt>sl</tt>.
+</p>
+</blockquote>
+
+<pre>
+mutex_type* release() noexcept;
+</pre>
+
+<blockquote>
+<p>
+<i>Returns:</i> The previous value of <tt>pm</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>pm == nullptr</tt> and <tt>owns == false</tt>.
+</p>
+</blockquote>
+
+<pre>
+template &lt;class Mutex&gt;
+  void swap(shared_lock&lt;Mutex&gt;&amp; x, shared_lock&lt;Mutex&gt;&amp; y) noexcept;
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> <tt>x.swap(y)</tt>.
+</p>
+</blockquote>
+
+<h5><tt>shared_lock</tt> observers [thread.lock.shared.obs]</h5>
+
+<pre>
+bool owns_lock() const noexcept;
+</pre>
+
+<blockquote>
+<p>
+<i>Returns:</i> <tt>owns</tt>.
+</p>
+</blockquote>
+
+<pre>
+explicit operator bool () const noexcept;
+</pre>
+
+<blockquote>
+<p>
+<i>Returns:</i> <tt>owns</tt>.
+</p>
+</blockquote>
+
+<pre>
+mutex_type* mutex() const noexcept;
+</pre>
+
+<blockquote>
+<p>
+<i>Returns:</i> <tt>pm</tt>.
+</p>
+</blockquote>
+
+</blockquote>
+
+<p>
+Add a new section 30.4.2.4 Class template <tt>upgrade_lock</tt> [thread.lock.upgrade]:
+</p>
+
+<blockquote>
+
+<h4>Class template <code>upgrade_lock</code> [thread.lock.upgrade]</h4>
+
+<blockquote><pre>
+namespace std {
+
+template &lt;class Mutex&gt;
+class upgrade_lock
+{
+public:
+    typedef Mutex mutex_type;
+
+    // Upgrade locking
+
+    upgrade_lock() noexcept;
+    explicit upgrade_lock(mutex_type&amp; m);  // blocking
+    upgrade_lock(mutex_type&amp; m, defer_lock_t) noexcept;
+    upgrade_lock(mutex_type&amp; m, try_to_lock_t);
+    upgrade_lock(mutex_type&amp; m, adopt_lock_t);
+    template &lt;class Clock, class Duration&gt;
+        upgrade_lock(mutex_type&amp; m,
+                     const chrono::time_point&lt;Clock, Duration&gt;&amp; abs_time);
+    template &lt;class Rep, class Period&gt;
+        upgrade_lock(mutex_type&amp; m,
+                     const chrono::duration&lt;Rep, Period&gt;&amp; rel_time);
+    ~upgrade_lock();
+
+    upgrade_lock(upgrade_lock const&amp;) = delete;
+    upgrade_lock&amp; operator=(upgrade_lock const&amp;) = delete;
+
+    upgrade_lock(upgrade_lock&amp;&amp; u) noexcept;
+    upgrade_lock&amp; operator=(upgrade_lock&amp;&amp; u) noexcept;
+
+    void lock();  // blocking
+    bool try_lock();
+    template &lt;class Rep, class Period&gt;
+        bool try_lock_for(const chrono::duration&lt;Rep, Period&gt;&amp; rel_time);
+    template &lt;class Clock, class Duration&gt;
+        bool
+        try_lock_until(const chrono::time_point&lt;Clock, Duration&gt;&amp; abs_time);
+    void unlock();
+
+    // Conversion from shared locking
+
+    upgrade_lock(shared_lock&lt;mutex_type&gt;&amp;&amp; u, try_to_lock_t);
+    template &lt;class Clock, class Duration&gt;
+        upgrade_lock(shared_lock&lt;mutex_type&gt;&amp;&amp; u,
+                     const chrono::time_point&lt;Clock, Duration&gt;&amp; abs_time);
+    template &lt;class Rep, class Period&gt;
+        upgrade_lock(shared_lock&lt;mutex_type&gt;&amp;&amp; u,
+                     const chrono::duration&lt;Rep, Period&gt;&amp; rel_time);
+
+    // Conversion from exclusive locking
+
+    explicit upgrade_lock(unique_lock&lt;mutex_type&gt;&amp;&amp; u);
+
+    // Setters
+
+    void swap(upgrade_lock&amp; u) noexcept;
+    mutex_type* release() noexcept;
+
+    // Getters
+
+    bool owns_lock() const noexcept;
+    explicit operator bool () const noexcept;
+    mutex_type* mutex() const noexcept;
+};
+
+template &lt;class Mutex&gt;
+  void swap(upgrade_lock&lt;Mutex&gt;&amp; x, upgrade_lock&lt;Mutex&gt;&amp; y) noexcept;
+
+}  // std
+</pre></blockquote>
+
+<p>
+An object of type <tt>upgrade_lock</tt> controls the upgrade ownership of a
+lockable object within a scope. Upgrade ownership of the lockable object may be
+acquired at construction or after construction, and may be transferred, after
+acquisition, to another <tt>upgrade_lock</tt> object. Objects of type
+<tt>upgrade_lock</tt> are not copyable but are movable. The behavior of a
+program is undefined if the contained pointer <tt>pm</tt> is not null and the
+lockable object pointed to by <tt>pm</tt> does not exist for the entire
+remaining lifetime (3.8) of the <tt>upgrade_lock</tt> object. The supplied
+<tt>Mutex</tt> type shall implement the semantics of upgrade mutex
+([thread.upgrademutex.class]).
+</p>
+
+<p>
+[<i>Note:</i> <tt>upgrade_lock&lt;Mutex&gt;</tt> meets the TimedLockable
+requirements (30.2.5.4). &mdash; <i>end note</i>]
+</p>
+
+<h5><tt>upgrade_lock</tt> constructors, destructor, and assignment [thread.lock.upgrade.cons]</h5>
+
+<pre>
+upgrade_lock() noexcept;
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>upgrade_lock</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>pm == nullptr</tt> and <tt>owns == false</tt>.
+</p>
+</blockquote>
+
+<pre>
+explicit upgrade_lock(mutex_type&amp; m);
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread does not own the mutex for any ownership
+mode.
+</p>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>upgrade_lock</tt> and calls
+<tt>m.lock_upgrade()</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>pm == &amp;m</tt> and <tt>owns == true</tt>.
+</p>
+</blockquote>
+
+<pre>
+upgrade_lock(mutex_type&amp; m, defer_lock_t) noexcept;
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>upgrade_lock</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>pm == &amp;m</tt> and <tt>owns == false</tt>.
+</p>
+</blockquote>
+
+<pre>
+upgrade_lock(mutex_type&amp; m, try_to_lock_t);
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread does not own the mutex for any ownership
+mode.
+</p>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>upgrade_lock</tt> and calls
+<tt>m.try_lock_upgrade()</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>pm == &amp;m</tt> and <tt>owns == res</tt> where
+<tt>res</tt> is the value returned by the call to <tt>m.try_lock_upgrade()</tt>.
+</p>
+</blockquote>
+
+<pre>
+upgrade_lock(mutex_type&amp; m, adopt_lock_t);
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread has upgrade ownership of the mutex.
+</p>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>upgrade_lock</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>pm == &amp;m</tt> and <tt>owns == true</tt>.
+</p>
+</blockquote>
+
+<pre>
+template &lt;class Clock, class Duration&gt;
+    upgrade_lock(mutex_type&amp; m,
+                const chrono::time_point&lt;Clock, Duration&gt;&amp; abs_time);
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread does not own the mutex for any ownership
+mode.
+</p>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>upgrade_lock</tt> and calls
+<tt>m.try_lock_upgrade_until(abs_time)</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>pm == &amp;m</tt> and <tt>owns == res</tt> where
+<tt>res</tt> is the value returned by the call to
+<tt>m.try_lock_upgrade_until(abs_time)</tt>.
+</p>
+</blockquote>
+
+<pre>
+template &lt;class Rep, class Period&gt;
+    upgrade_lock(mutex_type&amp; m,
+                const chrono::duration&lt;Rep, Period&gt;&amp; rel_time);
+</pre>
+
+<blockquote>
+<p>
+<i>Requires:</i> The calling thread does not own the mutex for any ownership
+mode.
+</p>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>upgrade_lock</tt> and calls
+<tt>m.try_lock_upgrade_for(rel_time)</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>pm == &amp;m</tt> and <tt>owns == res</tt> where
+<tt>res</tt> is the value returned by the call to
+<tt>m.try_lock_upgrade_for(rel_time)</tt>.
+</p>
+</blockquote>
+
+<pre>
+~upgrade_lock();
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> If <tt>owns</tt> calls <tt>pm-&gt;unlock_upgrade()</tt>.
+</p>
+</blockquote>
+
+<pre>
+upgrade_lock(upgrade_lock&amp;&amp; ul) noexcept;
+</pre>
+
+<blockquote>
+<p>
+<i>Postconditions:</i> <tt>pm == &amp;ul_p.pm</tt> and <tt>owns == ul_p.owns</tt>
+(where <tt>ul_p</tt> is the state of <tt>ul</tt> just prior to this construction),
+<tt>ul.pm == nullptr</tt> and <tt>ul.owns ==  false</tt>.
+</p>
+</blockquote>
+
+<pre>
+upgrade_lock&amp; operator=(upgrade_lock&amp;&amp; ul) noexcept;
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> If <tt>owns</tt> calls <tt>pm-&gt;unlock_upgrade()</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>pm == &amp;ul_p.pm</tt> and <tt>owns == ul_p.owns</tt>
+(where <tt>ul_p</tt> is the state of <tt>ul</tt> just prior to this assignment),
+<tt>ul.pm == nullptr</tt> and <tt>ul.owns ==  false</tt>.
+</p>
+</blockquote>
+
+<pre>
+upgrade_lock(shared_lock&lt;mutex_type&gt;&amp;&amp; sl, try_to_lock_t);
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>upgrade_lock</tt>, initializing
+<tt>pm</tt> with <tt>nullptr</tt> and <tt>owns</tt> with <tt>false</tt>. If
+<tt>sl.owns_lock()</tt> returns <tt>false</tt>, sets <tt>pm</tt> to the return
+value of <tt>sl.release()</tt>. Else  <tt>sl.owns_lock()</tt> returns
+<tt>true</tt>, and in this case if
+<tt>sl.mutex()-&gt;try_unlock_shared_and_lock_upgrade()</tt> returns <tt>true</tt>, sets
+<tt>pm</tt> to the value returned by <tt>sl.release()</tt> and sets
+<tt>owns</tt> to <tt>true</tt>. [<i>Note:</i> If <tt>sl.owns_lock()</tt> returns
+<tt>true</tt> and <tt>sl.mutex()-&gt;try_unlock_shared_and_lock_upgrade()</tt> returns
+<tt>false</tt>, <tt>sl</tt> is not modified.  &mdash; <i>end note</i>]
+</p>
+<p>
+<i>Postconditions:</i> <tt>pm == &amp;sl_p.pm</tt> and <tt>owns == sl_p.owns</tt>
+(where <tt>sl_p</tt> is the state of <tt>sl</tt> just prior to this construction),
+<tt>sl.pm == nullptr</tt> and <tt>sl.owns ==  false</tt>.
+</p>
+</blockquote>
+
+<pre>
+template &lt;class Clock, class Duration&gt;
+    upgrade_lock(shared_lock&lt;mutex_type&gt;&amp;&amp; sl,
+                 const chrono::time_point&lt;Clock, Duration&gt;&amp; abs_time);
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>upgrade_lock</tt>, initializing
+<tt>pm</tt> with <tt>nullptr</tt> and <tt>owns</tt> with <tt>false</tt>. If
+<tt>sl.owns_lock()</tt> returns <tt>false</tt>, sets <tt>pm</tt> to the return
+value of <tt>sl.release()</tt>. Else  <tt>sl.owns_lock()</tt> returns
+<tt>true</tt>, and in this case if
+<tt>sl.mutex()-&gt;try_unlock_shared_and_lock_upgrade_until(abs_time)</tt>
+returns <tt>true</tt>, sets <tt>pm</tt> to the value returned by
+<tt>sl.release()</tt> and sets <tt>owns</tt> to <tt>true</tt>. [<i>Note:</i> If
+<tt>sl.owns_lock()</tt> returns <tt>true</tt> and
+<tt>sl.mutex()-&gt;try_unlock_shared_and_lock_upgrade_until(abs_time)</tt>
+returns <tt>false</tt>, <tt>sl</tt> is not modified.  &mdash; <i>end note</i>]
+</p>
+<p>
+<i>Postconditions:</i> <tt>pm == &amp;sl_p.pm</tt> and <tt>owns == sl_p.owns</tt>
+(where <tt>sl_p</tt> is the state of <tt>sl</tt> just prior to this construction),
+<tt>sl.pm == nullptr</tt> and <tt>sl.owns ==  false</tt>.
+</p>
+</blockquote>
+
+<pre>
+template &lt;class Rep, class Period&gt;
+    upgrade_lock(shared_lock&lt;mutex_type&gt;&amp;&amp; sl,
+                 const chrono::duration&lt;Rep, Period&gt;&amp; rel_time);
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>upgrade_lock</tt>, initializing
+<tt>pm</tt> with <tt>nullptr</tt> and <tt>owns</tt> with <tt>false</tt>. If
+<tt>sl.owns_lock()</tt> returns <tt>false</tt>, sets <tt>pm</tt> to the return
+value of <tt>sl.release()</tt>. Else  <tt>sl.owns_lock()</tt> returns
+<tt>true</tt>, and in this case if
+<tt>sl.mutex()-&gt;try_unlock_shared_and_lock_upgrade_for(rel_time)</tt>
+returns <tt>true</tt>, sets <tt>pm</tt> to the value returned by
+<tt>sl.release()</tt> and sets <tt>owns</tt> to <tt>true</tt>. [<i>Note:</i> If
+<tt>sl.owns_lock()</tt> returns <tt>true</tt> and
+<tt>sl.mutex()-&gt;try_unlock_shared_and_lock_upgrade_for(rel_time)</tt>
+returns <tt>false</tt>, <tt>sl</tt> is not modified.  &mdash; <i>end note</i>]
+</p>
+<p>
+<i>Postconditions:</i> <tt>pm == &amp;sl_p.pm</tt> and <tt>owns == sl_p.owns</tt>
+(where <tt>sl_p</tt> is the state of <tt>sl</tt> just prior to this construction),
+<tt>sl.pm == nullptr</tt> and <tt>sl.owns ==  false</tt>.
+</p>
+</blockquote>
+
+<pre>
+explicit upgrade_lock(unique_lock&lt;mutex_type&gt;&amp;&amp; ul);
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> If <tt>owns</tt> calls <tt>pm-&gt;unlock_and_lock_upgrade()</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>pm == &amp;ul_p.pm</tt> and <tt>owns == ul_p.owns</tt>
+(where <tt>ul_p</tt> is the state of <tt>ul</tt> just prior to this construction),
+<tt>ul.pm == nullptr</tt> and <tt>ul.owns ==  false</tt>.
+</p>
+</blockquote>
+
+<h5><tt>upgrade_lock</tt> locking [thread.lock.upgrade.locking]</h5>
+
+<pre>
+void lock();
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> <tt>pm-&gt;lock_upgrade()</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>owns == true</tt>.
+</p>
+<p>
+<i>Throws:</i> Any exception thrown by <tt>pm-&gt;lock_upgrade()</tt>.
+<tt>system_error</tt> if an exception is required (30.2.2).
+<tt>system_error</tt> with an error condition of
+<tt>operation_not_permitted</tt> if <tt>pm</tt> is <tt>nullptr</tt>.
+<tt>system_error</tt> with an error condition of
+<tt>resource_deadlock_would_occur</tt> if on entry <tt>owns</tt> is
+<tt>true</tt>.
+</p>
+</blockquote>
+
+<pre>
+bool try_lock();
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> <tt>pm-&gt;try_lock_upgrade()</tt>.
+</p>
+<p>
+<i>Returns:</i> The value returned by the call to
+<tt>pm-&gt;try_lock_upgrade()</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>owns == res</tt>, where <tt>res</tt> is the value
+returned by the call to <tt>pm-&gt;try_lock_upgrade()</tt>.
+</p>
+<p>
+<i>Throws:</i> Any exception thrown by <tt>pm-&gt;try_lock_upgrade()</tt>.
+<tt>system_error</tt> if an exception is required (30.2.2).
+<tt>system_error</tt> with an error condition of
+<tt>operation_not_permitted</tt> if <tt>pm</tt> is <tt>nullptr</tt>.
+<tt>system_error</tt> with an error condition of
+<tt>resource_deadlock_would_occur</tt> if on entry <tt>owns</tt> is
+<tt>true</tt>.
+</p>
+</blockquote>
+
+<pre>
+template &lt;class Clock, class Duration&gt;
+    bool
+    try_lock_until(const chrono::time_point&lt;Clock, Duration&gt;&amp; abs_time);
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> <tt>pm-&gt;try_lock_upgrade_until(abs_time)</tt>.
+</p>
+<p>
+<i>Returns:</i> The value returned by the call to
+<tt>pm-&gt;try_lock_upgrade_until(abs_time)</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>owns == res</tt>, where <tt>res</tt> is the value
+returned by the call to <tt>pm-&gt;try_lock_upgrade_until(abs_time)</tt>.
+</p>
+<p>
+<i>Throws:</i> Any exception thrown by
+<tt>pm-&gt;try_lock_upgrade_until(abs_time)</tt>. <tt>system_error</tt> if an
+exception is required (30.2.2). <tt>system_error</tt> with an error condition of
+<tt>operation_not_permitted</tt> if <tt>pm</tt> is <tt>nullptr</tt>.
+<tt>system_error</tt> with an error condition of
+<tt>resource_deadlock_would_occur</tt> if on entry <tt>owns</tt> is
+<tt>true</tt>.
+</p>
+</blockquote>
+
+<pre>
+template &lt;class Rep, class Period&gt;
+    bool try_lock_for(const chrono::duration&lt;Rep, Period&gt;&amp; rel_time);
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> <tt>pm-&gt;try_lock_upgrade_for(rel_time)</tt>.
+</p>
+<p>
+<i>Returns:</i> The value returned by the call to
+<tt>pm-&gt;try_lock_upgrade_for(rel_time)</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>owns == res</tt>, where <tt>res</tt> is the value
+returned by the call to <tt>pm-&gt;try_lock_upgrade_for(rel_time)</tt>.
+</p>
+<p>
+<i>Throws:</i> Any exception thrown by
+<tt>pm-&gt;try_lock_upgrade_for(rel_time)</tt>. <tt>system_error</tt> if an
+exception is required (30.2.2). <tt>system_error</tt> with an error condition of
+<tt>operation_not_permitted</tt> if <tt>pm</tt> is <tt>nullptr</tt>.
+<tt>system_error</tt> with an error condition of
+<tt>resource_deadlock_would_occur</tt> if on entry <tt>owns</tt> is
+<tt>true</tt>.
+</p>
+</blockquote>
+
+<pre>
+void unlock();
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> <tt>pm-&gt;unlock_upgrade()</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>owns == false</tt>.
+</p>
+<p>
+<i>Throws:</i> <tt>system_error</tt> when an exception is required (30.2.2).
+</p>
+<p>
+<i>Error conditions:</i>
+</p>
+<ul>
+<li><tt>operation_not_permitted</tt> &mdash; if on entry <tt>owns</tt> is
+<tt>false</tt>.</li>
+</ul>
+</blockquote>
+
+<h5><tt>upgrade_lock</tt> modifiers [thread.lock.upgrade.mod]</h5>
+
+<pre>
+void swap(upgrade_lock&amp; sl) noexcept;
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> Swaps the data members of <tt>*this</tt> and <tt>sl</tt>.
+</p>
+</blockquote>
+
+<pre>
+mutex_type* release() noexcept;
+</pre>
+
+<blockquote>
+<p>
+<i>Returns:</i> The previous value of <tt>pm</tt>.
+</p>
+<p>
+<i>Postconditions:</i> <tt>pm == nullptr</tt> and <tt>owns == false</tt>.
+</p>
+</blockquote>
+
+<pre>
+template &lt;class Mutex&gt;
+  void swap(upgrade_lock&lt;Mutex&gt;&amp; x, upgrade_lock&lt;Mutex&gt;&amp; y) noexcept;
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> <tt>x.swap(y)</tt>.
+</p>
+</blockquote>
+
+<h5><tt>upgrade_lock</tt> observers [thread.lock.upgrade.obs]</h5>
+
+<pre>
+bool owns_lock() const noexcept;
+</pre>
+
+<blockquote>
+<p>
+<i>Returns:</i> <tt>owns</tt>.
+</p>
+</blockquote>
+
+<pre>
+explicit operator bool () const noexcept;
+</pre>
+
+<blockquote>
+<p>
+<i>Returns:</i> <tt>owns</tt>.
+</p>
+</blockquote>
+
+<pre>
+mutex_type* mutex() const noexcept;
+</pre>
+
+<blockquote>
+<p>
+<i>Returns:</i> <tt>pm</tt>.
+</p>
+</blockquote>
+
+</blockquote>
+</body>
+</html>

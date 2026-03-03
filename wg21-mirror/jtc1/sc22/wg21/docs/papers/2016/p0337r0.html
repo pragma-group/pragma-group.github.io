@@ -1,0 +1,95 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <meta http-equiv="Content-Style-Type" content="text/css" />
+  <meta name="generator" content="pandoc" />
+  <meta name="author" content="Pablo Halpern phalpern@halpernwightsoftware.com" />
+  <title>P0337r0 | Delete operator= for polymorphic_allocator</title>
+  <style type="text/css">code{white-space: pre;}</style>
+  <style type="text/css">
+table.sourceCode, tr.sourceCode, td.lineNumbers, td.sourceCode {
+  margin: 0; padding: 0; vertical-align: baseline; border: none; }
+table.sourceCode { width: 100%; line-height: 100%; }
+td.lineNumbers { text-align: right; padding-right: 4px; padding-left: 4px; color: #aaaaaa; border-right: 1px solid #aaaaaa; }
+td.sourceCode { padding-left: 5px; }
+code > span.kw { color: #007020; font-weight: bold; }
+code > span.dt { color: #902000; }
+code > span.dv { color: #40a070; }
+code > span.bn { color: #40a070; }
+code > span.fl { color: #40a070; }
+code > span.ch { color: #4070a0; }
+code > span.st { color: #4070a0; }
+code > span.co { color: #60a0b0; font-style: italic; }
+code > span.ot { color: #007020; }
+code > span.al { color: #ff0000; font-weight: bold; }
+code > span.fu { color: #06287e; }
+code > span.er { color: #ff0000; font-weight: bold; }
+  </style>
+</head>
+<body>
+<div id="header">
+<h1 class="title">P0337r0 | Delete <code>operator=</code> for <code>polymorphic_allocator</code></h1>
+<h2 class="author">Pablo Halpern <script type="text/javascript">
+<!--
+h='&#104;&#x61;&#108;&#112;&#x65;&#114;&#110;&#x77;&#x69;&#x67;&#104;&#116;&#x73;&#x6f;&#102;&#116;&#x77;&#x61;&#114;&#x65;&#46;&#x63;&#x6f;&#x6d;';a='&#64;';n='&#112;&#104;&#x61;&#108;&#112;&#x65;&#114;&#110;';e=n+a+h;
+document.write('<a h'+'ref'+'="ma'+'ilto'+':'+e+'" clas'+'s="em' + 'ail">'+e+'<\/'+'a'+'>');
+// -->
+</script><noscript>&#112;&#104;&#x61;&#108;&#112;&#x65;&#114;&#110;&#32;&#x61;&#116;&#32;&#104;&#x61;&#108;&#112;&#x65;&#114;&#110;&#x77;&#x69;&#x67;&#104;&#116;&#x73;&#x6f;&#102;&#116;&#x77;&#x61;&#114;&#x65;&#32;&#100;&#x6f;&#116;&#32;&#x63;&#x6f;&#x6d;</noscript></h2>
+<h3 class="date">2016-05-25 | Target audience: LWG &amp; LEWG</h3>
+</div>
+<h1 id="target"><span class="header-section-number">1</span> Target</h1>
+<p>The problem addressed by this proposal is a defect in the Working Draft. This (very short) proposal is, therefore, targeted for C++17 and should ideally be put into the Working Draft before a CD is created, so as to avoid an unnecessary National Body comment.</p>
+<h1 id="motivation"><span class="header-section-number">2</span> Motivation</h1>
+<p>The <code>polymorphic_allocator</code> class template is the first stateful allocator added to the C++ working draft. As is the default for any allocator, the <code>propagate_on_container_copy_assignment</code> and <code>propagate_on_container_move_assignment</code> traits are false, meaning that the allocator does not get assigned when the container that uses the allocator gets assigned. This is intentional: most stateful allocators should be set on container construction and never changed.</p>
+<p>Given that a <code>polymorphic_allocator</code> is not propagated on assignment, one may question the usefulness of the assignment operators. Indeed, it seems that most uses of assignment for <code>polymorphic_allocator</code> are likely to be errors. Consider the following:</p>
+<pre class="sourceCode cpp"><code class="sourceCode cpp">    <span class="kw">class</span> int_array {
+        std::polymorphic_allocator&lt;<span class="dt">int</span>&gt; m_alloc;
+        std::size_t                     m_size;
+        <span class="dt">int</span>*                            m_data;
+      <span class="kw">public</span>:
+        <span class="kw">typedef</span> std::polymorphic_allocator&lt;<span class="dt">int</span>&gt; allocator_type;
+        <span class="kw">typedef</span> <span class="dt">int</span> value_type;
+
+        int_array(std::size_t n, allocator_type alloc = {})
+          : m_alloc(alloc), m_size(n), m_data(m_alloc.allocate(n)) { }
+
+        int_array(<span class="dt">const</span> int_array&amp;);
+        int_array(int_array&amp;&amp;);
+
+        int_array&amp; <span class="kw">operator</span>=(<span class="dt">const</span> int_array&amp;);
+        int_array&amp; <span class="kw">operator</span>=(int_array&amp;&amp;);
+
+        ~int_array();
+        ...
+    };</code></pre>
+<p>Now, let’s look at the move-assignment operator. Even a knowledgeable implementer may accidentally forget that the allocator should not be moved, and write the code this way:</p>
+<pre class="sourceCode cpp"><code class="sourceCode cpp">    <span class="co">// BUGGY IMPLEMENTATION</span>
+    int_array&amp; int_array::<span class="kw">operator</span>=(int_array&amp;&amp; other) {
+        m_alloc = std::move(other.m_alloc); <span class="co">// BAD IDEA</span>
+        m_size = other.m_size;
+        m_data = other.m_data;
+        other.m_size = <span class="dv">0</span>;
+        other.m_data = <span class="kw">nullptr</span>;
+        <span class="kw">return</span> *<span class="kw">this</span>;
+    }</code></pre>
+<p>A correct implementation is as follows:</p>
+<pre class="sourceCode cpp"><code class="sourceCode cpp">    int_array&amp; int_array::<span class="kw">operator</span>=(int_array&amp;&amp; other) {
+        <span class="kw">if</span> (m_alloc != other.m_alloc)
+            <span class="kw">return</span> *<span class="kw">this</span> = other;  <span class="co">// Call copy assignment for unequal alloc</span>
+
+        m_size = other.m_size;
+        m_data = other.m_data;
+        other.m_size = <span class="dv">0</span>;
+        other.m_data = <span class="kw">nullptr</span>;
+        <span class="kw">return</span> *<span class="kw">this</span>;
+    }</code></pre>
+<p>Polymorphic allocators are an important step towards making allocators easier to use. For this reason, we should do whatever is possible to reduce the incidence of errors like the one above. <a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2016/p0339r0.pdf">P0339</a> extends this notion further, and proposes <code>polymorphic_allocator</code> as a vocabulary type, making non-template classes like the one above easier to write. However, P0339 is targeted for a TS whereas the change proposed here should be in C++17, <em>before</em> <code>polymorphic_allocator</code> becomes standard. Furthermore, we should set an example for stateful allocators in the future; stateful allocators for which <code>propagate_on_container_move/copy_assignment</code> is false should not have move and copy assignment operators.</p>
+<h1 id="proposed-wording"><span class="header-section-number">3</span> Proposed Wording</h1>
+<p>The following wording is relative to the March 2016 Working Draft, N4582.</p>
+<p>In section 20.11.3 [memory.polymorphic.allocator.class], change the declaration of <code>operator=</code> to be deleted instead of defaulted, as follows:</p>
+<blockquote>
+<p><code>polymorphic_allocator&amp;</code> <code>operator=(const polymorphic_allocator&amp; rhs) =</code> <del style="color:red">default</del><ins style="color:green">delete</ins>;</p>
+</blockquote>
+</body>
+</html>

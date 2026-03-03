@@ -1,0 +1,89 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <meta http-equiv="Content-Style-Type" content="text/css" />
+  <meta name="generator" content="pandoc" />
+  <title>P0706R0: Efficient headers for modules (or not)</title>
+</head>
+<body>
+<div id="header">
+<h1 class="title">P0706R0: Efficient headers for modules (or not)</h1>
+</div>
+<p><em>Audience</em>: Evolution Working Group<br />S. Davis Herring &lt;<script type="text/javascript">
+<!--
+h='&#108;&#x61;&#110;&#108;&#46;&#x67;&#x6f;&#118;';a='&#64;';n='&#104;&#x65;&#114;&#114;&#x69;&#110;&#x67;';e=n+a+h;
+document.write('<a h'+'ref'+'="ma'+'ilto'+':'+e+'">'+'<code>'+e+'</code>'+'<\/'+'a'+'>');
+// -->
+</script><noscript>&#104;&#x65;&#114;&#114;&#x69;&#110;&#x67;&#32;&#x61;&#116;&#32;&#108;&#x61;&#110;&#108;&#32;&#100;&#x6f;&#116;&#32;&#x67;&#x6f;&#118;</noscript>&gt;<br />Los Alamos National Laboratory<br />June 18 2017</p>
+<h1 id="definitions">Definitions</h1>
+<ol style="list-style-type: decimal">
+<li>A <em>header</em> is used via <code>#include</code> in the global module in a top-level context (and so does not contain a partial declaration).</li>
+<li>A <em>source file</em> is a file used directly as a translation unit.</li>
+<li>A <em>file</em> is a header (even if it is not really a file) or source file.</li>
+<li>A <em>body</em> of a file is a contiguous portion with declarations or macro definitions but no header inclusions.</li>
+<li>A <em>section</em> is a header or body (even one in a header).</li>
+<li>A <em>section hash</em> is a hash of the text of a section (before preprocessing).</li>
+<li>A <em>section name</em> is the name of a header or a section hash of a body.</li>
+<li>The <em>contents</em> of a section are its declarations, implicit instantiations, and (net) macros.</li>
+<li>The <em>names used</em> by a section are the names encountered in it either during or after preprocessing.</li>
+<li>The <em>cache</em> of a module, file, or section is its serialized form.</li>
+<li>A <em>database</em> is a set of caches (with indices to be specified).</li>
+<li>A <em>cache hash</em> is a (partial) key for the database derived from the corresponding value, long enough to be assumed collision-free.</li>
+</ol>
+<h1 id="issues">Issues</h1>
+<ol style="list-style-type: decimal">
+<li>Many if not all of the definitions in a header must appear in the cache of every module that includes it to support template instantiation (both templates in the header and instantiation with types derived from the header).
+<ol style="list-style-type: decimal">
+<li>One implementation of N4637 serializes all the referenced classes from a header.</li>
+<li>Non-member functions would also have to be serialized to support ADL (the ill-formed example from P0582R0).</li>
+</ol></li>
+<li>A change in a header forces recompilation of all translation units that include it, even if they are not affected by the change.
+<ol style="list-style-type: decimal">
+<li>For a module, the new version must appear in its cache.</li>
+<li>For a traditional compile, nothing may be assumed about the effects.</li>
+</ol></li>
+<li>While it is often an ODR violation, many headers in practice are noncommutative, limiting the utility of traditional precompiled headers.
+<ol style="list-style-type: decimal">
+<li>We want to &quot;support&quot; these in as close a fashion as possible to traditional separate compilation behavior.</li>
+<li>We want to detect violations so as to (gradually) remedy them.</li>
+</ol></li>
+</ol>
+<h1 id="goals">Goals</h1>
+<ol style="list-style-type: decimal">
+<li>Store each declaration in one cache.
+<ol style="list-style-type: decimal">
+<li>Support fast lookup in all modules (to fix P0582R0's example).</li>
+<li>&quot;Allow&quot; ODR-violating definitions in different caches.</li>
+<li>Warn about or reject such violations.</li>
+</ol></li>
+<li>Avoid reparsing of dependent files on insignificant changes.</li>
+<li>Take advantage of existing organization into headers.</li>
+<li>Improve compilation performance even in the absence of any modules (conversely, in the presence of macros).</li>
+<li>Handle include guards without repeated preprocessing.</li>
+</ol>
+<h1 id="non-strategies">Non-strategies</h1>
+<ol style="list-style-type: decimal">
+<li>In the absence of trickery (<em>e.g.</em>, macro-based template emulation), it would be sufficient to store a cache for each header (as if it were a module that exported all its contents): this is just precompiled headers.</li>
+<li>If prefixes of certain long sequences of headers were frequently included at the beginning of a translation unit (but others might appear with meaningfully different orders), we could use the sequence of header names as a database key.</li>
+<li>If changes to a header were either irrelevant to all clients (<em>e.g.</em>, comments) or relevant to all clients (<em>e.g.</em>, a header containing a single class), we could use (a hash of) the contents of antecedent headers and the (next) header's name as a database key.</li>
+</ol>
+<h1 id="strategy">Strategy</h1>
+<ol style="list-style-type: decimal">
+<li>Store in a database one or more caches for each section, containing the section's contents and the interpretation of its names used (as a macro or from name lookup), as well as a section hash (not included in constructing the cache hash) to detect alteration.</li>
+<li>Store in a database a cache for each file (indexed simply by the file's name), containing a mapping from section names to section cache hashes. (For a source file, the object code might reasonably also be included so as to provide the basic functionality of <code>make(1)</code>.)</li>
+<li>When recompiling a file, the caches identified by the cached mapping are checked. If the section has not changed textually and (despite any changes earlier in the recompilation) its names used have the same interpretations when looked up in the new compilation context as they have in the cache, then the cached contents are used. (Note that this can occur even after encountering semantically significant changes if they do not affect the interpretation of the section in question.) Otherwise, the section is recompiled and recached -- note that if the textual changes are insignificant, the section contents will match those in the cache (but its section hash is updated) and the &quot;no changes&quot; state of compilation persists.</li>
+<li>Since bodies do not have names, changed bodies will simply not be found in the cache at all. Those with insignificant changes will nonetheless allow the &quot;no changes&quot; to persist.</li>
+<li><code>#include</code> directives that do not qualify as headers are not cached separately, but treated as the textual inclusion that they are.</li>
+<li>Any of these lookups may be augmented with the set of compiler options that may affect program behavior, so as to maintain different versions simultaneously.</li>
+<li>The database must be garbage-collected, especially for bodies which (lacking names) cannot be replaced when modified.</li>
+<li>Module interface units can be treated in a fashion very similar to that for other source files, but with the export status of each declaration included so that other translation units that import the module can use the (appropriate subset of the) cache.</li>
+</ol>
+<h1 id="notes">Notes</h1>
+<ol style="list-style-type: decimal">
+<li>When a header is &quot;skipped&quot; because of include guards, its only name used will be the guard macro, so that recompiling will succeed at reusing the cache regardless of changed contents.</li>
+<li>A module can but need not be automatically (re)compiled and cached when an import of it is encountered.</li>
+<li>ODR violations can easily be detected at &quot;link time&quot; by consulting the union of the caches for the various translation units (making sure to include the definitions, or at least hashes of them, in the caches for this purpose).</li>
+</ol>
+</body>
+</html>

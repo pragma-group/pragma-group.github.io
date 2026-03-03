@@ -1,0 +1,566 @@
+<html><head>
+<style>
+body { font-family: "Book Antiqua", "Times New Roman", "Times", serif; padding: 2em; }
+.programlisting, .computeroutput, .literal { font-family: "Consolas", monospace; font-size: 90%; }
+blockquote pre.programlisting { margin-left: 1em; padding-left: 1em; }
+.programlisting { margin-left: 2em; }
+div.table { text-align: center; }
+.sidebar { background-color: #e0e0e0; font-style: italic; }
+p { text-align: justify; }
+p.tablecaption { font-weight: bold; text-align: center; }
+p.title { font-weight: bold; text-align: center; }
+div.section { position: relative; }
+span.xrefid { position: absolute; right: 0em; top: 0em; }
+table { margin: auto; border: 1px solid gray; border-collapse: collapse; }
+th { border: 1px solid gray; padding: 0.5em; }
+td { border: 1px solid gray; padding: 0.5em; }
+h1, h2, h3, h4, h5, div.titlepage { page-break-after: avoid; }
+dl { margin-top: 0px; margin-bottom: 0px; }
+</style>
+<meta http-equiv="Content-Type" content="text/html; charset=US-ASCII"><title>A networking library extension to support co_await-based coroutines</title><meta name="generator" content="DocBook XSL Stylesheets V1.75.2"></head><body bgcolor="white" text="black" link="#0000FF" vlink="#840084" alink="#0000FF">
+<pre>Doc. no:  P0286R0 
+Date:     2016-02-14
+Audience: Library Evolution
+Reply-To: Christopher Kohlhoff &lt;chris@kohlhoff.com&gt;
+</pre>
+<div class="chapter" title="A networking library extension to support co_await-based coroutines"><div class="titlepage"><div><div><h2 class="title"><a name="networking_await"></a>A networking library extension to support co_await-based coroutines</h2></div></div></div><div class="section" title="1.&#160;Introduction"><div class="titlepage"><div><div><h2 class="title" style="clear: both"><a name="networking_await.introduction"></a>1.&#160;Introduction</h2></div></div></div><p>
+      This paper outlines a pure extension to the draft Networking Technical Specification
+      to add support for <code class="computeroutput"><span class="identifier">co_await</span></code>-based
+      coroutines. This extension allows us to leverage coroutines to write asynchronous
+      code in a synchronous style, as in:
+    </p><pre class="programlisting"><span class="identifier">awaitable</span><span class="special">&lt;</span><span class="keyword">void</span><span class="special">&gt;</span> <span class="identifier">echo</span><span class="special">(</span><span class="identifier">tcp</span><span class="special">::</span><span class="identifier">socket</span> <span class="identifier">socket</span><span class="special">,</span> <span class="identifier">await_context</span> <span class="identifier">ctx</span><span class="special">)</span>
+<span class="special">{</span>
+  <span class="keyword">try</span>
+  <span class="special">{</span>
+    <span class="keyword">for</span> <span class="special">(;;)</span>
+    <span class="special">{</span>
+      <span class="keyword">char</span> <span class="identifier">data</span><span class="special">[</span><span class="number">128</span><span class="special">];</span>
+      <span class="identifier">std</span><span class="special">::</span><span class="identifier">size_t</span> <span class="identifier">n</span> <span class="special">=</span> <span class="identifier">co_await</span> <span class="identifier">socket</span><span class="special">.</span><span class="identifier">async_read_some</span><span class="special">(</span><span class="identifier">net</span><span class="special">::</span><span class="identifier">buffer</span><span class="special">(</span><span class="identifier">data</span><span class="special">),</span> <span class="identifier">ctx</span><span class="special">);</span>
+      <span class="identifier">co_await</span> <span class="identifier">async_write</span><span class="special">(</span><span class="identifier">socket</span><span class="special">,</span> <span class="identifier">net</span><span class="special">::</span><span class="identifier">buffer</span><span class="special">(</span><span class="identifier">data</span><span class="special">,</span> <span class="identifier">n</span><span class="special">),</span> <span class="identifier">ctx</span><span class="special">);</span>
+    <span class="special">}</span>
+  <span class="special">}</span>
+  <span class="keyword">catch</span> <span class="special">(</span><span class="identifier">std</span><span class="special">::</span><span class="identifier">exception</span><span class="special">&amp;</span> <span class="identifier">e</span><span class="special">)</span>
+  <span class="special">{</span>
+    <span class="identifier">std</span><span class="special">::</span><span class="identifier">cerr</span> <span class="special">&lt;&lt;</span> <span class="string">"echo Exception: "</span> <span class="special">&lt;&lt;</span> <span class="identifier">e</span><span class="special">.</span><span class="identifier">what</span><span class="special">()</span> <span class="special">&lt;&lt;</span> <span class="identifier">std</span><span class="special">::</span><span class="identifier">endl</span><span class="special">;</span>
+  <span class="special">}</span>
+<span class="special">}</span>
+</pre><p>
+      The design presented in this paper reflects the view that, when using coroutines
+      to compose asynchronous operations, coroutines must be considered in conjunction
+      with executors. Typical networking programs consist of multiple threads of
+      execution (whether implemented using coroutines or as simple chains of callbacks).
+      Indeed, one of the motivations for using coroutines and asynchronous operations
+      is greater control over scheduling than that provided by the OS's thread scheduler.
+      This control allows for both better performance and simplified programming.
+    </p><p>
+      Consequently, the design presented below has the following features:
+    </p><div class="itemizedlist"><ul class="itemizedlist" type="disc"><li class="listitem">
+          The execution properties of the current coroutine-based thread of execution
+          are explicitly represented by an <code class="computeroutput"><span class="identifier">await_context</span></code>
+          object. This object is a completion token, and when passed to an asynchronous
+          operation causes the operation to "block" the current coroutine
+          in a synchronous-like manner.
+        </li><li class="listitem">
+          To mirror the semantics of normal functions, coroutines may be composed
+          into a "stack", and all coroutines in the stack behave as though
+          part of the same thread of execution.
+        </li><li class="listitem">
+          New coroutine-based threads of execution are explicitly launched using
+          a <code class="computeroutput"><span class="identifier">spawn</span></code> function. This
+          function also allows the user to specify the execution properties of the
+          new thread of execution.
+        </li></ul></div></div><div class="section" title="2.&#160;Reference implementation"><div class="titlepage"><div><div><h2 class="title" style="clear: both"><a name="networking_await.reference_implementation"></a>2.&#160;Reference implementation</h2></div></div></div><p>
+      An implementation of this proposal text may be found in a branch of the variant
+      of Asio that stands alone from Boost. This branch is available at <span class="emphasis"><em><a href="https://github.com/chriskohlhoff/asio/tree/co_await" target="_top">https://github.com/chriskohlhoff/asio/tree/co_await</a></em></span>.
+      It has been tested with Microsoft Visual Studio 2015 Update 1, and depends
+      specifically on the version of the proposed coroutine functionality delivered
+      with that compiler.
+    </p></div><div class="section" title="3.&#160;Examples"><div class="titlepage"><div><div><h2 class="title" style="clear: both"><a name="networking_await.examples"></a>3.&#160;Examples</h2></div></div></div><div class="section" title="3.1.&#160;Basic use"><div class="titlepage"><div><div><h3 class="title"><a name="networking_await.basic_use"></a>3.1.&#160;Basic use</h3></div></div></div><p>
+        To begin, we will examine a simple TCP server that echoes back any data it
+        receives. The main function is as follows:
+      </p><pre class="programlisting"><span class="keyword">int</span> <span class="identifier">main</span><span class="special">()</span>
+<span class="special">{</span>
+  <span class="keyword">try</span>
+  <span class="special">{</span>
+    <span class="identifier">net</span><span class="special">::</span><span class="identifier">io_context</span> <span class="identifier">io_context</span><span class="special">;</span>
+    <span class="identifier">spawn</span><span class="special">(</span><span class="identifier">io_context</span><span class="special">,</span> <span class="identifier">listener</span><span class="special">,</span> <span class="identifier">detached</span><span class="special">);</span>
+    <span class="identifier">io_context</span><span class="special">.</span><span class="identifier">run</span><span class="special">();</span>
+  <span class="special">}</span>
+  <span class="keyword">catch</span> <span class="special">(</span><span class="identifier">std</span><span class="special">::</span><span class="identifier">exception</span><span class="special">&amp;</span> <span class="identifier">e</span><span class="special">)</span>
+  <span class="special">{</span>
+    <span class="identifier">std</span><span class="special">::</span><span class="identifier">cerr</span> <span class="special">&lt;&lt;</span> <span class="string">"Exception: "</span> <span class="special">&lt;&lt;</span> <span class="identifier">e</span><span class="special">.</span><span class="identifier">what</span><span class="special">()</span> <span class="special">&lt;&lt;</span> <span class="identifier">std</span><span class="special">::</span><span class="identifier">endl</span><span class="special">;</span>
+  <span class="special">}</span>
+<span class="special">}</span>
+</pre><p>
+        Here, the call to the function <code class="computeroutput"><span class="identifier">spawn</span></code>:
+      </p><pre class="programlisting"><span class="identifier">spawn</span><span class="special">(</span><span class="identifier">io_context</span><span class="special">,</span> <span class="identifier">listener</span><span class="special">,</span> <span class="identifier">detached</span><span class="special">);</span>
+</pre><p>
+        launches a coroutine as a new thread of execution. The first argument specifies
+        that this new thread of execution will be scheduled by the <code class="computeroutput"><span class="identifier">io_context</span></code>. The entry point for this new
+        thread of execution is the function <code class="computeroutput"><span class="identifier">listener</span></code>,
+        which we will see below. The final argument, <code class="computeroutput"><span class="identifier">detached</span></code>,
+        is a special completion token that tells <code class="computeroutput"><span class="identifier">spawn</span></code>
+        that we are not interested in the result of the coroutine.
+      </p><p>
+        The <code class="computeroutput"><span class="identifier">listener</span></code> is a free function:
+      </p><pre class="programlisting"><span class="identifier">awaitable</span><span class="special">&lt;</span><span class="keyword">void</span><span class="special">&gt;</span> <span class="identifier">listener</span><span class="special">(</span><span class="identifier">await_context</span> <span class="identifier">ctx</span><span class="special">)</span>
+<span class="special">{</span>
+  <span class="identifier">tcp</span><span class="special">::</span><span class="identifier">acceptor</span> <span class="identifier">acceptor</span><span class="special">(</span><span class="identifier">ctx</span><span class="special">.</span><span class="identifier">get_executor</span><span class="special">().</span><span class="identifier">context</span><span class="special">(),</span> <span class="special">{</span><span class="identifier">tcp</span><span class="special">::</span><span class="identifier">v4</span><span class="special">(),</span> <span class="number">55555</span><span class="special">});</span>
+  <span class="keyword">for</span> <span class="special">(;;)</span>
+  <span class="special">{</span>
+    <span class="identifier">spawn</span><span class="special">(</span><span class="identifier">acceptor</span><span class="special">.</span><span class="identifier">get_executor</span><span class="special">(),</span> <span class="identifier">echo</span><span class="special">,</span>
+        <span class="identifier">co_await</span> <span class="identifier">acceptor</span><span class="special">.</span><span class="identifier">async_accept</span><span class="special">(</span><span class="identifier">ctx</span><span class="special">),</span> <span class="identifier">detached</span><span class="special">);</span>
+  <span class="special">}</span>
+<span class="special">}</span>
+</pre><p>
+        The <code class="computeroutput"><span class="identifier">listener</span></code> function returns
+        an <code class="computeroutput"><span class="identifier">awaitable</span><span class="special">&lt;</span><span class="keyword">void</span><span class="special">&gt;</span></code>.
+        This indicates that it must either be the entry point of a new thread of
+        execution, or itself be <code class="computeroutput"><span class="identifier">co_await</span></code>-ed.
+      </p><p>
+        The <code class="computeroutput"><span class="identifier">listener</span></code> function also
+        accepts an <code class="computeroutput"><span class="identifier">await_context</span></code>
+        as its parameter. This parameter represents the context in which the coroutine
+        is executing, and is passed as a completion token to any asynchronous operations
+        called by the coroutine, such as:
+      </p><pre class="programlisting"><span class="identifier">co_await</span> <span class="identifier">acceptor</span><span class="special">.</span><span class="identifier">async_accept</span><span class="special">(</span><span class="identifier">ctx</span><span class="special">)</span>
+</pre><p>
+        When the <code class="computeroutput"><span class="identifier">ctx</span></code> completion token
+        is passed to an asynchronous operation, that operation's initiating function
+        returns an <code class="computeroutput"><span class="identifier">awaitable</span><span class="special">&lt;</span><span class="identifier">T</span><span class="special">&gt;</span></code>.
+        We must apply the <code class="computeroutput"><span class="identifier">co_await</span></code>
+        keyword to this return value to suspend the coroutine.
+      </p><p>
+        In this listener, private state (such as <code class="computeroutput"><span class="identifier">acceptor</span></code>)
+        may simply be declared as a stack-based variable. As each new connection
+        is accepted, the listener spawns a new, detached thread of execution to handle
+        the incoming client:
+      </p><pre class="programlisting"><span class="identifier">spawn</span><span class="special">(</span><span class="identifier">acceptor</span><span class="special">.</span><span class="identifier">get_executor</span><span class="special">(),</span> <span class="identifier">echo</span><span class="special">,</span>
+    <span class="identifier">co_await</span> <span class="identifier">acceptor</span><span class="special">.</span><span class="identifier">async_accept</span><span class="special">(</span><span class="identifier">ctx</span><span class="special">),</span> <span class="identifier">detached</span><span class="special">);</span>
+</pre><p>
+        The first argument to <code class="computeroutput"><span class="identifier">spawn</span></code>
+        specifies that the new thread of execution will be scheduled using the acceptor's
+        <code class="computeroutput"><span class="identifier">io_context</span></code>. This is the
+        <code class="computeroutput"><span class="identifier">io_context</span></code> object that we
+        created in <code class="computeroutput"><span class="identifier">main</span></code>. In the case
+        where multiple threads are running the <code class="computeroutput"><span class="identifier">io_context</span></code>,
+        this would allow the new thread of execution to execute concurrently. This
+        is a safe choice only if the new thread of execution is truly independent
+        and does not access shared data structures. (Note that, in this example,
+        only the main thread runs the <code class="computeroutput"><span class="identifier">io_context</span></code>
+        and so all coroutines will be scheduled in a single thread in any case.)
+      </p><p>
+        The entry point for the new thread of execution is the <code class="computeroutput"><span class="identifier">echo</span></code>
+        function, and this time we are passing it the result of the <code class="computeroutput"><span class="identifier">async_accept</span></code> operation. The <code class="computeroutput"><span class="identifier">echo</span></code> function accepts this result in its
+        parameter list:
+      </p><pre class="programlisting"><span class="identifier">awaitable</span><span class="special">&lt;</span><span class="keyword">void</span><span class="special">&gt;</span> <span class="identifier">echo</span><span class="special">(</span><span class="identifier">tcp</span><span class="special">::</span><span class="identifier">socket</span> <span class="identifier">socket</span><span class="special">,</span> <span class="identifier">await_context</span> <span class="identifier">ctx</span><span class="special">)</span>
+<span class="special">{</span>
+  <span class="keyword">try</span>
+  <span class="special">{</span>
+    <span class="keyword">for</span> <span class="special">(;;)</span>
+    <span class="special">{</span>
+      <span class="keyword">char</span> <span class="identifier">data</span><span class="special">[</span><span class="number">128</span><span class="special">];</span>
+      <span class="identifier">std</span><span class="special">::</span><span class="identifier">size_t</span> <span class="identifier">n</span> <span class="special">=</span> <span class="identifier">co_await</span> <span class="identifier">socket</span><span class="special">.</span><span class="identifier">async_read_some</span><span class="special">(</span><span class="identifier">net</span><span class="special">::</span><span class="identifier">buffer</span><span class="special">(</span><span class="identifier">data</span><span class="special">),</span> <span class="identifier">ctx</span><span class="special">);</span>
+      <span class="identifier">co_await</span> <span class="identifier">async_write</span><span class="special">(</span><span class="identifier">socket</span><span class="special">,</span> <span class="identifier">net</span><span class="special">::</span><span class="identifier">buffer</span><span class="special">(</span><span class="identifier">data</span><span class="special">,</span> <span class="identifier">n</span><span class="special">),</span> <span class="identifier">ctx</span><span class="special">);</span>
+    <span class="special">}</span>
+  <span class="special">}</span>
+  <span class="keyword">catch</span> <span class="special">(</span><span class="identifier">std</span><span class="special">::</span><span class="identifier">exception</span><span class="special">&amp;</span> <span class="identifier">e</span><span class="special">)</span>
+  <span class="special">{</span>
+    <span class="identifier">std</span><span class="special">::</span><span class="identifier">cerr</span> <span class="special">&lt;&lt;</span> <span class="string">"echo Exception: "</span> <span class="special">&lt;&lt;</span> <span class="identifier">e</span><span class="special">.</span><span class="identifier">what</span><span class="special">()</span> <span class="special">&lt;&lt;</span> <span class="identifier">std</span><span class="special">::</span><span class="identifier">endl</span><span class="special">;</span>
+  <span class="special">}</span>
+<span class="special">}</span>
+</pre><p>
+        As with the <code class="computeroutput"><span class="identifier">listener</span></code>, private
+        state such as the <code class="computeroutput"><span class="identifier">data</span></code> buffer
+        may simply be specified as stack variable in the coroutine. We pass the
+        <code class="computeroutput"><span class="identifier">ctx</span></code> completion token to the
+        asynchronous operations, and <code class="computeroutput"><span class="identifier">co_await</span></code>
+        the <code class="computeroutput"><span class="identifier">awaitable</span><span class="special">&lt;</span><span class="identifier">T</span><span class="special">&gt;</span></code> objects
+        that they return. Any errors are reported as exceptions, so we catch these
+        within the coroutine to prevent them from escaping to the <code class="computeroutput"><span class="identifier">main</span></code>
+        function.
+      </p></div><div class="section" title="3.2.&#160;Refactoring"><div class="titlepage"><div><div><h3 class="title"><a name="networking_await.refactoring"></a>3.2.&#160;Refactoring</h3></div></div></div><p>
+        Just as with normal, synchronous function calls, when using coroutines we
+        wish to be able to refactor a sequence of code into its own function. When
+        doing so, it is vital for ensuring program correctness that the refactored
+        code execute in the same thread of execution, and have the same executor
+        properties as its caller.
+      </p><p>
+        For example, lets us say we wish to refactor the <code class="computeroutput"><span class="identifier">echo</span></code>
+        function above so that a single <code class="computeroutput"><span class="identifier">async_read_some</span></code>/<code class="computeroutput"><span class="identifier">async_write</span></code> pair is in its own <code class="computeroutput"><span class="identifier">echo_once</span></code> function:
+      </p><pre class="programlisting"><span class="identifier">awaitable</span><span class="special">&lt;</span><span class="keyword">void</span><span class="special">&gt;</span> <span class="identifier">echo_once</span><span class="special">(</span><span class="identifier">tcp</span><span class="special">::</span><span class="identifier">socket</span><span class="special">&amp;</span> <span class="identifier">socket</span><span class="special">,</span> <span class="identifier">await_context</span> <span class="identifier">ctx</span><span class="special">)</span>
+<span class="special">{</span>
+  <span class="keyword">char</span> <span class="identifier">data</span><span class="special">[</span><span class="number">128</span><span class="special">];</span>
+  <span class="identifier">std</span><span class="special">::</span><span class="identifier">size_t</span> <span class="identifier">n</span> <span class="special">=</span> <span class="identifier">co_await</span> <span class="identifier">socket</span><span class="special">.</span><span class="identifier">async_read_some</span><span class="special">(</span><span class="identifier">net</span><span class="special">::</span><span class="identifier">buffer</span><span class="special">(</span><span class="identifier">data</span><span class="special">),</span> <span class="identifier">ctx</span><span class="special">);</span>
+  <span class="identifier">co_await</span> <span class="identifier">net</span><span class="special">::</span><span class="identifier">async_write</span><span class="special">(</span><span class="identifier">socket</span><span class="special">,</span> <span class="identifier">net</span><span class="special">::</span><span class="identifier">buffer</span><span class="special">(</span><span class="identifier">data</span><span class="special">,</span> <span class="identifier">n</span><span class="special">),</span> <span class="identifier">ctx</span><span class="special">);</span>
+<span class="special">}</span>
+</pre><p>
+        This function is then called from <code class="computeroutput"><span class="identifier">echo</span></code>
+        as follows:
+      </p><pre class="programlisting"><span class="identifier">awaitable</span><span class="special">&lt;</span><span class="keyword">void</span><span class="special">&gt;</span> <span class="identifier">echo</span><span class="special">(</span><span class="identifier">tcp</span><span class="special">::</span><span class="identifier">socket</span> <span class="identifier">socket</span><span class="special">,</span> <span class="identifier">await_context</span> <span class="identifier">ctx</span><span class="special">)</span>
+<span class="special">{</span>
+  <span class="keyword">try</span>
+  <span class="special">{</span>
+    <span class="keyword">for</span> <span class="special">(;;)</span>
+    <span class="special">{</span>
+      <span class="identifier">co_await</span> <span class="identifier">echo_once</span><span class="special">(</span><span class="identifier">socket</span><span class="special">,</span> <span class="identifier">ctx</span><span class="special">);</span>
+    <span class="special">}</span>
+  <span class="special">}</span>
+  <span class="keyword">catch</span> <span class="special">(</span><span class="identifier">std</span><span class="special">::</span><span class="identifier">exception</span><span class="special">&amp;</span> <span class="identifier">e</span><span class="special">)</span>
+  <span class="special">{</span>
+    <span class="identifier">std</span><span class="special">::</span><span class="identifier">cerr</span> <span class="special">&lt;&lt;</span> <span class="string">"echo Exception: "</span> <span class="special">&lt;&lt;</span> <span class="identifier">e</span><span class="special">.</span><span class="identifier">what</span><span class="special">()</span> <span class="special">&lt;&lt;</span> <span class="identifier">std</span><span class="special">::</span><span class="identifier">endl</span><span class="special">;</span>
+  <span class="special">}</span>
+<span class="special">}</span>
+</pre><p>
+        By passing the <code class="computeroutput"><span class="identifier">ctx</span></code> variable
+        to <code class="computeroutput"><span class="identifier">echo_once</span></code> we ensure that
+        it is scheduled using the same executor. Furthermore, the caller applies
+        <code class="computeroutput"><span class="identifier">co_await</span></code> to the <code class="computeroutput"><span class="identifier">awaitable</span><span class="special">&lt;</span><span class="identifier">T</span><span class="special">&gt;</span></code> produced
+        by <code class="computeroutput"><span class="identifier">echo_once</span></code>, guaranteeing
+        that the <code class="computeroutput"><span class="identifier">echo</span></code> function does
+        not resume until the callee is complete. These two attributes combine to
+        ensure that the <code class="computeroutput"><span class="identifier">echo_once</span></code>
+        function behaves as though part of the same thread of execution as <code class="computeroutput"><span class="identifier">echo</span></code>.
+      </p></div><div class="section" title="3.3.&#160;Coordinating related threads of execution"><div class="titlepage"><div><div><h3 class="title"><a name="networking_await.coordinating_related_threads_of_execution"></a>3.3.&#160;Coordinating related threads of execution</h3></div></div></div><p>
+        The echo server shown above is a trivially asynchronous program in that:
+      </p><div class="itemizedlist"><ul class="itemizedlist" type="disc"><li class="listitem">
+            the protocol is half-duplex, so there is only one chain of operations
+            associated with the connection; and
+          </li><li class="listitem">
+            the connections do not share data or otherwise interact with any others
+            in the program.
+          </li></ul></div><p>
+        More typically, connection handling involves a number of concurrent threads
+        of execution, such as:
+      </p><div class="itemizedlist"><ul class="itemizedlist" type="disc"><li class="listitem">
+            one to read inbound data;
+          </li><li class="listitem">
+            one to write queued outbound data;
+          </li><li class="listitem">
+            one to manage timeouts or heartbeats; and
+          </li><li class="listitem">
+            short-lived threads of execution representing messages from other actors.
+          </li></ul></div><p>
+        As an example, consider a simple chat server where multiple connections share
+        a chat room. Any message sent by a participant to the room is relayed by
+        the server to all participants.
+      </p><pre class="programlisting"><span class="keyword">class</span> <span class="identifier">chat_session</span>
+  <span class="special">:</span> <span class="keyword">public</span> <span class="identifier">chat_participant</span><span class="special">,</span>
+    <span class="keyword">public</span> <span class="identifier">std</span><span class="special">::</span><span class="identifier">enable_shared_from_this</span><span class="special">&lt;</span><span class="identifier">chat_session</span><span class="special">&gt;</span>
+</pre><p>
+        The <code class="computeroutput"><span class="identifier">chat_session</span></code> class is
+        comprised of multiple coroutine-based threads of execution. We want the session
+        to exist for as long as there is client activity, so we use <code class="computeroutput"><span class="identifier">std</span><span class="special">::</span><span class="identifier">enable_shared_from_this</span></code>
+        to keep the <code class="computeroutput"><span class="identifier">chat_session</span></code>
+        object alive for as long as its constituent coroutines.
+      </p><pre class="programlisting"><span class="special">{</span>
+  <span class="identifier">tcp</span><span class="special">::</span><span class="identifier">socket</span> <span class="identifier">socket_</span><span class="special">;</span>
+  <span class="identifier">net</span><span class="special">::</span><span class="identifier">steady_timer</span> <span class="identifier">timer_</span><span class="special">;</span>
+  <span class="identifier">chat_room</span><span class="special">&amp;</span> <span class="identifier">room_</span><span class="special">;</span>
+  <span class="identifier">std</span><span class="special">::</span><span class="identifier">deque</span><span class="special">&lt;</span><span class="identifier">std</span><span class="special">::</span><span class="identifier">string</span><span class="special">&gt;</span> <span class="identifier">write_msgs_</span><span class="special">;</span>
+  <span class="identifier">net</span><span class="special">::</span><span class="identifier">strand</span><span class="special">&lt;</span><span class="identifier">net</span><span class="special">::</span><span class="identifier">io_context</span><span class="special">::</span><span class="identifier">executor_type</span><span class="special">&gt;</span> <span class="identifier">strand_</span><span class="special">;</span>
+</pre><p>
+        The <code class="computeroutput"><span class="identifier">chat_session</span></code> class uses
+        a strand to coordinate the threads of execution and ensure that they do not
+        execute concurrently.
+      </p><pre class="programlisting"><span class="keyword">public</span><span class="special">:</span>
+  <span class="identifier">chat_session</span><span class="special">(</span><span class="identifier">tcp</span><span class="special">::</span><span class="identifier">socket</span> <span class="identifier">socket</span><span class="special">,</span> <span class="identifier">chat_room</span><span class="special">&amp;</span> <span class="identifier">room</span><span class="special">)</span>
+    <span class="special">:</span> <span class="identifier">socket_</span><span class="special">(</span><span class="identifier">std</span><span class="special">::</span><span class="identifier">move</span><span class="special">(</span><span class="identifier">socket</span><span class="special">)),</span>
+      <span class="identifier">timer_</span><span class="special">(</span><span class="identifier">socket_</span><span class="special">.</span><span class="identifier">get_executor</span><span class="special">().</span><span class="identifier">context</span><span class="special">()),</span>
+      <span class="identifier">room_</span><span class="special">(</span><span class="identifier">room</span><span class="special">),</span>
+      <span class="identifier">strand_</span><span class="special">(</span><span class="identifier">socket_</span><span class="special">.</span><span class="identifier">get_executor</span><span class="special">())</span>
+  <span class="special">{</span>
+    <span class="identifier">timer_</span><span class="special">.</span><span class="identifier">expires_at</span><span class="special">(</span><span class="identifier">std</span><span class="special">::</span><span class="identifier">chrono</span><span class="special">::</span><span class="identifier">steady_clock</span><span class="special">::</span><span class="identifier">time_point</span><span class="special">::</span><span class="identifier">max</span><span class="special">());</span>
+  <span class="special">}</span>
+
+  <span class="keyword">void</span> <span class="identifier">start</span><span class="special">()</span>
+  <span class="special">{</span>
+    <span class="identifier">room_</span><span class="special">.</span><span class="identifier">join</span><span class="special">(</span><span class="identifier">shared_from_this</span><span class="special">());</span>
+    <span class="identifier">spawn</span><span class="special">(</span><span class="identifier">strand_</span><span class="special">,</span> <span class="special">&amp;</span><span class="identifier">chat_session</span><span class="special">::</span><span class="identifier">reader</span><span class="special">,</span> <span class="identifier">shared_from_this</span><span class="special">(),</span> <span class="identifier">detached</span><span class="special">);</span>
+    <span class="identifier">spawn</span><span class="special">(</span><span class="identifier">strand_</span><span class="special">,</span> <span class="special">&amp;</span><span class="identifier">chat_session</span><span class="special">::</span><span class="identifier">writer</span><span class="special">,</span> <span class="identifier">shared_from_this</span><span class="special">(),</span> <span class="identifier">detached</span><span class="special">);</span>
+  <span class="special">}</span>
+</pre><p>
+        The strand is specified as the executor when launching the two threads of
+        execution using <code class="computeroutput"><span class="identifier">spawn</span></code>.
+      </p><pre class="programlisting">  <span class="keyword">void</span> <span class="identifier">deliver</span><span class="special">(</span><span class="keyword">const</span> <span class="identifier">std</span><span class="special">::</span><span class="identifier">string</span><span class="special">&amp;</span> <span class="identifier">msg</span><span class="special">)</span>
+  <span class="special">{</span>
+    <span class="identifier">strand_</span><span class="special">.</span><span class="identifier">dispatch</span><span class="special">(</span>
+        <span class="special">[</span><span class="keyword">this</span><span class="special">,</span> <span class="identifier">self</span><span class="special">=</span><span class="identifier">shared_from_this</span><span class="special">(),</span> <span class="identifier">msg</span><span class="special">]</span>
+        <span class="special">{</span>
+          <span class="identifier">write_msgs_</span><span class="special">.</span><span class="identifier">push_back</span><span class="special">(</span><span class="identifier">msg</span><span class="special">);</span>
+          <span class="identifier">timer_</span><span class="special">.</span><span class="identifier">cancel_one</span><span class="special">();</span>
+        <span class="special">});</span>
+  <span class="special">}</span>
+</pre><p>
+        The <code class="computeroutput"><span class="identifier">deliver</span></code> function uses
+        a short-lived non-coroutine-based thread of execution to add new messages
+        to the outbound write queue.
+      </p><pre class="programlisting"><span class="keyword">private</span><span class="special">:</span>
+  <span class="identifier">awaitable</span><span class="special">&lt;</span><span class="keyword">void</span><span class="special">&gt;</span> <span class="identifier">reader</span><span class="special">(</span><span class="identifier">await_context</span> <span class="identifier">ctx</span><span class="special">)</span>
+  <span class="special">{</span>
+    <span class="keyword">try</span>
+    <span class="special">{</span>
+      <span class="keyword">for</span> <span class="special">(</span><span class="identifier">std</span><span class="special">::</span><span class="identifier">string</span> <span class="identifier">read_msg</span><span class="special">;;)</span>
+      <span class="special">{</span>
+        <span class="identifier">std</span><span class="special">::</span><span class="identifier">size_t</span> <span class="identifier">n</span> <span class="special">=</span> <span class="identifier">co_await</span> <span class="identifier">net</span><span class="special">::</span><span class="identifier">async_read_until</span><span class="special">(</span><span class="identifier">socket_</span><span class="special">,</span>
+            <span class="identifier">net</span><span class="special">::</span><span class="identifier">dynamic_buffer</span><span class="special">(</span><span class="identifier">read_msg</span><span class="special">,</span> <span class="number">1024</span><span class="special">),</span> <span class="string">"\n"</span><span class="special">,</span> <span class="identifier">ctx</span><span class="special">);</span>
+
+        <span class="identifier">room_</span><span class="special">.</span><span class="identifier">deliver</span><span class="special">(</span><span class="identifier">read_msg</span><span class="special">.</span><span class="identifier">substr</span><span class="special">(</span><span class="number">0</span><span class="special">,</span> <span class="identifier">n</span><span class="special">));</span>
+        <span class="identifier">read_msg</span><span class="special">.</span><span class="identifier">erase</span><span class="special">(</span><span class="number">0</span><span class="special">,</span> <span class="identifier">n</span><span class="special">);</span>
+      <span class="special">}</span>
+    <span class="special">}</span>
+    <span class="keyword">catch</span> <span class="special">(</span><span class="identifier">std</span><span class="special">::</span><span class="identifier">exception</span><span class="special">&amp;)</span>
+    <span class="special">{</span>
+      <span class="identifier">stop</span><span class="special">();</span>
+    <span class="special">}</span>
+  <span class="special">}</span>
+
+  <span class="identifier">awaitable</span><span class="special">&lt;</span><span class="keyword">void</span><span class="special">&gt;</span> <span class="identifier">writer</span><span class="special">(</span><span class="identifier">await_context</span> <span class="identifier">ctx</span><span class="special">)</span>
+  <span class="special">{</span>
+    <span class="keyword">try</span>
+    <span class="special">{</span>
+      <span class="keyword">while</span> <span class="special">(</span><span class="identifier">socket_</span><span class="special">.</span><span class="identifier">is_open</span><span class="special">())</span>
+      <span class="special">{</span>
+        <span class="keyword">if</span> <span class="special">(</span><span class="identifier">write_msgs_</span><span class="special">.</span><span class="identifier">empty</span><span class="special">())</span>
+        <span class="special">{</span>
+          <span class="identifier">std</span><span class="special">::</span><span class="identifier">error_code</span> <span class="identifier">ec</span><span class="special">;</span>
+          <span class="identifier">co_await</span> <span class="identifier">timer_</span><span class="special">.</span><span class="identifier">async_wait</span><span class="special">(</span><span class="identifier">redirect_error</span><span class="special">(</span><span class="identifier">ctx</span><span class="special">,</span> <span class="identifier">ec</span><span class="special">));</span>
+</pre><p>
+        By default, passing an <code class="computeroutput"><span class="identifier">await_context</span></code>
+        to an asynchronous operation will cause errors to be reported via exception.
+        In this case we handle the error as an expected case, so we use the <code class="computeroutput"><span class="identifier">redirect_error</span></code> completion token to capture
+        the error into an <code class="computeroutput"><span class="identifier">error_code</span></code>.
+      </p><pre class="programlisting">        <span class="special">}</span>
+        <span class="keyword">else</span>
+        <span class="special">{</span>
+          <span class="identifier">co_await</span> <span class="identifier">net</span><span class="special">::</span><span class="identifier">async_write</span><span class="special">(</span><span class="identifier">socket_</span><span class="special">,</span>
+              <span class="identifier">net</span><span class="special">::</span><span class="identifier">buffer</span><span class="special">(</span><span class="identifier">write_msgs_</span><span class="special">.</span><span class="identifier">front</span><span class="special">()),</span> <span class="identifier">ctx</span><span class="special">);</span>
+          <span class="identifier">write_msgs_</span><span class="special">.</span><span class="identifier">pop_front</span><span class="special">();</span>
+        <span class="special">}</span>
+      <span class="special">}</span>
+    <span class="special">}</span>
+    <span class="keyword">catch</span> <span class="special">(</span><span class="identifier">std</span><span class="special">::</span><span class="identifier">exception</span><span class="special">&amp;)</span>
+    <span class="special">{</span>
+      <span class="identifier">stop</span><span class="special">();</span>
+    <span class="special">}</span>
+  <span class="special">}</span>
+
+  <span class="keyword">void</span> <span class="identifier">stop</span><span class="special">()</span>
+  <span class="special">{</span>
+    <span class="identifier">room_</span><span class="special">.</span><span class="identifier">leave</span><span class="special">(</span><span class="identifier">shared_from_this</span><span class="special">());</span>
+    <span class="identifier">socket_</span><span class="special">.</span><span class="identifier">close</span><span class="special">();</span>
+    <span class="identifier">timer_</span><span class="special">.</span><span class="identifier">cancel</span><span class="special">();</span>
+  <span class="special">}</span>
+<span class="special">};</span>
+</pre></div></div><div class="section" title="4.&#160;Summary of library facilities"><div class="titlepage"><div><div><h2 class="title" style="clear: both"><a name="networking_await.summary_of_library_facilities"></a>4.&#160;Summary of library facilities</h2></div></div></div><p>
+      This paper proposes the following extensions to the Networking Technical Specification
+      to add support for <code class="computeroutput"><span class="identifier">co_await</span></code>-based
+      coroutines.
+    </p><div class="section" title="4.1.&#160;Class template awaitable"><div class="titlepage"><div><div><h3 class="title"><a name="networking_await.class_template___awaitable_"></a>4.1.&#160;Class template <code class="literal">awaitable</code></h3></div></div></div><pre class="programlisting"><span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">T</span><span class="special">&gt;</span> <span class="identifier">awaitable</span><span class="special">;</span>
+</pre><p>
+        Class template <code class="computeroutput"><span class="identifier">awaitable</span></code>
+        represents the return type of an asynchronous operation when used with coroutines,
+        or of a coroutine function that composes asynchronous operations. The <code class="computeroutput"><span class="identifier">awaitable</span><span class="special">&lt;</span><span class="identifier">T</span><span class="special">&gt;</span></code> class
+        satisfies the Awaitable type requirements.
+      </p><p>
+        An <code class="computeroutput"><span class="identifier">awaitable</span><span class="special">&lt;</span><span class="identifier">T</span><span class="special">&gt;</span></code> can
+        be consumed by at most one <code class="computeroutput"><span class="identifier">co_await</span></code>
+        keyword.
+      </p></div><div class="section" title="4.2.&#160;Class template basic_unsynchronized_await_context"><div class="titlepage"><div><div><h3 class="title"><a name="networking_await.class_template___basic_unsynchronized_await_context_"></a>4.2.&#160;Class template <code class="literal">basic_unsynchronized_await_context</code></h3></div></div></div><pre class="programlisting"><span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">Executor</span><span class="special">&gt;</span> <span class="keyword">class</span> <span class="identifier">basic_unsynchronized_await_context</span><span class="special">;</span>
+</pre><p>
+        Class template <code class="computeroutput"><span class="identifier">basic_unsynchronized_await_context</span></code>
+        is a completion token type that causes asynchronous operations to produce
+        an <code class="computeroutput"><span class="identifier">awaitable</span><span class="special">&lt;</span><span class="identifier">T</span><span class="special">&gt;</span></code> as
+        their initiating function return type.
+      </p><p>
+        <code class="computeroutput"><span class="identifier">basic_unsynchronized_await_context</span><span class="special">&lt;</span><span class="identifier">Executor</span><span class="special">&gt;</span></code> class introduces no synchronization on
+        top of the underlying <code class="computeroutput"><span class="identifier">Executor</span></code>
+        object. It requires an executor that provides mutual exclusion semantics.
+        This minimizes the overhead of coroutines when executing on a single threaded
+        <code class="computeroutput"><span class="identifier">io_context</span></code>, since it is implicitly
+        a mutual exclusion executor.
+      </p></div><div class="section" title="4.3.&#160;Template alias basic_await_context"><div class="titlepage"><div><div><h3 class="title"><a name="networking_await.template_alias___basic_await_context_"></a>4.3.&#160;Template alias <code class="literal">basic_await_context</code></h3></div></div></div><pre class="programlisting"><span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">Executor</span><span class="special">&gt;</span>
+<span class="keyword">using</span> <span class="identifier">basic_await_context</span> <span class="special">=</span> <span class="identifier">basic_unsynchronized_await_context</span><span class="special">&lt;</span><span class="identifier">strand</span><span class="special">&lt;</span><span class="identifier">Executor</span><span class="special">&gt;&gt;;</span>
+</pre><p>
+        <code class="computeroutput"><span class="identifier">basic_await_context</span></code> is a
+        template alias that addresses the common use case of coordinating coroutine
+        execution in a multithreaded context (such as a thread pool). It uses a
+        <code class="computeroutput"><span class="identifier">strand</span><span class="special">&lt;&gt;</span></code>
+        to provide the requisite mutual exclusion semantics.
+      </p></div><div class="section" title="4.4.&#160;Typedef await_context"><div class="titlepage"><div><div><h3 class="title"><a name="networking_await.typedef__await_context_"></a>4.4.&#160;Typedef <code class="computeroutput"><span class="identifier">await_context</span></code></h3></div></div></div><pre class="programlisting"><span class="keyword">typedef</span> <span class="identifier">basic_await_context</span><span class="special">&lt;</span><span class="identifier">executor</span><span class="special">&gt;</span> <span class="identifier">await_context</span><span class="special">;</span>
+</pre><p>
+        This typedef uses the <code class="computeroutput"><span class="identifier">basic_await_context</span></code>
+        template with the polymorphic executor wrapper. This maximizes ease of use,
+        particularly when calling coroutine functions across module boundaries, with
+        some runtime cost.
+      </p></div><div class="section" title="4.5.&#160;Function template spawn"><div class="titlepage"><div><div><h3 class="title"><a name="networking_await.function_template___spawn_"></a>4.5.&#160;Function template <code class="literal">spawn</code></h3></div></div></div><pre class="programlisting"><span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">Executor</span><span class="special">,</span> <span class="keyword">class</span> <span class="identifier">F</span><span class="special">,</span> <span class="keyword">class</span> <span class="identifier">Arg1</span><span class="special">,</span> <span class="special">...,</span> <span class="keyword">class</span> <span class="identifier">ArgN</span><span class="special">,</span> <span class="keyword">class</span> <span class="identifier">CompletionToken</span><span class="special">&gt;</span>
+  <span class="emphasis"><em>DEDUCED</em></span> <span class="identifier">spawn</span><span class="special">(</span><span class="keyword">const</span> <span class="identifier">Executor</span><span class="special">&amp;</span> <span class="identifier">ex</span><span class="special">,</span> <span class="identifier">F</span><span class="special">&amp;&amp;</span> <span class="identifier">f</span><span class="special">,</span> <span class="identifier">Arg1</span><span class="special">&amp;&amp;</span> <span class="identifier">arg1</span><span class="special">,</span> <span class="special">...,</span> <span class="identifier">ArgN</span><span class="special">&amp;&amp;</span> <span class="identifier">argN</span><span class="special">,</span>
+    <span class="identifier">CompletionToken</span><span class="special">&amp;&amp;</span> <span class="identifier">token</span><span class="special">);</span>
+
+<span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">ExecutionContext</span><span class="special">,</span> <span class="keyword">class</span> <span class="identifier">F</span><span class="special">,</span> <span class="keyword">class</span> <span class="identifier">Arg1</span><span class="special">,</span> <span class="special">...,</span> <span class="keyword">class</span> <span class="identifier">ArgN</span><span class="special">,</span> <span class="keyword">class</span> <span class="identifier">CompletionToken</span><span class="special">&gt;</span>
+  <span class="emphasis"><em>DEDUCED</em></span> <span class="identifier">spawn</span><span class="special">(</span><span class="identifier">ExecutionContext</span><span class="special">&amp;</span> <span class="identifier">ctx</span><span class="special">,</span> <span class="identifier">F</span><span class="special">&amp;&amp;</span> <span class="identifier">f</span><span class="special">,</span> <span class="identifier">Arg1</span><span class="special">&amp;&amp;</span> <span class="identifier">arg1</span><span class="special">,</span> <span class="special">...,</span> <span class="identifier">ArgN</span><span class="special">&amp;&amp;</span> <span class="identifier">argN</span><span class="special">,</span>
+    <span class="identifier">CompletionToken</span><span class="special">&amp;&amp;</span> <span class="identifier">token</span><span class="special">);</span>
+
+<span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">Executor</span><span class="special">,</span> <span class="keyword">class</span> <span class="identifier">F</span><span class="special">,</span> <span class="keyword">class</span> <span class="identifier">Arg1</span><span class="special">,</span> <span class="special">...,</span> <span class="keyword">class</span> <span class="identifier">ArgN</span><span class="special">,</span> <span class="keyword">class</span> <span class="identifier">CompletionToken</span><span class="special">&gt;</span>
+  <span class="emphasis"><em>DEDUCED</em></span> <span class="identifier">spawn</span><span class="special">(</span><span class="keyword">const</span> <span class="identifier">basic_unsynchronized_await_context</span><span class="special">&lt;</span><span class="identifier">Executor</span><span class="special">&gt;&amp;</span> <span class="identifier">ctx</span><span class="special">,</span>
+    <span class="identifier">F</span><span class="special">&amp;&amp;</span> <span class="identifier">f</span><span class="special">,</span> <span class="identifier">Arg1</span><span class="special">&amp;&amp;</span> <span class="identifier">arg1</span><span class="special">,</span> <span class="special">...,</span> <span class="identifier">ArgN</span><span class="special">&amp;&amp;</span> <span class="identifier">argN</span><span class="special">,</span> <span class="identifier">CompletionToken</span><span class="special">&amp;&amp;</span> <span class="identifier">token</span><span class="special">);</span>
+</pre><p>
+        The function template <code class="computeroutput"><span class="identifier">spawn</span></code>
+        is used to launch a new coroutine-based thread of execution.
+      </p><p>
+        The first argument determines the executor to be used for scheduling the
+        coroutine. In the case of the final overload, the new coroutine inherits
+        the executor of the specified <code class="computeroutput"><span class="identifier">basic_unsynchronized_await_context</span></code>.
+        (This final overload is provided as a convenience for launching related coroutines
+        that should not be scheduled concurrently.)
+      </p><p>
+        These overloads shall not participate in function overload resolution unless
+        the return type of <code class="computeroutput"><span class="identifier">f</span><span class="special">(</span><span class="identifier">arg1</span><span class="special">,</span> <span class="special">...,</span> <span class="identifier">argN</span><span class="special">,</span> <span class="identifier">basic_unsynchronized_await_context</span><span class="special">&lt;</span><span class="identifier">Executor</span><span class="special">&gt;)</span></code> is an <code class="computeroutput"><span class="identifier">awaitable</span><span class="special">&lt;</span><span class="identifier">T</span><span class="special">&gt;</span></code>
+        for some type <code class="computeroutput"><span class="identifier">T</span></code>.
+      </p><p>
+        Note that the function <code class="computeroutput"><span class="identifier">spawn</span></code>
+        meets the requirements of an asynchronous operation, which means that we
+        can pass any completion token type to it. In the examples above, we use the
+        <code class="computeroutput"><span class="identifier">detached</span></code> completion token
+        which is defined in this proposal, but other options include plain callbacks:
+      </p><pre class="programlisting"><span class="identifier">awaitable</span><span class="special">&lt;</span><span class="keyword">int</span><span class="special">&gt;</span> <span class="identifier">my_coroutine</span><span class="special">(</span><span class="identifier">await_context</span> <span class="identifier">ctx</span><span class="special">);</span>
+<span class="comment">// ...</span>
+<span class="identifier">spawn</span><span class="special">(</span><span class="identifier">my_executor</span><span class="special">,</span> <span class="identifier">my_coroutine</span><span class="special">,</span> <span class="special">[](</span><span class="keyword">int</span> <span class="identifier">result</span><span class="special">)</span> <span class="special">{</span> <span class="special">...</span> <span class="special">});</span>
+</pre><p>
+        or the <code class="computeroutput"><span class="identifier">use_future</span></code> completion
+        token:
+      </p><pre class="programlisting"><span class="identifier">awaitable</span><span class="special">&lt;</span><span class="keyword">int</span><span class="special">&gt;</span> <span class="identifier">my_coroutine</span><span class="special">(</span><span class="identifier">await_context</span> <span class="identifier">ctx</span><span class="special">);</span>
+<span class="comment">// ...</span>
+<span class="identifier">std</span><span class="special">::</span><span class="identifier">future</span><span class="special">&lt;</span><span class="keyword">int</span><span class="special">&gt;</span> <span class="identifier">f</span> <span class="special">=</span> <span class="identifier">spawn</span><span class="special">(</span><span class="identifier">my_executor</span><span class="special">,</span> <span class="identifier">my_coroutine</span><span class="special">,</span> <span class="identifier">std</span><span class="special">::</span><span class="identifier">experimental</span><span class="special">::</span><span class="identifier">use_future</span><span class="special">);</span>
+</pre></div><div class="section" title="4.6.&#160;Class detached_t"><div class="titlepage"><div><div><h3 class="title"><a name="networking_await.class___detached_t_"></a>4.6.&#160;Class <code class="literal">detached_t</code></h3></div></div></div><pre class="programlisting"><span class="keyword">class</span> <span class="identifier">detached_t</span> <span class="special">{</span> <span class="special">};</span>
+<span class="keyword">constexpr</span> <span class="identifier">detached_t</span> <span class="identifier">detached</span><span class="special">;</span>
+</pre><p>
+        The class <code class="computeroutput"><span class="identifier">detached_t</span></code> is a
+        completion token that is used to indicate that an asynchronous operation
+        is detached. That is, there is no completion handler waiting to receive the
+        operation's result. It is typically used by passing the <code class="computeroutput"><span class="identifier">detached</span></code>
+        object as the completion token argument.
+      </p><p>
+        This class is independent of the coroutine facility and may have some utility
+        in other use cases.
+      </p></div><div class="section" title="4.7.&#160;Class redirect_error_t and function redirect_error"><div class="titlepage"><div><div><h3 class="title"><a name="networking_await.class___redirect_error_t__and_function___redirect_error_"></a>4.7.&#160;Class <code class="literal">redirect_error_t</code> and function <code class="literal">redirect_error</code></h3></div></div></div><pre class="programlisting"><span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">CompletionToken</span><span class="special">&gt;</span> <span class="keyword">class</span> <span class="identifier">redirect_error_t</span><span class="special">;</span>
+
+<span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">CompletionToken</span><span class="special">&gt;</span>
+  <span class="identifier">redirect_error_t</span><span class="special">&lt;</span><span class="identifier">decay_t</span><span class="special">&lt;</span><span class="identifier">CompletionToken</span><span class="special">&gt;::</span><span class="identifier">type</span><span class="special">&gt;</span>
+    <span class="identifier">redirect_error</span><span class="special">(</span><span class="identifier">CompletionToken</span><span class="special">&amp;&amp;</span> <span class="identifier">completion_token</span><span class="special">,</span> <span class="identifier">error_code</span><span class="special">&amp;</span> <span class="identifier">ec</span><span class="special">);</span>
+</pre><p>
+        The class template <code class="computeroutput"><span class="identifier">redirect_error_t</span></code>
+        is a completion token that is used to specify that the error produced by
+        an asynchronous operation is captured to an <code class="computeroutput"><span class="identifier">error_code</span></code>
+        variable. By intercepting the error code before it is passed to the coroutine,
+        we may prevent the coroutine from throwing an exception on resumption. For
+        example:
+      </p><pre class="programlisting"><span class="keyword">char</span> <span class="identifier">data</span><span class="special">[</span><span class="number">1024</span><span class="special">];</span>
+<span class="identifier">std</span><span class="special">::</span><span class="identifier">error_code</span> <span class="identifier">ec</span><span class="special">;</span>
+<span class="identifier">std</span><span class="special">::</span><span class="identifier">size_t</span> <span class="identifier">n</span> <span class="special">=</span> <span class="identifier">co_await</span> <span class="identifier">my_socket</span><span class="special">.</span><span class="identifier">async_read_some</span><span class="special">(</span>
+    <span class="identifier">net</span><span class="special">::</span><span class="identifier">buffer</span><span class="special">(</span><span class="identifier">data</span><span class="special">),</span> <span class="identifier">redirect_error</span><span class="special">(</span><span class="identifier">ctx</span><span class="special">,</span> <span class="identifier">ec</span><span class="special">));</span>
+<span class="keyword">if</span> <span class="special">(</span><span class="identifier">ec</span> <span class="special">==</span> <span class="identifier">net</span><span class="special">::</span><span class="identifier">stream_errc</span><span class="special">::</span><span class="identifier">eof</span><span class="special">)</span> <span class="special">{</span> <span class="special">...</span> <span class="special">}</span>
+</pre><p>
+        This class is independent of the coroutine facility and may have some utility
+        in other use cases.
+      </p></div></div><div class="section" title="5.&#160;Design discussion"><div class="titlepage"><div><div><h2 class="title" style="clear: both"><a name="networking_await.design_discussion"></a>5.&#160;Design discussion</h2></div></div></div><div class="section" title="5.1.&#160;Using executors to coordinate multiple threads of execution"><div class="titlepage"><div><div><h3 class="title"><a name="networking_await.using_executors_to_coordinate_multiple_threads_of_execution"></a>5.1.&#160;Using executors to coordinate multiple threads of execution</h3></div></div></div><p>
+        Whether an application uses coroutines or callbacks, a chain of asynchronous
+        operations conceptually behaves as though it is a thread of execution. Furthermore,
+        all but the most trivial networking programs will consist of multiple threads
+        of execution interacting and operating on shared data.
+      </p><p>
+        Consequently, it is essential that coroutine facilities intended for networking
+        support executors. This allows us to manage the scheduling of related coroutines
+        that operate on shared data. Indeed, we should allow the scheduling of both
+        coroutine- and non-coroutine-based threads of execution in a single program.
+      </p><p>
+        This proposal addresses this by encoding the executor properties of a thread
+        of execution into the <code class="computeroutput"><span class="identifier">basic_unsynchronized_await_context</span></code>
+        completion token. When passed to an asynchronous operation, the operation
+        will utilize the associated executor when resuming the coroutine.
+      </p><p>
+        Similarly, the await context completion token may be passed to child coroutine
+        functions to ensure that these callees observe the same executor properties
+        as the caller, as illustrated in the "Refactoring" example above.
+      </p></div><div class="section" title="5.2.&#160;Introducing new threads of execution should be explicit"><div class="titlepage"><div><div><h3 class="title"><a name="networking_await.introducing_new_threads_of_execution_should_be_explicit"></a>5.2.&#160;Introducing new threads of execution should be explicit</h3></div></div></div><p>
+        As mentioned above, coordinating multiple threads of execution is a requirement
+        of all but the most trivial applications. Even if a networking application
+        is single-threaded, there still exists concurrency in the scheduling and
+        execution of these threads of execution. Therefore, to reduce the risk of
+        programmer error, the introduction of new threads of execution should be
+        explicit.
+      </p><p>
+        In this proposal, new coroutine-based threads of execution are initiated
+        using the <code class="computeroutput"><span class="identifier">spawn</span></code> function.
+        In addition to launching a new thread of execution, this function requires
+        the programmer to specify the executor that will be used for it.
+      </p></div><div class="section" title="5.3.&#160;Refactoring and composition"><div class="titlepage"><div><div><h3 class="title"><a name="networking_await.refactoring_and_composition"></a>5.3.&#160;Refactoring and composition</h3></div></div></div><p>
+        Unlike the approach proposed in P0055R0, this proposal does not encode the
+        implementation of an asynchronous operation into an initiating function's
+        return type. Specifically, all asynchronous operations that participate in
+        a coroutine return an <code class="computeroutput"><span class="identifier">awaitable</span><span class="special">&lt;</span><span class="identifier">T</span><span class="special">&gt;</span></code>.
+        This allows us to perform simple, non-coroutine based composition of coroutine-aware
+        functions, as in:
+      </p><pre class="programlisting"><span class="identifier">awaitable</span><span class="special">&lt;</span><span class="keyword">void</span><span class="special">&gt;</span> <span class="identifier">throttled_post</span><span class="special">(</span><span class="identifier">await_context</span> <span class="identifier">ctx</span><span class="special">)</span>
+<span class="special">{</span>
+  <span class="keyword">if</span> <span class="special">(</span><span class="identifier">throttle_required</span><span class="special">())</span>
+    <span class="keyword">return</span> <span class="identifier">my_simple_timer</span><span class="special">.</span><span class="identifier">async_wait</span><span class="special">(</span><span class="identifier">ctx</span><span class="special">);</span>
+  <span class="keyword">else</span>
+    <span class="keyword">return</span> <span class="identifier">post</span><span class="special">(</span><span class="identifier">ctx</span><span class="special">);</span>
+<span class="special">}</span>
+</pre><p>
+        Indeed, this proposal's <code class="computeroutput"><span class="identifier">awaitable</span><span class="special">&lt;</span><span class="identifier">T</span><span class="special">&gt;</span></code>
+        return type mirrors (most of) the regular behaviour of "normal"
+        function return types. (The main exception being a lack of convertibility
+        between types.) This allows end users to compose asynchronous operations
+        and coroutines alike, as shown in the "Refactoring" example above.
+      </p></div><div class="section" title="5.4.&#160;Placement of the await_context arguments"><div class="titlepage"><div><div><h3 class="title"><a name="networking_await.placement_of_the__await_context__arguments"></a>5.4.&#160;Placement of the <code class="computeroutput"><span class="identifier">await_context</span></code>
+      arguments</h3></div></div></div><p>
+        In this proposal, the <code class="computeroutput"><span class="identifier">await_context</span></code>
+        is passed as the final argument to a thread of execution's entry point. In
+        early prototypes it was passed as the initial argument, but this interfered
+        with the ability to implement <code class="computeroutput"><span class="identifier">spawn</span></code>
+        using <code class="computeroutput"><span class="identifier">std</span><span class="special">::</span><span class="identifier">invoke</span></code> (necessary to support <code class="computeroutput"><span class="identifier">spawn</span></code>-ing member functions).
+      </p></div><div class="section" title="5.5.&#160;Performance notes"><div class="titlepage"><div><div><h3 class="title"><a name="networking_await.performance_notes"></a>5.5.&#160;Performance notes</h3></div></div></div><p>
+        This library proposal should have minimal performance overhead on top of
+        that already imposed by the <code class="computeroutput"><span class="identifier">co_await</span></code>-based
+        coroutine mechanism.
+      </p><p>
+        First, the P0055R0 approach of encoding the implementation into the initiating
+        function return type appears to be unnecessary. Instead, asynchronous operations
+        can encapsulate "allocated" state into a temporary coroutine that
+        is then returned by the initiating function inside an <code class="computeroutput"><span class="identifier">awaitable</span><span class="special">&lt;</span><span class="identifier">T</span><span class="special">&gt;</span></code>
+        object. The compiler's allocation/deallocation elision optimization should
+        then eliminate the allocation. (Unfortunately, at the time of writing this
+        could not be verified, due to lack of access to a compiler with this optimization.)
+      </p><p>
+        Second, in low latency scenarios where single-threaded execution is employed,
+        use of <code class="computeroutput"><span class="identifier">basic_unsynchronized_await_context</span></code>
+        ensures that coroutines introduce no additional synchronization overhead.
+      </p><p>
+        What is less certain, however, is the performance impact of refactoring code
+        into child coroutines within a thread of execution (as shown in the "Refactoring"
+        example above). There is significant machinery required to transport a return
+        value from a callee to the caller. It is not clear whether compiler heroics
+        can reduce this cost to something approaching a normal function return, let
+        alone the coroutine equivalent of inlining the callee.
+      </p></div></div><div class="section" title="6.&#160;Impact on the standard"><div class="titlepage"><div><div><h2 class="title" style="clear: both"><a name="networking_await.impact_on_the_standard"></a>6.&#160;Impact on the standard</h2></div></div></div><p>
+      This is a pure extension to the draft Networking Technical Specification. It
+      does not require changes to that specification nor to any other part of the
+      standard.
+    </p></div><div class="section" title="7.&#160;Relationship to other proposals"><div class="titlepage"><div><div><h2 class="title" style="clear: both"><a name="networking_await.relationship_to_other_proposals"></a>7.&#160;Relationship to other proposals</h2></div></div></div><p>
+      This paper proposes an extension to the draft Networking Technical Specification
+      to add support for <code class="computeroutput"><span class="identifier">co_await</span></code>-based
+      coroutines. These coroutines are specified in P0057R1.
+    </p><p>
+      This paper provides an alternative design for integrating the coroutines to
+      that proposed in P0055R0 <span class="emphasis"><em>On Interactions Between Coroutines and Networking
+      Library</em></span>. In particular, this proposal requires no modification to
+      the design of the draft Networking Technical Specification, and it addresses
+      the design issues raised in section 5 of P0162R0 <span class="emphasis"><em>A response to P0055R0</em></span>.
+    </p></div><div class="section" title="8.&#160;Proposed text"><div class="titlepage"><div><div><h2 class="title" style="clear: both"><a name="networking_await.proposed_text"></a>8.&#160;Proposed text</h2></div></div></div><p>
+      TBD
+    </p></div><div class="section" title="9.&#160;Acknowledgements"><div class="titlepage"><div><div><h2 class="title" style="clear: both"><a name="networking_await.acknowledgements"></a>9.&#160;Acknowledgements</h2></div></div></div><p>
+      The author would like to acknowledge Jamie Allsop and Arash Partow for providing
+      design feedback and comments on this proposal.
+    </p></div></div></body></html>

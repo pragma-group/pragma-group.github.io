@@ -1,0 +1,279 @@
+<!doctype html>
+<title>Recursive lambdas</title>
+
+<style type="text/css">
+  ins, ins * { text-decoration:none; font-weight:bold; background-color:#A0FFA0 }
+  del, del * { text-decoration:line-through; background-color:#FFA0A0 }
+  #hidedel:checked ~ * del, #hidedel:checked ~ * del * { display:none; visibility:hidden }
+
+blockquote { color: #000000; background-color: #F1F1F1;
+  border: 1px solid #D1D1D1;
+  padding-left: 0.5em; padding-right: 0.5em; }
+blockquote.stdins { text-decoration: underline;
+  color: #000000; background-color: #C8FFC8;
+  border: 1px solid #B3EBB3; padding: 0.5em; }
+blockquote.stddel { text-decoration: line-through;
+  color: #000000; background-color: #FFEBFF;
+  border: 1px solid #ECD7EC;
+  padding-left: 0.5em; padding-right: 0.5em; }
+
+p.grammarlhs { margin-bottom: 0 }
+p.grammarrhs { margin-left:8em; margin-top:0; margin-bottom:0; text-indent:-4em }
+</style>
+
+<div style="text-align: right; float: right">
+ISO/IEC JTC1 SC22 WG21<br>
+P0839R0<br>
+Richard Smith<br>
+richard@metafoo.co.uk<br>
+2017-10-16<br>
+</div>
+
+<h1>Recursive lambdas</h1>
+
+<h2>Motivation</h2>
+
+<p>
+Lambdas are a useful tool for local code refactoring.
+However, we sometimes want to use the lambda from within
+itself, either to permit direct recursion or to allow the
+closure to be registered as a continuation. This is
+surprisingly difficult to accomplish well in current C++.
+
+<p>
+Example:
+
+<pre>
+void read(Socket sock, OutputBuffer buff) {
+  sock.readsome([&amp;] (Data data) {
+    buff.append(data);
+    sock.readsome(/*current lambda*/);
+  }).get();
+}
+</pre>
+
+<p>
+One natural attempt to reference a lambda from itself
+is to store it in a variable and capture that variable
+by reference:
+
+<pre>
+auto on_read = [&amp;] (Data data) {
+  buff.append(data);
+  sock.readsome(on_read);
+};
+</pre>
+
+However, this is not possible due to a semantic circularity:
+the type of the <tt>auto</tt> variable is not deduced until
+after the lambda-expression is processed, which means the
+lambda-expression cannot reference the variable.
+
+<p>
+Another natural approach is to use a <tt>std::function</tt>:
+
+<pre>
+std::function<void(Data)> on_read = [&amp;] (Data data) {
+  buff.append(data);
+  sock.readsome(on_read);
+};
+</pre>
+
+This approach compiles, but typically introduces an abstraction
+penalty: the <tt>std::function</tt> may incur a memory allocation
+and the invocation of the lambda will typically require an indirect
+call.
+
+<p>
+For a zero-overhead solution, there is often no better approach
+than defining a local class type explicitly.
+
+<h2>Proposal</h2>
+
+<p>
+This paper proposes allowing a lambda to refer to itself within
+its own definition. Specifically, a lambda will be permitted to
+provide a name prior to its parameter list (mirroring the syntax
+for a regular function), and within the body of the lambda, that
+name will be an lvalue denoting the <tt>*this</tt> of the closure
+object.
+
+<pre>
+auto visit_tree = [&amp;] <b>visit</b>(Tree *node) -> void { // <i>self parameter </i>visit<i> names lambda object</i>
+  if (node->left) <b>visit</b>(node->left);              // <i>and can be used to make recursive calls</i>
+  out &lt;&lt; node->value;
+  if (node->right) <b>visit</b>(node->right);
+};
+// <i>the name </i>visit<i> is not in scope here</i>
+</pre>
+
+<p>
+The name of the lambda can be used to refer to the lambda
+for any purpose, including making copies of the lambda or
+capturing it within a nested lambda.
+
+<pre>
+sock.readsome([&amp;sock, &amp;buff] on_read(Data data) {
+  buff.append(data);
+  sock.readsome(on_read); // make a copy of the lambda
+  // ...
+}).get();
+</pre>
+
+If the lambda does not specify an explicit return type,
+recursive calls will not be possible until the first
+<tt>return</tt> statement has been seen,
+as a consequence of the usual <tt>auto</tt> return type
+deduction rules applied to the lambda's
+<tt>operator()</tt> function.
+
+<pre>
+auto bad_fib = [] fib(int n) {
+  // error, return type for closure's operator() not yet deduced
+  return fib(n-1) + fib(n-2);
+};
+auto less_bad_fib = [] fib(int n) {
+  if (n == 0 || n == 1) return 1;
+  return fib(n-1) + fib(n-2); // ok
+};
+</pre>
+
+<h3>Implicit captures</h3>
+
+<p>
+When a lambda has a <i>capture-default</i>
+(<tt>[&amp;]</tt> or <tt>[=]</tt>),
+we do not know the
+semantic properties of the closure type until we reach
+the end of the lambda's body, because we do not know
+which local variables it captures.
+We propose to handle this by treating the closure type
+as an incomplete type within the body of the lambda if
+the lambda has a <i>capture-default</i>.
+In that case, the self parameter
+of the lambda can still have its call operator invoked
+and it can be captured by reference in nested lambdas,
+but it cannot be copied.
+
+<pre>
+auto copy = [&amp;] copysome() {
+  // ok, captures self parameter of lambda 'copysome'
+  // by reference
+  sock1.readsome([&amp;] on_read(Data data) {
+    // ok, can call copysome even though type is incomplete
+    sock2.writesome(std::ref(copysome));
+  });
+};
+</pre>
+
+For uses where the lambda needs to be copied, the user
+code will need to explicitly specify a list of captures.
+
+<h2>Proposed wording</h2>
+
+<p>Change in grammar in 8.1.5 [expr.prim.lambda]:</p>
+
+<p class="grammarlhs"><i>lambda-declarator:</i>
+<p class="grammarrhs">
+<ins><i>identifier</i><sub>opt</sub></ins>
+<tt>(</tt>
+<i>parameter-declaration-clause</i>
+<tt>)</tt>
+<i>decl-specifier-seq</i><sub>opt</sub>
+<i>noexcept-specifier</i><sub>opt</sub>
+<i>attribute-specifier-seq</i><sub>opt</sub>
+<i>trailing-return-type</i><sub>opt</sub>
+
+<p>Add a new paragraph at the end of 8.1.5 [expr.prim.lambda]:</p>
+
+<blockquote class="stdins">
+If the optional <i>identifier</i> within the <i>lambda-declarator</i>
+is present, it declares the lambda's <i>self parameter</i>, which is
+a variable whose declarative region is the <i>lambda-expression</i>'s
+<i>compound-statement</i>.
+For a lambda with closure type <tt>T</tt>, the self parameter is
+a variable of type <i>cv</i> <tt>T&amp;</tt>
+initialized with the closure object, where <i>cv</i> is empty if
+<tt>mutable</tt> appears within the <i>decl-specifier-seq</i> and is
+<tt>const</tt> otherwise.
+[&nbsp;<i>Example:</i> <pre>
+auto fib = [] self(int n) {
+  if (n &lt; 2) return n;
+  return self(n-1) + self(n-2);
+};
+</pre> &mdash; <i>end example</i>&nbsp;]
+</blockquote>
+
+<p>Add a new paragraph before 8.1.5.1 [expr.prim.lambda.closure] paragraph 10 ("The <i>lambda-expression</i>'s <i>compound-statement</i> yields the <i>function-body</i> of the function call operator [&hellip;]":</p>
+
+<blockquote class="stdins">
+The closure type is an incomplete type until the end of the
+<i>compound-statement</i> if the <i>lambda-expression</i> has a
+<i>lambda-capture</i> that includes a <i>capture-default</i>. Otherwise, the
+closure type becomes a complete type at the beginning of the
+<i>compound-statement</i>.
+The point of declaration of the function call operator or function call
+operator template for the closure type precedes the <i>compound-statement</i>
+([basic.scope.class]).
+[&nbsp;<i>Example:</i> <pre>
+void f(int n) {
+  auto a = [&amp;] g(int k) -> int {
+    return k ? g(k - 1) + n : 0;   // OK, lookup into incomplete closure type finds member <tt>operator()</tt>
+  };
+  auto b = [&amp;] h(int k) {
+    [h] { h(0); } ();              // error: cannot capture parameter <tt>h</tt> with incomplete type
+  };
+}
+</pre> &mdash; <i>end example</i>&nbsp;]
+</blockquote>
+
+<p>Change in 8.1.5.1 [expr.prim.lambda.closure] paragraph 6:</p>
+
+<blockquote>
+[&hellip;] The value returned by this conversion function is
+the address of a function <tt>F</tt> that, when invoked,
+has the same effect as invoking the closure type's function
+call operator <ins>on an unspecified object of the closure
+type</ins>. [&hellip;]
+</blockquote>
+
+<h2>Alternatives</h2>
+
+<ul>
+<li>
+Allow an <tt>auto</tt> variable to be referenced in its
+initializer in this special case.
+<br><b>Pro:</b> no new syntax required, avoids duplicating
+variable name as lambda self parameter name
+<br><b>Con:</b> requires a variable declaration, adds a
+special case and extra complexity to the language rules
+
+<li>
+Allow <tt>this</tt> to be used to refer to the enclosing
+closure object within a lambda.
+<br><b>Pro:</b> does not require new syntax
+<br><b>Con:</b> conflicts with existing use for denoting
+enclosing member function's <tt>this</tt> parameter, does
+not handle nested lambdas
+
+<li>
+Permit arbitrary use of self parameter within a lambda with
+a <i>capture-default</i>,
+by giving it a dependent type and substituting the actual
+type after parsing.
+<br><b>Pro:</b> allows full use of self parameter in
+lambda with <i>capture-default</i>
+<br><b>Con:</b> adds complexity and creates cases where
+<tt>typename</tt> and <tt>template</tt> keywords would
+surprisingly be necessary
+
+<li>
+Treat self parameter as a name for the closure type's
+<tt>operator()</tt> function, rather than as a synoynm
+for the lambda object.
+<br><b>Pro:</b> consistent rule for all lambdas, regardless
+of <i>capture-default</i>
+<br><b>Con:</b> does not permit lambda to pass itself
+(by copy or reference), requires special-case rule to
+support use (mutual recursion) within nested lambdas
+</ul>

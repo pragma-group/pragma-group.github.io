@@ -1,0 +1,499 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"
+        "http://www.w3.org/TR/html4/loose.dtd">
+<html>
+<head>
+  <title>Re-enabling shared_from_this</title>
+  <meta charset='UTF-8'/>
+
+  <style type="text/css">
+  p {text-align:justify}
+  li {text-align:justify}
+  blockquote.note
+  {
+          background-color:#E0E0E0;
+          padding-left: 15px;
+          padding-right: 15px;
+          padding-top: 1px;
+          padding-bottom: 1px;
+  }
+  p code {color:navy}
+  ins p code {color:#00A000}
+  ins {color:#00A000}
+  del {color:#A00000}
+  table#boilerplate { border:0 }
+  table#boilerplate td { padding-left: 2em }
+  table.bordered, table.bordered th, table.bordered td {
+    border: 1px solid;
+    text-align: center;
+  }
+  </style>
+</head>
+<body>
+
+<table id="boilerplate">
+  <tr>
+    <td>Document number:</td>
+    <td>P0033R0</td>
+  </tr>
+  <tr>
+    <td>Date:</td>
+    <td>2015-09-23</td>
+  </tr>
+  <tr>
+    <td>Project:</td>
+    <td>Programming Language C++, Library Evolution Working Group</td>
+  </tr>
+  <tr>
+    <td>Reply-to:</td>
+    <td>
+    Jonathan Wakely <a href="mailto:cxx@kayari.org">&lt;cxx@kayari.org&gt;</a>,
+    Peter Dimov <a href="mailto:pdimov@pdimov.com">&lt;pdimov@pdimov.com&gt;</a>
+    </td>
+  </tr>
+</table>
+
+<hr>
+
+<h1 align="center">Re-enabling <code>shared_from_this</code></h1>
+
+<h2 id="toc">I. Table of Contents</h2>
+
+<ul>
+<li><a href="#intro">Introduction</a></li>
+<li><a href="#motivation">Motivation and Scope</a></li>
+<li><a href="#impact">Impact On The Standard</a></li>
+<li><a href="#design">Design Decisions</a></li>
+<li><a href="#spec">Technical Specification</a></li>
+<li><a href="#impl">Sample Implementation</a></li>
+<li><a href="#ack">Acknowledgements</a></li>
+<li><a href="#ref">References</a></li>
+</ul>
+
+
+<h2 id="intro">II. Introduction</h2>
+
+<p>
+The class template <code>enable_shared_from_this</code> is very weakly
+specified, making it hard to reason about its behaviour in some situations and
+risking implementation divergence.
+
+This proposal provides a more precise specification and where the desired
+behaviour is unclear recommends standardising the behaviour of
+<code>boost::enable_shared_from_this</code>.
+
+In addition the <code>weak_from_this</code> member functions of the Boost
+version are proposed for inclusion in C++.
+</p>
+
+<h2 id="motivation">III. Motivation and Scope</h2>
+
+<p>
+LWG issue
+<a href="http://cplusplus.github.io/LWG/lwg-active.html#2529">2529</a>
+shows the following program which has unspecified behaviour in C++14:
+</p>
+
+<pre><code>
+#include &lt;memory&gt;
+
+using namespace std;
+
+int main()
+{
+  struct X : public enable_shared_from_this&lt;X&gt; { };
+  auto xraw = new X;
+  shared_ptr&lt;X&gt; xp1(xraw);  <em>// #1</em>
+  {
+    shared_ptr&lt;X&gt; xp2(xraw, [](void*) { });  <em>// #2</em>
+  }
+  xraw-&gt;shared_from_this();  <em>// #3</em>
+}
+</code></pre>
+
+<p>
+The standard says that #1 should set <code>xraw-&gt;__weak_this</code> to
+share ownership with <code>xp1</code>.
+
+It is unclear whether #2 should update it to share ownership with
+<code>xp2</code> instead. At #3 all the preconditions for calling
+<code>shared_from_this()</code> are met:
+</p>
+
+<blockquote>
+ <em>Requires:</em> <code>enable_shared_from_this&lt;T&gt;</code> shall be an
+     accessible base class of <code>T</code>. <code>*this</code> shall be a
+     subobject of an object <code>t</code> of type <code>T</code>.
+     There shall be at least one <code>shared_ptr</code> instance
+     <code>p</code> that owns <code>&amp;t</code>.
+</blockquote>
+
+<p>
+But depending on what happened at #2 it might be impossible to meet the
+postconditions:
+</p>
+
+<blockquote>
+ <em>Returns:</em> A <code>shared_ptr&lt;T&gt;</code> object <code>r</code> that
+     shares ownership with <code>p</code>.<br>
+ <em>Postconditions:</em> <code>r.get() == this</code>.
+</blockquote>
+
+<p>
+If <code>xraw-&gt;__weak_this</code> was updated at #2 then it is impossible to
+meet the postcondition because the <code>weak_ptr</code> is expired.
+
+For the case where #2 does not update the <code>weak_ptr</code> a different
+example can be constructed that again makes it impossible to meet the
+postcondition, by ensuring that whichever <code>shared_ptr</code> shares
+ownership with the <code>weak_ptr</code> is made to release its ownership
+before the call to <code>shared_from_this()</code>.
+</p>
+
+<p>
+The root of the problem is that <code>enable_shared_from_this</code> is
+underspecified, leaving the precise semantics up to implementors.
+
+The aim of this proposal is to clearly specify the effects so that the
+behaviour of the example above is predictable and portable.
+</p>
+
+<p>
+The proposed specification is <strong>is a breaking change</strong> for the
+three major standard library implementations tested, however it is believed
+to be unlikely that any working code is relying on the current behaviour.
+</p>
+
+<p>
+In addition to the improved specification for
+<code>enable_shared_from_this</code> two new member functions are proposed.
+
+The <code>weak_from_this</code> functions are directly analogous to the
+existing <code>shared_from_this</code> functions but they return a
+<code>weak_ptr</code> instead.
+
+These new functions are a pure extension and have been provided in Boost since
+the recent 1.58 release.
+
+It is possible to obtain a <code>weak_ptr</code> today via
+<code>weak_ptr&lt;T&gt;(shared_from_this())</code> but the proposed new
+functions achieve the same thing more efficiently (with fewer reference count
+modifications), they more clearly express the intent, and they can be used
+in additional situations.
+</p>
+
+<p>
+The proposed wording removes the preconditions on <code>shared_from_this</code>
+so that it is now well-defined to call it on an object which is not owned by
+any <code>shared_ptr</code>, in which case <code>shared_from_this</code> would
+throw an exception.
+
+<code>weak_from_this().lock()</code> is a non-throwing alternative to
+<code>shared_from_this()</code> that returns an empty <code>shared_ptr</code>
+when the object is not owned by any <code>shared_ptr</code>.
+
+This can be used in situations where the overhead of an exception is
+undesirable and in environments that disable exceptions entirely.
+</p>
+
+<p>
+<code>weak_from_this</code> can also be used in the object's destructor, after
+the <code>weak_this</code> member has expired.
+
+<code>weak_from_this</code> can be used to get a <code>weak_ptr</code> that
+still shares ownership with any other <code>weak_ptr</code> objects that still
+exist after the last "strong" reference has been released by the last
+<code>shared_ptr</code>.
+</p>
+
+<p>
+Finally, the proposed changes would also resolve LWG issue <a
+href="http://www.open-std.org/jtc1/sc22/wg21/docs/lwg-active.html#2179">2179</a>.  The
+improved specification clarifies that the behaviour of the example in the issue
+is undefined, as there is no sharing between the two instances.
+</p>
+
+<h2 id="design">V. Design Decisions</h2>
+
+<p>
+The important design decision is whether or not a <code>weak_ptr</code> member
+that already shares ownership with one <code>shared_ptr</code> should be
+modified by subsequent constructions of unique <code>shared_ptr</code>
+objects.
+</p>
+
+<p>
+Existing practice is consistent across the Dinkumware, GNU and LLVM
+implementations of <code>std::shared_ptr</code>, with all three updating
+the <code>weak_ptr</code> member on subsequent constructions, however it
+is not clear whether this is by design or simply an oversight due to not
+considering the possibility (which is the case for the GNU implementation).
+On the other hand, <code>boost::shared_ptr</code> does not update the
+<code>weak_ptr</code> member and this is a deliberate choice that was
+made in response to user feedback<a href="#ref1" id="ref1_">[1]</a> and
+consideration of the alternatives.
+When asked about the above example Peter Dimov said:
+</p>
+
+<blockquote>
+"Based on our experience with boost::enable_shared_from_this, there are
+real-world cases where you very much want the above to work, and there are
+no cases in which you want it to not work."
+</blockquote>
+
+<blockquote>
+"The first owner is generally what one wants returned from shared_from_this.
+There is one corner case here and it occurs when the object acquires a
+second owner when the first owner is already dead. The Boost implementation
+does replace the owner in this case.
+</blockquote>
+
+<p>
+In support of the argument that the first owner is the one that should be
+associated with the <code>weak_this</code> member, Peter also points out that
+the code doing:
+</p>
+
+<pre><code>
+  {
+    shared_ptr&lt;X&gt; xp2(xraw, [](void*) { });  <em>// #2</em>
+  }
+</code></pre>
+
+<p>
+may occur somewhere deep inside a library that only gets a raw pointer,
+and that therefore it's much better if it doesn't break
+<code>xp1-&gt;shared_from_this()</code>,
+because the owner of <code>xp1</code> would not expect it.
+</p>
+
+<p>
+The experience from Boost is persuasive, so the proposed change is to
+standardise the Boost behaviour, even though that requires all three
+standard library implementations to change their previous behaviour.
+</p>
+
+<h2 id="spec">VI. Technical Specification</h2>
+
+<blockquote class="note">
+For the purposes of SG10, I recommend a feature-testing macro named
+<code>__cpp_lib_enable_shared_from_this</code> to indicate conformance to
+the new specification,
+and if a separate macro is desired for the new members (which I don't think
+is necessary), <code>__cpp_lib_weak_from_this</code>.
+</blockquote>
+
+<p>
+Add a new paragraph before paragraph 1 of [util.smartptr.shared.const]:
+</p>
+
+<blockquote>
+<ins style="text-decoration:none">
+<p>
+In the constructor definitions below,
+<em>enables <code>shared_from_this</code> with <code>p</code></em>, for a
+pointer <code>p</code> of type <code>Y*</code>, means that if <code>Y</code>
+has an accessible base class that is a specialization of
+<code>enable_shared_from_this</code> ([util.smartptr.enab]),
+then the constructor evaluates the statement:
+</p>
+<pre><code>
+    if (p != nullptr &amp;&amp; p-&gt;weak_this.expired())
+      p-&gt;weak_this = shared_ptr&lt;remove_cv_t&lt;Y&gt;&gt;(*this, const_cast&lt;remove_cv_t&lt;Y&gt;*&gt;(p));
+</code></pre>
+</ins>
+</blockquote>
+
+<p>
+Edit paragraph 4:
+</p>
+
+<blockquote>
+<i>Effects:</i> Constructs a <code>shared_ptr</code> object that <i>owns</i> the pointer
+<code>p</code>. <ins> Enables <code>shared_from_this</code> with <code>p</code>.</ins>
+</blockquote>
+
+<p>
+Edit paragraph 9:
+</p>
+
+<blockquote>
+<i>Effects:</i>  Constructs a <code>shared_ptr</code> object that <i>owns</i> the
+object <code>p</code> and the deleter <code>d</code>. <ins>The first and second constructors enable <code>shared_from_this</code> with <code>p</code>.</ins>
+The second and fourth constructors shall use a copy of <code>a</code> to
+allocate memory for internal use.
+</blockquote>
+
+<p>
+Edit paragraph 29:
+</p>
+
+<blockquote>
+<i>Effects:</i> Equivalent to <code>shared_ptr(r.release(), r.get_deleter())</code> when
+<code>D</code> is not a reference type, otherwise <code>shared_ptr(r.release(),
+ref(r.get_deleter()))</code>.  <ins>Enables <code>shared_from_this</code> with the value that was returned by <code>r.release()</code>.</ins>
+</blockquote>
+
+<p>
+Add two member functions and an exposition-only member to the class synopsis
+in [util.smartptr.enab]:
+</p>
+
+<blockquote>
+<pre><code>namespace std {
+  template&lt;class T&gt; class enable_shared_from_this {
+  protected:
+    constexpr enable_shared_from_this() noexcept;
+    enable_shared_from_this(enable_shared_from_this const&amp;) noexcept;
+    enable_shared_from_this&amp; operator=(enable_shared_from_this const&amp;) noexcept;
+    ~enable_shared_from_this();
+  public:
+    shared_ptr&lt;T&gt; shared_from_this();
+    shared_ptr&lt;T const&gt; shared_from_this() const;
+    <ins>weak_ptr&lt;T&gt; weak_from_this();
+    weak_ptr&lt;T const&gt; weak_from_this() const;
+  private:
+    mutable weak_ptr&lt;T&gt; weak_this; <em>// exposition only</em></ins>
+  };
+} <em>// namespace std</em>
+</code></pre>
+</blockquote>
+
+<p>
+Edit paragraph 4:
+</p>
+
+<blockquote>
+<i>Effects:</i>  <del>Constructs an <code>enable_shared_from_this&lt;T&gt;</code> object.</del><ins>Value-initializes <code>weak_this</code>.</ins>
+</blockquote>
+
+
+<p>
+Add a note after paragraph 5:
+</p>
+
+<blockquote>
+<i>Returns:</i>  <code>*this</code>.
+<br><br>
+<ins style="text-decoration:none">
+[&nbsp;<i>Note:</i>  <code>weak_this</code> is not changed. <i>&nbsp;—&nbsp;end note</i>&nbsp;]
+</ins>
+</blockquote>
+
+<p>
+Remove the redundant destructor specification and paragraph 6:
+</p>
+
+<blockquote>
+<del>
+<code>~enable_shared_from_this</code>
+<br><br>
+<i>Effects:</i>  Destroys <code>*this</code>.
+</del>
+</blockquote>
+
+<p>
+Replace paragraphs 7, 8 and 9:
+</p>
+
+<blockquote>
+<code>
+shared_ptr&lt;T&gt;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; shared_from_this();
+<br>
+shared_ptr&lt;T const&gt; shared_from_this() const;
+</code>
+<br><br>
+<del>
+<i>Requires:</i>  <code>enable_shared_from_this&lt;T&gt;</code> shall be an accessible base
+class of <code>T</code>. <code>*this</code> shall be a subobject of an object <code>t</code> of
+type <code>T</code>. There shall be at least one <code>shared_ptr</code> instance <code>p</code>
+that <i>owns</i> <code>&amp;t</code>.
+<br>
+<i>Returns:</i>  A <code>shared_ptr&lt;T&gt;</code> object <code>r</code>
+that <i>shares ownership with</i> <code>p</code>.
+</del>
+<br><br>
+<ins>
+<i>Returns:</i>  <code>shared_ptr&lt;T&gt;(weak_this)</code>.
+</ins>
+</blockquote>
+
+
+<p>
+Add definitions for the new members after the replaced paragraph 9:
+</p>
+
+<blockquote>
+<ins style="text-decoration:none">
+<code>
+weak_ptr&lt;T&gt;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; weak_from_this();
+<br>
+weak_ptr&lt;T const&gt; weak_from_this() const;
+</code>
+<br><br>
+<i>Returns:</i>  <code>weak_this</code>.
+</ins>
+</blockquote>
+
+<p>
+Remove the note in paragraphs 10 and 11:
+</p>
+
+<blockquote>
+<del>
+[&nbsp;<i>Note:</i> A possible implementation is shown below:
+<br>
+<pre><code>template&lt;class T&gt; class enable_shared_from_this {
+private:
+  weak_ptr&lt;T&gt; __weak_this;
+protected:
+  constexpr enable_shared_from_this() : __weak_this() { }
+  enable_shared_from_this(enable_shared_from_this const &amp;) { }
+  enable_shared_from_this&amp; operator=(enable_shared_from_this const &amp;) { return *this; }
+  ~enable_shared_from_this() { }
+public:
+  shared_ptr&lt;T&gt; shared_from_this() { return shared_ptr&lt;T&gt;(__weak_this); }
+  shared_ptr&lt;T const&gt; shared_from_this() const { return shared_ptr&lt;T const&gt;(__weak_this); }
+};
+</code></pre>
+<br><br>
+The <code>shared_ptr</code> constructors that create unique pointers
+can detect the presence of an <code>enable_shared_from_this</code> base and
+assign the newly created <code>shared_ptr</code> to its <code>__weak_this</code>
+member. <i>&nbsp;—&nbsp;end note</i>&nbsp;]
+</del>
+</blockquote>
+
+
+
+
+
+<h2 id="impl">VII. Implementation Experience</h2>
+
+<p>
+Boost's <code>boost::enable_shared_from_this</code> has done the
+<code>expired()</code> check for years, and has provided
+<code>weak_from_this</code> since the Boost 1.58.0 release.
+The libstdc++ development sources were recently altered to do the expired
+check.
+</p>
+
+<h2 id="ack">VIII. Acknowledgements</h2>
+
+<p>
+Thanks to Howard Hinnant for his comments on the issue.
+</p>
+
+<h2 id="ref">IX. References</h2>
+
+<p>
+<a href="#ref1_" id="ref1">[1]</a>
+<a href="https://svn.boost.org/trac/boost/ticket/2584">Ticket #2584:
+boost::enable_shared_from_this + boost.python library</a>,
+Boost Trac, Nicolas Lelong, 2008-12-12.
+</p>
+<p>
+<a href="#ref2_" id="ref2">[2]</a>
+<a href="http://lists.boost.org/Archives/boost/2011/06/182597.php">[boost]
+enable_shared_from_this::weak_from_this() request</a>,
+Boost mailing list, Marat Abrarov, 2011-06-11.
+</p>

@@ -1,0 +1,534 @@
+
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html">
+<style type="text/css">
+  ins { text-decoration:none; font-weight:bold; background-color:#A0FFA0 }
+  del { text-decoration:line-through; background-color:#FFA0A0 }
+  xins { font-weight: inherit; color: #2020ff }
+
+  tab { padding-left: 4em; }
+  tab2 { padding-left: 2em; }
+</style>
+<title>More constexpr containers</title>
+</head>
+
+
+<body>
+<p align="right"><b>P0784R3, 2018-05-04</b>
+<br>EWG, LEWG
+</p>
+
+<p align="right">
+<br>Louis Dionne (ldionne.2@gmail.com)  
+<br>Richard Smith (richard@metafoo.co.uk)  
+<br>Nina Ranns (dinka.ranns@gmail.com)
+<br>Daveed Vandevoorde (daveed@edg.com)
+</p>
+
+<h1>More constexpr containers</h1>
+
+<p>
+<br>R0: Original proposal, presented in Albuquerque 2017.
+<br><tab2>EWG approved the direction: SF: 11 | F: 12 | N: 2 | A: 0 | SA: 0
+<br>R1: Provided initial wording.
+<br><tab2>EWG approved the proposal as presented: SF: 23 | F: 11 | N: 0 | A: 0 | SA: 0
+<br>R2: Implemented core review comments.
+<br>R3 (this version): Extends proposal for non-transient allocations.
+</p>
+
+<h3>Introduction and motivation</h3>
+
+<p>Variable size container types, like <code>std::vector</code> or
+<code>std::unordered_map</code>, are generally useful for runtime programming,
+and therefore also potentially useful in constexpr computations. This has been
+made clear by some recent experiments such as the
+<a href="https://youtu.be/HMB9oXFobJc">Constexpr ALL the things!</a>
+presentation (and its companion paper
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/p0810r0.pdf">P0810R0</a>
+published in the pre-Albuquerque mailing) by Ben Deane and Jason Turner,
+in which they build a compile-time JSON parser and JSON value representation
+using <code>constexpr</code>. Amongst other things, the lack of variable size
+containers forces them to use primitive fixed-size data structures in the
+implementation, and to parse the input JSON string twice; once to determine the
+size of the data structures, and once to parse the JSON into those
+structures.</p>
+
+<p>We also expect variable size containers to be a necessity in the reflection
+and metaprogramming APIs that will emerge from the work in SG-7, which decided
+that the preferred direction for a standard solution would involve
+constexpr-like computation. For example, querying the template arguments of a
+class type might look something like:</p>
+
+<pre><code class="language-c++">std::vector&lt;std::metainfo&gt; args = std::meta::get_template_args(reflexpr(T));
+</code></pre>
+
+<h3>Non-transient allocation</h3>
+<p>
+Earlier versions of this paper (<a href="http://wg21.link/P0784R1">P0784r1</a> and
+<a href="http://wg21.link/P0784R2">P0784r2</a>) proposed the changes need for
+constexpr destructors and for so-called "transient constexpr allocations".
+Transient constexpr allocations are dynamic memory allocations occurring
+during a constexpr evaluation that are deallocated before that
+evaluation completes.
+</p>
+
+<p>What about dynamically allocated constexpr storage that hasn't been deallocated by the time evaluation
+completes?  We could that, but there are really compelling use
+cases where this might be desirable. E.g., this could be the basis for a more
+flexible kind of "string literal" class.  We therefore propose that
+a non-transient constexpr allocation be a valid result for a constexpr
+variable initializer if:</p>
+
+<ul>
+<li>the result of evaluating the initializer is an object with a nontrivial
+	constexpr destructor, and</li>
+<li>evaluating that destructor would be a valid core constant expression and
+	would deallocate all the <i>non-transient</i> allocations produced by
+	the evaluation of <i>expr</i>.</li>
+</ul>
+
+Furthermore, we specify that an attempt to deallocate a non-transiently allocated
+object by any other means results in undefined behavior.  (Note that this is unlikely
+because the object pointing to the allocated storage is immutable.)
+
+<p>For example:</p>
+
+<pre><code class="language-c++">#include &lt;memory&gt;
+#include &lt;new&gt;
+using namespace std;
+template&lt;typename T&gt; struct S: allocator&lt;T&gt; {
+  T *ps;
+  int sz;
+  template&lt;int N&gt; constexpr S(T (&amp;p)[N])
+                          : sz{N}
+                          , ps{this-&gt;allocate(N)} {
+    for (int k = 0; k&lt;N; ++k) {
+      new(this-&gt;ps+k) T{p[k]};
+    }
+  }
+  constexpr ~S() {
+    for (int k = 0; k&lt;this-&gt;sz; ++k) {
+      (this-&gt;ps+k)-&gt;T::~T();
+    }
+    this-&gt;deallocate(this-&gt;ps, this-&gt;sz);
+  }
+};
+
+constexpr S&lt;char&gt; str("Hello!");
+  // str ends up pointing to a static array
+  // containing the string "Hello!".
+</code></pre>
+
+<p>The constructor constexpr evaluation in this example is successful,
+producing an <code>S</code> object that points to a non-transient constexpr
+allocation.  The constexpr evaluation of the destructor would also be
+successful and would deallocate the non-transient allocation. The non-transient
+allocation is therefore promoted to static storage.</p>
+
+
+<h3>Implementation experience</h3>
+
+<p>So far, this has not been implemented. However, based on preliminary
+discussion with implementers working on Clang, MSVC and EDG, no blockers that
+would make this feature unimplementable or prohibitively expensive to implement
+have been identified at the moment.</p>
+
+
+<h2>Wording changes</h2>
+
+<p><i>
+	<b>Note 1: </b>These are cummulative changes: They include the changes
+	EWG approved for P0784r1, and build on top of that.
+</i></p>
+
+<p><i>
+	<b>Note 2: </b>The following changes enable "constexpr destructors".
+	See further down for allocation-related changes.
+</i></p>
+
+<p>Change in [basic.types] paragraph 10.5.1:</p>
+<blockquote style="padding-left: 30px;">-it has a 
+<del>trivial</del><ins>constexpr</ins> 
+destructor,
+</blockquote>
+ 
+
+<p>Change in [expr.const] paragraph 2:</p>
+
+<blockquote>An expression <code>e</code> is a <i>core constant expression</i>
+unless the evaluation of <code>e</code>, following the rules of the abstract
+machine (4.6), would evaluate one of the following expressions:</blockquote>
+
+<blockquote style="padding-left: 30px;"> — <code>this</code> (8.1.2),
+except in a constexpr function<del> or</del><ins>,</ins> a constexpr
+constructor,<ins> or a constexpr destructor</ins> that is being
+evaluated as part of e;
+</blockquote>
+
+<blockquote style="padding-left: 30px;"> — an invocation of a function
+other than a constexpr constructor <ins>or destructor </ins>for a
+literal class,<ins>or </ins> a constexpr function <del>, or an implicit
+invocation of a trivial destructor (15.4)</del> [ <i>Note:</i>
+Overload resolution (16.3) is applied as usual — <i>end note</i> ];
+</blockquote>
+
+<blockquote style="padding-left: 30px;"> — an invocation of an
+undefined constexpr function<del> or</del><ins>,</ins> an undefined
+constexpr constructor,<ins> or an undefined constexpr destructor</ins>;
+</blockquote>
+
+<blockquote style="padding-left: 30px;"> — an invocation of an
+instantiated constexpr function<del> or</del><ins>,</ins> a constexpr
+constructor,<ins> or a constexpr destructor</ins> that fails to satisfy the
+requirements for a constexpr function<del> or</del><ins>,</ins> a constexpr
+constructor,<ins> or a constexpr destructor</ins> (10.1.5);
+</blockquote>
+
+
+<blockquote style="padding-left: 30px;"> —  an <i>id-expression</i>
+that refers to a variable or data member of reference type unless the
+reference has a preceding initialization and either
+</blockquote>
+
+<blockquote style="padding-left: 60px;"> — it is initialized with a
+constant expression<ins>,</ins><del> or</del>
+</blockquote>
+
+<blockquote style="padding-left: 60px;"> — its lifetime began within
+the evaluation of <code>e</code><ins>, or</ins><del>;</del>
+</blockquote>
+
+<blockquote style="padding-left: 60px;"><ins> — for an
+<i>id-expression</i> that refers to a data member of a constexpr variable <code>x</code>
+with static storage duration, the evaluation occurs during the
+invocation of a constexpr destructor for <code>x</code>. </ins>
+</blockquote>
+
+<blockquote style="padding-left: 30px;"> — modification of an object
+(8.18, 8.2.6, 8.3.2) unless it is applied to a non-volatile lvalue of literal
+type that refers to <del> non-volatile object whose lifetime began within the
+evaluation of <code>e</code></del>
+</blockquote>
+
+<blockquote style="padding-left: 60px;"><ins> — a non-volatile object
+whose lifetime began within the evaluation of <code>e</code>, or </ins>
+</blockquote>
+
+<blockquote style="padding-left: 60px;"><ins> — a non-volatile
+subobject of a constexpr variable <code>x</code> with static storage duration
+and the modification occurs in an invocation of a
+constexpr destructor for <code>x</code></ins>
+</blockquote> 
+
+
+<p>Add new paragraph after [expr.const] paragraph 2:</p>
+
+
+<blockquote><ins>An object is said to have <i>constant destruction</i> if: </ins></blockquote>
+<blockquote style="padding-left: 30px;"><ins> — it is of a non-class type, or</ins></blockquote>
+<blockquote style="padding-left: 30px;"><ins> — the type of that object has a constexpr destructor and for a hypothetical expression
+<code>e</code> whose only effect is to destroy that object,
+<code>e</code> is a core constant expression.</ins>
+</blockquote>
+
+
+
+<p>Change in [dcl.constexpr] paragraph 2:</p>
+
+<blockquote>A <code>constexpr</code> specifier used in the declaration
+of a function that is not a constructor<ins> or a destructor</ins>
+declares that function to be a <i>constexpr function</i>. Similarly,
+a  <code>constexpr</code> specifier used in a constructor declaration
+declares that constructor to be a <i>constexpr constructor</i>.
+<ins> A  <code>constexpr</code> specifier used in a destructor
+declaration declares that destructor to be a
+<i>constexpr destructor</i>.</ins>
+</blockquote>
+
+<p>Insert new paragraph after [dcl.constexpr] paragraph 4:</p>
+
+<blockquote><ins>The definition of a <code>constexpr</code> destructor
+shall satisfy the following requirements:</ins>
+</blockquote>
+<blockquote style="padding-left: 30px;"><ins>— it shall not be virtual</ins></blockquote>
+<blockquote style="padding-left: 30px;"><ins>— the class shall not
+have any virtual base classes;</ins>
+</blockquote>
+
+<blockquote style="padding-left: 30px;"><ins>— its
+<i>function-body</i> shall satisfy the requirements for a
+<i>function-body</i> of a constexpr function;</ins>
+</blockquote>
+
+<p>Change in [dcl.constexpr] paragraph 6:</p>
+
+<blockquote>If the instantiated template specialization of a constexpr
+function template or member function of a class template would fail to
+satisfy the requirements for a constexpr function<del> or</del><ins>,</ins>
+a constexpr constructor,<ins> or a constexpr destructor</ins>, that
+specialization is still a constexpr function<del> or</del><ins>,</ins>
+a constexpr constructor,<ins> or a constexpr destructor</ins>, even though a
+call to such a function cannot appear in a constant expression. If no
+specialization of the template would satisfy the requirements for a constexpr
+function<del> or</del><ins>,</ins> a constexpr constructor,<ins> or a constexpr
+destructor</ins> when considered as a non-template function<del>
+or</del><ins>,</ins> a constructor,<ins> or a  destructor</ins>, the template
+is ill-formed, no diagnostic required.
+</blockquote>
+
+<p>Change in [dcl.constexpr] paragraph 8:</p>
+
+<blockquote>The constexpr specifier has no effect on the type of a
+constexpr function<del> or</del><ins>,</ins> a constexpr constructor,<ins> or a
+constexpr destructor</ins>.
+</blockquote>
+
+<p>Change in [dcl.constexpr] paragraph 9:</p>
+
+<blockquote>In any <code>constexpr</code> variable declaration, the
+full-expression of the initialization shall be a constant expression (8.20).
+<ins>A <code>constexpr</code> variable shall have constant
+destruction.</ins>
+</blockquote>
+
+<p>Change in [class.dtor]  paragraph 1:</p>
+
+<blockquote>Each decl-specifier of the decl-specifier-seq of a destructor
+declaration (if any) shall be <code>friend</code>, <code>inline</code>,
+<del> or</del> <code>virtual</code><ins>, or <code>constexpr</code></ins>.
+</blockquote>
+
+<p>Add after [class.dtor] paragraph 9:</p>
+
+<blockquote>
+<ins> The defaulted destructor is a constexpr destructor if </ins>
+</blockquote>
+
+<blockquote style="padding-left: 30px;"><ins>— it is a trivial
+destructor, or </ins>
+</blockquote>
+
+<blockquote style="padding-left: 30px;"><ins>— it is not virtual
+and all the destructors it invokes are constexpr destructors</ins>
+</blockquote>
+
+
+
+<p><i>
+	<b>Note 3: </b>The following changes enable some
+	"constexpr new-expressions".
+</i></p>
+
+
+<p>Modify [expr.new] paragraph 10</p>
+
+<blockquote>An implementation is allowed to omit a call to a replaceable global
+allocation function (21.6.2.1, 21.6.2.2).  When it does so, the storage
+is instead provided by the implementation or provided by extending the
+allocation of another <i>new-expression.</i>
+</blockquote>
+
+<blockquote><del>The implementation may extend the allocation of a
+new-expression <code>e1</code> to provide storage for a
+<i>new-expression</i> <code>e2</code> if the following would
+be true were the allocation not extended:</del></blockquote>	
+
+<blockquote style="padding-left: 30px;"><del>— the evaluation of
+<code>e1</code> is sequenced before the evaluation of <code>e2</code>,
+and</del>
+</blockquote>
+
+<blockquote style="padding-left: 30px;"><del>— <code>e2</code> is
+evaluated whenever <code>e1</code> obtains storage, and</del>
+</blockquote>
+
+<blockquote style="padding-left: 30px;"><del>— both <code>e1</code>
+and <code>e2</code> invoke the same replaceable global allocation function,
+and</del>
+</blockquote>
+
+<blockquote style="padding-left: 30px;"><del>— if the allocation
+function invoked by <code>e1</code> and <code>e2</code> is throwing,
+any exceptions thrown in the evaluation of either <code>e1</code> or
+<code>e2</code> would be first caught in the same handler, and</del>
+</blockquote>
+
+<blockquote style="padding-left: 30px;"><del>— the pointer values
+produced by <code>e1</code> and <code>e2</code> are operands to
+evaluated delete-expressions, and</del>
+</blockquote>
+
+<blockquote style="padding-left: 30px;"><del>— the evaluation
+of <code>e2</code> is sequenced before the evaluation of the
+delete-expression whose operand is the pointer value produced by
+<code>e1</code>.</del></blockquote>
+
+<blockquote><del>[<i>Example:</i></del></blockquote>
+
+<blockquote><del>...</del></blockquote>
+
+<blockquote><del>— <i>end example</i> ]</del></blockquote>
+
+<p>Add new paragraph after [expr.new] paragraph 10</p>
+
+<blockquote><ins>During an evaluation of a constant expression, a call to
+an allocation function is always omitted.  [ Note: Only
+<i>new-expression</i>s that would otherwise result in a call to a
+replaceable global allocation function can be evaluated in
+constant expressions (see [expr.const]). — <i>end note</i> ]</ins>
+</blockquote>
+
+
+<p>Add new paragraph after [expr.new] paragraph 10</p>
+
+<blockquote><ins>The implementation may extend the allocation of a
+<i>new-expression</i> <code>e1</code> to provide
+storage for a <i>new-expression.</i> <code>e2</code> if the following
+would be true were the allocation not extended:</ins>
+</blockquote>	
+
+<blockquote style="padding-left: 30px;"><ins>— the evaluation
+of <code>e1</code> is sequenced before the evaluation of
+<code>e2</code>, and</ins>
+</blockquote>
+
+<blockquote style="padding-left: 30px;"><ins>— <code>e2</code>
+is evaluated whenever <code>e1</code> obtains storage, and</ins>
+</blockquote>
+
+<blockquote style="padding-left: 30px;"><ins>— both
+<code>e1</code> and <code>e2</code> invoke the same replaceable
+global allocation function, and</ins>
+</blockquote>
+
+<blockquote style="padding-left: 30px;"><ins>— if the allocation
+function invoked by <code>e1</code> and <code>e2</code> is throwing,
+any exceptions thrown in the evaluation of either <code>e1</code> or
+<code>e2</code> would be first caught in the same handler, and</ins>
+</blockquote>
+
+<blockquote style="padding-left: 30px;"><ins>— the pointer
+values produced by <code>e1</code> and <code>e2</code> are operands
+to evaluated <i>delete-expression</i>s, and</ins>
+</blockquote>
+
+<blockquote style="padding-left: 30px;"><ins>— the evaluation
+of <code>e2</code> is sequenced before the evaluation of the
+<i>delete-expression</i> whose operand is the pointer value produced by
+<code>e1</code>.</ins>
+</blockquote>
+
+<blockquote><ins>[<i>Example:</i></ins></blockquote>
+
+<blockquote><ins>...</ins></blockquote>
+
+<blockquote><ins>— <i>end example</i> ]</ins></blockquote>
+
+
+<p>Change in [expr.const] paragraph 2:</p>
+
+<blockquote><del>— a <i>new-expression (8.3.4)</i>;</del>
+</blockquote>  
+
+<!--
+<blockquote>&mdash; <ins>a non <i>placement new-expression</i> (8.3.4),
+unless it would result in a call to a replaceable global allocation
+function (21.6.2.1, 21.6.2.2), or a <i>placement
+new-expression</i> (8.3.4);</ins>
+</blockquote>    
+-->
+<blockquote>— <ins>a <i>new-expression</i> (8.3.4),
+unless the selected allocation function is a replaceable global allocation
+function (21.6.2.1, 21.6.2.2);</ins>
+</blockquote>    
+
+<blockquote><del>— a <i>delete-expression (8.3.5)</i>;</del>
+</blockquote>   
+
+	
+
+<p><i>
+	<b>Note 4: </b>The following changes enable the use of the
+	default allocator in constant expressions.
+</i></p>
+
+<p>Add a new paragraph after [expr.const] paragraph 2:</p>
+
+<ins>
+<blockquote><ins>
+For the purposes of determining whether an expression is a core constant
+expression, the evaluation of a call to a member function of
+<tt>std::allocator&lt;T&gt;</tt> as defined in _allocator.members_,
+where <tt>T</tt> is a literal type,
+is permitted even if the actual evaluation of such a call would
+otherwise fail the requirements for a core constant expression.
+Similarly, the evaluation of a call to a member function of
+<tt>std::allocator_traits&lt;std::allocator&lt;T&gt;&gt;</tt> as defined in
+_allocator.traits,members_, is a valid core constant expression unless
+</ins></blockquote>
+
+<blockquote><ins>— for a call to the member <tt>construct</tt>,
+	the evaluation of the underlying constructor call is
+	not a core constant expression, or</ins>
+</blockquote>   
+
+<blockquote><ins>— for a call to the member <tt>destroy</tt>,
+	the evaluation of the underlying destructor call is
+	not a core constant expression.</ins>
+</blockquote>   
+
+<p><i>
+	<b>Note 5: </b>The following changes enable non-transient
+	allocations.
+</i></p>
+
+<p>Change bullet (6.2) of [expr.const] paragraph 6 from:
+<blockquote>
+	<ul>
+	<li> if the value is of pointer type, it contains the address of an
+	     object with static storage duration, the address past the
+	     end of such an object (8.5.6), the address of a function,
+	     or a null pointer value, and
+	</li></ul>
+</blockquote>
+to:
+<blockquote>
+	<ul>
+	<li> if the value is of pointer type, it contains
+		<ul>
+		<li>the address of an object with static storage duration or 
+		    the address past the end such an object (8.5.6), or</li>
+		<li>the address of a function, or</li>
+		<li>a null pointer value, or,</li>
+		<li>if the prvalue under consideration initializes a constexpr variable,
+		    the address of a non-transient constexpr allocation (as defined below)
+		    or the address past the end (_expr.add_) of such an allocation,</li>
+	      and
+	</li></ul>
+</blockquote>
+</p>
+
+<p>Add to end of [expr.const] paragraph 6:
+
+<blockquote>
+	<ins>A <i>non-transient constexpr allocation</i> is an object of dynamic storage
+	duration allocated and not deallocated during the initialization of a constexpr
+	variable of class type or array of class type, such that evaluation of that variable's
+	destructor(s) immediately after that initialization would deallocate the object.
+	Deallocating a non-transient constexpr allocation before the (implicit) invocation
+	of the associated constexpr variable's destructor results in undefined behavior.
+	</ins>
+</<blockquote>
+</p>
+	
+<!--
+<p>Add to end of [expr.const] paragraph 6:</p>
+
+<blockquote><ins>Every object of dynamic storage duration [6.6.4.4]
+created during the evaluation of a constant expression shall be
+destroyed during that evaluation and its storage shall be deallocated.</ins>
+</blockquote>
+-->
+
+</ins></body></html>

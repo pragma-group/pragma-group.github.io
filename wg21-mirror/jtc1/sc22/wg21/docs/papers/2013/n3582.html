@@ -1,0 +1,498 @@
+<html>
+<style>
+  ins {background-color:#A0FFA0}
+  del {background-color:#FFA0A0}
+  strong { font-weight: inherit; color: #2020ff }
+</style>
+<title>Return type deduction for normal functions</title>
+<body>
+Jason Merrill
+<br>2013-03-15
+<br>Revision 3
+<br>N3582
+
+<h2><b>Return type deduction for normal functions</b></h2>
+
+<h3>Introduction</h3>
+
+Any C++ user introduced to the C++11 features of <tt>auto</tt>, lambdas,
+and trailing return types immediately wonders why they can't just
+write <tt>auto</tt> on their function declaration and have the return type
+deduced.  This functionality was proposed previously in
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2009/n2954.html">N2954</a>,
+but dropped from C++11 due to time constraints, as the drafting didn't
+address various questions and concerns that the Core WG had.  I have now
+implemented this functionality in GCC, and propose to add it to C++1<strong>4</strong>.  I
+discuss some of the less obvious aspects of the semantics below.
+
+<p/>This proposal also resolves core DRs 975 (lambda return type deduction
+from multiple return statements) and 1048 (inconsistency between auto and
+lambda return type deduction).
+
+<h3>ChangeLog</h3>
+Revision 2: N3386<br/>
+Revision 3: N3582
+<ul>
+  <li>Add <tt>decltype(auto)</tt></li>
+  <li>Allow <tt>auto</tt> in <i>trailing-return-type</i></li>
+  <li>Prohibit deduction from an initializer-list</li>
+</ul>
+Changes since N3386 are in <strong>blue</strong>.
+
+<h3>Redeclaration</h3>
+
+<strong>Allowing non-defining function declarations with auto return type is not
+strictly necessary, but it</strong> is useful for coding styles
+that prefer to define member functions outside the class:
+
+<blockquote><pre>
+struct A {
+  auto f(); // forward declaration
+};
+auto A::f() { return 42; }
+</pre></blockquote>
+
+and if we allow it in that situation, it should be valid in other
+situations as well.  Allowing it is also the more orthogonal choice; in
+general, I believe that if combining two features can work, it should work.
+
+<p/>The proposed wording allows non-defining declarations so long as all
+declarations have the same declared type, without considering the deduced
+type.
+
+<blockquote><pre>
+auto f(); // return type is unknown
+auto f() { return 42; } // return type is int
+auto f(); // redeclaration
+int  f(); // error, declares a different function
+</pre></blockquote>
+
+And similarly for templates:
+
+<blockquote><pre>
+template &lt;class T> auto g(T t); // forward declaration
+template &lt;class T> auto g(T t) { return t; } // return type is deduced at instantiation time
+template &lt;class T> auto g(T t); // redeclaration
+</pre></blockquote>
+
+<p/>Of course, using such a function in an expression when only a forward
+declaration has been seen is ill-formed:
+
+<blockquote><pre>
+auto f();    // return type is unknown
+int i = f(); // error, return type of f is unknown
+</pre></blockquote>
+
+An explicit specialization or instantiation of an auto template must also
+use auto.  An explicit specialization or instantiation of a non-auto
+template must not use auto.
+
+<blockquote><pre>
+template &lt;class T> auto f(T t) { return t; } // #1
+template auto f(int); // OK
+template char f(char); // error, no matching template
+template&lt;> auto f(double); // OK, forward declaration with unknown return type
+
+template &lt;class T> T f(T t) { return t; } // OK, not functionally equivalent to #1
+template char f(char); // OK, now there is a matching template
+template auto f(float); // OK, matches #1
+</pre></blockquote>
+
+<h3>Multiple returns</h3>
+
+<p/>The limitation on return type deduction to function bodies consisting
+of a single return statement is inconvenient for lambdas (DR 975), but is
+likely to be even more of an annoyance on normal functions.
+
+<blockquote><pre>
+auto iterate(int len) // error, body isn't "return expr;"
+{
+  for (int i = 0; i < len; ++i)
+    if (search (i))
+      return i;
+  return -1;
+}
+</pre></blockquote>
+
+Both return statements here return int, we can determine that perfectly
+well.  The proposed wording allows this example, and resolves core issue
+975.
+
+<h3>Recursion</h3>
+
+One important difference between lambdas and normal functions is that
+normal functions can refer to themselves by name.  Of course, we can't
+deduce the return type that way:
+
+<blockquote><pre>
+auto h() { return h(); } // error, return type of h is unknown
+</pre></blockquote>
+
+but once we have deduced a return type, there is no reason to prohibit recursion.
+
+<blockquote><pre>
+auto sum(int i) {
+  if (i == 1)
+    return i;          // return type deduced to int
+  else
+    return sum(i-1)+i; // ok to call it now
+}
+</pre></blockquote>
+
+<h3>Instantiation</h3>
+
+Like <tt>constexpr</tt> functions, it can be necessary to instantiate
+an <tt>auto</tt> function template even if it is not odr-used.
+
+<blockquote><pre>
+template &lt;class T> auto f(T t) { return t; } // return type deduced at instantiation time
+typedef decltype(f(1)) fint_t; // must instantiate f&lt;int> to deduce return type
+</pre></blockquote>
+
+<strong><h3>SFINAE</h3>
+
+Since the return type is deduced by instantiating the template, if the
+instantiation is ill-formed, this causes an error rather than a
+substitution failure.  This allows an <tt>auto</tt> function to return a
+lambda, which is not possible using the
+<tt>decltype(</tt><i>returned expression</i><tt>)</tt> pattern.
+</strong>
+
+<h3>More general deduction</h3>
+
+The declarator of a variable declared with <tt>auto</tt> is not limited in
+the form of the declarator; the same should be true of a function with
+deduced return type.  In particular, this is the only way to deduce return
+by reference:
+
+<blockquote><pre>
+template &lt;class T> struct A { static T t; };
+template &lt;class T> auto& f() { return A<T>::t; } // returns by reference
+</pre></blockquote>
+
+To allow this, we should use the same auto deduction rules for function and
+lambda return type that we do for auto variables.  This would also resolve
+core DR 1048, which objects to the difference in handling of cv-qualifiers
+between auto deduction and lambda return type deduction and was classified
+as an extension.
+
+<p/>Such a function must have a return statement, however, since there is no
+way to get <tt>void</tt> from <tt>auto&</tt>.
+
+<blockquote><pre>
+auto& f() { } // error, no return statement
+</pre></blockquote>
+
+<h3>Difference from decltype</h3>
+
+<p/>Unfortunately, there is no way to get the effect of <tt>decltype</tt>
+with an <tt>auto</tt> return type; plain <tt>auto</tt> never deduces to a
+reference, and <tt>auto&&</tt> always deduces to a reference.  This is a
+significant problem, as it means that forwarding functions can't
+use <tt>auto</tt>.  We could consider using <tt>decltype</tt> semantics
+instead of the existing <tt>auto</tt> semantics, but that would mean giving
+different deduction semantics to <tt>auto</tt> depending on whether the
+declaration is of a variable or a function, and making <tt>auto</tt>
+functions different from lambdas.
+
+<p/><strong>Therefore, I propose to also allow <tt>decltype(auto)</tt> to
+get the <tt>decltype</tt> semantics without having to repeat the
+expression.  For simplicity of specification and orthogonality I propose to
+allow it everywhere that plain <tt>auto</tt> is allowed, except for
+introducing a <i>trailing-return-type</i>.  It occurs to me that the
+difference in meaning of <tt>decltype</tt> depending on the form of the
+expression (e.g. parenthesized or not) might be more surprising in this
+context, but I think it would be even more surprising if this worked
+differently from C++11 <tt>decltype</tt>.
+
+<h3>noexcept</h3>
+
+<p/>A few people have requested that an <tt>auto</tt> function should have
+a deduced noexcept-specifier as well as return type.  I don't think that
+tying the two deductions together is appropriate, but if people want
+general deduction of noexcept-specifiers, EWG might wish to
+revisit <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2010/n3207.htm">N3207</a>.
+
+<h3><tt>auto</tt> in <i>trailing-return-type</i></h3>
+
+This proposal initially did not allow <tt>auto</tt> in
+a <i>trailing-return-type</i>, but since then it was pointed out that
+putting it there is the only way to specify that a lambda returns by
+a deduced reference type:
+
+<blockquote><pre>[]()->auto& { return f(); }</pre></blockquote>
+
+<h3>Deducing <tt>std::initializer_list</tt></h3>
+
+Although a variable declared <tt>auto</tt> and initialized with a
+brace-enclosed initializer list gets a type
+of <tt>std::initializer_list</tt>, we don't want that for a function return
+type; since the underlying array is allocated on the stack, it would
+immediately leak on return, and any use of the return value would have
+undefined behavior.
+
+</strong>
+
+<h3>Proposed wording</h3>
+
+<strong>Change 7.1.6.2&para;1:
+
+<blockquote>
+<dl>
+  <dt><i>decltype-specifier:</i></dt>
+  <dd><tt>decltype ( </tt><i>expression</i><tt> )</tt></dd>
+  <dd><ins><tt>decltype ( auto )</tt></ins></dd>
+</dl>
+</blockquote>
+
+Change 7.1.6.2&para;4:
+
+<blockquote>
+<ins>The type-specifier <tt>decltype(auto)</tt> indicates a type
+to be deduced as for the <tt>auto</tt> <i>type-specifier</i> (7.1.6.4),
+except that the deduced type is determined using the following rules
+rather than template argument deduction.  For an expression <i>e</i>,</ins>
+
+The type denoted by decltype(e) is defined as follows:
+<ul>
+<li>if e is an unparenthesized id-expression or an unparenthesized class member access (5.2.5), decltype(e)
+is the type of the entity named by e. If there is no such entity, or if e names a set of overloaded func-
+  tions, the program is ill-formed;</li>
+<li>otherwise, if e is an xvalue, decltype(e) is T&&, where T is the type of e;</li>
+<li>otherwise, if e is an lvalue, decltype(e) is T&, where T is the type of e;</li>
+<li>otherwise, decltype(e) is the type of e.</li>
+</ul>
+The operand of the decltype specifier is an unevaluated operand (Clause 5).
+[ Example:
+<blockquote><pre>
+const int&& foo();
+int i;
+struct A { double x; };
+const A* a = new A();
+decltype(foo()) x1 = i;   // type is const int&&
+<ins>decltype(auto) x1a = foo(); // type is const int&&</ins>
+decltype(i) x2;           // type is int
+decltype(a->x) x3;        // type is double
+decltype((a->x)) x4 = x3; // type is const double&
+</pre></blockquote>
+&mdash;end example ]
+
+</blockquote>
+</strong>
+Change 7.1.6.4:
+
+<blockquote>
+The auto <strong><ins>and <tt>decltype(auto)</tt></ins></strong> type-specifier<ins>s designate a placeholder type that will be
+replaced later, by either deduction from an initializer
+or</ins> <del>signifies that the type of a variable being declared shall be
+deduced from its initializer or that a function declarator shall
+include</del> a trailing-return-type.
+
+<p/>The <del>auto type-specifier may</del> 
+<ins><strong>placeholder type</strong> can</ins> appear with a
+function declarator <ins>in the <i>decl-specifier-seq</i>, 
+<i>type-specifier-seq</i>, <i>conversion-function-id</i>,
+<strong>or <i>trailing-return-type</i></strong>,</ins>
+<del>with a trailing-return-type
+(8.3.5)</del> in any context where such a declarator is valid.  <ins>If the
+function declarator includes a <i>trailing-return-type</i> (8.3.5), that specifies
+the declared return type of the function.
+<strong>If the declared return type of the function
+contains a placeholder type</strong>, the return type of the function is deduced
+from <tt>return</tt> statements in the body of the function, if any.</ins>
+
+<p/><del>Otherwise, the type of the variable</del> <ins>The type of a
+variable declared using <tt>auto</tt>
+<strong>or <tt>decltype(auto)</tt></strong></ins> is deduced from its
+initializer. <del>The name of the variable being declared shall not appear in
+the initializer expression.</del> This use <del>of auto</del> is allowed when declaring
+variables in a block (6.3), in namespace scope (3.3.6), and in a
+for-init-statement (6.5.3). auto <ins><strong>or decltype(auto)</strong></ins>
+shall appear as one of the decl-specifiers
+in the decl-specifier-seq and the decl-specifier-seq shall be followed by
+one or more init-declarators, each of which shall have a non-empty
+initializer.
+
+<p/>[ Example:
+<blockquote><pre>
+auto x = 5;                 // OK: x has type int
+const auto *v = &x, u = 6;  // OK: v has type const int*, u has type const int
+static auto y = 0.0;        // OK: y has type double
+auto int r;                 // error: auto is not a storage-class-specifier
+<ins>auto f() -> int;             // OK: f returns int</ins>
+<ins>auto g() { return 0.0; }     // OK: g returns double</ins>
+<ins>auto h();                    // OK, h's return type will be deduced when it is defined</ins>
+</pre></blockquote>
+&mdash; end example ]
+
+<p/><del>The auto type-specifier</del>
+<ins><strong>A placeholder type</strong></ins> can also be used in declaring a variable in the
+condition of a selection statement (6.4) or an iteration statement (6.5),
+in the type-specifier-seq in the new-type-id or type-id of a new-expression
+(5.3.4), in a for-range-declaration, and in declaring a static data member
+with a brace-or-equal-initializer that appears within the
+member-specification of a class definition (9.4.2).
+
+<p/>A program that uses auto <ins><strong>or decltype(auto)</strong></ins> 
+in a context not explicitly allowed in this section is ill-formed.
+
+<p/><del>Once the type of a declarator-id has been
+determined according to 8.3, the type of the declared variable using the
+declarator-id</del> <ins>When a variable declared
+<strong>using a placeholder type</strong> is
+initialized, or a <tt>return</tt> statement occurs in a function declared
+with a return type that contains a placeholder type, the deduced return type or
+variable type</ins> is determined from the type of its initializer<ins>.
+<strong>In the case of a <tt>return</tt> with no operand, the initializer is considered to be <tt>void()</tt>.
+Let T be the declared type of the variable or return type of the function.</ins></strong>
+
+<p/><ins><strong>If the placeholder corresponds to the <tt>auto</tt> type-specifier,
+the deduced type is determined</strong></ins> using
+the rules for template argument
+deduction. <del>Let T be the declared type that has been determined for a variable identifier d.</del> 
+<ins><strong>If the deduction is for a <tt>return</tt> statement and the
+initializer is a braced-init-list (8.5.4), the program is ill-formed.  Otherwise,</strong></ins>
+Obtain P from T by
+replacing the occurrences of auto with either a new invented type template parameter U or, if the initializer
+is a braced-init-list <del>(8.5.4)</del>, with std::initializer_list&lt;U>.
+<ins>If </ins>
+The type deduced for the variable <del>d</del> <ins>or return type</ins> is then
+the deduced A determined using the rules of template argument deduction from a function call (14.8.2.1),
+where P is a function template parameter type and the initializer <del>for d</del> is the corresponding argument.  If
+the deduction fails, the declaration is ill-formed. [ Example:
+<blockquote><pre>
+auto x1 = { 1, 2 };    // decltype(x1) is std::initializer_list&lt;int>
+auto x2 = { 1, 2.0 };  // error: cannot deduce element type
+</pre></blockquote>
+&mdash; end example ]
+
+<p/><strong><ins>If the placeholder corresponds to the <tt>decltype(auto)</tt> type-specifier, the deduced type is determined as though the initializer had been the operand of the <tt>decltype</tt>. [ Example:</ins>
+<blockquote><pre>
+<ins>int i;</ins>
+<ins>int& f();</ins>
+<ins>decltype(auto) x3 = i;        // decltype(x3) is int</ins>
+<ins>decltype(auto) x4 = (i);      // decltype(x4) is int&</ins>
+<ins>decltype(auto) x5 = f();      // decltype(x5) is int&</ins>
+<ins>decltype(auto) x6 = { 1, 2 }; // error, { 1, 2 } is not an expression</ins>
+</pre></blockquote>
+<ins>&mdash; end example ]</ins></strong>
+
+<p/>If the list of declarators contains more than one declarator, the type of each declared variable is determined
+as described above. <ins>If a function with a declared return type that
+<strong>contains a placeholder type</strong> has multiple <tt>return</tt> statements, the return type
+is deduced for each <tt>return</tt> statement.</ins>  <del>If</del> <ins>In
+either case, if</ins> the type deduced for the template parameter U is not
+the same in each deduction, the
+program is ill-formed.
+[ Example:
+<blockquote><pre>
+const auto &i = expr;
+</pre></blockquote>
+The type of i is the deduced type of the parameter u in the call f(expr) of the following invented
+function template:
+<blockquote><pre>
+template &lt;class U> void f(const U& u);
+</pre></blockquote>
+&mdash; end example ]
+
+<p/><ins>If a function with a declared return type that uses <strong>a placeholder type</strong> has
+no <tt>return</tt> statements, the return type is deduced as though from
+a <tt>return</tt> statement with no operand at the closing brace of the
+function body. [ Example:</ins>
+<blockquote><pre>
+<ins>auto  f() { } // OK, return type is void
+auto* g() { } // error, cannot deduce auto* from void()</ins>
+</pre></blockquote>
+
+<p/><ins>When a declaration <strong>with a placeholder</strong> in its declared type
+appears as an expression, the type of the expression is the deduced type of
+the declaration.  If the declaration does not yet have a deduced type, the
+expression is ill-formed.  But once a <tt>return</tt>
+statement has been seen in a function, the return type deduced from that
+statement can be used in the rest of the function, including in other
+<tt>return</tt> statements.
+[ Example:</ins>
+<blockquote><pre>
+<ins>auto n = n; // error, n's type is unknown</ins>
+<ins>auto f();</ins>
+<ins>void g() { &amp;f; } // error, f's return type is unknown</ins>
+<ins>auto sum(int i) {</ins>
+  <ins>if (i == 1)</ins>
+    <ins>return i;  // sum's return type is int</ins>
+  <ins>else</ins>
+    <ins>return sum(i-1)+i; // OK, sum's return type has been deduced</ins>
+<ins>}</ins>
+</pre></blockquote>
+<ins>&mdash;end example]</ins>
+
+<p/><ins>Return type deduction for a function template <strong>with a placeholder</strong>
+in its declared type occurs at instantiation time even
+if the function body
+contains a <tt>return</tt> statement with a non-type-dependent operand.
+[ Note: So any use of a specialization of the function template will cause
+an implicit instantiation.  &mdash;end note ] [ Example:</ins>
+<blockquote><pre>
+<ins>template &lt;class T> auto f(T t) { return t; } // return type deduced at instantiation time</ins>
+<ins>typedef decltype(f(1)) fint_t; // must instantiate f&lt;int> to deduce return type</ins>
+</pre></blockquote>
+<ins>&mdash;end example]</ins>
+
+<p/><ins>Redeclarations or specializations of a function or function template
+with a declared return type that uses <strong>a placeholder type</strong> 
+must also use <strong>that placeholder</strong>, not
+a deduced type. [ Example:</ins>
+<blockquote><pre>
+<ins>auto f();
+auto f() { return 42; } // <strong>return type is int</strong>
+auto f(); // OK
+int f();  // error, cannot be overloaded with auto f()
+<strong>decltype(auto) f(); // error, auto and decltype(auto) don't match</strong>
+
+template &lt;typename T> auto g(T t) { return t; } // #1
+template auto g(int);      // OK, return type is int
+template char g(char);     // error, no matching template
+template<> auto g(double); // OK, forward declaration with unknown return type
+
+template &lt;class T> T g(T t) { return t; } // OK, not functionally equivalent to #1
+template char g(char);     // OK, now there is a matching template
+template auto g(float);    // still matches #1
+
+void h() { return g(42); } // error, ambiguous
+</pre></blockquote>
+
+</blockquote>
+
+Change 5.1.2&para;4:
+
+<blockquote>
+If a lambda-expression does not include a lambda-declarator, it is as if the lambda-declarator were (). <del>If
+a lambda-expression does not include a trailing-return-type, it is as if the trailing-return-type denotes the
+following type:</del>
+<ul>
+<li><del>if the compound-statement is of the form</del>
+<blockquote>
+<del>{ <i>attribute-specifier-seq</i>opt <tt>return</tt> <i>expression</i> ; }</del>
+</blockquote>
+<del>the type of the returned expression after lvalue-to-rvalue conversion (4.1), array-to-pointer conver-
+  sion (4.2), and function-to-pointer conversion (4.3);</del></li>
+<li><del>otherwise, void.</del></li>
+</ul>
+<ins>The lambda return type is <tt>auto</tt>, which is replaced by
+the <i>trailing-return-type</i> if provided <strong>and/or deduced</strong>
+from <tt>return</tt> statements as described in 7.1.6.4.</ins>  [ Example:
+<blockquote><pre>
+auto x1 = [](int i){ return i; }; // OK: return type is int
+auto x2 = []{ return { 1, 2 }; }; // error: <ins><strong>deducing return type from braced-init-list</strong></ins> <del>the return type is void (a</del>
+                                  <del>// braced-init-list is not an expression)</del>
+<strong><ins>int j;
+auto x3 = []()->auto&& { return j; }; // OK: return type is int&</ins></strong>
+</pre></blockquote>
+&mdash; end example ]
+</blockquote>
+
+<h3>References</h3>
+
+Crowl, Lawrence and Alisdair Meredith.  <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2009/n2954.html">N2954: Unified Function Syntax</a> (and <a href="http://wiki.edg.com/twiki/bin/viewfile/Wg21santaCruz/CoreWorkingGroup?filename=d2989.html;rev=2">draft revision</a>)
+
+</body>
+</html>

@@ -1,0 +1,326 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+  <head>
+    <title>Support for user-defined exception information and diagnostic information in std::exception</title>
+    <meta content="http://schemas.microsoft.com/intellisense/ie5" name="vs_targetSchema"></meta>
+    <meta http-equiv="Content-Language" content="en-us"></meta>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8"></meta>
+  </head>
+  <body>
+    <address>
+      Document number: N3757
+    </address>
+    <address>
+      Programming Language C++, Library Subgroup
+    </address>
+    <address>
+      &nbsp;
+    </address>
+    <address>
+      Emil Dotchevski, <a href="mailto:emil@revergestudios.com">emil@revergestudios.com</a>
+    </address>
+    <address>
+      &nbsp;
+    </address>
+    <address>
+      2013-08-30
+    </address>
+    <h1>
+      Support for user-defined exception information and diagnostic information in <code>std::exception</code>
+    </h1>
+    <ul>
+      <li>
+        <a href="#overview">Overview</a>
+      </li>
+      <li>
+        <a href="#motivation">Motivation</a>
+      </li>
+      <li>
+        <a href="#impact">Impact</a>
+      </li>
+      <li>
+        <a href="#text">Proposed text</a>
+      </li>
+      <li>
+        <a href="#implementability">Implementability</a>
+      </li>
+      <li>
+        <a href="#acknowledgements">Acknowledgements</a>
+      </li>
+    </ul>
+    <h2>
+      <a name="overview">I. Overview</a>
+    </h2>
+    <p>
+      C++ supports throwing objects of user-defined types, which allows arbitrary data to be stored in exception objects
+      at the point of the <code>throw</code>. Unfortunately at that time we may not have available all of the data that is needed
+      at the <code>catch</code> site to properly deal with the error. However, that data is usually available in contexts
+      higher in the call stack, between the <code>throw</code> and the <code>catch</code> that handles the exception.
+    </p>
+    <p>
+      This document proposes extending <code>std::exception</code> to allow exception-neutral contexts to intercept
+      any <code>std::exception</code> object and store into it arbitrary additional data needed to handle the exception (the propagation of
+      the original exception object can then be resumed by a <code>throw</code> without argument.)
+    </p>
+    <h2>
+      <a name="motivation">II. Motivation</a>
+    </h2>
+    <p>
+      To illustrate the problem, consider the following example of a <code>catch</code> statement that handles an exception of a user-defined type
+      <code>file_read_error</code>:
+    </p>
+    <blockquote>
+<pre>catch( file_read_error &amp; e )
+{
+  std::cerr &lt;&lt; e.file_name();
+}</pre>
+    </blockquote>
+    <p>
+      And the matching <code>throw</code>:
+    </p>
+
+    <blockquote>
+<pre>void read_file( FILE * f )
+{
+  ....
+  size_t nr=fread(buf,1,count,f);
+  if( ferror(f) )
+    throw file_read_error(???);
+  ....
+}</pre>
+    </blockquote>
+    <p>
+      The issue is that the <code>catch</code> site needs a file name, but at the point of the <code>throw</code>
+      a file name is not available (only a <code>FILE</code> pointer is.)
+    </p>
+
+    <p>
+      Consider that the error might be detected in a library which can not assume that a meaningful name is
+      available for any <code>FILE</code> it reads, even if a program that uses the library could reasonably make the same
+      assumption.
+    </p>
+
+    <p>
+      The proposed extension to <code>std::exception</code> allows a program to augment library exceptions
+      with program-specific information required to properly handle them:
+    </p>
+    <blockquote>
+      <pre>struct errinfo_file_name { typedef std::string type; };
+
+void process_file( char const * name )
+{
+  try
+  {
+    if( FILE * fp=fopen(name,"rt") )
+    {
+      std::shared_ptr&lt;FILE&gt; f(fp,fclose);
+      ....
+      read_file(fp); //throws types deriving from std::exception
+      ....
+    }
+    else
+      throw file_open_error();
+  }
+  catch( std::exception &amp; e )
+  {
+    e.set&lt;errinfo_file_name&gt;(name);
+    throw;
+  }
+}</pre>
+    </blockquote>
+    <p>The handler can retrieve the file name using the following syntax:</p>
+    <blockquote>
+      <pre>catch( file_io_error &amp; e ) //derives (possibly indirectly) from std::exception
+{
+  std::cerr &lt;&lt; "I/O error!\n";
+  std::string const * fn=e.get&lt;errinfo_file_name&gt;(e);
+  assert(fn!=0); //In this program all files have names.
+  std::cerr &lt;&lt; "File name: " &lt;&lt; *fn &lt;&lt; "\n";
+}</pre>
+    </blockquote>
+    <h2>
+      <a name="impact">III. Impact</a>
+    </h2>
+    <p>
+      Extending <code>std::exception</code> as proposed is compatible with existing code and does not affect any other parts
+      of the standard library, except possibly <code>make_exception_ptr</code> and <code>current_exception</code>.
+    </p>
+    <h2>
+      <a name="text">IV. Proposed Text</a>
+    </h2>
+    <ol>
+      <li>
+        <p>
+          Add to <code>std::exception</code> the following member functions:
+        </p>
+        <blockquote>
+          <pre>template &lt;class Tag&gt;
+void set( typename Tag::type const &amp; x );</pre>
+        </blockquote>
+        <p>
+          <em>Requirements:</em> <code>x</code> shall be copyable.
+        </p>
+        <p>
+          <em>Effects:</em> A copy of <code>x</code> is stored in <code>this</code>. If <code>this</code> already
+          has a value stored under the specified <code>Tag</code>, the original value is overwritten.
+        </p>
+        <p>
+          <em>Postconditions:</em> <code>get&lt;Tag&gt;()</code> returns a pointer to the stored copy of <code>x</code>.
+        </p>
+        <p>
+          <em>Throws:</em> <code>std::bad_alloc</code> or any exception thrown by <code>T</code>'s copy or move constructor.
+        </p>
+        <p>
+          <em>Note:</em> It is permitted for copies of a <code>std::exception</code> object to share storage
+          for the objects stored by <code>set&lt;&gt;</code>, except for copies created by <code>std::make_exception_ptr</code> or
+          <code>std::current_exception</code>. Therefore calling <code>set&lt;&gt;</code> on copies of a <code>std::exception</code>
+          is not thread-safe unless the copies were created by <code>std::make_exception_ptr</code> or <code>std::current_exception</code>.
+        </p>
+        <blockquote>
+          <pre>template &lt;class Tag&gt;
+typename Tag::type const * get() const;</pre>
+        </blockquote>
+        <p>
+          <em>Returns:</em> If <code>set&lt;Tag&gt;</code> was called to store a copy of an object of type <code>typename Tag::type</code>
+          in <code>this</code>, <code>get&lt;Tag&gt;</code> returns a pointer to that copy; otherwise it returns 0.
+        </p>
+        <p>
+          <em>Throws:</em> does not throw.
+        </p>
+        <p>
+          <em>Note:</em> Destroying the exception object or calling <code>set&lt;&gt;</code> invalidates the returned pointer.
+        </p>
+        <blockquote>
+          <pre>std::string diagnostic_information() const;</pre>
+        </blockquote>
+        <p>
+          <em>Returns:</em> A string of unspecified format that contains human-readable diagnostic information about <code>this</code>.
+        </p>
+        <p>
+          <em>Throws:</em> May throw <code>std::bad_alloc</code> or any exception thrown in the attempt to convert to string any of the objects
+          stored in <code>this</code> by <code>set&lt;&gt;</code>.
+        </p>
+        <p>
+          <em>Notes:</em>
+        </p>
+        <ul>
+          <li>
+            <p>
+              Implementations are encouraged to include in the returned string information about the dynamic type of <code>this</code>,
+              for example by means of <code>typeid(*this).name()</code>.
+            </p>
+          </li>
+          <li>
+            <p>
+              Implementations are encouraged to include in the returned string the string returned by <code>what</code>.
+            </p>
+          </li>
+          <li>
+            <p>
+              Implementations are encouraged to include in the returned string information collected by <code>__FILE__</code> and <code>__LINE__</code>
+              at the point of the <code>throw</code>. The formatting may match the format of compile-time diagnostic messages.
+            </p>
+          </li>
+          <li>
+            <p>
+              Implementations are encouraged to include in the returned string the name of the function contaning the <code>throw</code>.
+            </p>
+          </li>
+          <li>
+            <p>
+              At the time <code>diagnostic_information</code> is called, implementations may convert to string any of the objects
+              stored in <code>this</code> by <code>set&lt;&gt;</code>, by calling a suitable <code>operator&lt;&lt;</code> overload that takes
+              <code>std::ostream</code> object on the left and <code>typename Tag::type</code> object on the right, bound at the point of
+              instantiation of <code>set&lt;Tag&gt;</code>. Implementations are not allowed to issue a diagnostic if a suitable overload could
+              not be bound.
+            </p>
+          </li>
+          <li>
+            <p>
+              At the time <code>diagnostic_information</code> is called, objects for which a suitable <code>operator&lt;&lt;</code> overload
+              could not be bound may be converted to string if a different reasonable string conversion is possible. For example,
+              if an <code>operator&lt;&lt;</code> overload suitable for converting objects of type <code>T</code> can be bound, a
+              <code>std::vector&lt;T&gt;</code> may be converted to string by calling that overload for each element of the vector
+              and concatenating the results.
+            </p>
+          </li>
+          <li>
+            <p>
+              At the time <code>diagnostic_information</code> is called, objects of type <code>exception_ptr</code> stored in <code>this</code>
+              by <code>set&lt;&gt;</code> may be converted to string by nesting the result of calling <code>diagnostic_information</code>
+              on the object they point to.
+            </p>
+          </li>
+          <li>
+            <p>
+              Implementations are encouraged to pair each converted to string object with a string representation of its tag type, for example
+              by means of <code>typeid(Tag).name()</code>, and to include both in the returned string. If a given object could not be reasonably
+              converted to string, an implementation-specified stub string may be used instead.
+            </p>
+          </li>
+          <li>
+            <p>
+              Implementations may include in the returned string any other relevant information, such as a stack trace
+              collected at the point of the <code>throw</code>.
+            </p>
+          </li>
+        </ul>
+        <p>
+          <em>
+            Example:
+          </em>
+        </p>
+        <blockquote>
+          <pre>example_io.cpp(70): Throw in function class std::shared_ptr&lt;FILE&gt; open_file(const char *,const char *)
+Dynamic exception type: struct file_open_error
+what: example_io error
+errinfo_api_function = fopen
+errinfo_errno = 2, "No such file or directory"
+errinfo_file_name = tmp1.txt</pre>
+        </blockquote>
+      </li>
+      <li>
+        <p>
+          Add the following note to the specification of <code>current_exception</code> (18.8.5 [propagation]):
+        </p>
+        <ul>
+          <li>
+            <p>
+              Note: If the current exception derives from <code>std::exception</code>, the exception object that is propagated
+              when the returned <code>exception_ptr</code> is passed to <code>rethrow_exception</code> shall include copies of
+              all objects stored in the original exception object by <code>std::exception::set&lt;&gt;</code>.
+            </p>
+          </li>
+        </ul>
+      </li>
+      <li>
+        <p>
+          Add the following note to the specification of <code>make_exception_ptr</code> (18.8.5 [propagation]):
+        </p>
+        <ul>
+          <li>
+            <p>
+              Note: If <code>E</code> derives from <code>std::exception</code>, the exception object that is propagated
+              when the returned <code>exception_ptr</code> is passed to <code>rethrow_exception</code> shall include copies of
+              all objects stored in the original exception object by <code>std::exception::set&lt;&gt;</code>.
+            </p>
+          </li>
+        </ul>
+      </li>
+    </ol>
+    <h2>
+      <a name="implementability">V. Implementability</a>
+    </h2>
+    <p>
+        A proof of concept implementation is available in Boost. See boost/exception/N3757.hpp and libs/exception/test/N3757_test.cpp
+        in <a href="http://svn.boost.org/svn/boost/trunk">http://svn.boost.org/svn/boost/trunk</a>.
+    </p>
+    <h2>
+      <a name="acknowledgements">VI. Acknowledgements</a>
+    </h2>
+    <p>
+        This proposal is based on the Boost Exception library and incorporates valuable feedback from the Boost community.
+        Special thanks to Peter Dimov and Dave Abrahams.
+    </p>
+  </body>
+</html>

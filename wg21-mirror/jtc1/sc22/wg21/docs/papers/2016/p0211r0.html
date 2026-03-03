@@ -1,0 +1,188 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN">
+<html>
+  <head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    <title>Allocator-aware library wrappers for dynamic allocation</title>
+    <style type="text/css">
+      html { margin: 0; padding: 0; color: black; background-color: white; }
+      body { padding: 2em; font-size: medium; font-family: "DejaVu Serif", serif; line-height: 150%; }
+      code { font-family: "DejaVu Sans Mono", monospace; color: #006; }
+
+      h1, h2, h3 { margin: 1.5em 0 .75em 0; line-height: 125%; }
+
+      div.code { white-space: pre-line; font-family: "DejaVu Sans Mono", monospace;
+                 border: thin solid #E0E0E0; background-color: #F8F8F8; padding: 1em;
+                 border-radius: 4px; }
+
+      div.strictpre { white-space: pre; }
+
+      table { border-collapse: collapse; margin: 2em auto; }
+
+      th, td { text-align: left; vertical-align: top; padding: .5ex 1em; margin: 0; }
+
+      td.new { background-color: #EFE; }
+      td.new:after { content: "new!"; font-family: "DejaVu Sans", sans-serif; font-weight: bold; font-size: xx-small;
+                     vertical-align: top; top: -1em; right: -1em; position: relative; float: right; color: #090; }
+
+      thead th { border-top: 2px solid #333; border-bottom: 2px solid #333; }
+      tbody tr:last-child th, tbody tr:last-child td { border-bottom: 2px solid #333; }
+
+      .docinfo { float: right }
+      .docinfo p { margin: 0; text-align:right; }
+      .docinfo address { font-style: normal; }
+
+      .quote { display: inline-block; clear: both; margin-left: 1ex;
+                 border: thin solid #E0E0E0; background-color: #F8F8F8; padding: 1ex; }
+
+      .insert { border-left: thick solid #0A0; border-right: thick solid #0A0; padding: 0 1em; }
+      .comment { color: #456; }
+      .inclassit { font-family: "DejaVu Serif", serif; font-style: italic; }
+      .insinline { border-bottom: 2px solid #0A0; }
+    </style>
+  </head>
+  <body>
+    <div class="docinfo">
+      <p>ISO/IEC JTC1 SC22 WG21 P00211r0</p>
+      <p>Date: 2016-01-30</p>
+      <p>To: LEWG</p>
+      <address>Thomas K&ouml;ppe &lt;<a href="mailto:tkoeppe@google.com">tkoeppe@google.com</a>&gt;</address>
+    </div>
+
+    <h1>Allocator-aware library wrappers for dynamic allocation</h1>
+
+    <h2>Contents</h2>
+    <!-- fgrep -e "<h2 id=" allocator_helpers.html | sed -e 's/.*id="\(.*\)">\(.*\)<\/h2>/<li><a href="#\1">\2<\/a><\/li>/g' -->
+    <ol>
+      <li><a href="#summary">Summary</a></li>
+      <li><a href="#examples">Example use cases</a></li>
+      <li><a href="#spec1">Dynamic allocation wrappers</a></li>
+      <li><a href="#spec2">Unique pointers</a></li>
+      <li><a href="#questions">Design questions</a></li>
+    </ol>
+
+    <h2 id="summary">Summary</h2>
+
+    <p><strong>Short form:</strong> We propose to add library functions that allow the
+      systematic use of allocators as a customisation point for dynamic allocations. The new
+      functions complete the following picture:</p>
+
+    <table>
+      <thead>
+        <tr><th></th><th>using <code>operator {new,delete}</code></th><th>using allocator</th></tr>
+      </thead>
+      <tbody>
+        <tr><th rowspan="2">Manual</th><td><code>T * p = new T(args...)</code></td><td class="new"><code>auto p = allocate_new&lt;T&gt;(alloc, args...)</code></td></tr>
+        <tr><td><code>delete p</code></td><td class="new"><code>allocate_delete(alloc, p)</code></td></tr>
+        <tr><th rowspan="2">Unique pointer</th><td><code>make_unique&lt;T&gt;(args...)</code></td><td class="new"><code>allocate_unique&lt;T&gt;(alloc, args...)</code></td></tr>
+        <tr><td><code>default_delete&lt;T&gt;</code></td><td class="new"><code>allocator_delete&lt;T&gt;</code></td></tr>
+        <tr><th>Shared pointer</th><td><code>make_shared&lt;T&gt;(args...)</code></td><td><code>allocate_shared&lt;T&gt;(alloc, args...)</code></td></tr>
+      </tbody>
+    </table>
+
+    <p><strong>Long form:</strong> The standard library rarely uses
+      <code>new</code>/<code>delete</code> directly, but instead allows customisation of dynamic
+      allocation and object construction via allocators. Currently this customisation is only
+      available for container <em>elements</em> and for <code>shared_ptr</code> (as well as for
+      a few other types that require dynamically allocated memory), but not for the top-level
+      objects themselves.</p> <p>The proposal is to complete the library facilities for
+      allocator-based customisation by providing a direct mechanism for creating and destroying
+      a dynamically stored object through an allocator, as well as a new deleter type for
+      <code>unique_ptr</code> to hold an allocator-managed unique pointee, together with the
+      appropriate factory function.</p>
+
+    <h2 id="examples">Example use cases</h2>
+
+    <ul>
+      <li>Consider an arena allocator. A vector may put its elements into the arena, but the
+        vector itself cannot easily be placed in the same arena. The proposed
+        <code>std::allocate_unique&lt;std::vector&lt;T,
+        ScopedArenaAlloc&lt;T&gt;&gt;&gt;(arena_alloc)</code> allows this. (Here we assume the
+        use of the usual alias idiom <code>template &lt;typename T&gt; using ScopedArenaAlloc =
+        std::scoped_allocator_adaptor&lt;ArenaAlloc&lt;T&gt;&gt;</code>;).</li> <li>Consider a
+        shared memory allocator. As in the previous example, containers will put their elements
+        in shared memory, but one process needs to create the container itself and place it in
+        shared memory. This is now possible with <code>auto p =
+        std::allocate_new&lt;std::vector&lt;T,
+        ScopedShmemAlloc&lt;T&gt;&gt;&gt;(shmem_alloc)</code>. The returned pointer is
+        presumably an offset pointer, and its offset value needs to be communicated to the other
+        participating processes. The last process to use the container calls
+        <code>allocate_delete(shmem_alloc, p)</code>.</li> <li>Allocator support is <a
+        href="http://stackoverflow.com/a/23132307">frequently requested on Stack
+        Overflow</a>.</li>
+    </ul>
+
+    <h2 id="spec1">Dynamic allocation wrappers</h2>
+
+    <h3>Allocation and object creation</h3>
+
+    <div class="code">template &lt;typename A, typename ...Args&gt;
+      auto allocate_new(A&amp; alloc, Args&amp;&amp;... args) {
+      &nbsp;&nbsp;using Traits = allocator_traits&lt;A&gt;;
+
+      &nbsp;&nbsp;auto p = Traits::allocate(alloc, 1);
+      &nbsp;&nbsp;if (!p) throw bad_alloc();
+
+      &nbsp;&nbsp;try {
+      &nbsp;&nbsp;&nbsp;&nbsp;Traits::construct(alloc, addressof(*p), std::forward&lt;Args&gt;(args)...);
+      &nbsp;&nbsp;} catch(...) {
+      &nbsp;&nbsp;&nbsp;&nbsp;Traits::deallocate(alloc, p, 1);
+      &nbsp;&nbsp;&nbsp;&nbsp;throw;
+      &nbsp;&nbsp;}
+
+      &nbsp;&nbsp;return p;
+    }</div>
+
+    <h3>Object destruction and Deallocation</h3>
+
+    <div class="code">template &lt;typename A&gt;
+      void allocate_delete(A&amp; alloc, typename allocator_traits&lt;A&gt;::pointer p) {
+      &nbsp;&nbsp;using Traits = allocator_traits&lt;A&gt;;
+
+      &nbsp;&nbsp;Traits::destroy(alloc, addressof(*p));
+      &nbsp;&nbsp;Traits::deallocate(alloc, p, 1);
+    }</div>
+          
+    <h2 id="spec2">Unique pointers</h2>
+
+    <p>To allow <code>std::unique_ptr</code> to use custom allocators, we first need a deleter template that stores the allocator:</p>
+
+    <div class="code">template &lt;typename A&gt;
+      struct allocator_delete {
+      &nbsp;&nbsp;using pointer = typename allocator_traits&lt;A&gt;::pointer;
+
+      &nbsp;&nbsp;A a_;&nbsp;&nbsp;// <em>exposition only</em>
+
+      &nbsp;&nbsp;allocator_delete(const A&amp; a) : a_(a) {}
+
+      &nbsp;&nbsp;void operator()(pointer p) {
+      &nbsp;&nbsp;&nbsp;&nbsp;allocate_delete(a_, p);
+      &nbsp;&nbsp;}
+      };
+    </div>
+
+    <p>The factory function is:</p>
+
+    <div class="code">template &lt;typename T, typename A, typename ...Args&gt;
+      unique_ptr&lt;T, allocator_delete&lt;A&gt;&gt; allocate_unique(A&amp; alloc, Args&amp;&amp;... args) {
+      &nbsp;&nbsp;return unique_ptr&lt;T, allocator_delete&lt;A&gt;&gt;(allocate_new&lt;T&gt;(alloc, std::forward&lt;Args&gt;(args)...), alloc);
+      }</div>
+
+    <p>The type <code>T</code> must not be an array type.</p>
+
+    <h2 id="questions">Design questions</h2>
+
+    <ul>
+      <li>Require exact allocator or allow rebind-copying? Rebind-copying would allow taking
+        the original allocator by const-reference, but would incur a local allocator&rsquo;s
+        destruction (which is not required to be <code>noexcept</code>).</li>
+      <li>Related: Should <code>allocate_new</code> take an explicit typename <code>T</code>
+        as a parameter, or use <code>A::value_type</code>?</li>
+      <li>We could have reused the name <code>allocate_delete</code> for both for the function
+        template that replaces <code>delete</code> and for the class template that replaces
+        <code>default_delete</code> to keep using the word &ldquo;allocate&rdquo; consistently.
+        That would require saying the unwieldy <code>struct allocate_delete</code> in the
+        <code>allocate_unique</code> function template, though.</li>
+    </ul>
+
+  </body>
+</html>

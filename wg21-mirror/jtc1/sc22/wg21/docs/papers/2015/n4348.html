@@ -1,0 +1,657 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+
+<style type="text/css">
+
+body { color: #000000; background-color: #FFFFFF; }
+del { text-decoration: line-through; color: #8B0040; }
+ins { text-decoration: underline; color: #005100; }
+
+p.example { margin-left: 2em; }
+pre.example { margin-left: 2em; }
+div.example { margin-left: 2em; }
+
+code.extract { background-color: #F5F6A2; }
+pre.extract { margin-left: 2em; background-color: #F5F6A2;
+  border: 1px solid #E1E28E; }
+
+p.function { }
+.attribute { margin-left: 2em; }
+.attribute dt { float: left; font-style: italic;
+  padding-right: 1ex; }
+.attribute dd { margin-left: 0em; }
+
+blockquote.std { color: #000000; background-color: #F1F1F1;
+  border: 1px solid #D1D1D1;
+  padding-left: 0.5em; padding-right: 0.5em; }
+blockquote.stddel { text-decoration: line-through;
+  color: #000000; background-color: #FFEBFF;
+  border: 1px solid #ECD7EC;
+  padding-left: 0.5empadding-right: 0.5em; ; }
+
+blockquote.stdins { text-decoration: underline;
+  color: #000000; background-color: #C8FFC8;
+  border: 1px solid #B3EBB3; padding: 0.5em; }
+
+blockquote pre em { font-family: normal }
+
+table { border: 1px solid black; border-spacing: 0px;
+  margin-left: auto; margin-right: auto; }
+th { text-align: left; vertical-align: top;
+  padding-left: 0.8em; border: none; }
+th.multicol { text-align: center; vertical-align:top;
+  padding-left: 0.8em; border: none; }
+td { text-align: left; vertical-align: top;
+  padding-left: 0.8em; border: none; }
+caption { font-size: 1.25em; font-weight: bold; padding-bottom: 3px;}
+</style>
+
+<title>Making std::function safe for concurrency</title>
+</head>
+
+<body>
+
+<p><b>Document number:</b> N4348
+<br><b>Date:</b> 2015-02-02
+<br><b>Project:</b> Programming Language C++, Library Working Group
+<br><b>Revises:</b> <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n4159.pdf">N4159</a>
+<br><b>Reply to:</b>
+Geoff Romer &lt;<a href="mailto:gromer@google.com">gromer@google.com</a>&gt;,
+Samuel Benzaquen &lt;<a href="mailto:sbenza@google.com">sbenza@google.com</a>&gt;
+</p>
+
+<h1>Making <code>std::function</code> safe for concurrency</h1>
+
+<ol>
+<li><a href="#Motivation">Motivation and Scope</a></li>
+<li><a href="#Design">Design Overview</a></li>
+<li><a href="#Alternatives">Alternatives Considered</a></li>
+<li><a href="#Impact">User Impact</a></li>
+<li><a href="#Wording">Proposed Wording</a></li>
+<li><a href="#Const">Appendix A: A Digression on the Meaning of <code>const</code></a></li>
+</ol>
+
+<h2 id="Motivation">Motivation and Scope</h2>
+<p><code>std::function</code>'s <code>operator()</code> is a const member, and
+yet it invokes the target function through a non-const access path (the
+standard is somewhat ambiguous, but this appears to be the universal existing
+practice). Consequently, it may mutate the target, if the target is a
+function object with a non-const <code>operator()</code>. This violates not
+only basic tenets of const-correctness, but also the data race avoidance
+guarantees in [res.on.data.races]/p3, which states that "A C++ standard
+library function shall not directly or indirectly modify objects accessible
+by threads other than the current thread unless the objects are accessed
+directly or indirectly via the function's non-const arguments,
+including <code>this</code>".</p>
+
+<p>The wording in [res.on.data.races] embodies a best-practice approach to
+concurrency in C++. One of the fundamental challenges of writing concurrent
+code is avoiding data races, which the language specifies in terms of
+reading and writing memory locations. The standard library for the most
+part treats how it operates on memory locations as a hidden implementation
+detail, but it must somehow specify its behavior in sufficient detail that
+the user can easily tell which combinations of library operations may induce
+data races, and which won't. By far the most common way to do this
+is to classify operations according to what data they read and what data
+they write, and specify that a data race can occur between a pair of
+unsynchronized operations only if they both operate on the same data,
+and at least one of them writes to it. Notably, the core language takes
+this approach in specifying the fundamental types. The only other plausible
+approaches would be to specify that no two operations can race, or to specify
+that any two operations can race, but these are, respectively, unimplementable
+and unusable.</p>
+
+<p>So in order to be usable in concurrent code, a library must specify, for
+every input to every operation, whether that operation writes to it or only
+reads from it. This is exactly what the const language feature was designed
+for, and what it is used for: to specify which function parameters are
+guaranteed not to be written by that function, in a way that can be enforced
+at compile time (recall that <code>const</code> was spelled
+<code>readonly</code> in early versions of C++). To be sure, it is logically
+possible for the library to specify one set of read/write semantics for
+purposes of static checking, and a separate set of read/write semantics for
+purposes of run-time program correctness. However, this would make the
+library harder to specify and harder to understand, and deny users the
+benefits of static checking exactly where it would be most useful. It would
+also seriously degrade code reusability, because polymorphic code would be
+unable to distinguish reads from writes, and therefore be unable to
+avoid data races other than by aggressively locking all operations.</p>
+
+<p>By the same token, when the library specifies whether it reads or writes
+to its inputs, it cannot directly make that guarantee in terms of reading
+and writing memory locations, because those may be hidden implementation
+details of user types. Instead, the library must specify whether it
+reads or writes according to the input type's definition of reading and
+writing&mdash; in other words, by whether it invokes any non-const operations
+on the input.</p>
+
+<p>One corrollary of these points is the widely-accepted design principle that
+the const methods of well-behaved types must not invoke non-const operations
+on the object's internal state without synchronization.
+<code>std::function</code> violates this principle, which would be a
+defect regardless of whether it violates the strict wording of
+[res.on.data.races]. It would be bad enough that basic concurrency
+principles do not apply to such a central vocabulary type, but this is
+compounded by the fact that a core use case for <code>std::function</code>
+is as a callback wrapper for concurrency APIs, so it is particularly likely
+to be used in concurrent settings.</p>
+
+<p>One response to this issue has been to claim that <code>std::function</code>
+is not defective, but is simply implementing pointer-like "shallow const"
+semantics (i.e. the target function object is not part of the
+<code>std::function</code>'s internal state). However,
+<code>std::function</code> does not behave like a pointer in any other
+respect, so behaving like a pointer in this one will be surprising and
+confusing. Furthermore, it is fundamentally incoherent for a type to have
+"shallow" const semantics, but "deep" copy semantics. For a detailed
+discussion of this point, see the <a href="#Const">Appendix</a>.</p>
+
+<p>We propose to correct this defect by specifying that
+<code>std::function</code> invokes its target through a const access path,
+and that the program is ill-formed if the user supplies a target that cannot
+be invoked that way. We also present wording for an alternative resolution,
+explicitly specifying that <code>operator()</code> is exempt from the
+guarantees of [res.on.data.races]/p3, but we do not recommend adopting that
+approach.</p>
+
+<p>In <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n4159.pdf">N4159</a>
+we discussed this problem together with some related issues in
+<code>std::function</code>'s API, in order to ensure they were addressed
+in a consistent way. We are satisfied that the joint discussion has served
+its purpose, and the issues are now better handled separately: the
+issue outlined above is a clear defect in the library as it stands, and so
+should be addressed by LWG, targeting C++17 as a shipping vehicle. However,
+the other issues discussed in N4159 are clearly feature requests, and so they
+belong with LEWG, with a Library Fundamentals TS as a target ship vehicle.
+Consequently, the other aspects of N4159 will be addressed in a separate
+paper; this paper will focus on the aforementioned issue.</p>
+
+<h2 id="Design">Design Overview</h2>
+
+<p>Our core proposal is to revise <code>std::function</code>'s
+<code>operator()</code> to explicitly specify that it invokes the target via
+a const access path. This implicitly requires that such an invocation
+be well-formed; we make that requirement explicit at the points where the
+user specifies the target (namely the constructor and assignment operator)
+because it is neither possible nor desirable to postpone the error until
+<code>operator()</code> is actually called. We introduce the term
+<def>Const-Lvalue-Callable</def> to refer to callable types that satisfy
+this requirement.</p>
+
+<p>All known implementations of <code>std::function</code> currently
+permit it to be initialized with a target that is callable only via a
+non-const access path, so this change has the potential to break existing
+user code. Most such breakages should be trivially fixable by adding
+<code>const</code> to functor definitions (and removing unnecessary
+<code>mutable</code> qualifiers from lambda expressions), but there will
+also be a small minority of cases where <code>std::function</code> wraps
+a target whose <code>operator()</code> genuinely does modify internal state
+(see <a href="#Impact">below</a> for further discussion of the likely user
+impact).</p>
+
+<p>In order to provide a smooth migration path for such code, we propose an
+adaptor <code>std::const_unsafe_fun</code> to coerce any callable
+type to an otherwise-equivalent Const-Lvalue-Callable type (which
+effectively holds the target function as a <code>mutable</code> member).
+Thus, any valid C++14 code which passes a target <code>f</code> to
+<code>std::function</code> can be mechanically rewritten to pass
+<code>std::const_unsafe_fun(f)</code> instead, thereby exactly restoring the
+C++14 behavior.</p>
+
+<p>Of course, code that uses <code>std::const_unsafe_fun</code> will be unsafe
+in exactly the same way that code using <code>std::function</code> currently
+is (hence the name); this is a transitional measure rather than a permanent
+solution. In the longer run, the standard library will need to provide a
+mutable function wrapper to support such use cases, but as discussed above
+this should go through the TS process before entering the main standard, and
+so cannot feasibly be ready for C++17. Once this wrapper is available, any
+remaining uses of <code>std::const_unsafe_fun</code> should migrate to it,
+after which <code>std::const_unsafe_fun</code> can be removed from the
+language. We propose introducing <code>std::const_unsafe_fun</code>
+in Annex D, to make clear that it is not a best-practice, and to reflect our
+intention to eventually remove it.</p>
+
+<p>There is one case in which this change can affect the run-time behavior of
+existing code: if a <code>std::function</code> is passed a functor that has both
+const and non-const <code>operator()</code> overloads, it will currently target
+the non-const overload, but with this change it would target the const overload.
+However, such a combination of circumstances appears to be very rare; we found
+no occurrences of it in our codebase. Furthermore, for such an overload pair
+to have observably different behavior, in a way that's detrimental to the
+program, strikes us as an extremely dubious coding practice. So behavioral
+changes should be extremely rare, and when they do occur, they will most
+likely be exposing latent bugs rather than introducing new ones.</p>
+
+<p>Jonathan Wakely observes that if this proposal is adopted, library vendors
+can begin to prepare their users for this transition immediately, by
+implementing the proposed SFINAE restrictions on <code>std::function</code>'s
+constructor and assignment operator, and providing complementary
+SFINAE-controlled overloads for handling functors that are permitted in C++14
+but not in C++17. The latter could be flagged with a <code>[[deprecated]]</code>
+attribute, and conditionally disabled in C++17 mode.</p>
+
+<h3>Feature test macro</h3>
+
+<p>It will ease the transition if <code>std::const_unsafe_fun</code> is
+provided in C++14 mode as a vendor extension, so that users can introduce it
+incrementally, rather than applying it to their code and switching to C++17
+in a single atomic step. However, since this practice may not be universal,
+we recommend that SD-6 provide a feature-test macro for
+<code>std::const_unsafe_fun</code>, so that portable code can use it
+conditionally. We recommend the macro be named <code>__cpp_lib_const_unsafe_fun</code>
+and be defined in the <code>&lt;functional&gt;</code> header.
+No feature-test macro is needed for the changes to <code>std::function</code>
+itself, because (apart from the aforementioned rare and dubious exceptions)
+this change is a pure narrowing of <code>std::function</code>'s interface.</p>
+
+<h2 id="Alternatives">Alternatives Considered</h2>
+
+<p>The first alternative below is new to this paper. The others were presented
+in <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n4159.pdf">N4159</a>
+and discussed in Urbana, but are presented here for completeness, in some cases
+with updated discussion. LEWG straw poll results from the Urbana discussion can
+be found <a href="https://issues.isocpp.org/show_bug.cgi?id=34">here</a>. No
+straw polls were recorded for the LWG discussion, but there was a clear
+consensus in favor of the approach described above.</p>
+
+<h3 id="Overload">Overloading on constness</h3>
+
+<p>In the vast majority of cases, our proposed change will either have no
+effect, or make existing code ill-formed. However, there is one case where
+this change can change the run-time behavior of existing code: if a
+<code>std::function</code> is passed a functor that has both const
+and non-const <code>operator()</code> overloads, it will currently target the
+non-const overload, but with this change it would target the const overload.</p>
+
+<p>We could mitigate this problem by giving <code>std::function</code> itself
+a non-const <code>operator()</code> overload, which would invoke the target
+via a non-const access path. Thus, <code>std::function</code> would continue to
+invoke the target via a non-const access path, unless the
+<code>std::function</code> is itself const. This is still a behavior change,
+but in a narrower set of cases where the change is more unambiguously correct.
+This approach would also give users the ability to control how
+<code>std::function</code>'s constness affects the target, by defining and
+using wrappers (like <code>const_unsafe_fun</code>) that implement their
+preferred policies using a const/non-const overload pair.</p>
+
+<p>However, <code>std::function</code> currently has the property that it
+wraps only a single function, not an overload set: the code executed by
+<code>operator()</code> does not vary with the type, value category, or
+cv-qualification of its arguments (including the implicit object argument).
+Adding such an overload would compromise this useful conceptual simplification,
+and invite the question of whether we should also overload on reference
+qualifiers, or even on argument qualifiers. Given that it is not feasible
+for <code>std::function</code> to represent an entire overload set, it seems
+preferable for it to represent only a single function, rather than attempt
+to occupy some intermediate position.<p>
+
+<p>Furthermore, as discussed earlier, functors which have both const and
+non-const overloads with non-equivalent behavior should be extremely rare
+(and of dubious value). The benefits of this approach therefore seem
+relatively minimal, compared to the drawbacks.</p>
+
+<h3 id="Run_time">Run-time error handling</h3>
+
+<p>A variant of the above approach would be for <code>std::function</code> to
+provide both const and non-const overloads of <code>operator()</code>, and
+accept all the same targets it currently does (so no that code would be rendered
+ill-formed by this change), and specify the const overload to throw an exception
+(or perhaps terminate the program) if invoked with a target that is not
+Const-Lvalue-Callable. This means that more code would continue to work
+unchanged, but at the cost of introducing many more run-time failures, mostly
+in code that could be caught and trivially fixed at build time under our
+proposed approach. It also still has the problem of adding complexity to
+<code>std::function</code>'s interface.</p>
+
+<h3 id="Synchronization">Internal synchronization</h3>
+
+<p>In principle, we could solve the concurrency issue (but not the const
+issue) by adding internal synchronization to <code>std::function</code>.
+However, this renders it vulnerable to deadlock. LEWG consensus against this
+was unanimous (the word "unthinkable" was used), so we need say no more
+about it.</p>
+
+<h3 id="Status_quo">The status quo</h3>
+
+<p>A final option is to standardize the status quo, making it explicit that
+<code>std::function::operator()</code> invokes the target via a non-const
+access path, and is exempt from [res.on.data.races]/p3. This approach is
+expedient because it requires no implementation changes, and hence no
+overt breakage that could be blamed on vendors or the standard. However,
+we believe this would do users a serious disservice, by passing the
+concurrency buck to them while withholding a vital tool for avoiding
+data races.</p>
+
+<p>While we don't wish to make an argument from popularity, it is noteworthy
+that this option has not attracted any significant support from standard
+library vendors, who would benefit the most from its expediency advantages.</p>
+
+<h2 id="Impact">User Impact</h2>
+
+<p>The proposed change can only affect code that initializes a
+<code>std::function</code> (via construction or assignment) from an object of
+class type that has a non-const <code>operator()</code> overload that matches
+the <code>std::function</code>'s signature. There are two cases to consider:
+<ul>
+  <li>If the class does not also have a matching <code>operator()</code> that
+      <em>is</em> const, the code will be ill-formed.</li>
+  <li>If the class has a matching const <code>operator()</code>, the code will
+      remain well-formed, but its run-time behavior will change. This difference
+      will be observable only to the extent that the two overloads have
+      different behavior.</li>
+</ul></p>
+
+<p>To assess how common these cases are likely to be in practice, we conducted a
+<a href="http://research.google.com/pubs/pub41342.html">ClangMR</a>
+analysis of a codebase of over 100 million lines of C++ code, identifying every
+location where a <code>std::function</code> is given a new target. More
+precisely, we identified every construction or assignment of a
+<code>std::function</code> where the sole argument (hereinafter the
+"target expression") is a function, functor (excluding
+<code>std::function</code>), or function pointer (pointers to member functions,
+which are fairly rare, were not considered for simplicity), and classified
+according to whether the target type has a const and/or non-const
+<code>operator()</code>. Note that the objects produced by
+<code>std::bind</code> (and, equivalently, <code>boost::bind</code>) may have
+const/non-const overload pairs for forwarding purposes, but they just forward
+to the corresponding overloads (if any) of the bound function. So for purposes
+of this analysis, when a <code>std::function</code> is initialized with a
+<code>bind</code> wrapper, we treat <code>bind</code>'s first argument as
+the target expression.</p>
+
+<p>The codebase contained over 70,000 distinct target expressions, of which
+less than 5,000 had a non-const <code>operator()</code>. We manually classified
+the operator definitions according to what they mutate, because that dictates
+how to fix them. Less than 80 target expressions genuinely mutated the internal
+state of the target, and so would have to be wrapped in
+<code>std::const_unsafe_fun</code>. The remainder can be fixed by
+adding <code>const</code> to or removing <code>mutable</code> from the operator
+definition (with no change to the target expression). Less than 150 distinct
+operator definitions would have to be modified in this way to fix all
+the remaining target expressions. Other than outputs of <code>std::bind</code>
+and <code>boost::bind</code> (handled as discussed above), we found no cases at
+all where a single target expression had both const and non-const overloads.</p>
+
+<p>In short, this codebase would not experience any run-time changes from our
+proposal, and all compile-time problems could be fixed with less than 250
+single-line mechanical edits (compared to over 70,000 initializations of
+<code>std::function</code>, and over 100 million lines of code total).</p>
+
+<p>Of the operator definitions that did not genuinely modify internal state,
+roughly 15% mutated nothing at all (almost all were class types, where
+the author presumably just forgot the <code>const</code>). Another 15%
+were class types that mutated some state outside the type, and 70% were
+lambda expressions that mutated external state via reference or pointer
+captures. One might object that mutated data could be logically internal to the
+object, even if it is not physically internal. This could be true in principle,
+but in practice physical and logical constness were equivalent in every
+case. Our criterion for whether the data was logically internal to the
+function object was based on the principles discussed in the
+<a href="#Const">Appendix</a>: if the function object's copy constructor does
+not make a copy of the data (e.g. if it shallow-copies a pointer to it), the
+data cannot be considered internal. For example, consider code like the
+following:
+<pre>
+int i = 0;
+auto f = [&i]() mutable {i++;};
+</pre>
+We conjecture that the people writing code like this are thinking of constness
+as representing functional purity (absence of side effects). This is a tempting
+intuition, but it is defeated by the fact that code with only const access to
+<code>f</code> can still invoke <code>operator()</code> on a copy of
+<code>f</code>.</p>
+
+<p>In interpreting this data, we must bear in mind its limitations. Most
+notably, there are many ways it could fail to be representative of C++
+programmers at large. It covers a single codebase, produced (with the
+exception of a small amount of open-source code) by a single company with
+a fairly uniform C++ culture. This codebase has a well-established pre-C++11
+callback infrastructure, and although <code>std::function</code> is now
+encouraged over those legacy callbacks, it was forbidden until less than a
+year ago. Nonetheless, this is the only data we have; we must look for our
+keys where the light is.</p>
+
+<h2 id="Wording">Proposed Wording</h2>
+<p>Note that this wording incorporates an updated resolution of <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n4245.html#2393">LWG 2393</a>.
+All changes are relative to <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n4296.pdf">N4296</a>.</p>
+
+<p>Change 20.9.11.2 [func.wrap.func] p2 as follows:
+<blockquote class="std">
+A callable <del>object <code>f</code> of</del> type <ins>(20.9.1
+[func.def]) </ins><code>F</code> is <i><ins>Const-Lvalue-</ins>Callable</i> for
+argument types <code>ArgTypes</code> and return type <code>R</code> if the
+expression <code><i>INVOKE</i>(<del>f</del><ins>declval&lt;const
+F&amp;&gt;</ins>, declval&lt;ArgTypes&gt;()..., R)</code>, considered as an
+unevaluated operand (Clause 5), is well formed (20.9.2).
+</blockquote>
+</p>
+
+<p>Change 20.9.11.2.1 [func.wrap.func.con] p8 and p21 as follows:
+<blockquote class="std">
+<pre>template&lt;class F&gt; function(F f);
+template &lt;class F, class A&gt; function(allocator_arg_t, const A& a, F f);</pre>
+&hellip;<br>
+<p>8 <i>Remarks:</i> These constructors shall not participate in overload
+resolution unless <code><del>f</del><ins>F</ins></code> is
+<ins>Const-Lvalue-</ins>Callable (20.9.11.2) for argument types
+<code>ArgTypes...</code> and return type <code>R</code>.</p>
+&hellip;<br>
+<pre>template<class F> function& operator=(F&& f);</pre>
+&hellip;<br>
+<p>21 <i>Remarks:</i> This assignment operator shall not participate in
+overload resolution unless <code><del>declval&lt;typename decay&lt;F&gt;::type&amp;&gt;()</del><ins>decay_t&lt;F&gt;</code>
+is <ins>Const-Lvalue-</ins>Callable (20.9.11.2) for argument types
+<code>ArgTypes...</code> and return type <code>R</code>.</p>
+</blockquote>
+</p>
+
+<p>Change 20.9.11.2.4 [func.wrap.func.inv] as follows:
+<blockquote class="std">
+<pre>R operator()(ArgTypes... args) const</pre>
+<p>1 <i>Effects:</i> <code><i>INVOKE</i>(f, std::forward&lt;ArgTypes&gt;(args)..., R)</code>
+(20.9.2), where <code>f</code> is <ins>a const lvalue expression referring
+to</ins> the target object (20.9.1) of <code>*this</code>.</p>
+
+<p>2 <i>Returns:</i> Nothing if <code>R</code> is void, otherwise the return
+value of <code><i>INVOKE</i>(f, std::forward&lt;ArgTypes&gt;(args)..., R)</code>.</p>
+
+<p>3 <i>Throws:</i> <code>bad_function_call</code> if <code>!*this</code>;
+otherwise, any exception thrown by the wrapped callable object.</p>
+</blockquote>
+</p>
+
+<p>Add a new section to Annex C as follows:
+<blockquote class="stdins">
+<h4>C.X.X Clause 20: General utilities library  [diff.cpp14.func.wrap]</h4>
+<p>20.9.11.2</p>
+<p><b>Change:</b> <code>std::function</code> requires its target to be callable
+via a const access path, and always calls it via that path.</p>
+<p><b>Rationale:</b> Without this restriction, <code>std::function</code>
+cannot satisfy the library's data race avoidance requirements.</p>
+<p><b>Effect on original feature:</b> Valid C++ 2014 code may fail to compile
+or may change meaning in this International Standard. For example,
+the following code is valid in both C++ 2014 and in this International
+Standard, but produces different observable behavior:
+<pre>
+struct S {
+  bool operator()() { return true; }
+  bool operator()() const { return false; }
+};
+const std::function<bool()> f(S{});
+bool b = f();
+// b is true in C++14, but false in this International Standard
+</pre>
+</p>
+</blockquote>
+</p>
+
+<p>Change D.8.2 [depr.function.adaptors] as follows:
+<blockquote class="std">
+<p>1 The adaptors ptr_fun, mem_fun, mem_fun_ref, and their corresponding return
+types are deprecated. [ <i>Note:</i> The function template <code>bind</code>
+20.9.9 provides a better solution. &mdash; <i>end note</i> ]</p>
+<p><ins>2 The adaptor <code>const_unsafe_fun</code> and its corresponding
+return type are deprecated.</ins></p>
+</blockquote>
+</p>
+
+<p>Add a new section to D.8.2 [depr.function.adaptors] as follows:
+<blockquote class="stdins">
+<h4>D.8.2.X Const-Lvalue-Callable function adaptor [depr.const.unsafe.fun]</h4>
+<p><code>const_unsafe_fun</code> takes an argument of a callable type and
+wraps it in a Const-Lvalue-Callable interface, regardless of whether
+the argument is Const-Lvalue-Callable.</p>
+<p>[ <i>Note:</i> The purpose of this adaptor is to provide a temporary,
+mechanical migration path for C++ 2014 code that is affected by the changes
+described in [diff.cpp14.func.wrap]. &mdash; <i>end note</i> ]</p>
+<p>
+<code>
+template &lt;class F&gt;<br>
+<i>unspecified</i> const_unsafe_fun(F f);<br>
+</code>
+</p>
+<p><i>Requires:</i> <code>F</code> shall be a callable type, and shall
+satisfy the requirements of <code>CopyConstructible</code>.</p>
+<p><i>Returns:</i> A Const-Lvalue-Callable (20.9.11.2) forwarding call wrapper
+(20.9.2) whose target object is a copy of <code>f</code>. The forwarding step
+shall access the target object as an lvalue via a non-const access path, and
+consequently is permitted to modify the target object, even when the wrapper
+is invoked via a const access path. [<i>Note:</i> this supersedes the data race
+avoidance requirements specified in 17.6.5.9. The caller is responsible for
+ensuring that the wrapper is not invoked simultaneously from multiple threads,
+or that simultaneous invocations of the target object do not lead to data
+races. &mdash; <i>end note</i> ]</p>
+<p><i>Remarks:</i> The return type shall satisfy the requirements of
+<code>CopyConstructible</code>.</p>
+</blockquote>
+</p>
+
+<h3>Alternate wording</h3>
+
+<p>The following wording resolves the internal contradiction by standardizing
+the status quo that <code>operator()</code> is an exception to
+[res.on.data.races]/p3. We do not recommend this approach, but offer wording
+for it it in case the committee is unwilling to make a breaking change as
+proposed above.</p>
+
+<p>Change 20.9.11.2.4 [func.wrap.func.inv] as follows:
+<blockquote class="std">
+<pre>R operator()(ArgTypes... args) const</pre>
+<p>1 <i>Effects:</i> <code><i>INVOKE</i>(f, std::forward&lt;ArgTypes&gt;(args)..., R)</code>
+(20.9.2), where <code>f</code> is <ins>a non-const lvalue expression referring
+to</ins> the target object (20.9.1) of <code>*this</code>.<ins> [ <i>Note:</i>
+This may modify the target object. This function is consequently an exception
+to the general requirement (17.6.5.9) that a standard library function will
+not modify objects except via the function's non-const arguments. &mdash;
+<i>end note</i> ]</ins>
+</p>
+
+<p>2 <i>Returns:</i> Nothing if <code>R</code> is void, otherwise the return
+value of <code><i>INVOKE</i>(f, std::forward&lt;ArgTypes&gt;(args)..., R)</code>.</p>
+
+<p>3 <i>Throws:</i> <code>bad_function_call</code> if <code>!*this</code>;
+otherwise, any exception thrown by the wrapped callable object.</p>
+</blockquote>
+</p>
+
+<h2 id="Const">Appendix A: A digression on the meaning of <code>const</code></h2>
+
+<p>This issue raises the basic question of what we intend <code>const</code>
+to mean. For example, some people have argued for the status quo on the
+grounds that <code>std::function</code> just has "shallow const" semantics,
+like a pointer, and so this is not a defect. Similarly, our investigation
+of the user impact of this change raises the question of how to tell whether
+the absence of <code>const</code> on a method (or even the presence of
+<code>mutable</code> on a lambda) is a programmer error.</p>
+
+<p>The language imposes certain constraints on what <code>const</code> means,
+but it gives the library designer the ability to impose whatever higher-level
+semantics they want, e.g. "physical" vs. "logical" constness, and "shallow"
+vs. "deep" constness. Intuition is normally a reliable guide, but in areas
+of disagreement or uncertainty, it's useful to make our intuitions explicit,
+so we can reason about them. To that end, we present the following:</p>
+
+<p>The core intuitive meaning of <code>const</code> is "read-only" (indeed,
+it was spelled <code>readonly</code> in early versions of C++). By
+declaring something as const, we give up the ability to mutate the underlying
+object, or in other words to change the object's logical state. Thus, if
+a member function can leave the object in a different logical state, it
+must not be marked const (notice that this is a generalization of the rule
+that the core language already imposes on the <em>physical</em> state).
+Conversely, if a member function cannot modify the object's logical state,
+it is wasteful (and frequently pointless, as we will see) to mark it as
+non-const. A library designer may have wide latitude to choose how they
+define the logical states of a class, but having made that decision, they
+have little further discretion in how they const-qualify their members.
+Thus, for example, the choice is not between "shallow const" and
+"deep const", but between "shallow" and "deep" notions of the object's
+logical state (i.e. does the logical state depend on the pointer itself,
+or on the pointee?).</p>
+
+<p>This is significant, because several other aspects of the design of a class
+depend on its "logical state". In particular, consider the copy constructor:
+it has a postcondition that the constructed object has the same logical state as
+the source object ([utility.arg.requirements] says "equivalent", without further
+defining that term). It has another, less obvious postcondition: the two
+objects must be independent, i.e. subsequent changes to the logical state of
+one will have no effect on the other. Notice that this also is a
+generalization of a language-level rule about the physical state. This
+postcondition often goes unmentioned (probably because it is so self-evident
+at the physical level), but it is nonetheless crucial: the fundamental purpose
+of copying, as a computing operation, is to decouple subsequent operations on
+the copies. It's also fundamental to the ordinary meaning of the word "copy":
+I cannot copy something by holding a mirror up to it, or by creating a new
+name to refer to it by. A copy is, by definition, an object with an
+independent existence from the original.</p>
+
+<p>Thus, the copy constructor must copy the entire logical state of the
+object (or more precisely the representation of it), and the copy must be
+"deep", with the partial exception that copying of immutable logical state may
+be "shallow". Conversely, anything that's mutable and shallow-copied cannot
+be part of the logical state. This brings us back to the observation that it's
+often pointless to treat a member function as non-const because it mutates
+something outside the logical state: if the type is copyable, treating the
+member function as non-const provides no practical benefit, because the
+restriction can be trivially evaded (even accidentally) by performing
+the mutation via a copy of the object.</p>
+
+<p>Notice the recurrence of the terms "deep" and "shallow", and the
+connection to mutation. This is not a coincidence. Like "deep const" and
+"shallow const", "deep copy" and "shallow copy" are not really independent
+type design options, but manifestations of the deeper choice between
+"shallow" and "deep" logical state. And this is the point: both the
+const semantics and the copy semantics are determined by that choice,
+so they must be consistent with each other. Const methods cannot modify
+what the copy constructor copies, and the copy constructor must
+copy anything that const methods aren't allowed to modify.</p>
+
+<p>It bears mentioning that the equality comparison operators should also
+be defined in terms of the logical state, and so must be consistent with
+the copying and const semantics, but that isn't relevant for present
+purposes.</p>
+
+<p>One corollary of this is that defenders of the status quo are not correct
+to say that <code>std::function</code> is properly using shallow const
+semantics (even leaving aside the point that its <code>target()</code> member
+has deep const semantics). That position would imply that
+<code>std::function</code>'s logical state does not contain the target object,
+but only some pointer to it. Consequently, the copy constructor's
+postcondition must be that the two <code>std::function</code> objects point
+to the same target object, but the copy constructor's current specification
+clearly contradicts that. Either way, there's a defect in
+<code>std::function</code>, so by taking that tack, we'd just be deciding
+to break <code>std::function</code> in a way that creates more transitional
+pain for a less desirable end state.</p>
+
+<p>As a final note, <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3339.pdf">N3339</a>'s
+proposed <code>value_ptr&lt;T&gt;</code> is sometimes cited as a counterexample
+to this principle, but we believe it simply violates it. Its logical state
+consists of a <code>T</code> object, not a pointer, and it would be
+materially improved if its const members did not provide non-const access
+to the underlying pointer (and likewise if its comparison operators
+compared <code>T</code> values rather than <code>T*</code> addresses).
+Analogies with e.g. <code>shared_ptr&lt;T&gt;</code> are misleading; in effect,
+<code>value_ptr&lt;T&gt;</code> is a variant of <code>optional&lt;T&gt;</code>
+that uses heap allocation to support dynamic polymorphism.</p>
+
+</body></html>

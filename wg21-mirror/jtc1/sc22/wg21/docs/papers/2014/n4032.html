@@ -1,0 +1,435 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="content-type" content="text/html; charset=UTF-8">
+<title>N4032: Comments on continuations and executors</title>
+<style type="text/css">
+p {text-align:justify}
+li {text-align:justify}
+blockquote.note
+{
+    background-color:#E0E0E0;
+    padding-left: 15px;
+    padding-right: 15px;
+    padding-top: 1px;
+    padding-bottom: 1px;
+}
+ins, .inserted
+{
+    color: black;
+    background: #a0ffa0;
+    text-decoration: underline;
+}
+del
+{
+    color: black;
+    background: #ffa0a0;
+    text-decoration: line-through;
+}
+</style>
+</head><body>
+<table>
+<tr><td>Document Number:</td><td>N4032</td></tr>
+<tr><td>Date:</td><td>2014-05-23</td></tr>
+<tr><td>Author:</td><td><a href="mailto:anthony@justsoftwaresolutions.co.uk">Anthony
+      Williams</a><br>Just Software Solutions Ltd</td></tr>
+</table>
+    <h1>N4032: Comments on continuations and executors</h1>
+
+<p>Having implemented the concurrency extensions from D3904 from the
+  Issaquah wiki, it is apparent that there are several aspects of the
+  specification which are incomplete, and others which I find
+  undesirable.</p>
+
+<p>This paper attempts to enumerate those aspects, and proposes fixes
+and suggestions.</p>
+
+<h2>Executors</h2>
+
+<h3>Abstract class vs concept</h3>
+
+<p>While I can understand the need for a concrete executor type that
+  can be passed around, so functions that require executors do not
+  have to be templates, there are various downsides to consider
+  too:</p>
+
+<ol>
+<li>The use of virtual functions constrains the interface, and
+  prevents executors from returning anything from the <code>add</code>
+  function (such as a task handle).</li>
+<li>The use of virtual functions forces the use
+  of <code>std::function</code> to wrap all the tasks. This prevents
+  the use of move-only function objects such
+  as <code>std::packaged_task</code>.</li>
+</ol>
+
+<p>If we instead had an exector <em>concept</em> then we could allow
+  implementations that handled these scenarios. We could also provide
+  a type-erased <code>generic_executor_ref</code> which wrapped an
+  underlying executor in a concrete type.</p>
+
+<p>Uses that are already templates, such as <code>std::async</code>
+  could now take the executor type directly as a reference, avoiding
+  the need for virtual function calls, and potentially avoiding the
+  use of a <code>std::function</code> wrapper as well.</p>
+
+<p>If we had a <code>movable_function</code> template equivalent
+  to <code>std::function</code> that only required that the target was
+  movable rather than copyable, then this would be preferable
+  to <code>std::function</code> for passing tasks around.</p>
+
+<h3>Scheduled Executors</h3>
+
+<p>The use of <code>std::chrono::system_clock</code> for the timeouts
+  is odd: <code>std::chrono::steady_clock</code> should be the natural
+  choice. However the use of timestamps for scheduling is very
+  simplistic, and probably meets very few real use cases. Again, the
+  use of an abstract base class and virtual functions is constraining,
+  and prevents the use of varied scheduling functions for different
+  scenarios.</p>
+
+<p>My recommendation is to remove the <code>scheduled_executor</code>
+class entirely.</p>
+
+<h3>Concrete Executors</h3>
+
+<p>The list of concrete executors is limited, but workable. Those
+  executors that have an underlying executor should return it via
+  a <code>generic_executor_ref</code> rather than
+  an <code>executor*</code>, to maintain the concrete interface whilst
+  allowing flexibility in the type of the underlying executor.</p>
+
+<p>One additional executor type that would be nice to have is a
+  multiplexing executor that takes a set of underlying executors, and
+  shares the tasks out between them. This and
+  the <code>loop_executor</code> would provide basic building blocks
+  for a thread pool.</p>
+
+<p>The descriptions of the concrete executors are insufficiently
+  detailed when it comes to the scheduling properties. We need wording
+  to specify when the tasks are destructed, and any synchronization
+  relationships. For those executors that use multiple threads we need
+  to specify additional details about which threads the tasks are run
+  on.</p>
+
+<h2>Enhancements to Futures</h2>
+
+<h3>Executors and <code>std::async</code></h3>
+
+<p>Rather than taking a reference to the <code>executor</code> base
+  class, the overloads of <code>std::async</code> should instead just
+  take a reference to anything that implements the <em>Executor</em>
+  requirements. This will require careful wording of the form "shall
+  only partipate in overload resolution if..." for the various
+  overloads to avoid ambiguity.</p>
+
+<h3>Executors and <code>then()</code></h3>
+
+<p>Rather than taking a reference to the <code>executor</code> base
+  class, the overloads of <code>then()</code> should instead just take
+  a reference to anything that implements the <em>Executor</em>
+  requirements. Since <code>then()</code> only takes a nullary
+  callable, and not an argument set, this is unambiguous.</p>
+
+<h3><code>unwrap()</code> and invalid futures</h3>
+
+<p>The future returned from <code>unwrap()</code> is specified to be
+  valid, regardless of whether or not the inner future is
+  valid. However, if the outer future becomes ready with an inner
+  future that is not valid, it is unspecified what the behaviour of
+  the returned future should be. The inner future can never become
+  ready (because it has no shared state), but there is now no way to
+  detect this.</p>
+
+<p>I therefore propose that if the inner future is not valid, the
+  outer future becomes ready with an exception of
+  type <code>std::future_error</code>, with an error code
+  of <code>std::future_errc::broken_promise</code>.</p>
+
+<h3><code>unwrap()</code> and <code>std::shared_future</code></h3>
+
+<p>Firstly, <code>std::shared_future&lt;std::shared_future&lt;R&gt;&gt;::unwrap()</code>
+  is specified to return a <code>std::future&lt;R&gt;</code>. I
+  believe it should return a <code>std::shared_future&lt;R&gt;</code>,
+  which can therefore reference the same shared state as the original
+  inner future, rather than copying the value.</p>
+
+<p>Secondly, <code>std::shared_future&lt;std::future&lt;R&gt;&gt;::unwrap()</code>
+  is specified to move the inner future into the result: </p>
+
+<blockquote>
+  When the inner future is ready, its value (or exception) is moved to
+  the shared state of the returned future.
+</blockquote>
+
+<p>This moves the result out from under any other copies of
+  that <code>std::shared_future</code> object which refer to the same
+  result &mdash; in theory multiple threads could each have their
+  own <code>std::shared_future</code> object referencing the same
+  inner <code>std::future</code>, and each could
+  call <code>unwrap()</code> in parallel. This results in a race
+  condition, which I believe is undesirable.</p>
+
+<p>Instead, I propose
+  that <code>std::shared_future&lt;std::future&lt;R&gt;&gt;::unwrap()</code>
+  is not permitted. Users should either unwrap
+  the <code>std::future&lt;std::future&lt;R&gt;&gt;</code> before it
+  is converted to a <code>std::shared_future</code>, or use
+  a <code>std::shared_future&lt;std::shared_future&lt;R&gt;&gt;</code>,
+  which can be safely unwrapped into
+  a <code>std::shared_future&lt;R&gt;</code>.</p>
+
+<h3><code>when_all</code> effects</h3>
+
+<p>The effects as specified are:</p>
+
+<blockquote>
+  Each <code>future</code> and <code>shared_future</code> is waited
+  upon and then copied into the collection of the output
+  (returned) <code>future</code>, maintaining the order of the futures
+  in the input collection.
+</blockquote>
+
+<p>This implies that the futures are waited on before the call
+  to <code>when_all</code> returns, which would defeat the purpose of
+  the call.</p>
+
+<p>It also requires <em>copying</em> of <code>std::future</code>
+  objects, which is not possible.</p>
+
+<p>I propose that the wording is clarified to say that the waiting is
+  done in the background, and that the futures are <em>moved</em>.</p>
+
+<h3><code>when_any</code> effects</h3>
+
+<p>The effects as specified are:</p>
+
+<blockquote>
+  Each <code>future</code> and <code>shared_future</code> is waited
+  upon. When at least one is ready, all the futures are copied into
+  the collection of the output (returned) <code>future</code>,
+  maintaining the order of the futures in the input collection.
+</blockquote>
+
+<p>This implies that the futures are waited on before the call
+  to <code>when_any</code> returns, which would defeat the purpose of
+  the call.</p>
+
+<p>It also requires <em>copying</em> of <code>std::future</code>
+  objects, which is not possible.</p>
+
+<p>I propose that the wording is clarified to say that the waiting is
+  done in the background, and that the futures are <em>moved</em>.</p>
+
+<h3><code>when_all</code> and deferred tasks</h3>
+
+<p>Futures that result from a call to <code>std::async</code>, or a
+  call to <code>then()</code> on another future can refer to deferred
+  tasks. It is currently unspecified what happens when such futures are
+  passed to <code>when_all()</code>.</p>
+
+<p>Passing these to <code>when_all</code> should execute the deferred
+  tasks before the call to <code>when_all</code> returns, just
+  as <code>then()</code> does, as otherwise the future returned
+  from <code>when_all</code> will never become <em>ready</em>, as the
+  deferred tasks will not execute until their futures are waited
+  on.</p>
+
+<h3><code>when_any</code> and deferred tasks</h3>
+
+<p>Futures that result from a call to <code>std::async</code>, or a
+  call to <code>then()</code> on another future can refer to deferred
+  tasks. It is currently unspecified what happens when such futures are
+  passed to <code>when_any()</code>.</p>
+
+<p>Whereas <code>when_all()</code> requires all the futures to
+  be <em>ready</em> before the result
+  is <em>ready</em>, <code>when_any</code> only requires one of the
+  supplied futures to be <em>ready</em>. I therefore propose that a
+  call to <code>when_any</code> checks the passed futures in the order
+  passed to see if they are already ready, or are deferred. If future
+  <code>f<sub>i</sub></code> is <em>ready</em> then the result
+  is <em>ready</em>, and no further futures are checked. If
+  future <code>f<sub>i</sub></code> is deferred, then the deferred
+  task is executed, the result is <em>ready</em>, and no further
+  futures are checked.
+
+<h2>Partial proposed wording</h2>
+
+<p>What follows is partial wording for addressing some of the issues
+raised in this paper.</p>
+
+<p>Remove the <code>executor</code>
+  and <code>scheduled_executor</code> classes (2.2.1 and
+  2.2.2). Replace them with an <em>executor</em> concept
+  and <code>generic_executor_ref</code> class defined as follows:</p>
+
+<blockquote class="inserted">
+  <h3>2.2.x Requirements for Executor types</h3>
+
+  <p>An <em>Executor</em> type is a class that manages the scheduling
+    and execution of supplied tasks. The details of the scheduling and
+    ordering of the tasks, along with the execution agents used to
+    execute the tasks will vary between executors. In order for a
+    type <code>E</code> to qualify as an <em>Executor</em> type, the
+    following expressions must be supported, with the specified
+    semantics, where <code>e</code> denotes a value of
+    type <code>E</code>, and <code>f</code> denotes a value of a
+    callable type <code>F</code> such that <code>f()</code> is
+    well-formed, and <code>F</code> is <em>CopyConstructible</em>.</p>
+
+  <h4><code>e.add(f)</code></h4>
+  <dl>
+    <dt>Effects:</dt>
+    <dd>A copy of <code>f</code> is constructed in internal storage as
+      if <code>F g(f)</code>. The copy of <code>f</code> is executed
+      at the time and manner specified for type <code>E</code>.</dd>
+    <dt>Throws:</dt>
+    <dd>Any exception thrown by the copy constructor
+      of <code>f</code>. <code>std::bad_alloc</code> if sufficient
+      internal storage cannot be allocated. Any other exceptions
+      specified by <code>E</code>.</dd>
+    <dt>Synchronization:</dt>
+    <dd>The completion of the copy-construction of <code>f</code> into
+      internal storage synchronizes-with the start of the execution of
+      that copy.</dd>
+  </dl>
+
+  <h4><code>e.num_pending_closures()</code></h4>
+  <dl>
+    <dt>Returns:</dt>
+    <dd>A value implicitly convertible to <code>size_t</code> which is
+      the number of tasks submitted to the executor but not yet
+      started.</dd>
+  </dl>
+
+  <h3>2.2.y Class <code>generic_executor_ref</code></h3>
+  
+  <p><code>generic_executor_ref</code> satisfies the <em>Executor</em>
+    requirements (2.2.x). It wraps a reference to a concrete executor
+    type.</p>
+
+  <pre>
+class generic_executor_ref {
+public:
+    template&lt;typename E&gt;
+    generic_executor_ref(E&amp; e) noexcept;
+
+    generic_executor_ref(generic_executor_ref const&amp; other) noexcept;
+    generic_executor_ref&amp; operator=(generic_executor_ref const&amp; other) noexcept;
+
+    void add(std::function&lt;void()&gt; f);
+    size_t num_pending_closures() const;
+};
+</pre>
+
+  <h4><code>template&lt;typename E&gt;
+      generic_executor_ref(E&amp; e) noexcept;</code></h4>
+  <dl>
+    <dt>Requires:</dt>
+    <dd><code>E</code> shall satisfy the <em>Executor</em> requirements (2.2.x).</dd>
+    <dt>Effects:</dt>
+    <dd>Constructs a new instance of <code>generic_executor_ref</code> that refers
+      to <code>e</code>.</dd>
+  </dl>
+
+  <h4><code>generic_executor_ref(generic_executor_ref const&amp; other) noexcept;</code></h4>
+  <dl>
+    <dt>Effects:</dt>
+    <dd>Constructs a new instance of <code>generic_executor_ref</code>
+      that refers to the same underlying executor
+      as <code>other</code>.</dd>
+  </dl>
+
+  <h4><code>generic_executor_ref&amp; operator=(generic_executor_ref const&amp; other)
+  noexcept;</code></h4>
+  <dl>
+    <dt>Postconditions:</dt>
+    <dd><code>*this</code> refers to the same underlying executor
+    as <code>other</code>.</dd>
+    <dt>Returns:</dt>
+    <dd><code>*this</code></dd>
+  </dl>
+
+  <h4><code>void add(std::function&lt;void()&gt; f);</code></h4>
+  <dl>
+    <dt>Effects:</dt>
+    <dd><code>e.add(f)</code>, where <code>e</code> is the underlying
+    executor referred to by <code>*this</code>.</dd>
+  </dl>
+
+  <h4><code>size_t num_pending_closures() const;</code></h4>
+  <dl>
+    <dt>Returns:</dt>
+    <dd><code>e.num_pending_closures()</code>, where <code>e</code> is
+    the underlying executor referred to by <code>*this</code>.</dd>
+  </dl>
+
+</blockquote>
+
+<p>Modify the effects clause of 3.4 (<code>when_all</code>):
+
+<blockquote>
+<dl>
+  <dt>Effects:</dt>
+<dd><ul>
+    <li><del>Each <code>future</code> and <code>shared_future</code>
+        is waited upon and then copied into the collection of the
+        output (returned) future, maintaining the order of the futures
+        in the input collection.</del></li>
+    <li><ins>If any of the futures supplied to a call
+        to <code>when_all</code> refer to deferred tasks that have not
+        started execution, those tasks are executed before the call
+        to <code>when_all</code> returns. Once all such tasks have
+        been executed, the call to <code>when_all</code> returns
+        immediately.</ins></li>
+    <li><ins>The call to <code>when_all</code> does not wait for
+        non-deferred tasks, or deferred tasks that have already
+        started executing elsewhere, to complete before
+        returning.</ins></li>
+    <li><ins>Once all the futures supplied to the call
+        to <code>when_all</code> are <em>ready</em>, the futures are
+        moved into the associated state of the future returned from
+        the call to <code>when_all</code>, preserving the order of the
+        futures supplied to <code>when_all</code>. That future is
+        then <em>ready</em>.</ins></li>
+    <li>The future returned by <code>when_all</code> will not throw an
+      exception, but the futures held in the output collection may.</li>
+</ul></dd></dl>
+</blockquote>
+
+<p>Modify the effects clause of 3.5 (<code>when_any</code>):
+
+<blockquote>
+<dl>
+  <dt>Effects:</dt>
+<dd><ul>
+    <li><del>Each <code>future</code> and <code>shared_future</code>
+        is waited upon. When at least one is ready, all the futures
+        are copied into the collection of the output (returned)
+        future, maintaining the order of the futures in the input
+        collection.</del></li>
+    <li><ins>Each of the futures supplied to <code>when_any</code> is
+        checked in the order supplied. If a given future
+        is <em>ready</em>, then no further futures are checked, and
+        the call to <code>when_any</code> returns immediately. If a
+        given future refers to a deferred task that has not yet
+        started execution, then no further futures are checked, that
+        task is executed, and the call to <code>when_any</code> then
+        returns immediately.</ins></li>
+    <li><ins>The call to <code>when_any</code> does not wait for
+        non-deferred tasks, or deferred tasks that have already
+        started executing elsewhere, to complete before
+        returning.</ins></li>
+    <li><ins>Once at least one of the futures supplied to the call
+        to <code>when_any</code> are <em>ready</em>, the futures are
+        moved into the associated state of the future returned from
+        the call to <code>when_any</code>, preserving the order of the
+        futures supplied to <code>when_any</code>. That future is
+        then <em>ready</em>.</ins></li>
+    <li>The future returned by <code>when_any</code> will not throw an
+      exception, but the futures held in the output collection may.</li>
+</ul></dd></dl>
+</blockquote>
+
+</body> </html>

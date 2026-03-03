@@ -1,0 +1,311 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html><head>
+<meta http-equiv="content-type" content="text/html; charset=windows-1252">
+<style type="text/css">
+.comment { color: #999999; font-style: italic; font-family:serif;}
+.pre { color: #000099; }
+.string { color: #009900; }
+.char { color: #009900; }
+.float { color: #996600; }
+.int { color: #999900; }
+.bool { color: #000000; font-weight: bold; }
+.type { color: #FF6633; }
+.flow { color: #FF0000; }
+.keyword { color: #990000; }
+.operator { color: #663300; font-weight: bold; }
+.operator { color: #663300; font-weight: bold; }
+pre.code {
+    border: 2px solid #666;
+    background-color: #F4F4F4;
+    padding-left: 10px;
+    padding-top: 0px;
+}
+code {
+    border: 2px solid #d0d0d0;
+    background-color: LightYellow;
+    padding: 2px;
+    padding-left: 10px;
+    display:table;
+    white-space:pre;
+    margin:2px;
+    margin-bottom:10px;
+}
+dt
+{
+    font-weight: bold;
+}
+    
+.ins {
+    background-color:#A0FFA0;
+}
+
+.del {
+    background-color:#FFA0A0;
+    text-decoration:line-through
+}
+
+.quest {
+    background-color:#FFFF00;
+}
+
+</style><title>Invocation type traits</title>
+</head><body>
+<p>N3729<br>
+Revision of N3579<br>
+2013-09-02<br>
+Mike Spertus<br>
+<a href="mailto:mike_spertus@symantec.com"><tt>mike_spertus@symantec.com</tt></a><br></p>
+
+<h1>Invocation type traits</h1>
+<h2>Overview</h2>
+<p>We propose a (compiler-supported) type trait <tt>std::invocation_type</tt> whose <tt>type</tt> typedef 
+is the implied function
+type of the callable object when called with the given argument types.</p>
+<p>For example, if we define <tt>C</tt> as 
+<code>struct C {
+  int operator()(double d, int i);
+  int operator()(double d1, double d2);
+};
+</code>
+then <tt>std::invocation_type&lt;C(int, int)&gt;::type</tt> would be <tt>int(double, int)</tt>.
+More precisely the return type of <tt>invocation_type&lt;Fn(ArgTypes...)&gt;</tt> is 
+<tt>result_of&lt;Fn(ArgTypes...)&gt;</tt> and each argument type is the same
+as the formal parameter type matched in the call to <tt>Fn</tt>. For more detailed
+information, see the <a href="#uc">use cases</a> and <a href="#wording">wording</a> below.</p>		
+<a name="uc"></a><h2>Example application: More perfect forwarding</h2>
+<p>This section gives several examples of using <tt>std::invocation_type</tt> to
+create transparent forwarding functions. Note that this paper does not propose
+changing <tt>async</tt>, etc., but to illustrate, as Pablo Halpern has said,
+that the problem is real for any "pass-through" functions that need to capture
+arguments.</p>
+
+<p>The moment a programmer first encounters multithreaded programs, they run into 
+    surprises like the following example:
+<code>// Inspired by examples in section 2.2 of Anthony Williams <em>C++ Concurrency in Action</em>
+void f(int &amp;i) { i = 2; <span class="comment">/* ... */</span> }
+int i;
+f(i); <span class="comment">// <tt>i</tt> passed by reference, <tt>f</tt> can change <tt>i</tt></span>
+thread tf = thread(f, i); <span class="comment">// Ill-formed: i not passed by reference</span>
+</code>
+While they can always force a pass by reference,e.g., by
+<code>thread t(f, ref(i));</code>
+this is entirely different from how functions arguments are ordinarily passed. 
+
+While the above example is at least a compile error, we can even get
+silent errors introduced for parameters that are passed by value
+<code>// Another variation on an example in section 2.2 of Anthony Williams <em>C++ Concurrency in Action</em>
+void f(int i,std::string s); <span class="comment">// Unlike in the book, <tt>s</tt> is passed by value.</span>
+void my_oops(int some_param)
+{
+  char buffer[1024];
+  sprintf(buffer, "%i",some_param);
+  <span class="comment">// Intermittent failures as buffer may not be converted to a string during the lifetime of buffer</span>
+  std::thread t(f,3,buffer);  
+  t.detach();
+}
+</code>
+</p><p>I believe requiring most C++ programmers to be conversant with these kinds of silent change of signature
+    is a pretty high bar.
+    This is borne out by my experience teaching C++ to Masters' students, possibly because
+    the reason for this change isn't apparent until one is comfortable writing templates,
+    instead they naturally expect asynchronous functions to obey the same parameter
+    passing rules as ordinary functions.
+</p>
+<p>While this paper is definitely not proposing a change to <tt>std::async</tt>,
+ we can illustrate how the <tt>invocation_type</tt> trait could be used to create a
+   "More Perfect Forwarding async"
+    that its arguments with the same signature as its callable does:
+    
+</p>
+<a name="more_perfect_forwarding_async"></a><code><span class="comment">// more_perfect_forwarding_async.h</span>
+#include&lt;iostream&gt;
+#include&lt;utility&gt;
+#include&lt;future&gt;
+#include&lt;type_traits&gt;
+<span class="comment">// Uses "apply" template for unpacking tuple members into arguments written by DRayX at</span>
+<span class="comment">// http://stackoverflow.com/questions/687490/how-do-i-expand-a-tuple-into-variadic-template-functions-arguments</span>
+#include"apply.h" 
+
+template&lt;typename Callable, typename Signature&gt; struct Caller;
+template&lt;typename Callable, typename Result, typename...Args&gt;
+struct Caller&lt;Callable, Result(Args...)&gt; {
+  Caller(Callable c, Args&amp;&amp;... args) 
+    : callable(c), saved_args(std::forward&lt;Args...&gt;(args...)) {}
+  Result operator()() { return apply(callable, saved_args); }
+  std::tuple&lt;Args...&gt; saved_args;
+  Callable callable;
+};
+
+template&lt;typename Callable, typename... Args&gt;
+future&lt;typename result_of&lt;Callable(Args...)&gt;::type&gt;
+more_perfect_forwarding_async(Callable c, Args&amp;&amp;... args)
+{
+  return 
+    std::async
+      (Caller&lt;Callable, typename invocation_type&lt;Callable(Args...)&gt;::type&gt;
+         (c, std::forward&lt;Args&gt;(args)...));
+}
+</code>
+<div style="padding-left: 3em;text-indent: -3em"><b>Note: </b>This uses a complicated template metafunction
+    given by
+    DRayX on <a href="http://stackoverflow.com/questions/687490/how-do-i-expand-a-tuple-into-variadic-template-functions-arguments">StackOverflow</a> to unpack tuple members into a function argument list .
+    See N3728: Packaging Parameter Packs (Rev. 2) for an alternative approach not requiring advanced metaprogramming.</div>
+<p>Now, we can run asynchronous functions without worrying about implicit signature changes</p>
+<code>#include"more_perfect_forwarding_async.h"
+#include&lt;iostream&gt;
+int func(int &amp;i) { i = 2; return i; }
+
+int main()
+{
+  int i = 5;
+  auto f = more_perfect_forwarding_async(func, i);
+  f.get();
+  cout &lt;&lt; "i = " &lt;&lt; i &lt;&lt; endl; <span class="comment">// Correctly prints 2 </span>
+}
+</code>
+
+<p>Pablo Halpern mentions in N3557 that that a theoretical library implementation of fork-join parallelism would benefit
+from a <tt>signature</tt> type trait for similar reasons, resulting in 
+fewer programmer errors in asynchronous parameter passing.</p>
+<p>Finally, a more perfectly forwarding function binder could also be useful for some applications
+for more precisely calling the bound function</p>
+<h2>Rvalue references</h2>
+<p>In the <a href="#more_perfect_forwarding_async"><tt>more_perfect_forwarding_async.h</tt></a> example above,
+we appear risk storing references to temporaries:
+<code>#include "more_perfect_forwarding_async.h"
+#include &lt;memory&gt;
+struct S
+{
+   void m();
+};
+
+S s();
+
+void f()
+{
+   more_perfect_async( &amp;S::m, s()); <span class="comment">// <tt>s()</tt> will no longer exist when async executes. &sect;12.2p5</span>
+}
+</code></p>
+<p>In order to avoid such dangling references, if the callable parameter to an <tt>invocation_type</tt> is
+a member pointer and the first parameter is an rvalue, we decay the the first parameter of the invocation
+type. The <tt>raw_invocation_type</tt> type trait is provided if we really want a reference to
+the temporary (e.g., if one knows the lifetime of the temporary is long enough for our use case).</p>
+<p>Thanks to Peter Dimov for helping me clarify my understanding of this issue.</p>
+ 
+ 
+<a name="wording"></a><h2>Wording</h2>
+Modify &sect;20.10.2p1 [func.require] as follows:
+<blockquote>Define <tt><em>INVOKE</em>(f, t1, t2, ..., tN)</tt><span class="ins">and the corresponding 
+<em>invocation parameters</em> as in the following, in which <tt>U1</tt> denotes
+<tt>T1 &amp;</tt> if <tt>t1</tt> is an lvalue or <tt>T1 &amp;&amp;</tt>
+if <tt>t1</tt> is an rvalue where <tt>T1</tt> is the possibly <em>cv</em>-qualified
+type of <tt>t1</tt>:<br>
+<div style="padding-left:22px;text-indent:-22px"><p>— <tt>(t1.*f)(t2, ..., tN)</tt>
+ when <tt>f</tt> is a pointer to a member function of a class <tt>T</tt> and 
+ <tt>t1</tt> is an object of
+type <tt>T</tt> or a reference to an object of type <tt>T</tt> or a reference 
+to an object of a type derived from <tt>T</tt><span class="del">;</span><span class="ins">.</span>
+<span class="ins">The invocation parameters
+are <tt>U1</tt> followed by the parameters of <tt>f</tt> matched
+by <tt>t2</tt>, ..., <tt>tN</tt></span>.</p>
+<p>— <tt>((*t1).*f)(t2, ..., tN)</tt> when <tt>f</tt> is a pointer to a member 
+function of a class <tt>T</tt> 
+and <tt><span class="del">t</span><span class="ins">T</span>1</tt> is not one of
+the types described in the previous item<span class="del">;</span><span class="ins">.</span><span class="ins">The invocation parameters
+are <tt>U1</tt> followed by the parameters of <tt>f</tt> matched
+by <tt>t2</tt>, ..., <tt>tN</tt>.</span></p>
+<p>— <tt>t1.*f</tt> when <tt>N == 1</tt> and <tt>f</tt> is a pointer to member 
+data of a class <tt>T</tt> and <tt>t1</tt> is an object of type <tt>T</tt> or a
+reference to an object of type <tt>T</tt> or a reference to an object of a type 
+derived from <tt>T</tt><span class="del">;</span><span class="ins">. The
+invocation parameter is <tt>U1</tt>. </span></p>
+<p>— <tt>(*t1).*f</tt> when <tt>N == 1</tt> and <tt>f</tt> is a pointer to member 
+data of a class <tt>T</tt> and <tt><span class="del">t</span><span class="ins">T</span>1</tt> is not one of
+the types described in the previous item<span class="del">;</span><span class="ins">. The
+invocation parameter is <tt>U1</tt>.</span></p>
+<p><span class="ins">— <tt>f(t1, t2, ..., tN)</tt> if <tt>f</tt> is a class object.
+The invocation parameters are the parameters matching <tt>t1</tt>, ..., <tt>tN</tt>
+of the best viable function (13.3.3) for the arguments <tt>t1</tt>, ..., <tt>tN</tt>
+among the function call operators of <tt>f</tt>.</span></p>
+<p>— <tt>f(t1, t2, ..., tN)</tt> in all other cases.
+<span class="ins">The invocation parameters are the parameters of <tt>f</tt> matching
+<tt>t1</tt>, ... <tt>tN</tt>.</span></p></div>
+<p><span class="ins">In all of the above cases, if an argument <tt>tI</tt> matches the ellipsis in the function's
+<em>parameter-declaration-clause</em>, the corresponding invocation parameter
+is defined to be the result of applying the default argument promotions (5.2.2)
+to <tt>tI</tt>.</span></p>
+<p><span class="ins">[<em>example</em><br>
+Assume <tt>S</tt> is defined as
+<pre><div class="ins">struct S {
+  int f(double const &amp;) const;
+  void operator()(int, int);
+  void operator()(char const *, int i = 2, int j = 3);
+  void operator()(...);
+};</div></pre>
+The invocation parameters of <tt><em>INVOKE</em>(&amp;S::f, S(), 3.5)</tt> are <tt>(S &amp;&amp;, double const &amp;)</tt>.<br>
+The invocation parameters of <tt><em>INVOKE</em>(S(), 1, 2)</tt> are <tt>(int, int)</tt>.<br>
+The invocation parameters of <tt><em>INVOKE</em>(S(), "abc", 5)</tt> are <tt>(const char *, int)</tt>. <span class="comment">// Defaulted parameter <tt>j</tt> does not correspond to an argument</span><br>
+The invocation parameters of <tt><em>INVOKE</em>(S(), locale(), 5)</tt> are <tt>(locale, int)</tt>. <span class="comment">// Arguments corresponding to ellipsis maintain their types</span><br>
+
+<em>—end example</em> ]</span></p></span></blockquote>
+Change the end of §20.11.2 [meta.type.synop] to 
+<blockquote>
+<pre style="padding:0;margin:0">  template &lt;class&gt; class result_of; <span class="comment">// not defined</span>
+  template &lt;class F, class... ArgTypes&gt; class result_of&lt;F(ArgTypes...)&gt;;
+<span class="ins">  template &lt;class&gt; class raw_invocation_type; <span class="comment">// not defined</span></span>
+<span class="ins">  template &lt;class F, class... ArgTypes&gt; class invocation_type&lt;F(ArgTypes...)&gt;;</span>
+} <span class="comment">// namespace std</span></pre></blockquote>
+Add the following rows to the end of table 57 in &sect;20.11.7.6 [meta.trans.other]
+<blockquote><table style="border:1px solid black;border-collapse: collapse;background-color:#A0FFA0">
+<tbody><tr style="border-bottom:1px solid black;"><td><tt>template &lt;class Fn,
+class... ArgTypes&gt; struct
+raw_invocation_type&lt;Fn(ArgTypes...)&gt;;</tt></td><td><tt>Fn</tt>
+and all types in the
+parameter pack <tt>ArgTypes</tt>
+shall be complete types,
+(possibly cv-qualified) <tt>void</tt>,
+or arrays of unknown bound.</td>
+<td>If the expression
+<tt><em>INVOKE</em>(declval&lt;Fn&gt;(), declval&lt;ArgTypes&gt;()...)</tt>
+is well formed when treated as an
+unevaluated operand (Clause 5), The member typedef <tt>type</tt> shall name the function type 
+<tt>R(T1, T2, ...)</tt>
+where <tt>R</tt> denotes <tt>result_of&lt;Fn(ArgTypes...)&gt;::type</tt> and
+the types <tt>Ti</tt> are the invocation parameters (20.8.2) of
+<tt><em>INVOKE</em>(declval&lt;Fn&gt;(),
+declval&lt;ArgTypes&gt;()...)</tt>;
+otherwise, there shall be no member
+<tt>type</tt>. Access checking is performed as
+if in a context unrelated to
+<tt>Fn</tt>
+and
+<tt>ArgTypes</tt>. Only the validity of the
+immediate context of the expression is
+considered. [ <em>Note:</em>
+The compilation of
+the expression can result in side
+effects such as the instantiation of
+class template specializations and
+function template specializations, the
+generation of implicitly-defined
+functions, and so on. Such side effects
+are not in the “immediate context”
+and can result in the program being
+ill-formed.
+<em>—end note</em>]
+</td></tr>
+<tr><td><tt>template &lt;class Fn,
+class... ArgTypes&gt; struct
+invocation_type&lt;Fn(ArgTypes...)&gt;;</tt></td><td><tt>Fn</tt>
+and all types in the
+parameter pack <tt>ArgTypes</tt>
+shall be complete types,
+(possibly cv-qualified) <tt>void</tt>,
+or arrays of unknown bound.</td>
+<td>If <tt>raw_invocation_type&lt;Fn(ArgTypes...)&gt;::type</tt> is the function
+type <tt>R(T1, T2, ...)</tt> and <tt>Fn</tt> is a pointer to member type and
+<tt>T1</tt> is an rvalue reference, then <tt>R(decay&lt;T1&gt;::type, T2, ...)</tt>.
+Otherwise, <tt>raw_invocation_type&lt;Fn(ArgTypes...)&gt;::type</tt>.
+</td></tr></tbody></table></blockquote>
+
+</body></html>

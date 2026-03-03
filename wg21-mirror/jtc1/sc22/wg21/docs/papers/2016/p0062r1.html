@@ -1,0 +1,189 @@
+<!doctype html>
+<html>
+<head>
+<title>P0062R1: When should compilers optimize atomics?</title>
+<meta charset="UTF-8">
+</head>
+<body>
+<table>
+	<tr>
+                <th>Doc. No.:</th>
+                <td>WG21/P0062R1</td>
+        </tr>
+        <tr>
+                <th>Date:</th>
+                <td>2016-05-27</td>
+        </tr>
+        <tr>
+                <th>Reply to:</th>
+                <td>Hans-J. Boehm</td>
+        </tr>
+        <tr>
+                <th>Other Contributors:</th>
+                <td>JF Bastien, Peter Dimov, Hal Finkel, Paul McKenney, Michael Wong, Jeffrey Yasskin</td>
+        </tr>
+        <tr>
+                <th>Email:</th>
+                <td><a href="mailto:hboehm@google.com">hboehm@google.com</a></td>
+        </tr>
+        <tr>
+                <th>Target:</th>
+                <td>SG1 for now</td>
+        </tr>
+</table>
+
+<h1>P0062R1: When should compilers optimize atomics?</h1>
+
+<p>[This was revised, and the concrete wording adjusted, in response to
+discussion in Kona.]
+<p>Programmers often assume that atomic operations, since they involve thread
+communication, are not subject to compiler optimization.  <a
+href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/n4455.html">N4455</a>
+tries to refute that, mostly by exhibiting optimizations on atomics that are in
+fact legal.   For example, <code>load(y, memory_order_<i>x</i>) + load(y,
+memory_order_<i>x</i>)</code> can be coalesced into <code>2 * load(y,
+memory_order_<i>x</i>)</code>.  In many cases, such optimizations are not only
+allowed, but in fact desirable.  For example, removing a
+(non-<code>volatile</code>) <code>atomic</code> load whose value is not used
+seems uncontroversial.</p>
+<p>However, some optimizations on atomics are controversial, because they may
+actually adversely affect progress, performance, or responsiveness of the whole
+application.  This issue was raised in a recent, rather lengthy, discussion on
+the c++std-parallel reflector.  The purpose of this short paper is to reflect
+some of that discussion here.  I believe that, even if we cannot say anything
+normative in this area, it would be very useful to clarify our intent, if we
+can agree what it is.  Atomic optimization can easily cause an application to
+misbehave unacceptably if the programmer and compiler writer disagreed on our
+intent; I believe this is too serious a code portability issue to write
+this off as "quality of implementation".</p>
+<p>To keep this discussion focused we will concentrate on transformations of
+atomic operations themselves, rather than mixed atomics and non-atomics.</p>
+<p>As a simple example, consider:</p>
+<pre>
+atomic&lt;int&gt; progress(0);
+
+f() {
+    for (i = 0; i &lt; 1000000; ++i) {
+        // ...
+        ++progress;
+    }
+}
+</pre>
+
+<p>where the ellipsis represents work that does not read or write shared
+memory (or where the increment is replaced by a <code>memory_order_relaxed
+operation)</code>, and where the variable <code>progress</code> is used by
+another thread to update a progress bar.</p>
+<p>An (overly?) aggressive compiler could "optimize" this to:</p>
+<pre>
+atomic&lt;int&gt; progress(0);
+f() {
+    int my_progress = 0; // register allocated
+    for (i = 0; i &lt; 1000000; ++i) {
+        // ...
+        ++my_progress;
+    }
+    progress += my_progress;
+}
+</pre>
+<p>
+This transformation is clearly "correct".  An execution of the transformed
+<code>f()</code> looks to other threads exactly like an execution of the
+original <code>f()</code> which paused at the beginning, and then ran the
+entire loop so fast that none of the intermediate increments could be seen.  In
+spite of this "correctness", the transformation completely defeats the point of
+the progress bar: In the transformed program it always pauses at zero and then
+jumps to 100%.</p> <p>We can also consider less drastic transformations in
+which the loop is partially unrolled and the global progress counter is only
+updated in the outer loop, for example after every ten iterations.  This would
+probably not interfere with the progress bar.  It might be more problematic is
+the counter is instead read by a watchdog thread which restarts the process if
+it fails to observe progress.  But in any case, it's usually not too different
+from the kind of delays normally introduced by hardware and operating systems
+anyway.</p>
+<p>The only statement made by the current standard about this kind of
+transformation is 1.10p28:</p>
+<blockquote>"An implementation should ensure that the last value (in
+modification order) assigned by an atomic or synchronization operation will
+become visible to all other threads in a finite period of time."</blockquote>
+<p>This arguably doesn't restrict us here, since even a million loop iterations
+presumably still qualify as "a finite period of time".</p>
+<p>Our prohibition against infinite loops (1.10p27) also makes this statement
+still weaker than one might expect.</p>
+<pre>
+x.store(1); while (...) { … }
+</pre>
+
+<p>can technically be transformed to</p>
+<pre>
+while (...) { … } x.store(1);
+</pre>
+
+<p>so long as the loop performs no I/O, <code>volatile</code>, or
+<code>atomic</code> operations, since the compiler is allowed to assume
+termination.</p>
+<p>Peter Dimov points out that fairly aggressive optimizations on atomics may
+be highly desirable, and there seems to be little controversy that this is true
+in some cases.  For example, atomics optimizations might eliminate repeated
+<code>shared_ptr</code> reference count increment and decrement operations in a loop.</p>
+<p>Paul McKenney suggests avoiding problems as in the above progress bar
+example by  generally also declaring each <code>atomic</code> variable as
+<code>volatile</code>, thus minimizing the compiler's choices.  This
+unfortunately leads to a significantly different style, and probably worse
+performance for compilers that are already cautious about optimizing atomics.
+It also is not technically sufficient.  For example, in the above progress bar
+example, it would still be allowable to decompose the loop into two loops, such
+that the second loop did nothing but repeatedly increment <code>progress</code>
+a million times.</p>
+<p>My personal feeling is that we should:</p>
+<ol>
+<li>Discourage aggressive compiler optimizations by default.</li>
+<li>Possibly provide some way to specify exceptions to this rule, e.g. via an
+attribute.</li>
+</ol>
+<p>The argument for (1) is that aggressive atomic optimizations may be
+extremely helpful (e.g. Peter Dimov's <code>shared_ptr</code> example), or extremely
+unhelpful (e.g. progress bar example above, or cases in which delayed updates
+effectively increase critical section length and destroy scalability).
+Compilers are almost never in a position to distinguish between these two with
+certainty.  I believe that if a compiler doesn't know what it's doing, it
+should leave the code alone.</p> <p>Peter Dimov's example provides a good
+argument for (2).  Implementations could handle specifically
+<code>shared_ptr</code> this way, even without additional facilities in the
+standard.  But that wouldn't cover e.g. intrusive reference-counting schemes,
+which are also justifiably common.</p>
+
+<h2>Conclusions from Kona:</h2>
+<p>We discussed P0062R0 in Kona.  There was a fairly strong consensus that we should
+provide more control over aggressive atomics optimization.  There was
+a slight majority, though not consensus, against discouraging aggressive
+optimizations by default.  This wording follows the majority.</p>
+
+<h2>A wording proposal to provide increased control over optimization of atomics:</h2>
+
+<p>I am not deeply attached to the "brittle_atomic" name.</p>
+<p>Add a new section near 7.6.5 [dcl.attr.deprecated]:</p>
+<blockquote>
+<p><ins><b>7.6.? Brittle atomic attribute&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;[dcl.attr.brittle]</b></ins></p>
+<p><ins>The <i>attribute-token</i> <code>brittle_atomic</code> can be used
+to identify statements containing atomic operations that should be less aggressively
+optimized.</ins></p>
+<p><ins>This attribute requests that implementations
+should limit program transformations involving calls to atomic operations textually
+contained in the associated statement.  Timing of these atomic operations may be
+important to program performance or interactive program response.
+Such atomic operations should not be postponed
+or advanced appreciably more than what would already be expected
+from hardware optimizations.</ins></p>
+<p><ins>[Note: A typical example might be a conditional that uses an atomic store
+to release a spin lock after the then clause, but releases it before a
+potentially long running loop in the else clause. The implementation might
+otherwise merge the two atomic stores into a single one
+following the entire conditional.  If the atomic store in the else clause
+is preceded by <code>[[brittle_atomic]]</code>, then the compiler should not do
+so. This may prevent the critical section from being substantially extended.
+The use of <code>volatile</code> qualifiers for this purpose may
+not be effective, and is discouraged. -- end note]</ins></p>
+</blockquote>
+</body>
+</html>

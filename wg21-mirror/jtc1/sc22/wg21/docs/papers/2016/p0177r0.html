@@ -1,0 +1,1656 @@
+<html>
+
+<head>
+<title>Cleaning up allocator_traits</title>
+<style type="text/css">
+  p {text-align:justify}
+  li {text-align:justify}
+  blockquote.note
+  {
+    background-color:#E0E0E0;
+    padding-left: 15px;
+    padding-right: 15px;
+    padding-top: 1px;
+    padding-bottom: 1px;
+  }
+  ins {background-color:#A0FFA0}
+  del {background-color:#FFA0A0}
+</style>
+</head>
+
+<body>
+<table>
+<tr>
+  <td align="left">Doc. no.</td>
+  <td align="left">P0177R0</td>
+</tr>
+<tr>
+  <td align="left">Date:</td>
+  <td align="left">2016-02-15</td>
+</tr>
+<tr>
+  <td align="left">Project:</td>
+  <td align="left">Programming Language C++</td>
+</tr>
+<tr>
+  <td align="left">Audience:</td>
+  <td align="left">Library Evolution Working Group</td>
+</tr>
+<tr>
+  <td align="left">Reply to:</td>
+  <td align="left">Alisdair Meredith &lt;<a href="mailto:ameredith1@bloomberg.net">ameredith1@bloomberg.net</a>&gt;</td>
+</tr>
+</table>
+
+<h1>Cleaning up <tt>allocator_traits</tt></h1>
+
+<h2>Table of Contents</h2>
+<ol>
+<li><a href="#0.0">Revision History</a></li>
+  <ul>
+  <li><a href="#0.1">Revision 0</a></li>
+  </ul>
+<li><a href="#1.0">Introduction</a></li>
+<li><a href="#2.0">Problems with <tt>allocator_traits></tt></a></li>
+  <ul>
+  <li><a href="#2.1">Consistency of propagation traits</a></li>
+  </ul>
+<li><a href="#4.0">Acknowledgements</a></li>
+<li><a href="#5.0">References</a></li>
+</ol>
+
+
+<h2><a name="0.0">Revision History</a></h2>
+
+<h3><a name="0.1">Revision 0</a></h3>
+<p>
+Original version of the paper for the 2016 pre-Jacksonville mailing.
+</p>
+
+<!--
+<h6>To be done:</h6>
+<ul>
+  <li>Propose updates to large parts of transcribed wording</li>
+  <li>Clearer examples of problems with mismatched traits</li>
+  <li>Defer <tt>swap</tt> problem to paper on Rob's issues</li>
+  <li>Clearly defer (with reference) issue of propagate-on-copy-construct to P0176</li>
+</ul>
+-->
+
+<h2><a name="1.0">Introduction</a></h2>
+<p>
+The C++11 standard introduced <tt>allocator_traits</tt> with great
+flexibility as a way to generically customize allocator behavior.
+With experience, we have learned that some of this generality comes
+at great cost, but little benefit.  This paper proposed cleaning up
+the wilder corners of the traits behavior.
+</p>
+
+
+<h2><a name="2.0">Problems with <tt>allocator_traits</tt></a></h2>
+<p>
+The addition of <tt>allocator_traits</tt> to C++11 brought relatively
+simple support for a wide variety of allocator models to the C++
+standard library.  It provides a consistent interface for containers
+and other types that require memory allocation services to be
+customized non-intrusively by their users.  This traits template is
+deliberately designed to be flexible to support a wide variety of
+allocator models, as described in paper
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0176r0.html">P0176R0</a>.
+However, not all of that generality is useful, and some creates
+needless complexity when implementing types that use allocators. 
+</p>
+
+<h3><a name="2.1">Consistency of propagation traits</a></h3>
+<p>
+One of the important customizations for stateful allocators is
+the ability to control the <i>propagation</i> of allocators,
+that is, to control which allocator is used after an assignment
+operator, or a <tt>swap</tt> operation.  When all allocators of
+the same type are interchangable, and so always compare equal,
+these traits have little value.  If all allocator objects are
+interchangable, then the only effect of propagation is potentially
+making a few more assignment or swaps.  However, when allocators
+have state that affects allocation behavior, this can become
+critically important.
+</p>
+<p>
+The first model, that drives the current default behavior that
+allocators do not propagate, is that all subcomponents of a
+data structure should use the same allocator.  For example, a
+container would pass its own allocator down to its elements,
+and they in turn would pass that allocator down to their bases
+and members.  Once this invariant is established, we do not
+want to lose it by swapping with elements for elsewhere that use
+a different allocator, or change allocator when assigned-to from
+an external source.  This allows us to reason about the lifetime
+of the allocator and the data structure, see 
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0176r0.html">P0176R0</a>
+for further details.
+</p>
+<p>
+A second model is that the allocator move with the allocated
+memory, so every move-assignment and <tt>swap</tt> should
+propgate the allocator to maintain a non-throwing wide contract,
+and not risk an allocation or undefined behavior when the
+allocators do not match, but without any guarantee that a given
+data structure will have a consistent allocation strategy using
+such allocators.
+</p>
+<p>
+There is no clear model that benefits from requiring container
+implementations to support allocators that propagate on move
+assignemnt, but not on <tt>swap</tt> (or vice-versa).  The cost
+in terms of complexity this burdens container implementers with
+is considerable, and every operation involving another object
+that uses the same allocator famuily must document whether any
+potentially moving operation explicitly in terms whether it uses
+move-assignment, swap, or both.  Use of an undocumented operation
+would result in a surprising allocator propagation which is
+distinctly observable.
+</p>
+<p>
+The issue with copy-assignment is a little more subtle, but for
+a type that provides a copy-assignment operator but no move-
+assignment operator, then, when move-assignment is requested,
+the copy-assignment operator will be called.  If the propagation
+traits of the user-supplied allocator differ, then problems will
+follow.
+</p>
+<p>
+The proposed solution of this paper is to require that all three
+propagation traits be equivalent, and change the type-computation
+in the trait to simply delegate to a preferred trait.  Customizing
+that one trait would change the behavior of all three.  Note that
+this is a breaking change if anyone has successfully made use of
+diverging these traits, although the author has no experience of
+such allocators outside of standard conformance suites.
+</p>
+<p>
+Once we mandate consistency, we could go further and deprecate
+the two names that are simply aliases of the first.  Similarly,
+we would update all standard wording that references the two
+deprecated traits to use the one remaining propagation trait
+instead.  Ideally, we would have a new trait with a simpler name,
+but that would break all existing code where users have correctly
+customized the existing traits (consistently).  Therefore, as we
+must pick one of the three existing names, we will pick the one
+that is shorter to type, as these names are infamously long when
+used (typically seen only by users implementing their own custom
+containers).
+</p>
+
+<h3><a name="2.2">Inconsistent propagation traits are hard to deal with</a></h3>
+<p>
+This is the other side to 2.1, highlighting the burden on library
+implementers to handle inconsistent propagation traits.  First,
+as we have three independant binary traits, that is 2<sup>3</sup>
+combinations of different behavior that must be tested, just for
+the allocator parameter of any container.  These traits can have
+a subtle impact on many operations.  As an example, consider the
+copy-assignment operator for <tt>vector</tt>.  This has the strong
+exception safety guarantee, so we would like to use the copy and
+<tt>swap</tt> idiom, but how does that work if the propagation
+traits are different for copy-assignment and <tt>swap</tt>?  Here
+is a sample implementation, relying on compiler optimizations to
+eliminate the dead branches (as the <tt>if</tt> expressions all
+yield a compile-time result).
+</p>
+
+<blockquote><pre>
+template &lt;typename T, typename A&gt;
+auto vector&lt;T, A&gt;::operator=(vector const&amp; other) -&gt; vector&amp;
+{
+   using Traits = allocator_traits&lt;A&gt;
+
+   if (!AT::propagate_on_copy_assignment) {
+      vector temp(other, this-&gt;get_allocator());
+      swap(temp);
+   }
+   else if (AT::propagate_on_swap) {
+      vector temp(other, other.&gt;get_allocator());
+      swap(temp);
+   }
+   else if ( AT::propagate_on_copy_assignment &amp;&amp; !AT::propagate_on_swap) {
+      <i>// This is the really awkward case</i>
+      vector temp(::std::move(*this));
+      try {
+         this-&gt;~vector();
+         new(this) vector(other, other.get_allocator());
+      }
+      catch(...) {
+         new(this) vector(::std::move(temp));
+         throw;
+      }
+   }
+
+   return *this;
+}
+</pre></blockquote>
+
+<p>
+As an alternative to the destory/in-place new idiom, the moved-from
+<tt>vector</tt> could be <tt>clear</tt>ed, then use a private member
+function to rebind the allocator, followed by a range-insertion, and
+reverse the operation in the <tt>catch</tt> clause (as moving back
+after rebinding the allocator is a simple pointer operation, and
+cannot throw).
+</p>
+<p>
+Note the return of an explicit <tt>try</tt>/<tt>catch</tt> block, or
+its moral equivalent by introducing some other guard class or
+scopeguard.  This is exactly the kind of code construct that the
+copy/<tt>swap</tt> idiom is supposed to save us from, preferring to
+<tt>throw</tt> freely but <tt>catch</tt> rarely.
+</p>
+<p>
+With the changes proposed in this paper, the example becomes a lot
+simpler (and there are fewer configurations to validate in a test
+driver):
+</p>
+
+<blockquote><pre>
+template &lt;typename T, typename A&gt;
+auto vector&lt;T, A&gt;::operator=(vector const&amp; other) -&gt; vector&amp;
+{
+   using Traits = allocator_traits&lt;A&gt;
+   Allocator alloc = AT::propagate
+                   ? other.get_allocator()
+                   : this-&gt;get_allocator();
+
+   vector temp(other, alloc);
+   swap(temp);
+
+   return *this;
+}
+</pre></blockquote>
+
+
+<h3><a name="2.2">Default for propagation traits</a></h3>
+<p>
+Note:
+  <li><a href="http://cplusplus.github.io/LWG/lwg-defects.html#2103">LWG #2103</a> <tt>std::allocator_traits&lt;std::allocator&lt;T&gt;&gt;::propagate_on_container_move_assignment</tt></li>
+  <li><a href="http://cplusplus.github.io/LWG/lwg-defects.html#2108">LWG #2108</a> No way to identify allocator types that always compare equal</li>
+  <li><a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n4258">N4258</a> Cleaning‐up noexcept in the Library, Nicolai Josuttis</li>
+</p>
+
+
+<h3><a name="2.3"><tt>noexcept</tt> Move Operations</a></h3>
+<p>
+Two of the key operations of a container are its move-assignment operator and
+its <tt>swap</tt> overload.  While it is important that these are efficient, it
+is also important that callers can observe whether they have the no-throw
+guarantee, or if they need to code defensively around these operations.
+Nicolai Jossutis made an important contribution earlier in the C++17 process,
+introducing the <tt>is_always_equal</tt> predicate to identify the case where
+allocators that do not propagate can still give the no-throw guarantee for
+their container's operations.  Unfortunately, this makes the signature of these
+key operations appear much more complex than necessary.  This is also very
+visible in the specification, as these are the important operations that will
+be advertized frequently.  Worse, we expect implementers of their own
+containers to duplicate this logic and spelling in their own implementations of
+these functions.
+</p>
+<p>
+This paper proposes adding a new <tt>constexpr</tt> variable template with a
+simpler spelling in the <tt>std</tt> namespace, that should also be clearer to
+read in the specification of the critical operations.  Finding a good name,
+that is simple, short, and precise, is difficult.  The initially suggest name
+is <tt>propagate_may_throw_v</tt>, although it is expected that the Library
+Evolution Working Group will brainstorm something better.
+</p>
+<p>
+In addition to <tt>basic_string</tt> and <tt>vector</tt>, there are several
+other containers that provide a no-throw guarantee when the allocators
+guarantee to compare equal, should we use this new
+<tt>propagate_may_throw_v</tt> exception-specification there as well?  While
+the consistency is appealing, it would also break some existing
+implementations, as mentioned in Nico's paper.
+</p>
+<p>
+The key to the issue is that, even if allocators can propagate on
+move-assignment, we expect them to propagate in only one direction.  For
+containers that need a sentry node to maintain their invariants, a new sentry
+must be allocated with the moved allocator, which might throw.  This should not
+be an issue for <tt>swap</tt> operations though, as allocators are expected to
+be exchanged, along with two data structures that satisfy the invariants.  A
+second issue arises for containers that hold predicates or other function
+objects in addition to the stored elements, as even though a swap may not need
+to allocate, the functor objects may throw on move/swap.  This limits our scope
+to make changes, although it looks like <tt>deque::swap</tt> should take
+advantage.
+</p>
+
+
+<h3><a name="2.4">Tidying the Allocator Requirements Table</a></h3>
+<p>
+The allocator requirements table in clause 17 is long, so long that it spreads
+over three pages of the standard.  It is also complex with a lot of small
+identifiers used to simplify the specification, and there are so many of these
+that they have their own table in advance of the allocator requirements table
+that is the key to that table.  Unfortunately, the spelling of the short
+identifiers is not always obvious, which necessitates srolling up and down a
+few pages, every time the reader wants to clarify their understanding.  Worse,
+in some cases it is outright missleading, where <tt>X</tt> is the type of an
+allocator, but <tt>x</tt> is an object of a pointer type, not an allocator.
+Instead, and allocator of type <tt>X</tt> is spelled <tt>a</tt>.  This paper
+proposes a more intuitive set of spellings that are similarly terse, but will
+give the reader an intuition they can trust without scrolling back to the table
+key each time.
+</p>
+<p>
+Secondly, around half of the entries in the allocator requirements table are
+optional, denoted by the presence of the Defaults column.  However, most
+operations are specified directly in terms of the allocator member, when really
+they should be specified in terms of the default, which is obtained through
+<tt>allocator_traits</tt>.  There would be a risk of a circular definition if
+the specification of <tt>allocator_traits</tt> were in terms of this table, but
+that is not the case.  The specifcation for <tt>allocator_traits</tt> gives a
+formula for the default in each case without (normatively) referring back to
+the allocator requirements table.  This paper substitues the
+<tt>allocator_traits</tt> name for every optional property that is used in the
+specification of dependent requirements.
+</p>
+
+
+
+<h2><a name="3.0">Ideas not Pursued</a></h2>
+<p>
+There were a few additional ideas that occurred during the writing of this
+paper that the author ultimately rejected.
+</p>
+
+
+<h4>Introduce a new name for the propagation trait</h4>
+<p>
+Retaining a single propagation trait with the term <tt>swap</tt> as part of its
+name is not ideal, as it suggests the original, more specific meaning of the
+trait.  This could be resolved by having a single <tt>propagate_allocator</tt>
+trait, possible as a free-standing variable template,
+<tt>propagate_allocator_v</tt>.  Its default value could be computed in some
+way from the existing three (deprecated) legacy traits, in an attempt to
+provide some backwards-compatiblity scheme for existing allocators.
+Alternatively, the three deprecated traits in <tt>allocator_traits</tt> could
+simply check this value, supporting existing container implementations (which
+are likely to be more numerous).
+</p>
+<p>
+Ultimately this idea was rejected as being too big a change, providing a much
+more awkward period of transition.  Generally, a feature is not simplified by
+adding more redundant names for the existing behavior.
+</p>
+<p>
+However, a new <tt>propagate_may_throw_v</tt> trait is proposed, that
+simplifies the frequent combination of checking for an allocator that either
+propagates, or for which comparison <tt>is_alwaty_true</tt>.  This case is
+encountered frequently enough in the standard that it should be simplified.
+</p>
+
+
+<h2><a name="4.0">Drive-by Fixes</a></h2>
+<p>
+The Library Active Issues Lists was consulted for any allocator related issues
+that might be resolved as part of this clean-up exercise.  In addition to
+issues directly addressing allocators, a few issues addressing class
+definitions that would be partially addressed by fixing allocator support were,
+instead, fully addressed to avoid confusion with multple resolutions
+interacting on the same wording.
+</p>
+
+<h3><a name="4.1">Annex C was not updated for C++11</a></h3>
+<p>
+  <li><a href="http://cplusplus.github.io/LWG/lwg-active.html#2178">LWG #2178</a>  Annex C update for C++11 on allocators
+</p>
+
+
+<h3><a name="4.2">Regex <tt>match_results</tt> does not use <tt>noexcept</tt></a></h3>
+<p>
+  <li><a href="http://cplusplus.github.io/LWG/lwg-active.html#2183">LWG #2183</a>  regex <tt>match_results</tt> missing allocator-aware ctors
+  <li><a href="http://cplusplus.github.io/LWG/lwg-active.html#2184">LWG #2184</a>  regex <tt>match_results</tt> assigment and allocator propagation
+</p>
+
+<h3><a name="4.3">Regex <tt>match_results</tt> does not use <tt>noexcept</tt></a></h3>
+<p>
+  <li><a href="http://cplusplus.github.io/LWG/lwg-active.html#2490">LWG #2490</a>  <tt>&lt;regex&gt; needs lots of noexcept</tt>
+
+Note that this issue is not fully addressed by this paper, but only one class.
+</p>
+
+<h3><a name="4.4"><tt>vector&lt;bool&gt;</tt> does not use <tt>noexcept</tt></a></h3>
+<p>
+</p>
+
+<h3><a name="4.5">Adding (nothrow) swappable traits</tt></a></h3>
+<p>
+This paper should incorporate the improved support for portable detection of
+<tt>noexept</tt> swap functions in
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/n4511">N4511</a>,
+Adding [nothrow-]swappable traits, by Daniel Krügler.
+</p>
+
+
+<h2><a name="5.0">Proposed Wording</a></h2>
+<p>
+Amend existing library clauses as below:
+</p>
+<blockquote>
+
+<h3>17.6.3.5 Allocator requirements [allocator.requirements]</h3>
+
+<ol>
+<li>
+The library describes a standard set of requirements for allocators, which are
+class-type objects that encapsulate the information about an allocation model.
+This information includes the knowledge of pointer types, the type of their
+difference, the type of the size of objects in this allocation model, as well
+as the memory allocation and deallocation primitives for it. All of the string
+types (Clause 21), containers (Clause 23) (except array), string buffers and
+string streams (Clause 27), and match_results (Clause 28) are parameterized in
+terms of allocators.
+</li>
+<li>
+The class template <tt>allocator_traits</tt> (20.7.8) supplies a uniform
+interface to all allocator types. Table 27 describes the types manipulated
+through allocators. Table 28 describes the requirements on allocator types and
+thus on types used to instantiate <tt>allocator_traits</tt>. A requirement is
+optional if the last column of Table 28 specifies a default for a given
+expression. Within the standard library <tt>allocator_traits</tt> template, an
+optional requirement that is not supplied by an allocator is replaced by the
+specified default expression. A user specialization of
+<tt>allocator_traits</tt> may provide different defaults and may provide
+defaults for different requirements than the primary template. Within Tables 27
+and 28, the use of <tt>move</tt> and <tt>forward</tt> always refers to
+<tt>std::move</tt> and <tt>std::forward</tt>, respectively.
+</li>
+
+<h5>Table 27 — Descriptive variable definitions</h5>
+<table border="1" cellpadding="0" cellspacing="0">
+<tr>
+  <td><b>Variable</b></td>
+  <td><b>Definition</td>
+</tr>
+<tr>
+  <td><tt>T</tt>, <tt>U</tt>, <tt>C</tt></td>
+  <td>any <i>cv</i>-unqualified object type (3.9)</td>
+</tr>
+<tr>
+  <td><tt><del>X</del><ins>A</ins></tt></td>
+  <td>an Allocator class for type <tt>T</tt></td>
+</tr>
+<tr>
+  <td><tt><del>Y</del><ins>B</ins></tt></td>
+  <td>the corresponding Allocator class for type <tt>U</tt></td>
+</tr>
+<tr>
+  <td><tt><del>XX</del><ins>AT</ins></tt></td>
+  <td>the type <tt>allocator_traits&lt;<ins>A</ins><del>X</del>&gt;</td>
+</tr>
+<tr>
+  <td><tt><del>YY</del><ins>BT</ins></tt></td>
+  <td>the type <tt>allocator_traits&lt;<ins>B</ins><del>Y</del>&gt;</td>
+</tr>
+<tr>
+  <td><tt>a</tt>, <tt>a1</tt>, <tt>a2</tt></td>
+  <td>lvalues of type <tt><ins>A</ins><del>X</del></tt></td>
+</tr>
+<tr>
+  <td><tt>u</tt></td>
+  <td>the name of a variable being declared</td>
+</tr>
+<tr>
+  <td><tt>b</tt></td>
+  <td>a value of type <tt><ins>B</ins><del>Y</del></tt></td>
+</tr>
+<tr>
+  <td><tt>c<ins>*</ins></tt></td>
+  <td>a pointer of type <tt>C*</tt> through which indirection is valid</td>
+</tr>
+<tr>
+  <td><tt>p</tt></td>
+  <td>
+a value of type <tt><del>XX</del><ins>AT</ins>::pointer</tt>, obtained by calling <tt>a1.allocate</tt>,
+where <tt>a1 == a</tt>
+  </td>
+</tr>
+<tr>
+  <td><tt><del>q</del><ins>cp</ins></tt></td>  <td>
+a value of type <tt><del>XX</del><ins>AT</ins>::const_pointer</tt> obtained by conversion from a value
+<tt>p</tt><del>.</del>
+  </td>
+</tr>
+<tr>
+  <td><tt><del>w</del><ins>vp</ins></tt></td>
+  <td>
+a value of type <tt><del>XX</del><ins>AT</ins>::void_pointer</tt> obtained by conversion from a value
+<tt>p</tt>
+  </td>
+</tr>
+<tr>
+  <td><tt><del>x</del><ins>cvp</ins></tt></td>
+  <td>
+a value of type <tt><del>XX</del><ins>AT</ins>::const_void_pointer</tt> obtained by conversion from a
+value <tt><del>q</del><ins>cp</ins></tt> or a value <tt><del>w</del><ins>vp</ins></tt>
+  </td>
+</tr>
+<tr>
+  <td><tt><del>y</del><ins>cvq</ins></tt></td>
+  <td>
+a value of type <tt><del>XX</del><ins>AT</ins>:const_void_pointer</tt> obtained by conversion from a
+result value of <tt><del>YY</del><ins>BT</ins>::allocate</tt>, or else a value of type (possibly const)
+<tt>std::nullptr_t</tt><del>.</del>
+  </td>
+</tr>
+<tr>
+  <td><tt>n</tt></td>
+  <td>a value of type <tt><del>XX</del><ins>AT</ins>::size_type</tt>.</td>
+</tr>
+<tr>
+  <td><tt>Args</tt></td>
+  <td>a template parameter pack</td>
+</tr>
+<tr>
+  <td><tt>args</tt></td>
+  <td>a function parameter pack with the pattern <tt>Args&amp;&amp;</tt></td>
+</tr>
+</table>
+
+<h5>Table 28 — Allocator requirements</h5>
+<table border="1" cellpadding="0" cellspacing="0">
+<tr>
+  <td><b>Expression</b></td>
+  <td><b>Return type</b></td>
+  <td><b>Assertion/note pre-/post-condition</b></td>
+  <td><b>Default</b></td>
+</tr>
+<tr>
+  <td><tt><del>X</del><ins>A</ins>::pointer</tt></td>
+  <td><i></i></td>
+  <td><i></i></td>
+  <td><tt>T*</tt></td>
+</tr>
+<tr>
+  <td><tt><del>X</del><ins>A</ins>::const_pointer</tt></td>
+  <td><i></i></td>
+  <td><tt><del>X</del><ins>AT</ins>::pointer</tt> is convertible to <tt><del>X</del><ins>AT</ins>::const_pointer</tt></td>
+  <td><tt>pointer_traits&lt;<del>X</del><ins>AT</ins>::pointer&gt;::rebind&lt;const T&gt;</tt></td>
+</tr>
+<tr>
+  <td><tt><del>X</del><ins>A</ins>::void_pointer <del>Y</del><ins>B</ins>::void_pointer</tt></td>
+  <td><i></i></td>
+  <td>
+<tt><del>X</del><ins>AT</ins>::pointer</tt> is convertible to <tt><del>X</del><ins>AT</ins>::void_pointer</tt>.
+<tt><del>X</del><ins>AT</ins>::void_pointer</tt> and <tt><del>Y</del><ins>BT</ins>::void_pointer</tt> are the same type.
+  </td>
+  <td><tt>pointer_traits&lt;<del>X</del><ins>AT</ins>::pointer&gt;::rebind&lt;void&gt;</tt></td>
+</tr>
+<tr>
+  <td><tt><del>X</del><ins>A</ins>::const_void_pointer <del>Y</del><ins>B</ins>::const_void_pointer</tt></td>
+  <td><i></i></td>
+  <td>
+<tt><del>X</del><ins>AT</ins>::pointer</tt>,
+<tt><del>X</del><ins>AT</ins>::const_pointer</tt>, and
+<tt><del>X</del><ins>AT</ins>::void_pointer</tt> are convertible to
+<tt><del>X</del><ins>AT</ins>::const_void_pointer</tt>.
+<tt><del>X</del><ins>AT</ins>::const_void_pointer</tt> and
+<tt><del>Y</del><ins>BT</ins>::const_void_pointer</tt> are the same type.
+  </td>
+  <td><tt>pointer_traits&lt;<del>X</del><ins>AT</ins>::pointer&gt;::rebind&lt;const void&gt;</tt></td>
+</tr>
+<tr>
+  <td><tt><del>X</del><ins>A</ins>::value_type</tt></td>
+  <td>Identical to <tt>T</tt></td>
+  <td><i></i></td>
+  <td><tt></tt></td>
+</tr>
+<tr>
+  <td><tt><del>X</del><ins>A</ins>::size_type</tt></td>
+  <td>unsigned integer type</td>
+  <td>
+a type that can represent the size of the largest object in the allocation
+model.
+  </td>
+  <td><tt></tt></td>
+</tr>
+<tr>
+  <td><tt><del>X</del><ins>A</ins>::difference_type</tt></td>
+  <td>signed integer type</td>
+  <td>
+a type that can represent the difference between any two pointers in the
+allocation model.
+  </td>
+  <td><tt></tt></td>
+</tr>
+<tr>
+  <td><tt>typename <del>X</del><ins>A</ins>::template rebind&lt;U&gt;::other</tt></td>
+  <td><tt><del>Y</del><ins>B</ins></tt></td>
+  <td>
+For all <tt>U</tt> (including <tt>T</tt>),
+<tt><del>Y</del><ins>B</ins>::template rebind&lt;T&gt;::other</tt> is <tt><del>X</del><ins>A</ins></tt>
+  </td>
+  <td>See Note A, below.</td>
+</tr>
+<tr>
+  <td><tt>*p</tt></td>
+  <td><tt>T&amp;</tt></td>
+  <td><i></i></td>
+  <td><tt></tt></td>
+</tr>
+<tr>
+  <td><tt>*<del>q</del><ins>cp</ins></tt></td>
+  <td><tt>const T&amp;</tt></td>
+  <td><tt>*<del>q</del><ins>cp</ins></tt> refers to the same object as <tt>*p</tt></td>
+  <td><tt></tt></td>
+</tr>
+<tr>
+  <td><tt>p-&gt;m</tt></td>
+  <td>type of <tt>T::m</tt></td>
+  <td><i>pre:</i> <tt>(*p).m</tt> is well-defined. equivalent to <tt>(*p).m</tt></td>
+  <td><tt></tt></td>
+</tr>
+<tr>
+  <td><tt><del>q</del><ins>cp</ins>-&gt;m</tt></td>
+  <td>type of <tt>T::m</tt></td>
+  <td><i>pre:</i> <tt>(*<del>q</del><ins>cp</ins>).m</tt> is well-defined. equivalent to <tt>(*<del>q</del><ins>cp</ins>).m</tt></td>
+  <td><tt></tt></td>
+</tr>
+<tr>
+  <td><tt>static_cast&lt;<del>X</del><ins>A</ins>::pointer&gt;(<del>w</del><ins>vp</ins>)</tt></td>
+  <td><tt>pointer</tt></td>
+  <td><tt>static_cast&lt;<del>X</del><ins>A</ins>::pointer&gt;(<del>w</del><ins>vp</ins>) == p</tt></td>
+  <td><tt></tt></td>
+</tr>
+<tr>
+  <td><tt>static_cast&lt;<del>X</del><ins>A</ins>::const_pointer&gt;(<del>x</del><ins>cvp</ins>)</tt></td>
+  <td><tt>const_pointer</tt></td>
+  <td><tt>static_cast&lt;<del>X</del><ins>A</ins>::const_pointer&gt;(<del>x</del><ins>cvp</ins>) == p</tt></td>
+  <td><tt></tt></td>
+</tr>
+<tr>
+  <td><tt>a.allocate(n)</tt></td>
+  <td><tt>pointer</tt></td>
+  <td>
+Memory is allocated for <tt>n</tt> objects of type <tt>T</tt> but objects are
+not constructed.  <tt>allocate</tt> may raise an appropriate
+exception.<sup>180</sup>[ <i>Note:</i> If <tt>n == 0</tt>, the return value is
+unspecified. <i>— end note</i> ]
+  </td>
+  <td><tt></tt></td>
+</tr>
+<tr>
+  <td><tt>a.allocate(n, <del>y</del><ins>cvq</ins>)</tt></td>
+  <td><tt>pointer</tt></td>
+  <td>
+Same as <tt>a.allocate(n)</tt>. The use of <tt><del>y</del><ins>cvq</ins></tt> is unspecified, but it is
+intended as an aid to locality.
+</td>
+  <td><tt>a.allocate(n)</tt></td>
+</tr>
+<tr>
+  <td><tt>a.deallocate(p,n)</tt></td>
+  <td>(not used)</td>
+  <td>
+<i>pre:</i> <tt>p</tt> shall be a value returned by an earlier call to
+<tt>allocate</tt> that has not been invalidated by an intervening call to
+<tt>deallocate</tt>. <tt>n</tt> shall match the value passed to
+<tt>allocate</tt> to obtain this memory.
+
+<i>Throws:</i> Nothing.
+</td>
+  <td><tt></tt></td>
+</tr>
+<tr>
+  <td><tt>a.max_size()</tt></td>
+  <td><tt><del>X</del><ins>A</ins>::size_type</tt></td>
+  <td>the largest value that can meaningfully be passed to <tt><del>X</del><ins>A</ins>::allocate()</tt></td>
+  <td><tt>numeric_limits&lt;size_type&gt;::max()/sizeof(value_type)</tt></td>
+</tr>
+<tr>
+  <td><tt>a1 == a2</tt></td>
+  <td><tt>bool</tt></td>
+  <td>
+returns <tt>true</tt> only if storage allocated from each can be deallocated
+via the other. <tt>operator==</tt> shall be reflexive, symmetric, and
+transitive, and shall not exit via an exception.
+
+  </td>
+  <td><tt></tt></td>
+</tr>
+<tr>
+  <td><tt>a1 != a2</tt></td>
+  <td><tt>bool</tt></td>
+  <td>same as <tt>!(a1 == a2)</tt></td>
+  <td><tt></tt></td>
+</tr>
+<tr>
+  <td><tt>a == b</tt></td>
+  <td><tt>bool</tt></td>
+  <td>same as <tt>a == <del>Y</del><ins>B</ins>::rebind&lt;T&gt;::other(b)</tt></td>
+  <td><tt></tt></td>
+</tr>
+<tr>
+  <td><tt>a != b</tt></td>
+  <td><tt>bool</tt></td>
+  <td>same as <tt>!(a == b)</tt></td>
+  <td><tt></tt></td>
+</tr>
+<tr>
+  <td><tt><del>X</del><ins>A</ins> u(a);  <del>X</del><ins>A</ins> u = a;</tt></td>
+  <td><i></i></td>
+  <td>
+    Shall not exit via an exception.
+    post: <tt>a1 == a</tt>
+  </td>
+  <td><tt></tt></td>
+</tr>
+<tr>
+  <td><tt><del>X</del><ins>A</ins> u(b);</tt></td>
+  <td><i></i></td>
+  <td>
+    Shall not exit via an exception.
+    post: <tt><del>Y</del><ins>B</ins>(a) == b</tt>, <tt>a == <del>X</del><ins>A</ins>(b)</tt>
+   </td>
+  <td><tt></tt></td>
+</tr>
+<tr>
+  <td><tt><del>X</del><ins>A</ins> u(move(a));  <del>X</del><ins>A</ins> u = move(a);</tt></td>
+  <td><i></i></td>
+  <td>
+    Shall not exit via an exception.
+    post: <tt>a1</tt> equals the prior value of <tt>a</tt>.
+  </td>
+  <td><tt></tt></td>
+</tr>
+<tr>
+  <td><tt><del>X</del><ins>A</ins> u(move(b));</tt></td>
+  <td><i></i></td>
+  <td>
+    Shall not exit via an exception.
+    post: <tt>a</tt> equals the prior value of <tt><del>X</del><ins>A</ins>(b)</tt>.
+  </td>
+  <td><tt></tt></td>
+</tr>
+<tr>
+  <td><tt>a.construct(c,args)</tt></td>
+  <td>(not used)</td>
+  <td>Effect: Constructs an object of type <tt>C</tt> at <tt>c</tt></td>
+  <td><tt>::new ((void*)c) C(forward&lt;Args&gt;(args)...)</tt></td>
+</tr>
+<tr>
+  <td><tt>a.destroy(c)</tt></td>
+  <td>(not used)</td>
+  <td>Effect: Destroys the object at <tt>c</tt></td>
+  <td><tt>c-&gt;~C()</tt></td>
+</tr>
+<tr>
+  <td><tt>a.select_on_container_copy_construction()</tt></td>
+  <td><tt><del>X</del><ins>A</ins></tt></td>
+  <td>Typically returns either <tt>a</tt> or <tt><del>X</del><ins>A</ins>()</tt></td>
+  <td><tt>return a;</tt></td>
+</tr>
+<tr>
+  <td><del><tt>propagate_on_container_copy_assignment</tt></del></td>
+  <td><del>Identical to or derived from <tt>true_type</tt> or <tt>false_type</tt></del></td>
+  <td><del>
+<tt>true_type</tt> only if an allocator of type <tt>X</tt> should be copied
+when the client container is copy-assigned. See Note B, below.
+  </del></td>
+  <td><del><tt>false_type</tt></del></td>
+</tr>
+<tr>
+  <td><del><tt>propagate_on_container_move_assignment</tt></del></td>
+  <td><del>Identical to or derived from <tt>true_type</tt> or <tt>false_type</tt></del></td>
+  <td><del>
+<tt>true_type</tt> only if an allocator of type <tt>X</tt> should be moved
+when the client container is move-assigned. See Note B, below.
+  </del></td>
+  <td><del><tt>false_type</tt></del></td>
+</tr>
+<tr>
+  <td><tt>propagate_on_container_swap</tt></td>
+  <td>Identical to or derived from <tt>true_type</tt> or <tt>false_type</tt></td>
+  <td>
+<tt>true_type</tt> only if an allocator of type <tt><del>X</del><ins>A</ins></tt> should be swapped
+when the client container is swapped<ins>, copied when the client container is copy-assigned, and
+moved when the client container is move-assigned</ins>. See Note B, below.
+  </td>
+  <td><tt>false_type</tt></td>
+</tr>
+<tr>
+  <td><tt>is_always_equal</tt></td>
+  <td>Identical to or derived from <tt>true_type</tt> or <tt>false_type</tt></td>
+  <td>
+<tt>true_type</tt> only if the expression <tT>a1 == a2</tt> is guaranteed to be
+<tt>true</tt> for any two (possibly const) values <tt>a1</tt>, <tt>a2</tt> of
+type <tt><del>X</del><ins>A</ins></tt>.
+  </td>
+  <td><tt>is_empty<ins>_t</ins>&lt;<del>X</del><ins>A</ins>&gt;<del>::type</del></tt></td>
+</tr>
+</table>
+
+<li>
+Note A: The member class template <tt>rebind</tt> in the table above is
+effectively a typedef template. [ <i>Note:</i> In general, if the name
+<tt>Allocator</tt> is bound to <tt>SomeAllocator&lt;T&gt;</tt>, then
+<tt>Allocator::rebind&lt;U&g;::other</tt> is the same type as
+<tt>SomeAllocator&lt;U&gt;</tt>, where
+<tt>SomeAllocator&lt;T&gt;::value_type</tt> is <tt>T</tt> and
+<tt>SomeAllocator&lt;U&gt;::value_type</tt> is <tt>U</tt>. <i>— end note</i> ]  If
+<tt>Allocator</tt> is a class template instantiation of the form
+<tt>SomeAllocator&lt;T, Args&gt;</tt>, where <tt>Args</tt> is zero or more type
+arguments, and <tt>Allocator</tt> does not supply a <tt>rebind</tt> member
+template, the standard <tt>allocator_traits</tt> template uses
+<tt>SomeAllocator&lt;U, Args&gt;</tt> in place of
+<tt>Allocator::rebind&lt;U&gt;::other</tt> by default. For allocator types that
+are not template instantiations of the above form, no default is provided.
+</li>
+
+<li>
+Note B: If
+<tt><del>X</del><ins>AT</ins>::propagate_on_container_<ins>swap</ins><del>copy_assignment</del>::value</tt>
+is <tt>true</tt>, <tt><del>X</del><ins>A</ins></tt> shall satisfy the <tt>CopyAssignable</tt>
+requirements (Table 23) and the copy operation shall not throw exceptions. If
+<tt><del>X</del><ins>AT</ins>::propagate_on_container_<ins>swap</ins><del>move_assignment</del>::value</tt>
+is <tt>true</tt>, <tt><del>X</del><ins>A</ins></tt> shall satisfy the <tt>MoveAssignable</tt>
+requirements (Table 22) and the move operation shall not throw exceptions. If
+<tt><del>X</del><ins>AT</ins>::propagate_on_container_swap::value</tt> is <tt>true</tt>, lvalues of
+type <tt><del>X</del><ins>A</ins></tt> shall be swappable (17.6.3.2) and the <tt>swap</tt> operation
+shall not throw exceptions.
+</li>
+
+<li>
+An allocator type <tt><del>X</del><ins>A</ins></tt> shall satisfy the
+requirements of <tt>CopyConstructible</tt> (17.6.3.1). The
+<tt><del>X</del><ins>AT</ins>::pointer</tt>,
+<tt><del>X</del><ins>AT</ins>::const_pointer</tt>,
+<tt><del>X</del><ins>AT</ins>::void_pointer</tt>, and
+<tt><del>X</del><ins>AT</ins>::const_void_pointer</tt> types shall satisfy the
+requirements of <tt>NullablePointer</tt> (17.6.3.3). No constructor, comparison
+operator, copy operation, move operation, or swap operation on these pointer
+types shall exit via an exception. <tt><del>X</del><ins>AT</ins>::pointer</tt>
+and <tt><del>X</del><ins>AT</ins>::const_pointer</tt> shall also satisfy the
+requirements for a random access iterator (24.2).
+</li>
+
+<li>
+Let <tt>x1</tt> and <tt>x2</tt> denote objects of (possibly different) types
+<tt><del>X</del><ins>AT</ins>::void_pointer</tt>,
+<tt><del>X</del><ins>AT</ins>::const_void_pointer</tt>,
+<tt><del>X</del><ins>AT</ins>::pointer</tt>, or
+<tt><del>X</del><ins>AT</ins>::const_pointer</tt>. Then, <tt>x1</tt> and
+<tt>x2</tt> are equivalently-valued pointer values, if and only if both
+<tt>x1</tt> and <tt>x2</tt> can be explicitly converted to the two
+corresponding objects <tt>px1</tt> and <tt>px2</tt> of type
+<tt><del>X</del><ins>AT</ins>::const_pointer</tt>, using a sequence of
+<tt>static_cast</tt>s using only these four types, and the expression
+<tt>px1 == px2</tt> evaluates to <tt>true</tt>.
+</li>
+
+<li>
+Let <tt>w1</tt> and <tt>w2</tt> denote objects of type <tt><del>X</del><ins>AT</ins>::void_pointer</tt>. Then for the expressions
+<blockquote><pre>
+w1 == w2
+w1 != w2
+</pre></blockquote>
+either or both objects may be replaced by an equivalently-valued object of type
+<tt><del>X</del><ins>AT</ins>::const_void_pointer</tt> with no change in semantics.
+</li>
+
+<li>
+Let <tt>p1</tt> and <tt>p2</tt> denote objects of type <tt><del>X</del><ins>AT</ins>::pointer</tt>. Then for the expressions
+<blockquote><pre>
+p1 == p2
+p1 != p2
+p1 &lt; p2
+p1 &lt;= p2
+p1 &gt;= p2
+p1 &gt; p2
+p1 - p2
+</pre></blockquote>
+either or both objects may be replaced by an equivalently-valued object of type
+<tt><del>X</del><ins>AT</ins>::const_pointer</tt> with no change in semantics.
+</li>
+
+<li>
+An allocator may constrain the types on which it can be instantiated and the
+arguments for which its <tt>construct</tt> or <tt>destroy</tt> members may be called. If a type
+cannot be used with a particular allocator, the allocator class or the call to
+<tt>construct</tt> or <tt>destroy</tt> may fail to instantiate.  [<i>Example:</i> the following is an
+allocator class template supporting the minimal interface that satisfies the
+requirements of Table 28:
+<blockquote><pre>
+template &lt;class Tp&gt;
+struct SimpleAllocator {
+  typedef Tp value_type;
+  SimpleAllocator(ctor args);
+
+  template &lt;class T&gt; SimpleAllocator(const SimpleAllocator&lt;T&gt;&amp; other);
+
+  Tp* allocate(std::size_t n);
+  void deallocate(Tp* p, std::size_t n);
+};
+
+template &lt;class T, class U&gt;
+bool operator==(const SimpleAllocator&lt;T&gt;&amp;, const SimpleAllocator&lt;U&gt;&amp;);
+template &lt;class T, class U&gt;
+bool operator!=(const SimpleAllocator&lt;T&gt;&amp;, const SimpleAllocator&lt;U&gt;&amp;);
+</pre></blockquote>
+</i>— end example</i> ]
+</li>
+
+<li>
+If the alignment associated with a specific over-aligned type is not supported
+by an allocator, instantiation of the allocator for that type may fail. The
+allocator also may silently ignore the requested alignment. [Note:
+Additionally, the member function <tt>allocate</tt> for that type may fail by throwing
+an object of type <tt>std::bad_alloc</tt>. <i>— end note</i> ] </li>
+
+</ol>
+
+<h3>17.6.3.5.1 Allocator completeness requirements [allocator.requirements.completeness]</h3>
+<ol>
+<li>
+If <tt><del>X</del><ins>A</ins></tt> is an allocator class for type <tt>T</tt>,
+<tt><del>X</del><ins>A</ins></tt> additionally satisfies the allocator
+completeness requirements if, whether or not <tt>T</tt> is a complete type:
+<ol>
+  <li><tt><del>X</del><ins>A</ins></tt> is a complete type, and</li>
+  <li>
+all the member types of
+<tt>allocator_traits&lt;<del>X</del><ins>A</ins>&gt;</tt> 20.7.8 other than
+<tt>value_type</tt> are complete types
+  </li>
+</ol>
+</li>
+</ol>
+<h3>20.7.8 Allocator traits [allocator.traits]</h3>
+<ol>
+<li>
+The class template <tt>allocator_traits</tt> supplies a uniform interface to
+all allocator types. An allocator cannot be a non-class type, however, even if
+<tt>allocator_traits</tt> supplies the entire required interface. [
+<i>Note:</i> Thus, it is always possible to create a derived class from an
+allocator. <i>- end note</i> ]
+</li>
+</ol>
+
+<blockquote><pre>
+namespace std {
+  template &lt;class Alloc&gt; struct allocator_traits {
+    typedef Alloc allocator_type;
+
+    typedef typename Alloc::value_type value_type;
+
+    typedef <i>see below</i> pointer;
+    typedef <i>see below</i> const_pointer;
+    typedef <i>see below</i> void_pointer;
+    typedef <i>see below</i> const_void_pointer;
+
+    typedef <i>see below</i> difference_type;
+    typedef <i>see below</i> size_type;
+
+    <del>typedef <i>see below</i> propagate_on_container_copy_assignment;</del>
+    <del>typedef <i>see below</i> propagate_on_container_move_assignment;</del>
+    typedef <i>see below</i> propagate_on_container_swap;
+    typedef <i>see below</i> is_always_equal;
+
+    template &lt;class T&gt; using rebind_alloc = <i>see below</i>;
+    template &lt;class T&gt; using rebind_traits = allocator_traits&lt;rebind_alloc&lt;T&gt; &gt;;
+
+    static pointer allocate(Alloc&amp; a, size_type n);
+    static pointer allocate(Alloc&amp; a, size_type n, const_void_pointer hint);
+
+    static void deallocate(Alloc&amp; a, pointer p, size_type n);
+
+    template &lt;class T, class... Args&gt;
+      static void construct(Alloc&amp; a, T* p, Args&amp;&amp;... args);
+
+    template &lt;class T&gt;
+      static void destroy(Alloc&amp; a, T* p);
+
+    static size_type max_size(const Alloc&amp; a) noexcept;
+
+    static Alloc select_on_container_copy_construction(const Alloc&amp; rhs);
+  };
+}
+
+// NOTE: MOVE THIS TO SYNOPSIS INSTEAD
+<ins>template &lt;class Alloc&gt;</ins>
+<ins>constexpr propagate_may_throw_v =</ins>
+  <ins>!allocator_traits&lt;Alloc&gt;::is_always_equal</ins>
+  <ins>!allocator_traits&lt;Alloc&gt;::propagate_on_container_swap;</ins>
+</pre></blockquote>
+
+
+<h3>20.7.8.1 Allocator traits member types [allocator.traits.types]</h3>
+<ol start="7">
+<pre><del>typedef <i>see below</i> propagate_on_container_copy_assignment;</del></pre>
+<li><del>
+<i>Type:</i> <tt>Alloc::propagate_on_container_copy_assignment</tt> if the 
+<i>qualified-id</i> <tt>Alloc::propagate_on_container_copy_assignment</tt> is
+valid and denotes a type (14.8.2); otherwise <tt>false_type</tt>
+<tt>propagate_on_container_move_assignment</tt>.
+</del></li>
+
+<pre><del>typedef <i>see below</i> propagate_on_container_move_assignment;</pre>
+<li><del>
+<i>Type:</i> <tt>Alloc::propagate_on_container_move_assignment</tt> if the
+<i>qualified-id</i> <tt>Alloc::propagate_on_container_move_assignment</tt> is
+valid and denotes a type (14.8.2); otherwise <tt>false_type</tt>
+<tt>is_always_equal</tt>.
+</del></li>
+
+<pre>typedef <i>see below</i> propagate_on_container_swap;</pre>
+<li>
+<i>Type:</i> <tt>Alloc::propagate_on_container_swap</tt> if the
+<i>qualified-id</i> <tt>Alloc::propagate_on_container_swap</tt> is valid and
+denotes a type (14.8.2); otherwise <del><tt>false_type</tt></del>
+<ins><tt>is_always_equal</tt></ins>.
+</li>
+
+<pre>typedef <i>see below</i> is_always_equal;</pre>
+<li>
+<i>Type:</i> <tt>Alloc::is_always_equal</tt> if the <i>qualified-id</i>
+<tt>Alloc::is_always_equal</tt> is valid and denotes a type (14.8.2); otherwise
+<tt>is_empty&lt;Alloc&gt;::type</tt>.
+</li>
+</ol>
+
+
+<h4>20.13.1 Header &lt;scoped_allocator&gt; synopsis</h4>
+
+<blockquote><pre>
+namespace std {
+  template &lt;class OuterAlloc, class... InnerAllocs&gt;
+    class scoped_allocator_adaptor : public OuterAlloc {
+
+      <del>typedef see below propagate_on_container_copy_assignment;</del>
+      <del>typedef see below propagate_on_container_move_assignment;</del>
+      typedef see below propagate_on_container_swap;
+      typedef see below is_always_equal;
+  };
+}
+</pre></blockquote>
+
+<h4>20.13.2 Scoped allocator adaptor member types [allocator.adaptor.types]</h4>
+<ol>
+<pre>typedef <i>see below</i> inner_allocator_type;</pre>
+<li>
+  <i>Type:</i> <tt>scoped_allocator_adaptor&lt;OuterAlloc&gt;</tt> if
+  <tt>sizeof...(InnerAllocs)</tt> is zero; otherwise,
+  <tt>scoped_allocator_adaptor&lt;InnerAllocs...&gt;</tt>.
+</li>
+
+<pre><del>typedef <i>see below</i> propagate_on_container_copy_assignment;</del></pre>
+<li><del>
+  <i>Type:</i> true_type if
+  <tt>allocator_traits&lt;A&gt;::propagate_on_container_copy_assignment::value</tt>
+  is <tt>true</tt> for any <tt>A</tt> in the set of <tt>OuterAlloc</tt> and
+  <tt>InnerAllocs...</tt>; otherwise, <tt>false_type</tt>.
+</del></li>
+
+<pre><del>typedef <i>see below</i> propagate_on_container_move_assignment;</del></pre>
+<li><del>
+  <i>Type:</i> <tt>true_type</tt> if
+  <tt>allocator_traits&lt;A&gt;::propagate_on_container_move_assignment::value</tt> is
+  <tt>true</tt> for any <tt>A</tt> in the set of <tt>OuterAlloc</tt> and
+  <tt>InnerAllocs...</tt>; otherwise, <tt>false_type</tt>.
+</del></li>
+
+<pre>typedef <i>see below</i> propagate_on_container_swap;</pre>
+<li>
+  <i>Type:</i> <tt>true_type</tt> if
+  <tt>allocator_traits&lt;A&gt;::propagate_on_container_swap::value</tt> is
+  <tt>true</tt> for any <tt>A</tt> in the set of <tt>OuterAlloc</tt> and
+  <tt>InnerAllocs...</tt>; otherwise, <tt>false_type</tt>.
+</li>
+
+<pre>typedef <i>see below</i> is_always_equal;</pre>
+<li>
+  <i>Type:</i> <tt>true_type</tt> if
+  <tt>allocator_traits&lt;A&gt;::is_always_equal::value</tt> is <tt>true</tt> for
+  every <tt>A</tt> in the set of <tt>OuterAlloc</tt> and <tt>InnerAllocs...</tt>;
+  otherwise, <tt>false_type</tt>.
+</li>
+</ol>
+
+
+<h4>21.4 Class template basic_string [basic.string]</h4>
+<blockquote><pre>
+namespace std {
+  template &lt;class charT, class traits = char_traits&lt;charT&gt;,
+    class Allocator = allocator&lt;charT&gt; &gt;
+  class basic_string {
+
+    ~basic_string();
+    basic_string&amp; operator=(const basic_string&amp; str);
+    basic_string&amp; operator=(basic_string&amp;&amp; str)
+      <ins>noexcept(!propagate_may_throw_v&lt;Allocator&gt;)</ins>
+      <del>noexcept(allocator_traits&lt;Allocator&gt;::propagate_on_container_move_assignment::value ||</del>
+               <del>allocator_traits&lt;Allocator&gt;::is_always_equal::value);</del>
+    basic_string&amp; operator=(const charT* s);
+    basic_string&amp; operator=(charT c);
+    basic_string&amp; operator=(initializer_list&lt;charT&gt;);
+
+
+
+    basic_string&amp; assign(const basic_string&amp; str);
+    basic_string&amp; assign(basic_string&amp;&amp; str)
+      <ins>noexcept(!propagate_may_throw_v&lt;Allocator&gt;)</ins>
+      <del>noexcept(allocator_traits&lt;Allocator&gt;::propagate_on_container_move_assignment::value ||</del>
+               <del>allocator_traits&lt;Allocator&gt;::is_always_equal::value);</del>
+    basic_string&amp; assign(const basic_string&amp; str, size_type pos,
+                         size_type n = npos);
+    basic_string&amp; assign(const charT* s, size_type n);
+    basic_string&amp; assign(const charT* s);
+    basic_string&amp; assign(size_type n, charT c);
+    template&lt;class InputIterator&gt;
+      basic_string&amp; assign(InputIterator first, InputIterator last);
+    basic_string&amp; assign(initializer_list&lt;charT&gt;);
+
+
+
+    void swap(basic_string&amp; str)
+      <ins>noexcept(!propagate_may_throw_v&lt;Allocator&gt;)</ins>
+      <del>noexcept(allocator_traits&lt;Allocator&gt;::propagate_on_container_swap::value ||</del>
+               <del>allocator_traits&lt;Allocator&gt;::is_always_equal::value);</del>
+  };
+}
+</pre></blockquote>
+
+
+<h4>23.2.1 General container requirements [container.requirements.general]</h4>
+<p>
+8 Unless otherwise specified, all containers defined in this clause obtain
+memory using an allocator (see 17.6.3.5). Copy constructors for these container
+types obtain an allocator by calling
+<tt>allocator_traits&lt;allocator_type&gt;::select_on_container_copy_construction</tt>
+on the allocator belonging to the container being copied. Move constructors
+obtain an allocator by move construction from the allocator belonging to the
+container being moved. Such move construction of the allocator shall not exit
+via an exception. All other constructors for these container types take a <tt>const
+allocator_type&amp;</tt> argument.  [<i>Note:</i> If an invocation of a
+constructor uses the default value of an optional allocator argument, then the
+<tt>Allocator</tt> type must support value initialization. <i>- end note</i> ] A copy of
+this allocator is used for any memory allocation and element construction
+performed, by these constructors and by all member functions, during the
+lifetime of each container object or until the allocator is replaced. The
+allocator may be replaced only via assignment or <tt>swap()</tt>. Allocator replacement
+is performed by copy assignment, move assignment, or swapping of the allocator
+only if <del>
+<tt>allocator_traits&lt;allocator_type&gt;::propagate_on_container_copy_assignment::value</tt>,
+<tt>allocator_traits&lt;allocator_type&gt;::propagate_on_container_move_assignment::value</tt>,
+or</del>
+<tt>allocator_traits&lt;allocator_type&gt;::propagate_on_container_swap::value</tt>
+is <tt>true</tt> within the implementation of the corresponding container operation.
+In all container types defined in this Clause, the member <tt>get_allocator()</tt>
+returns a copy of the allocator used to construct the container or, if that
+allocator has been replaced, a copy of the most recent replacement.
+</p>
+<p>
+9 The expression <tt>a.swap(b)</tt>, for containers <tt>a</tt> and <tt>b</tt>
+of a standard container type other than <tt>array</tt>, shall exchange the
+values of <tt>a</tt> and <tt>b</tt> without invoking any move, copy, or swap
+operations on the individual container elements. Lvalues of any
+<tt>Compare</tt>, <tt>Pred</tt>, or <tt>Hash</tt> types belonging to <tt>a</tt>
+and <tt>b</tt> shall be swappable and shall be exchanged by calling
+<tt>swap</tt> as described in 17.6.3.2. If
+<tt>allocator_traits&lt;allocator_type&gt;::propagate_on_container_swap::value</tt>
+is <tt>true</tt>, then lvalues of type <tt>allocator_type</tt> shall be
+swappable and the allocators of <tt>a</tt> and <tt>b</tt> shall also be
+exchanged by calling <tt>swap</tt> as described in 17.6.3.2.  Otherwise, the
+allocators shall not be swapped, and the behavior is undefined unless
+<tt>a.get_allocator() == b.get_allocator()</tt>. Every iterator referring to an
+element in one container before the swap shall refer to the same element in the
+other container after the swap. It is unspecified whether an iterator with
+value <tt>a.end()</tt> before the swap will have value <tt>b.end()</tt> after
+the swap.
+</p>
+
+<h5>Table 98 — Allocator-aware container requirements</h5>
+<table border="1" cellpadding="0" cellspacing="0">
+<tr>
+  <td><b>Expression</b></td>
+  <td><b>Return type</b></td>
+  <td><b>Assertion/note pre-/post-condition</b></td>
+  <td><b>Complexity</b></td>
+</tr>
+<tr>
+  <td><tt>a = rv</tt></td>
+  <td><tt>X&amp;</tt</td>
+  <td>
+<i>Requires:</i> If
+<del><tt>allocator_traits&lt;allocator_type&gt;::propagate_on_container_move_assignment::value</tt>
+is <tt>false</tt></del>
+<ins><tt>propagate_may_throw_v&lt;allocator_type&gt;</tt></ins>, <tt>T</tt> is
+<tt>MoveInsertable</tt> into <tt>X</tt> and <tt>MoveAssignable</tt>.  All
+existing elements of a are either move assigned to or destroyed.
+<i>post:</i> <tt>a</tt> shall be equal to the value that <tt>rv</tt> had before this assignment.
+  </td>
+  <td>linear</td>
+</tr>
+</table>
+
+<h4>23.3.3.1 Class template <tt>deque</tt> overview [deque.overview]</h4>
+<blockquote><pre>
+namespace std {
+  template &lt;class T, class Allocator = allocator&lt;T&gt; &gt;
+  class deque {
+    <i>// most content elided for simplicity</i>
+
+    void swap(deque&amp;) <ins>noexcept(!propagate_may_throw_v&lt;Allocator&gt;);</ins>
+      <del>noexcept(allocator_traits&lt;Allocator&gt;::is_always_equal::value);</del>
+  };
+}
+</pre></blockquote>
+
+<h4>23.3.4.1 Class template <tt>forward_list</tt> overview [forwardlist.overview]</h4>
+<blockquote><pre>
+namespace std {
+  template &lt;class T, class Allocator = allocator&lt;T&gt; &gt;
+  class forward_list {
+    <i>// most content elided for simplicity</i>
+
+    void swap(forward_list&amp;) <ins>noexcept(!propagate_may_throw_v&lt;Allocator&gt;);</ins>
+      <del>noexcept(allocator_traits&lt;Allocator&gt;::is_always_equal::value);</del>
+  };
+}
+</pre></blockquote>
+
+<h4>23.3.5.1 Class template <tt>forward_list</tt> overview [list.overview]</h4>
+<blockquote><pre>
+namespace std {
+  template &lt;class T, class Allocator = allocator&lt;T&gt; &gt;
+  class forward_list {
+    <i>// most content elided for simplicity</i>
+
+    void swap(list&amp;) <ins>noexcept(!propagate_may_throw_v&lt;Allocator&gt;);</ins>
+      <del>noexcept(allocator_traits&lt;Allocator&gt;::is_always_equal::value);</del>
+  };
+}
+</pre></blockquote>
+
+<h4>23.3.6.1 Class template <tt>vector</tt> overview [vector.overview]</h4>
+<blockquote><pre>
+namespace std {
+  template &lt;class T, class Allocator = allocator&lt;T&gt; &gt;
+  class vector {
+
+    ~vector();
+    vector&amp; operator=(const vector&amp; x);
+    vector&amp; operator=(vector&amp;&amp; x)
+      <ins>noexcept(!propagate_may_throw_v&lt;Allocator&gt;)</ins>
+      <del>noexcept(allocator_traits&lt;Allocator&gt;::propagate_on_container_move_assignment::value ||</del>
+               <del>allocator_traits&lt;Allocator&gt;::is_always_equal::value);</del>
+    vector&amp; operator=(initializer_list&lt;T&gt;);
+
+
+    void swap(vector&amp;)
+      <ins>noexcept(!propagate_may_throw_v&lt;Allocator&gt;)</ins>
+      <del>noexcept(allocator_traits&lt;Allocator&gt;::propagate_on_container_swap::value ||</del>
+               <del>allocator_traits&lt;Allocator&gt;::is_always_equal::value);</del>
+  };
+}
+</pre></blockquote>
+
+
+<h4>23.3.7 Class <tt>vector&lt;bool&gt;</tt> [vector.bool]</h4>
+<ol>
+<li>To optimize space allocation, a specialization of vector for bool elements is provided:</li>
+<blockquote><pre>
+namespace std {
+  template &lt;class Allocator&gt; class vector&lt;bool, Allocator&gt; {
+  public:
+
+    <i>// construct/copy/destroy:</i>
+    vector() <ins>noexcept(noexcept(Allocator()))</ins> : vector(Allocator()) { }
+    explicit vector(const Allocator&amp;) <ins>noexcept</ins>;
+    explicit vector(size_type n, const Allocator&amp; = Allocator());
+    vector(size_type n, const bool&amp; value,
+           const Allocator&amp; = Allocator());
+    template &lt;class InputIterator&gt;
+      vector(InputIterator first, InputIterator last,
+             const Allocator&amp; = Allocator());
+    vector(const vector<del>&lt;bool, Allocator&gt;</del>&amp; x);
+    vector(vector<del>&lt;bool, Allocator&gt;</del>&amp;&amp; x) <ins>noexcept</ins>;
+    vector(const vector&amp;, const Allocator&amp;);
+    vector(vector&amp;&amp;, const Allocator&amp;);
+    vector(initializer_list&lt;bool&gt;, const Allocator&amp; = Allocator()));
+    ~vector();
+    vector&lt;bool, Allocator&gt;&amp; operator=(const vector<del>&lt;bool, Allocator&gt;</del>&amp; x);
+    vector&lt;bool, Allocator&gt;&amp; operator=(vector<del>&lt;bool, Allocator&gt;</del>&amp;&amp; x)
+      <ins>noexcept(!propagate_may_throw_v&lt;Allocator&gt;)</ins>;
+    vector&amp; operator=(initializer_list<bool>);
+    template &lt;class InputIterator&gt;
+      void assign(InputIterator first, InputIterator last);
+    void assign(size_type n, const bool&amp; t);
+    void assign(initializer_list&lt;bool&gt;);
+    allocator_type get_allocator() const noexcept;
+
+
+    iterator erase(const_iterator position);
+    iterator erase(const_iterator first, const_iterator last)
+    void swap(vector<del>&lt;bool, Allocator&gt;</del>&amp;)
+      <ins>noexcept(!propagate_may_throw_v&lt;Allocator&gt;)</ins>;
+    static void swap(reference x, reference y) noexcept;
+    void flip() noexcept; <i>// flips all bits</i>
+    void clear() noexcept;
+  };
+}
+</pre></blockquote>
+
+
+<h4>23.4.4.1 Class template <tt>map</tt> overview [map.overview]</h4>
+<blockquote><pre>
+namespace std {
+  template &lt;class Key, class T, class Compare = less&lt;Key&gt;,
+            class Allocator = allocator&lt;pair&lt;const Key, T&gt; &gt; &gt; 
+  class map {
+    void      swap(map&amp;)
+      <del>noexcept(allocator_traits&lt;Allocator&gt;::is_always_equal::value &amp;&amp;</del>
+      <ins>noexcept(!propagate_may_throw_v&lt;Allocator&gt; &amp;&amp;</ins>
+               noexcept(swap(declval&lt;Compare&amp;&gt;(), declval&lt;Compare&amp;&gt;())));
+  };
+}
+</pre></blockquote>
+
+
+<h4>23.4.5.1 Class template <tt>multimap</tt> overview [multimap.overview]</h4>
+<blockquote><pre>
+namespace std {
+  template &lt;class Key, class T, class Compare = less&lt;Key&gt;,
+            class Allocator = allocator&lt;pair&lt;const Key, T&gt; &gt; &gt; 
+  class multimap {
+    void      swap(multimap&amp;)
+      <del>noexcept(allocator_traits&lt;Allocator&gt;::is_always_equal::value &amp;&amp;</del>
+      <ins>noexcept(!propagate_may_throw_v&lt;Allocator&gt; &amp;&amp;</ins>
+               noexcept(swap(declval&lt;Compare&amp;&gt;(), declval&lt;Compare&amp;&gt;())));
+  };
+}
+</pre></blockquote>
+
+
+<h4>23.4.6.1 Class template <tt>set</tt> overview [set.overview]</h4>
+<blockquote><pre>
+namespace std {
+  template &lt;class Key, class Compare = less&lt;Key&gt;,
+            class Allocator = allocator&lt;Key&gt; &gt; 
+  class set {
+    void      swap(set&amp;)
+      <del>noexcept(allocator_traits&lt;Allocator&gt;::is_always_equal::value &amp;&amp;</del>
+      <ins>noexcept(!propagate_may_throw_v&lt;Allocator&gt; &amp;&amp;</ins>
+               noexcept(swap(declval&lt;Compare&amp;&gt;(), declval&lt;Compare&amp;&gt;())));
+  };
+}
+</pre></blockquote>
+
+
+<h4>23.4.7.1 Class template <tt>multiset</tt> overview [multiset.overview]</h4>
+<blockquote><pre>
+namespace std {
+  template &lt;class Key,class Compare = less&lt;Key&gt;,
+            class Allocator = allocator&lt;Key&gt; &gt; 
+  class multiset {
+    void      swap(multiset&amp;)
+      <del>noexcept(allocator_traits&lt;Allocator&gt;::is_always_equal::value &amp;&amp;</del>
+      <ins>noexcept(!propagate_may_throw_v&lt;Allocator&gt; &amp;&amp;</ins>
+               noexcept(swap(declval&lt;Compare&amp;&gt;(), declval&lt;Compare&amp;&gt;())));
+  };
+}
+</pre></blockquote>
+
+
+<h4>23.5.4.1 Class template <tt>unordered_map</tt> overview [unord.map.overview]</h4>
+<blockquote><pre>
+namespace std {
+  template &lt;class Key,
+            class T,
+            class Hash = hash&lt;Key&gt;,
+            class Pred = std::equal_to&lt;Key&gt;,
+            class Allocator = allocator&lt;pair&lt;const Key, T&gt; &gt; &gt; 
+  class unordered_map {
+    void      swap(unordered_map&amp;)
+      <del>noexcept(allocator_traits&lt;Allocator&gt;::is_always_equal::value &amp;&amp;</del>
+      <ins>noexcept(!propagate_may_throw_v&lt;Allocator&gt; &amp;&amp;</ins>
+               noexcept(swap(declval&lt;Hash&amp;&gt;(), declval&lt;Hash&amp;&gt;())) &amp;&amp;
+               noexcept(swap(declval&lt;Pred&amp;&gt;(), declval&lt;Pred&amp;&gt;())));
+  };
+}
+</pre></blockquote>
+
+
+<h4>23.5.5.1 Class template <tt>unordered_multimap</tt> overview [unord.multimap.overview]</h4>
+<blockquote><pre>
+namespace std {
+  template &lt;class Key,
+            class T,
+            class Hash = hash&lt;Key&gt;,
+            class Pred = std::equal_to&lt;Key&gt;,
+            class Allocator = allocator&lt;pair&lt;const Key, T&gt; &gt; &gt; 
+  class unordered_multimap {
+    void      swap(unordered_multimap&amp;)
+      <del>noexcept(allocator_traits&lt;Allocator&gt;::is_always_equal::value &amp;&amp;</del>
+      <ins>noexcept(!propagate_may_throw_v&lt;Allocator&gt; &amp;&amp;</ins>
+               noexcept(swap(declval&lt;Hash&amp;&gt;(), declval&lt;Hash&amp;&gt;())) &amp;&amp;
+               noexcept(swap(declval&lt;Pred&amp;&gt;(), declval&lt;Pred&amp;&gt;())));
+  };
+}
+</pre></blockquote>
+
+
+<h4>23.5.6.1 Class template <tt>unordered_set</tt> overview [unord.set.overview]</h4>
+<blockquote><pre>
+namespace std {
+  template &lt;class Key,
+            class Hash = hash&lt;Key&gt;,
+            class Pred = std::equal_to&lt;Key&gt;,
+            class Allocator = allocator&lt;const Key&gt; &gt; 
+  class unordered_set {
+    void      swap(unordered_set&amp;)
+      <del>noexcept(allocator_traits&lt;Allocator&gt;::is_always_equal::value &amp;&amp;</del>
+      <ins>noexcept(!propagate_may_throw_v&lt;Allocator&gt; &amp;&amp;</ins>
+               noexcept(swap(declval&lt;Hash&amp;&gt;(), declval&lt;Hash&amp;&gt;())) &amp;&amp;
+               noexcept(swap(declval&lt;Pred&amp;&gt;(), declval&lt;Pred&amp;&gt;())));
+  };
+}
+</pre></blockquote>
+
+
+<h4>23.5.6.1 Class template <tt>unordered_multiset</tt> overview [unord.multiset.overview]</h4>
+<blockquote><pre>
+namespace std {
+  template &lt;class Key,
+            class Hash = hash&lt;Key&gt;,
+            class Pred = std::equal_to&lt;Key&gt;,
+            class Allocator = allocator&lt;const Key&gt; &gt; 
+  class unordered_multiset {
+    void      swap(unordered_multiset&amp;)
+      <del>noexcept(allocator_traits&lt;Allocator&gt;::is_always_equal::value &amp;&amp;</del>
+      <ins>noexcept(!propagate_may_throw_v&lt;Allocator&gt; &amp;&amp;</ins>
+               noexcept(swap(declval&lt;Hash&amp;&gt;(), declval&lt;Hash&amp;&gt;())) &amp;&amp;
+               noexcept(swap(declval&lt;Pred&amp;&gt;(), declval&lt;Pred&amp;&gt;())));
+  };
+}
+</pre></blockquote>
+
+
+<h4>28.10 Class template match_results [re.results]</h4>
+<blockquote><pre>
+namespace std {
+  template &lt;class BidirectionalIterator,
+            class Allocator = allocator&lt;sub_match&lt;BidirectionalIterator&gt;&gt;&gt;
+  class match_results {
+  public:
+    typedef sub_match&lt;BidirectionalIterator&gt;                     value_type;
+    typedef const value_type&amp;                                    const_reference;
+    typedef value_type&amp;                                          reference;
+    typedef <i>implementation-defined</i>                               const_iterator;
+    typedef const_iterator                                       iterator;
+    typedef typename
+      iterator_traits&lt;BidirectionalIterator&gt;::difference_type    difference_type;
+    typedef typename allocator_traits&lt;Allocator&gt;::size_type      size_type;
+    typedef Allocator                                            allocator_type;
+    typedef typename iterator_traits&lt;BidirectionalIterator&gt;::
+      value_type                                                 char_type;
+    typedef basic_string&lt;char_type&gt;                              string_type;
+
+    <i>// 28.10.1, construct/copy/destroy:</i>
+    explicit match_results(const Allocator&amp; a = Allocator());
+    match_results(const match_results&amp; m);
+    match_results(match_results&amp;&amp; m) noexcept;
+    <ins>match_results(const match_results&amp; m, const Allocator&amp; a);</ins>
+    <ins>match_results(match_results&amp;&amp; m, const Allocator&amp; a);</ins>
+    match_results&amp; operator=(const match_results&amp; m);
+    match_results&amp; operator=(match_results&amp;&amp; m)
+      <ins>noexcept(!propagate_may_throw_v&lt;Allocator&gt;)</ins>;
+    ~match_results();
+
+    <i>// 28.10.2, state:</i>
+    bool ready() const <ins>noexcept</ins>;
+
+    // 28.10.3, size:
+    size_type size() const <ins>noexcept</ins>;
+    size_type max_size() const <ins>noexcept</ins>;
+    bool empty() const <ins>noexcept</ins>;
+
+    <i>// 28.10.4, element access:</i>
+    difference_type length(size_type sub = 0) const;
+    difference_type position(size_type sub = 0) const;
+    string_type str(size_type sub = 0) const;
+    const_reference operator[](size_type n) const;
+
+    const_reference prefix() const;
+    const_reference suffix() const;
+    const_iterator begin() const <ins>noexcept</ins>;
+    const_iterator end() const <ins>noexcept</ins>;
+    const_iterator cbegin() const <ins>noexcept</ins>;
+    const_iterator cend() const <ins>noexcept</ins>;
+
+    <i>// 28.10.5, format:</i>
+    template &lt;class OutputIter&gt;
+      OutputIter
+      format(OutputIter out,
+             const char_type* fmt_first, const char_type* fmt_last,
+             regex_constants::match_flag_type flags =
+              regex_constants::format_default) const;
+     template &lt;class OutputIter, class ST, class SA&gt;
+       OutputIter
+       format(OutputIter out,
+              const basic_string&lt;char_type, ST, SA&gt;&amp; fmt,
+              regex_constants::match_flag_type flags =
+                regex_constants::format_default) const;
+     template &lt;class ST, class SA&gt;
+      basic_string&lt;char_type, ST, SA&gt;
+      format(const basic_string&lt;char_type, ST, SA&gt;&amp; fmt,
+             regex_constants::match_flag_type flags =
+               regex_constants::format_default) const;
+     string_type
+     format(const char_type* fmt,
+            regex_constants::match_flag_type flags =
+              regex_constants::format_default) const;
+
+    <i>// 28.10.6, allocator:</i>
+    allocator_type get_allocator() const <ins>noexcept</ins>;
+
+    <i>// 28.10.7, swap:</i>
+    void swap(match_results&amp; that)
+      <ins>noexcept(!propagate_may_throw_v&lt;Allocator&gt;)</ins>;
+  };
+}
+</pre></blockquote>
+</blockquote>
+
+
+<p>Add the following to Annex C:</p>
+
+<blockquote>
+
+<h4>C.2.11 Clause 20: general utilities library [diff.cpp03.utilities]</h4>
+<p><ins>
+20.1.5
+</ins></p>
+<p><ins>
+<b>Change:</b> Containers now access their allocators through the
+<tt>allocator_traits</tt> template.
+</ins></p>
+<p><ins>
+<b>Rationale:</b> Simplifies writing new allocators.
+</ins></p>
+<p><ins>
+<b>Effect on original feature:</b> <tt>allocator_traits</tt> supplies default
+definitions for many allocator type names and operations.  Containers written
+by users conforming to the original allocator requirements will not necessarily
+support allocators written to the simpler set of requirements in this standard.
+</ins></p>
+
+<p>20.7.4</p>
+<p><b>Change:</b> Minimal support for garbage-collected regions</p>
+<p><b>Rationale:</b> Required by new feature.</p>
+<p>
+<b>Effect on original feature:</b> Valid C++ 2003 code, compiled without
+traceable pointer support, that interacts with newer C++ code using regions
+declared reachable may have different runtime behavior.
+</p>
+
+<h4><ins>Clause 17: library introduction [diff.cpp14.library]</ins></h4>
+<p><ins>
+17.6.3.5
+</ins></p>
+<p><ins>
+<b>Change:</b> <tt>allocator_traits</tt> supports a single trait for allocator
+propagation, rather than decomposing into separate traits for copy-assignment,
+move-assignment, and <tt>swap</tt>.
+</ins></p>
+<p><ins>
+<b>Rationale:</b> Combinations of inconsistent propagation traits added
+significant complexity to containers, without demonstrating any real benefit.
+</ins></p>
+<p><ins>
+<b>Effect on original feature:</b> The two member traits
+<tt>propagate_on_container_copy_assignment</tt> and
+<tt>propagate_on_container_move_assignment</tt> are now explicitly coupled to
+the third member trait, <tt>propagate_on_container_swap</tt>.  Any allocator
+that customized these traits separately will now either propagate in all cases,
+or never, depending entirely on the value of
+<tt>propagate_on_container_swap::value</tt>.
+</ins></p>
+
+</blockquote>
+
+
+<p>Add the following to Annex D:</p>
+
+<blockquote>
+
+<h4>D.x Deprecated allocator traits bits [depr.alloc.traits]</h4>
+<blockquote><pre>
+<ins>namespace std {</ins>
+  <ins>template &lt;class Alloc&gt; struct allocator_traits {</ins>
+    <ins>typedef propagate_on_container_swap propagate_on_container_copy_assignment;</ins>
+    <ins>typedef propagate_on_container_swap propagate_on_container_move_assignment;</ins>
+  <ins>};</ins>
+<ins>}</ins>
+</pre></blockquote>
+
+</blockquote>
+
+<h2><a name="4.0">Acknowledements</h2>
+<p>
+</p>
+
+
+<h2><a name="5.0">References</h2>
+<ul>
+  <li><a href="http://cplusplus.github.io/LWG/lwg-defects.html#2103">LWG #2103</a> <tt>std::allocator_traits&lt;std::allocator&lt;T&gt;&gt;::propagate_on_container_move_assignment</tt></li>
+  <li><a href="http://cplusplus.github.io/LWG/lwg-defects.html#2108">LWG #2108</a> No way to identify allocator types that always compare equal</li>
+  <li><a href="http://cplusplus.github.io/LWG/lwg-active.html#2178">LWG #2178</a>  Annex C update for C++11 on allocators
+  <li><a href="http://cplusplus.github.io/LWG/lwg-active.html#2183">LWG #2183</a>  regex <tt>match_results</tt> missing allocator-aware ctors
+  <li><a href="http://cplusplus.github.io/LWG/lwg-active.html#2184">LWG #2184</a>  regex <tt>match_results</tt> assigment and allocator propagation
+  <li><a href="http://cplusplus.github.io/LWG/lwg-active.html#2490">LWG #2490</a>  <tt>&lt;regex&gt; needs lots of noexcept</tt>
+
+  <li><a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n4258">N4258</a> Cleaning‐up noexcept in the Library, Nicolai Josuttis</li>
+  <li><a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/n4511">N4511</a> Adding [nothrow-]swappable traits, Daniel Krügler</li>
+</ul>
+
+
+</body>
+</html>

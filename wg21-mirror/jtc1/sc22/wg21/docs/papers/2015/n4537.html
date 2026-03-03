@@ -1,0 +1,559 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=UTF-8">
+
+<style type="text/css">
+
+body { color: #000000; background-color: #FFFFFF; }
+del { text-decoration: line-through; color: #8B0040; }
+ins { text-decoration: underline; color: #005100; }
+
+p.example { margin-left: 2em; }
+pre.example { margin-left: 2em; }
+div.example { margin-left: 2em; }
+
+code.extract { background-color: #F5F6A2; }
+pre.extract { margin-left: 2em; background-color: #F5F6A2;
+  border: 1px solid #E1E28E; }
+
+p.function { }
+.attribute { margin-left: 2em; }
+.attribute dt { float: left; font-style: italic;
+  padding-right: 1ex; }
+.attribute dd { margin-left: 0em; }
+
+blockquote.std { color: #000000; background-color: #F1F1F1;
+  border: 1px solid #D1D1D1;
+  padding-left: 0.5em; padding-right: 0.5em; }
+blockquote.stddel { text-decoration: line-through;
+  color: #000000; background-color: #FFEBFF;
+  border: 1px solid #ECD7EC;
+  padding-left: 0.5empadding-right: 0.5em; ; }
+
+blockquote.stdins { text-decoration: underline;
+  color: #000000; background-color: #C8FFC8;
+  border: 1px solid #B3EBB3; padding: 0.5em; }
+
+table { border: 1px solid black; border-spacing: 0px;
+  margin-left: auto; margin-right: auto; }
+th { text-align: left; vertical-align: top;
+  padding-left: 0.8em; border: none; }
+td { text-align: left; vertical-align: top;
+  padding-left: 0.8em; border: none; }
+
+</style>
+
+<title>Adding Symmetry Between shared_ptr and weak_ptr</title>
+</head>
+<body>
+
+<b>Document number:</b> N4537 <br>
+<b>Date:</b> 2015-05-19 <br>
+<b>Project:</b> Programming Language C++, Library Evolution Working Group <br>
+<b>Reply to:</b> Arthur O'Dwyer &lt;arthur.j.odwyer@gmail.com&gt; <br>
+
+<h1>Adding Symmetry Between shared_ptr and weak_ptr</h1>
+
+<p>
+<a href="#Introduction">1. Introduction</a><br>
+<a href="#Problem1">2. Problem: Fine control over <code>weak_ptr</code> ownership</a><br>
+<a href="#Problem2">3. Problem: Generic programming and <code>weak_ptr</code></a><br>
+<a href="#Solutions">4. Solutions</a><br>
+<a href="#One_more_example">5. One more motivating example</a></br>
+<a href="#Possible_objections">6. Possible objections</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Obj1">6a. Does <code>weak_ptr</code> deserve parity with <code>shared_ptr</code>?</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Obj2">6b. Could <code>unlock</code> be confused with <code>reset</code>?</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Obj3">6c. Could <code>weak_ptr::unlock()</code> be a free function instead?</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Obj4">6d. Should <code>weak_ptr</code> also have certain move-constructors?</a><br>
+<a href="#Proposed_wording">7. Proposed wording</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#util.smartptr.shared">20.8.2.2 Class template shared_ptr [util.smartptr.shared]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#util.smartptr.shared.obs">20.8.2.2.5 shared_ptr observers [util.smartptr.shared.obs]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#util.smartptr.weak">20.8.2.3 Class template weak_ptr [util.smartptr.weak]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#util.smartptr.weak.const">20.8.2.3.1 weak_ptr constructors [util.smartptr.weak.const]</a><br>
+<a href="#References">8. References</a><br>
+</p>
+
+
+<h2><a name="Introduction">1. Introduction</a></h2>
+
+<p>
+This paper identifies two minor inconveniences in the design of <code>shared_ptr</code>
+and <code>weak_ptr</code>, diagnoses them as owing to unnecessary asymmetry
+between those two classes, and proposes wording to eliminate the asymmetry
+(and thus the inconveniences).
+</p>
+
+<h2><a name="Problem1">2. Problem: Fine control over <code>weak_ptr</code> ownership</a></h2>
+
+<p>
+Consider the following code sample:
+</p>
+
+<pre>
+    shared_ptr&lt;int&gt; first_elt_strong(const shared_ptr&lt;vector&lt;int&gt;&gt;&amp; vec)
+    {
+        return shared_ptr&lt;int&gt;(vec, &amp;vec-&gt;at(0));
+    }
+</pre>
+
+<p>
+The <code>first_elt_strong</code> function returns a "strong reference" (a <code>shared_ptr</code>)
+to the first element of the vector passed in as <code>*vec</code>. Naturally, we want the returned
+object (call it <code>r</code>) to <em>share ownership with</em> <code>vec</code>, so that the controlled
+vector doesn't get deallocated before the last user of <code>r</code>.
+Fortunately, there is a standard solution to this problem:
+<code>shared_ptr</code> has a two-argument constructor that allows us to set the
+<em>ownership</em> of the constructed object separately from the <em>stored pointer</em>.
+This functionality was added to the standard in proposal N2351 (July 2007) <a href="#N2351">[N2351]</a>.
+That proposal presented the following rationale:
+<blockquote>
+    <p>Advanced users often require the ability to create a <code>shared_ptr</code> instance <code>p</code>
+    that shares ownership with another (master) <code>shared_ptr q</code> but points to an object
+    that is not a base of <code>*q</code>. <code>*p</code> may be a member or an element of
+    <code>*q</code>, for example. This section proposes an additional constructor that can be
+    used for this purpose.</p>
+</blockquote>
+</p>
+
+<p>
+That rationale applies in full force to this proposal, if you replace "<code>shared_ptr</code>"
+throughout with "<code>weak_ptr</code>".
+</p>
+
+The equivalent C++14-compliant code for <code>weak_ptr</code> looks deceptively similar on
+the surface:
+<pre>
+    weak_ptr&lt;int&gt; first_elt_weak(const shared_ptr&lt;vector&lt;int&gt;&gt;&amp; vec)
+    {
+        return shared_ptr&lt;int&gt;(vec, &amp;vec-&gt;at(0));
+    }
+</pre>
+However, the <code>return</code> statement hides a non-trivial amount of code. This code
+first constructs a <code>shared_ptr</code> (incrementing the strong reference count of the
+controlled object), then uses that <code>shared_ptr</code> to initialize a return value
+of type <code>weak_ptr</code> (incrementing the weak reference count), then destroys the
+<code>shared_ptr</code> (decrementing the strong reference count): three atomic accesses,
+when just one would suffice.
+
+<h2><a name="Problem2">3. Problem: Generic programming and <code>weak_ptr</code></a></h2>
+
+<p>
+Given an arbitrary <code>shared_ptr</code>, write code to "weaken" the object into
+a <code>weak_ptr</code> with the same shared ownership and stored pointer.
+</p>
+
+<pre>
+    template&lt;class ObjectType&gt;
+    void register_observers(ObjectType&amp; obj)
+    {
+        auto sptr = obj.get_shared_ptr(); // for example, via shared_from_this
+        auto wptr = weak_ptr&lt;ObjectType&gt;(sptr);
+        sptr.reset(); // drop the strong reference as soon as possible
+        register_observer_1(wptr);
+        register_observer_2(wptr);
+    }
+</pre>
+
+<p>
+Unfortunately, this code is not perfectly generic: it will fail (or at least
+do the wrong thing) in the case that <code>obj.get_shared_ptr()</code>
+returns something other than <code>shared_ptr&lt;ObjectType&gt;</code>.
+For example, it might return <code>shared_ptr&lt;BaseClassOfObjectType&gt;</code>.
+Or, in an advanced scenario, we might want to be able to "drop in" a
+replacement class <code>custom_shared_ptr</code> instead of the standard
+<code>shared_ptr</code>, in which case we would also have to replace
+<code>weak_ptr</code> in the above code with <code>custom_weak_ptr</code>.
+Notice that the <em>only</em> place in the code sample where an explicit
+type is used, is in the line concerned with "weakening" <code>sptr</code>.
+</p>
+
+<p>
+"Weakening" a <code>shared_ptr</code> into a <code>weak_ptr</code> is not
+an operation that ought to force explicit types into otherwise generic code.
+</p>
+
+<h2><a name="Solutions">4. Solutions</a></h2>
+
+<p>
+We propose adding two new functionalities to the standard library.
+</p>
+
+<p>
+First, <code>weak_ptr</code> gains a two-argument constructor to allow
+direct construction of <code>weak_ptr</code> objects with a specific
+shared ownership and a specific stored pointer. This constructor
+is exactly symmetrical with the existing two-argument constructor
+of <code>shared_ptr</code>, and allows us to rewrite our first problematic
+code sample (using only one atomic access) as:
+<pre>
+    weak_ptr&lt;int&gt; first_elt_weak(const shared_ptr&lt;vector&lt;int&gt;&gt;&amp; vec) {
+        return weak_ptr&lt;int&gt;(vec, &amp;vec-&gt;at(0));
+    }
+</pre>
+</p>
+
+<p>
+Second, for creating a <code>weak_ptr&lt;T&gt;</code> directly from
+a <code>shared_ptr&lt;T&gt;</code> in the context of generic programming
+where the type <code>T</code> may not be easily accessible, <code>shared_ptr</code>
+gains a const member function <code>shared_ptr&lt;T&gt;::unlock()</code>.
+This member function
+is exactly symmetrical with the existing functionality for creating
+a <code>shared_ptr&lt;T&gt;</code> directly from a <code>weak_ptr&lt;T&gt;</code>,
+which is known as <code>weak_ptr&lt;T&gt;::lock()</code>. It allows us to
+rewrite our second problematic code sample (in generic style, naming
+no types explicitly) as:
+</p>
+
+<pre>
+    template&lt;class ObjectType&gt;
+    void register_observers(ObjectType&amp; obj) {
+        auto sptr = obj.get_shared_ptr(); // for example, via shared_from_this
+        auto wptr = sptr.unlock();
+        sptr.reset(); // drop the strong reference as soon as possible
+        register_observer_1(wptr);
+        register_observer_2(wptr);
+    }
+</pre>
+
+<h2><a name="One_more_example">5. One more motivating example</a></h2>
+<p>
+A real-world example of this pattern cropped up recently when Arthur attempted
+to implement a "task-based programming" library with task cancellation, as
+described in Sean Parent's "Better Code: Concurrency" <a href="#Parent">[Parent]</a>.
+In this library, the <code>TaskControlBlock</code> is the central concept;
+a <code>Future</code> is simply a thin wrapper around a
+<code>std::shared_ptr&lt;TaskControlBlock&gt;</code>, and a <code>Promise</code>
+is a thin wrapper around a <code>std::weak_ptr&lt;TaskControlBlock&gt;</code>.
+When the last <code>Future</code> referring to a <code>TaskControlBlock</code>
+is destroyed, the <code>TaskControlBlock</code> itself (if the task has not
+yet begun to execute) may be destroyed. The implementation of
+<code>EnqueueTask</code> in this system looks like this:
+<pre>
+    template&lt;typename T&gt;
+    inline std::weak_ptr&lt;T&gt; Unlock(const std::shared_ptr&lt;T&gt;& sptr)
+    {
+        return std::weak_ptr&lt;T&gt;(sptr);
+    }
+
+    template&lt;typename Func&gt;
+    auto EnqueueTask(Func&amp;&amp; func) -&gt; Future&lt;decltype(func())&gt;
+    {
+        using T = decltype(func());
+
+        auto sptr = std::make_shared&lt;TaskControlBlock&lt;T&gt;&gt;();
+
+        auto task = [
+            func = std::forward&lt;Func&gt;(func),
+            wptr = Unlock(sptr)
+        ]() {
+            Promise&lt;T&gt; px { wptr };
+            px.set_value(func());
+        };
+
+        GlobalTaskPool.submit(task);
+
+        Future&lt;T&gt; fx { std::move(sptr) };
+        return fx;
+    }
+</pre>
+Notice the use of the hand-coded free function <code>Unlock(sptr)</code>; that's
+a workaround for the unwieldy expression <code>std::weak_ptr&lt;TaskControlBlock&lt;T&gt;&gt;(sptr)</code>.
+If this proposal is adopted, the expression will become <code>sptr.unlock()</code>.
+</p>
+
+<h2><a name="Possible_objections">6. Possible objections</a></h2>
+
+<h3><a name="Obj1">6a. Does <code>weak_ptr</code> deserve parity with <code>shared_ptr</code>?</a></h3>
+
+<p>
+It has been suggested that the appropriate intuition for <code>weak_ptr</code> is not to think of it
+as a "pointer" type, but as a contract, promise, or "IOU" that may be redeemed (via <code>lock</code>)
+to produce a pointer when needed <a href="#Rodriguez">[Rodriguez]</a>. There is merit in this idea.
+<code>weak_ptr</code> is certainly not a normal "pointer" type: it has no unary <code>operator*</code>
+or <code>operator-&gt;</code>. Therefore, is there any logic at all to creating symmetry
+between <code>shared_ptr</code> (a "pointer" type) and <code>weak_ptr</code> (a "non-pointer" type)?
+</p>
+
+<p>
+We believe that viewing <code>weak_ptr</code> as an "IOU" type (rather than a "pointer" type)
+doesn't affect any of the problems or solutions presented in this proposal. For example, if we
+describe the purpose of <code>lock</code> as "redeem an IOU to obtain a <code>shared_ptr</code>,"
+it seems reasonable to provide a (symmetric) member function <code>unlock()</code> that, given
+a real <code>shared_ptr</code>, can turn it into an IOU to be redeemed later.
+</p>
+
+<p>
+The arguments from efficiency (number of reference-count bumps) and "generic programmability"
+(ability to express a conversion to <code>weak_ptr</code> without explicit types) seem no less
+applicable, whether one sees <code>shared_ptr</code> and <code>weak_ptr</code> on equal
+footing or whether one sees <code>weak_ptr</code> as an IOU to produce a
+<code>shared_ptr</code>.
+</p>
+
+<h3><a name="Obj2">6b. Could <code>unlock</code> be confused with <code>reset</code>?</a></h3>
+
+<p>
+The following code has no bugs:
+<pre>
+    void process() {
+        auto sptr = get_shared_ptr_from_somewhere();
+        // let's hang onto it while doing some work
+        do_work();
+        // now it's safe to drop the strong reference and possibly destroy the state
+        sptr.reset();
+        // at this point the state will have been destroyed if there are no other references to it
+        do_other_work();
+    }
+</pre>
+However, if a careless coder were to accidentally type <code>sptr.unlock()</code>
+(by analogy with <code>mutex::unlock()</code>) instead of <code>sptr.reset()</code>,
+the code would fail to drop the strong reference and would therefore break the invariants that
+might be assumed by <code>do_other_work()</code>.
+</p>
+
+<p>
+That is, while the non-static member functions <code>mutex::lock()</code> and
+<code>mutex::unlock()</code> are <em>mutators</em>, the non-static member functions
+<code>weak_ptr::lock()</code> and <code>shared_ptr::unlock()</code> are <em>observers</em>:
+they do not modify <code>*this</code>, but rather return brand-new objects and
+leave the old <code>*this</code> untouched.
+</p>
+
+<p>
+If it were not too late to
+rename <code>lock</code>, we would suggest pairs such as
+<code>wptr.strengthed() / sptr.weakened()</code> or <code>wptr.as_shared() / sptr.as_weak()</code>.
+But, as it <em>is</em> too late, in our opinion the symmetry of <code>wptr.lock()</code>
+and <code>sptr.unlock()</code> is desirable enough to outweigh the advantages of
+any alternative naming scheme.
+</p>
+
+<p>
+This is not a new class of problem; for example, careless coders have been observed in the wild
+typing <code>vector.empty()</code> instead of <code>vector.clear()</code>
+<a href="#Bug25509">[Bug25509]</a>.
+It might be wise of implementors to annotate both <code>lock()</code> and <code>unlock()</code>
+(and <code>empty()</code>) with implementation-specific attributes such as
+<code>[[warn_unused_result]]</code>.
+</p>
+
+<h3><a name="Obj3">6c. Could <code>weak_ptr::unlock()</code> be a free function instead?</a></h3>
+
+<p>
+Other commentators (before this proposal),
+for example <a href="#Hall">[Hall]</a> and <a href="#Bolas">[Bolas]</a>,
+have suggested code along the lines of
+<pre>
+    template&lt;typename T&gt;
+    std::weak_ptr&lt;T&gt; to_weak(const std::shared_ptr&lt;T&gt;&amp; sptr)
+    {
+        return std::weak_ptr&lt;T&gt;(sptr);
+    }
+</pre>
+This seems like a reasonable and generic-friendly approach; in fact a free function
+(or somehow wrapping the function up into a traits class?) would be more friendly
+to generic programming, on the face of it.
+</p>
+
+<p>
+The fundamental argument against a free function is <em>symmetry</em>. It would be
+unfortunate if the opposite of <code>wptr.lock()</code> were spelled
+<code>to_weak(sptr)</code>. We could propose to add <code>to_strong(wptr)</code>
+at the same time... but the more symmetry we <em>do</em> add, the more glaringly
+the few exceptions will stand out! Unfortunately, the asymmetry of <code>lock</code> versus
+<code>unlock</code> will not go away by any route other than adding <code>unlock</code>
+to the library.
+</p>
+
+<h3><a name="Obj4">6d. Should <code>weak_ptr</code> also have certain move-constructors?</a></h3>
+
+<p>Between working drafts N3797 and N4296, <code>weak_ptr</code> gained a move constructor
+and move assignment operator, as part of the resolution of LWG issue #2315
+<a href="#DR2315">[DR2315]</a>.
+</p>
+
+<p>Since one of the present proposal's code samples involves creating a weak
+reference from a strong reference and then immediately dropping the strong reference,
+one might reasonably ask whether this functionality should be supported via
+a constructor such as
+<pre>
+    weak_ptr(shared_ptr&lt;T&gt;&amp;&amp; r) noexcept;
+</pre>
+We believe the answer is <strong>no</strong>, because users would certainly expect
+this constructor to be both efficient and atomic, and implementors might find it
+difficult to achieve either of those goals. In the most obvious implementation,
+the constructor would have to simultaneously (atomically) increment a "weak
+reference count" <em>and</em> decrement a "strong reference count".
+</p>
+
+<p>
+Interestingly, this code currently compiles, but with "wrong" semantics:
+<pre>
+    void register_observers(std::shared_ptr&lt;int&gt; sptr) {
+        std::weak_ptr&lt;int&gt; wptr(std::move(sptr)); // destructively convert to a weak reference?
+        register_observer_1(wptr);
+        register_observer_2(wptr);
+    }
+</pre>
+The instance <code>sptr</code> does not become <em>empty</em> as it would if it were
+"moved into" another instance of <code>shared_ptr</code>. Instead, the rvalue reference
+quietly degrades itself into a const lvalue reference, and <code>sptr</code> keeps its
+old value.
+</p>
+
+<p>
+This "problem" could be "fixed" by judicious deletion of <code>weak_ptr</code> and
+<code>shared_ptr</code> constructors and assignment operators that take rvalue references
+of the other type; but that might have a significant effect on existing codebases,
+and is outside the scope of the present proposal regardless.
+</p>
+
+
+<h2><a name="Proposed_wording">7. Proposed wording</a></h2>
+
+<p>
+The wording in this section is relative to WG21 draft standard
+<a href="http://isocpp.org/files/papers/n4296.pdf">N4296</a> <a href="#N4296">[N4296]</a>.
+</p>
+
+<h3><a name="util.smartptr.shared">20.8.2.2 Class template shared_ptr [util.smartptr.shared]</a></h3>
+
+<p>
+Edit paragraph 1 as follows.
+</p>
+
+<blockquote class="std">
+<p>
+<code>
+    // 20.8.2.2.5, observers:<br>
+    T* get() const noexcept;<br>
+    T&amp; operator*() const noexcept;<br>
+    T* operator-&gt;() const noexcept;<br>
+    long use_count() const noexcept;<br>
+    bool unique() const noexcept;<br>
+    explicit operator bool() const noexcept;<br>
+    <ins>weak_ptr&lt;T&gt; unlock() const noexcept;</ins><br>
+    template&lt;class U&gt; bool owner_before(shared_ptr&lt;U&gt; const&amp; b) const;<br>
+    template&lt;class U&gt; bool owner_before(weak_ptr&lt;U&gt; const&amp; b) const;<br>
+</code>
+</blockquote>
+
+<h3><a name="util.smartptr.shared.obs">20.8.2.2.5 shared_ptr observers [util.smartptr.shared.obs]</a></h3>
+
+<p>
+Add a new paragraph between the existing paragraphs 11 and 12.
+</p>
+
+<blockquote class="stdins">
+<p><code>weak_ptr&lt;T&gt; unlock() const noexcept;</code></p>
+<p>
+<em>Returns:</em> <code>weak_ptr&lt;T&gt;(*this)</code>.
+</p>
+</blockquote>
+
+<h3><a name="util.smartptr.weak">20.8.2.3 Class template weak_ptr [util.smartptr.weak]</a></h3>
+
+<p>
+Edit paragraph 1 as follows.
+</p>
+
+<blockquote class="std">
+<p>
+<code>
+    // 20.8.2.3.1, constructors<br>
+    constexpr weak_ptr() noexcept;<br>
+    template&lt;class Y&gt; weak_ptr(shared_ptr&lt;Y&gt; const&amp; r) noexcept;<br>
+    <ins>template&lt;class Y&gt; weak_ptr(shared_ptr&lt;Y&gt; const&amp; r, T* p) noexcept;</ins><br>
+    weak_ptr(weak_ptr const&amp; r) noexcept;<br>
+    template&lt;class Y&gt; weak_ptr(weak_ptr&lt;Y&gt; const&amp; r) noexcept;<br>
+    <ins>template&lt;class Y&gt; weak_ptr(weak_ptr&lt;Y&gt; const&amp; r, T* p) noexcept;</ins><br>
+    weak_ptr(weak_ptr&amp;&amp; r) noexcept;<br>
+    template&lt;class Y&gt; weak_ptr(weak_ptr&lt;Y&gt;&amp;&amp; r) noexcept;<br>
+</code>
+</blockquote>
+
+<h3><a name="util.smartptr.weak.const">20.8.2.3.1 weak_ptr constructors [util.smartptr.weak.const]</a></h3>
+
+<p>
+Add a new paragraph after the existing paragraph 5.
+</p>
+
+<blockquote class="stdins">
+<p><code>template&lt;class Y&gt; weak_ptr(weak_ptr&lt;Y&gt; const&amp; r, T* p) noexcept;<br>
+template&lt;class Y&gt; weak_ptr(shared_ptr&lt;Y&gt; const&amp; r, T* p) noexcept;</code></p>
+<p>
+<em>Effects:</em> Constructs a <code>weak_ptr</code> instance that stores <code>p</code> and
+<em>shares ownership with</em> <code>r</code>.
+</p>
+<p><em>Postconditions:</em> <code>use_count() == r.use_count()</code>.</p>
+</blockquote>
+
+<h2><a name="References">8. References</a></h2>
+
+<dl>
+
+<dt><a name="Bolas">[Bolas]</a></dt>
+<dd>
+Nicol Bolas, in response to <i>Add "weak_from_this" to std::enable_shared_from_this</i> (August 2013):<br>
+"I would prefer something less limited: a <code>to_weak_ptr</code> function that takes
+a <code>shared_ptr&lt;T&gt;</code> and returns an appropriate <code>weak_ptr&lt;T&gt;</code>."
+<a href="https://groups.google.com/a/isocpp.org/forum/#!msg/std-proposals/fBe0AySrnKY/a3Ww4SWwJDUJ">
+https://groups.google.com/a/isocpp.org/forum/#!msg/std-proposals/fBe0AySrnKY/a3Ww4SWwJDUJ</a>
+</dd>
+
+<dt><a name="Bug25509">[Bug25509]</a></dt>
+<dd>
+Paul Pluzhnikov. GCC bug report 25509, comment #28 (August 2014):<br>
+"I have just found ~30 bugs in our code, where someone wrote ... <code>v.empty(); // v.clear() was intended!</code>"<br>
+<a href="https://gcc.gnu.org/bugzilla/show_bug.cgi?id=25509#c28">https://gcc.gnu.org/bugzilla/show_bug.cgi?id=25509#c28</a>
+</dd>
+
+<dt><a name="DR2315">[DR2315]</a></dt>
+<dd>
+Stephan T. Lavavej. "weak_ptr should be movable". Resolved February 2014 at Issaquah. <br>
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/lwg-defects.html#2315">http://www.open-std.org/jtc1/sc22/wg21/docs/lwg-defects.html#2315</a>
+</dd>
+
+<dt><a name="Hall">[Hall]</a></dt>
+<dd>
+Brett Hall. "Automatically Made Weak" (November 2013).<br>
+<a href="https://backwardsincompatibilities.wordpress.com/2013/11/12/automatically-made-weak/">
+https://backwardsincompatibilities.wordpress.com/2013/11/12/automatically-made-weak/</a>
+</dd>
+
+<dt><a name="N2351">[N2351]</a></dt>
+<dd>
+Peter Dimov and Beman Dawes. "Improving shared_ptr for C++0x, Revision 2" (July 2007).<br>
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2351.htm#aliasing">
+http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2351.htm#aliasing</a>.
+</dd>
+
+<dt><a name="N4296">[N4296]</a></dt>
+<dd>
+"Working Draft, Standard for Programming Language C++" (November 2014).<br>
+<a href="http://isocpp.org/files/papers/n4296.pdf">
+http://isocpp.org/files/papers/n4296.pdf</a>.
+</dd>
+
+<dt><a name="Parent">[Parent]</a></dt>
+<dd>
+"Better Code: Concurrency" (February 2015).<br>
+<a href="https://github.com/sean-parent/sean-parent.github.io/wiki/Papers-and-Presentations">
+https://github.com/sean-parent/sean-parent.github.io/wiki/Papers-and-Presentations</a>.
+</dd>
+
+<dt><a name="Rodriguez">[Rodriguez]</a></dt>
+<dd>
+David Rodríguez Ibeas, in response to "add operator-> to std::weak_ptr" (January 2015):<br>
+"Today, even if the name is misleading, at least it is easy to teach that <code>weak_ptr</code>
+is not a pointer but a mechanism to (possibly) obtain one. ... I don't believe there is value
+of symmetry between a pointer and a non-pointer type."<br>
+<a href="https://groups.google.com/a/isocpp.org/d/msg/std-proposals/frsyAl9Pci4/m_lHTN2Dz9AJ">https://groups.google.com/a/isocpp.org/d/msg/std-proposals/frsyAl9Pci4/m_lHTN2Dz9AJ</a>
+</dd>
+</dl>
+
+</body>
+</html>

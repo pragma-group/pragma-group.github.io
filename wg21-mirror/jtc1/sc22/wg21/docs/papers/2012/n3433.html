@@ -1,0 +1,637 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=US-ASCII">
+
+<style type="text/css">
+
+body { color: #000000; background-color: #FFFFFF; }
+del { text-decoration: line-through; color: #8B0040; }
+ins { text-decoration: underline; color: #005100; }
+
+p.example { margin-left: 2em; }
+pre.example { margin-left: 2em; }
+div.example { margin-left: 2em; }
+
+code.extract { background-color: #F5F6A2; }
+pre.extract { margin-left: 2em; background-color: #F5F6A2;
+  border: 1px solid #E1E28E; }
+
+p.function { }
+.attribute { margin-left: 2em; }
+.attribute dt { float: left; font-style: italic;
+  padding-right: 1ex; }
+.attribute dd { margin-left: 0em; }
+
+blockquote.std { color: #000000; background-color: #F1F1F1;
+  border: 1px solid #D1D1D1;
+  padding-left: 0.5em; padding-right: 0.5em; }
+blockquote.stddel { text-decoration: line-through;
+  color: #000000; background-color: #FFEBFF;
+  border: 1px solid #ECD7EC;
+  padding-left: 0.5empadding-right: 0.5em; ; }
+
+blockquote.stdins { text-decoration: underline;
+  color: #000000; background-color: #C8FFC8;
+  border: 1px solid #B3EBB3; padding: 0.5em; }
+
+table { border: 1px solid black; border-spacing: 0px;
+  margin-left: auto; margin-right: auto; }
+th { text-align: left; vertical-align: top;
+  padding-left: 0.8em; border: none; }
+td { text-align: left; vertical-align: top;
+  padding-left: 0.8em; border: none; }
+
+</style>
+
+<title>Clarifying Memory Allocation</title>
+</head>
+<body>
+<h1>Clarifying Memory Allocation</h1>
+
+<p>
+ISO/IEC JTC1 SC22 WG14 N1634 - 2012-09-23
+<br>
+ISO/IEC JTC1 SC22 WG21 N3433 = 12-0123 - 2012-09-23
+</p>
+
+<address>
+Lawrence Crowl, crowl@google.com, Lawrence@Crowl.org
+<br>
+Chandler Carruth, chandlerc@google.com
+</address>
+
+<p>
+<a href="#Introduction">Introduction</a><br>
+<a href="#Problem">Problem</a><br>
+<a href="#Solution">Solution</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Memory">Memory</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Races">Data Races</a><br>
+<a href="#CWording">C Wording</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#7.1.4">7.1.4 Use of library functions</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#7.22.3">7.22.3 Memory management functions</a><br>
+<a href="#CxxWording">C++ Wording</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#basic.stc.dynamic">3.7.4 Dynamic storage duration [basic.stc.dynamic]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#basic.stc.dynamic.allocation">3.7.4.1 Allocation functions [basic.stc.dynamic.allocation]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#replacement.functions">5.3.4 New [expr.new]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#replacement.functions">17.6.4.6 Replacement functions [replacement.functions]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#new.delete.dataraces">18.6.1.4 Data races [new.delete.dataraces]</a><br>
+<a href="#References">References</a><br>
+</p>
+
+
+<h2><a name="Introduction">Introduction</a></h2>
+
+<p>
+The allocation and deallocation of memory
+has become a significant expense in modern systems.
+The optimization of that process is important to good performance.
+However, it is important to distinguish between
+micro-optimization of the calls
+and macro-optimization of the allocation strategy.
+In particular, good system performance
+may well require adapting the allocation stragegy
+to the dynamic behavior of the application,
+or even to hints provided by the application.
+</p>
+
+
+<h2><a name="Problem">Problem</a></h2>
+
+<p>
+As strict reading of the current C and C++ standards
+may lead one to conclude that 
+the allocation strategy shall not consider any information
+not derivable from the sequence of allocation and deallocation calls.
+In essence, the standards may exclude macro-optimization of allocation.
+</p>
+
+<p>
+On the other hand,
+a strict reading of the standards
+may lead one to conclude that
+the implementation must make an external function call
+for each and every nominal call.
+This reading may exclude micro-optimization of allocation.
+</p>
+
+
+<h2><a name="Solution">Solution</a></h2>
+
+<p>
+We propose to replace existing mechanistic wording
+with wording more precisely focused on essential requirements.
+The intent is to enable behavior
+that some existing memory allocators already have.
+For example, see TCMalloc <a href="#TCM">[TCM]</a>.
+</p>
+
+<h3><a name="Memory">Memory</a></h3>
+
+<p>
+An essential requirement on implementations
+is that they deliver usable memory,
+not that they have a particular sequence of calls.
+We propose to explicitly decouple the implementation calls
+from the nominal calls.
+</p>
+
+<ol>
+<li><p>
+The number of implementation calls
+is not part of the observable behavior of the program.
+</p></li>
+<li><p>
+The parameters and return values of implementation calls
+is not part of the observable behavior of the program,
+except that the sum of the size parameters
+of live implementation allocation calls
+shall not exceed the sum of the size parameters,
+adjusted for alignment,
+of live nominal allocation calls.
+(That is, implementations may "round up" size parameters,
+as they already do.)
+</p></li>
+</ol>
+
+<p>
+Together these changes enable implementations
+to reduce the number of malloc calls by avoiding them or fusing them.
+However, it would only enable fusing
+mallocs together into larger mallocs
+provided it can prove that both mallocs have overlapping lifetimes
+(ended by corresponding calls to free)
+such that the peak allocated memory of the program remains unchanged.
+</p>
+
+<p>
+Because C++ class-specific memory allocators
+are often tuned to specific class sizes,
+we do not apply this relaxation to those allocators.
+</p>
+
+
+<h3><a name="Races">Data Races</a></h3>
+
+<p>
+An essential requirement on implementations
+is that they be data-race free,
+yet the standards do not say so directly.
+We propose to replace the current wording with direct wording,
+thus explicitly enabling an implementation to consider information
+beyond the strict sequence of allocation and deallocation calls.
+</p>
+
+
+<h2><a name="CWording">C Wording</a></h2>
+
+<p>
+The wording in this section is relative to WG14
+<a href="http://www.open-std.org/JTC1/SC22/WG14/www/docs/n1570.pdf">
+N1570</a>.
+</p>
+
+
+<h3><a name="7.1.4">7.1.4 Use of library functions</a></h3>
+
+<p>
+Paragraph 4 is unchanged.
+</p>
+
+<blockquote class="std">
+<p>
+The functions in the standard library
+are not guaranteed to be reentrant
+and may modify objects with static or thread storage duration.
+[<i>Footnote:</i>
+Thus, a signal handler cannot, in general, call standard library functions.
+&mdash;<i>end footnote</i>]
+</p>
+</blockquote>
+
+<p>
+Paragraph 5 is unchanged,
+though we note in passing that the wording may need improvement
+because it seems to fail
+to distinguish between atomic objects and regular objects,
+and to make access under mutual exclusion a normative exception.
+Despite that, we believe the intent of this paragraph is correct.
+</p>
+
+<blockquote class="std">
+<p>
+Unless explicitly stated otherwise in the detailed descriptions that follow,
+library functions shall prevent data races as follows:
+A library function shall not directly or indirectly
+access objects accessible by threads other than the current thread
+unless the objects are accessed directly or indirectly
+via the function's arguments.
+A library function shall not directly or indirectly
+modify objects accessible by threads other than the current thread
+unless the objects are accessed directly or indirectly
+via the function's non-const arguments.
+[<i>Footnote:</i>
+This means, for example, that
+an implementation is not permitted to use a static object
+for internal purposes without synchronization
+because it could cause a data race
+even in programs that do not explicitly share objects between threads.
+Similarly, an implementation of <code>memcpy</code>
+is not permitted to copy bytes
+beyond the specified length of the destination object
+and then restore the original values
+because it could cause a data race
+if the program shared those bytes between threads.
+&mdash;<i>end footnote</i>]
+Implementations may share their own internal objects between threads
+if the objects are not visible to users and are protected against data races.
+</p>
+</blockquote>
+
+<p>
+Paragraph 6 is unchanged.
+</p>
+
+<blockquote class="std">
+<p>
+Unless otherwise specified,
+library functions shall
+perform all operations solely within the current thread
+if those operations have effects that are visible to users.
+[<i>Footnote:</i>
+This allows implementations to parallelize operations
+if there are no visible side effects.
+&mdash;<i>end footnote</i>]
+</p>
+</blockquote>
+
+
+<h3><a name="7.22.3">7.22.3 Memory management functions</a></h3>
+
+<p>
+Edit paragraph 1 as follows.
+</p>
+
+<blockquote class="std">
+<p>
+The order and contiguity of storage
+allocated by successive calls to
+the <code>aligned_alloc</code>, <code>calloc</code>, <code>malloc</code>,
+and <code>realloc</code> functions
+is unspecified.
+<ins>
+A <dfn>live allocation call</dfn>
+is one in which the corresponding deallocation call has not occured.
+The number of calls to the implementation of these functions
+may be less than the number of nominal calls,
+provided that the sum of the size parameters of the implementation calls
+shall not exceed
+the sum of the size parameters of live nominal allocation calls,
+where each parameter is rounded up to a multiple of the corresponding alignment.
+</ins>
+The pointer returned if the allocation succeeds is suitably aligned
+so that it may be assigned to a pointer to any type of object
+with a fundamental alignment requirement
+and then used to access such an object or an array of such objects
+in the space allocated (until the space is explicitly deallocated).
+The lifetime of an allocated object
+extends from the allocation until the deallocation.
+Each such allocation shall yield a pointer to an object
+disjoint from any other object.
+The pointer returned
+points to the start (lowest byte address) of the allocated space.
+If the space cannot be allocated, a null pointer is returned.
+If the size of the space requested is zero,
+the behavior is implementation-defined:
+either a null pointer is returned,
+or the behavior is as if the size were some nonzero value,
+except that the returned pointer shall not be used to access an object.
+</p>
+</blockquote>
+
+<p>
+Paragraph 2 is unchanged.
+</p>
+
+<blockquote class="std">
+<p>
+For purposes of determining the existence of a data race,
+<del>
+memory allocation functions
+behave as though they accessed
+only memory locations accessible through their arguments
+and not other static duration storage.
+</del>
+<ins>
+the provisions of 7.1.4 apply.
+</ins>
+These functions may, however, visibly modify
+the storage that they allocate or deallocate.
+A call to <code>free</code> or <code>realloc</code>
+that deallocates a region <var>p</var> of memory
+synchronizes with any allocation call
+that allocates all or part of the region <var>p</var>.
+This synchronization occurs
+after any access of <var>p</var> by the deallocating function,
+and before any such access by the allocating function.
+</p>
+</blockquote>
+
+
+<h2><a name="CxxWording">C++ Wording</a></h2>
+
+<p>
+The wording in this section is relative to WG21
+<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2012/n3337.pdf">
+N3337</a>.
+</p>
+
+
+<h3><a name="basic.stc.dynamic">3.7.4 Dynamic storage duration [basic.stc.dynamic]</a></h3>
+
+<p>
+Paragraph 2 is unchanged.
+</p>
+
+<blockquote class="std">
+<p>
+The library provides default definitions
+for the global allocation and deallocation functions.
+Some global allocation and deallocation functions are replaceable (18.6.1).
+A C++ program shall provide
+at most one definition of a replaceable allocation or deallocation function.
+Any such function definition
+replaces the default version provided in the library (17.6.4.6).
+The following allocation and deallocation functions (18.6)
+are implicitly declared in global scope in each translation unit of a program.
+</p>
+<blockquote><pre>
+<code>void* operator new(std::size_t);
+void* operator new[](std::size_t);
+void operator delete(void*);
+void operator delete[](void*);</code>
+</pre></blockquote>
+<p>
+These implicit declarations introduce only the function names
+<code>operator new</code>, <code>operator new[]</code>,
+<code>operator delete</code>, and <code>operator delete[]</code>.
+[<em>Note:</em>
+The implicit declarations do not introduce the names
+<code>std</code>, <code>std::size_t</code>, or any other names
+that the library uses to declare these names.
+Thus, a <var>new-expression</var>, <var>delete-expression</var> or
+function call that refers to one of these functions
+without including the header <code>&lt;new&gt;</code> is well-formed.
+However, referring to <code>std</code> or <code>std::size_t</code>
+is ill-formed unless the name has been declared
+by including the appropriate header.
+&mdash;<i>end note</i>]
+Allocation and/or deallocation functions
+can also be declared and defined for any class (12.5).
+</p>
+</blockquote>
+
+<p>
+Paragraph 3 is unchanged.
+</p>
+
+<blockquote class="std">
+<p>
+Any allocation and/or deallocation functions defined in a C++ program,
+including the default versions in the library,
+shall conform to the semantics specified in 3.7.4.1 and 3.7.4.2.
+</p>
+</blockquote>
+
+
+<h3><a name="basic.stc.dynamic.allocation">3.7.4.1 Allocation functions [basic.stc.dynamic.allocation]</a></h3>
+
+<p>
+Edit paragraph 2 as follows.
+</p>
+
+<blockquote class="std">
+<p>
+The allocation function attempts to allocate the requested amount of storage.
+If it is successful,
+it shall return the address of the start of a block of storage
+whose length in bytes shall be at least as large as the requested size.
+There are no constraints on the contents of the allocated storage
+on return from the allocation function.
+The order, contiguity, and initial value of storage allocated
+by successive calls to an allocation function are unspecified.
+<ins>
+A <dfn>live allocation call</dfn>
+is one in which the corresponding deallocation call has not occured.
+The number of calls to the implementation of the global allocation functions
+may be less than the number of nominal calls,
+provided that the sum of the size parameters of the live implementation calls
+shall not exceed
+the sum of the size parameters of live nominal calls,
+where each parameter is rounded up to a multiple of the corresponding alignment.
+</ins>
+The pointer returned shall be suitably aligned
+so that it can be converted to a pointer of any complete object type
+with a fundamental alignment requirement (3.11)
+and then used to access the object or array in the storage allocated
+(until the storage is explicitly deallocated
+by a call to a corresponding deallocation function).
+Even if the size of the space requested is zero, the request can fail.
+If the request succeeds,
+the value returned shall be a non-null pointer value (4.10) <code>p0</code>
+different from any previously returned value <code>p1</code>,
+unless that value <code>p1</code>
+was subsequently passed to an operator <code>delete</code>.
+The effect of dereferencing a pointer returned as a request for zero size
+is undefined.
+[<i>Footnote:</i>
+The intent is to have operator <code>new()</code>
+implementable by calling
+<code>std::malloc()</code> or <code>std::calloc()</code>,
+so the rules are substantially the same.
+C++ differs from C in requiring a zero request to return a non-null pointer.
+&mdash;<i>end footnote</i>]
+</p>
+</blockquote>
+
+
+<h3><a name="replacement.functions">5.3.4 New [expr.new]</a></h3>
+
+<p>
+Paragraph 8 is unchanged,
+but note that the number of allocation implementation calls
+may be less than the number of nominal calls specified below
+via the provision of 3.7.4.1/2.
+</p>
+
+<blockquote class="std">
+<p>
+A <var>new-expression</var> obtains storage for the object
+by calling an <var>allocation function</var> (3.7.4.1).
+If the <var>new-expression</var> terminates by throwing an exception,
+it may release storage by calling a deallocation function (3.7.4.2).
+If the allocated type is a non-array type,
+the allocation function's name is <code>operator new</code> and
+the deallocation function's name is <code>operator delete</code>.
+If the allocated type is an array type,
+the allocation function's name is <code>operator new[]</code> and
+the deallocation function's name is <code>operator delete[]</code>.
+[<i>Note:</i>
+an implementation shall provide default definitions
+for the global allocation functions (3.7.4, 18.6.1.1, 18.6.1.2).
+A C++ program can provide
+alternative definitions of these functions (17.6.4.6)
+and/or class-specific versions (12.5).
+&mdash;<i>end note</i>]
+</p>
+</blockquote>
+
+<p>
+Paragraph 8 is unchanged,
+but note that the number of allocation implementation calls
+may be less than the number of nominal calls specified below
+via the provision of 3.7.4.1/2.
+</p>
+
+<blockquote class="std">
+<p>
+A <var>new-expression</var>
+passes the amount of space requested
+to the allocation function
+as the first argument of type <code>std::size_t</code>.
+That argument shall be no less than
+the size of the object being created;
+it may be greater than
+the size of the object being created
+only if the object is an array.
+For arrays of <code>char</code> and <code>unsigned char</code>,
+the difference between the result of the <var>new-expression</var>
+and the address returned by the allocation function
+shall be an integral multiple
+of the strictest fundamental alignment requirement (3.11)
+of any object type whose size is no greater than
+the size of the array being created.
+[<i>Note:</i>
+Because allocation functions
+are assumed to return pointers to storage
+that is appropriately aligned for objects
+of any type with fundamental alignment,
+this constraint on array allocation overhead
+permits the common idiom of allocating character arrays
+into which objects of other types will later be placed.
+&mdash;<i>end note</i>]
+</p>
+</blockquote>
+
+
+<h3><a name="replacement.functions">17.6.4.6 Replacement functions [replacement.functions]</a></h3>
+
+<p>
+Paragraph 2 is unchanged.
+</p>
+
+<blockquote class="std">
+<p>
+A C++ program may provide the definition for
+any of eight dynamic memory allocation function signatures
+declared in header <code>&lt;new&gt;</code> (3.7.4, 18.6):
+</p>
+<ul>
+<li><code>operator new(std::size_t)</code></li>
+<li><code>operator new(std::size_t, const std::nothrow_t&amp;)</code></li>
+<li><code>operator new[](std::size_t)</code></li>
+<li><code>operator new[](std::size_t, const std::nothrow_t&amp;)</code></li>
+<li><code>operator delete(void*)</code></li>
+<li><code>operator delete(void*, const std::nothrow_t&amp;)</code></li>
+<li><code>operator delete[](void*)</code></li>
+<li><code>operator delete[](void*, const std::nothrow_t&amp;)</code></li>
+</ul>
+</blockquote>
+
+<p>
+Paragraph 3 is unchanged.
+</p>
+
+<blockquote class="std">
+<p>
+The program's definitions are used
+instead of the default versions supplied by the implementation (18.6).
+Such replacement occurs prior to program startup (3.2, 3.6).
+The program's definitions shall not be specified as inline.
+No diagnostic is required.
+</p>
+</blockquote>
+
+
+<h3><a name="new.delete.dataraces">18.6.1.4 Data races [new.delete.dataraces]</a></h3>
+
+<p>
+Edit paragraph 1 as follows.
+</p>
+
+<blockquote class="std">
+<p>
+For purposes of determining the existence of data races,
+the library versions of operator <code>new</code>,
+user replacement versions of global operator <code>new</code>,
+and the C standard library functions <code>calloc</code> and <code>malloc</code>
+<del>
+shall behave as though they accessed and modified
+only the storage referenced by the return value.
+</del>
+<ins>
+shall conform to the provisions of 17.6.5.9 [res.on.data.races].
+</ins>
+The library versions of operator <code>delete</code>,
+user replacement versions of operator <code>delete</code>,
+and the C standard library function <code>free</code>
+<del>
+shall behave as though they accessed and modified
+only the storage referenced by their first argument.
+</del>
+<ins>
+shall conform to the provisions of 17.6.5.9 [res.on.data.races].
+</ins>
+The C standard library function <code>realloc</code>
+<del>
+shall behave as though it accessed and modified
+only the storage referenced by its first argument and by its return value.
+</del>
+<ins>
+shall conform to the provisions of 17.6.5.9 [res.on.data.races].
+</ins>
+Calls to these functions
+that allocate or deallocate a particular unit of storage
+<ins><var>p</var></ins>
+shall occur in a single total order,
+and each such deallocation call shall happen before
+the next allocation (if any) in this order.
+<ins>
+These functions may, however,
+visibly modify the storage that they allocate or deallocate.
+A call that deallocates a region <var>p</var> of memory
+shall synchronize after any access to <var>p</var>.
+A call that allocates a region <var>p</var> of memory
+shall synchronize before any access to <var>p</var>.
+</ins>
+</p>
+</blockquote>
+
+
+<h2><a name="References">References</a></h2>
+
+<dl>
+
+<dt><a name="TCM">[TCM]</a></dt>
+<dd>
+<cite>TCMalloc : Thread-Caching Malloc</cite>,
+<a href="http://goog-perftools.sourceforge.net/doc/tcmalloc.html">
+http://goog-perftools.sourceforge.net/doc/tcmalloc.html</a>.
+</dd>
+
+</dl>
+
+
+</body>
+</html>

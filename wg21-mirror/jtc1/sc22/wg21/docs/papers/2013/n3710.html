@@ -1,0 +1,870 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+ "http://www.w3.org/TR/html4/strict.dtd">
+<html><head>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8">
+<title>N3710: Specifying the absence of "out of thin air" results (LWG2265)</title>
+</head>
+<body>
+<table summary="Identifying information for this document.">
+	<tr>
+                <th>Doc. No.:</th>
+                <td>WG21/N3710</td>
+        </tr>
+        <tr>
+                <th>Date:</th>
+                <td>2013-8-29</td>
+        </tr>
+        <tr>
+                <th>Reply to:</th>
+                <td>Hans-J. Boehm</td>
+        </tr>
+        <tr>
+                <th>Other contributors:</th>
+                <td>Mark Batty, Brian Demsky, Olivier Giroux, Paul McKenney, Peter Sewell, Francesco Zappa Nardelli, ...</td>
+        </tr>
+        <tr>
+                <th>Phone:</th>
+                <td>+1-650-857-3406</td>
+        </tr>
+        <tr>
+                <th>Email:</th>
+                <td><a href="mailto:Hans.Boehm@hp.com">Hans.Boehm@hp.com</a></td>
+        </tr>
+</table>
+<h1>N3710: Specifying the absence of "out of thin air" results (LWG2265)</h1>
+<p>
+The C++11 memory model specified the semantics of shared ordinary
+and atomic objects.  There is one small part of this specification that
+we always recognized was dubious.   The specification in 1.10 of weakly
+ordered atomics allows an atomic load to essentially see, or not see,
+the result of any racing store.  In the case of explicit very
+weak memory ordering specifications, this can lead to "causal cycles" and
+highly counterintuitive results.  Consider the following example, where
+x and y are atomic variables initialized to zero, and r<i>i</i> are
+local variables:
+<blockquote>
+<pre>
+Thread 1:
+  r1 = x.load(memory_order_relaxed);
+  y.store(r1, memory_order_relaxed);
+
+Thread 2:
+  r2 = y.load(memory_order_relaxed);
+  x.store(r2, memory_order_relaxed);	
+</pre>
+</blockquote>
+<p>
+Effectively Thread 1 copies <code>x</code> to <code>y</code>,
+and thread 2 copies <code>y</code> to <code>x</code>.  The section
+1.10 specification allows each load to see either the initializing store
+of zero, or the store in the other thread.
+<p>
+This famously allows
+both <code>r1</code> and <code>r2</code> to have final values of 42, or
+any other "out of thin air" value.  This occurs if each load sees
+the store in the other thread.  It effectively models an execution
+in which the compiler speculates that both atomic variables will have a value
+of 42, speculatively stores the resulting values, and then performs the
+loads to confirm that the speculation was correct and nothing needs to be
+undone.
+<p>
+No known implementations actually produce such results.  However,
+it is extraordinarily hard to write specifications that present them
+without also preventing legitimate compiler and hardware optimizations.
+As a first indication of the complexity, note that the following variation
+of the preceding example should ideally allow
+<code>x</code> = <code>y</code> = 42, and some existing implementations
+<a name="example2">can produce such a result:</a>
+<blockquote>
+<pre>
+Thread 1:
+  r1 = x.load(memory_order_relaxed);
+  y.store(r1, memory_order_relaxed);
+
+Thread 2:
+  r2 = y.load(memory_order_relaxed);
+  x.store(42, memory_order_relaxed);	
+</pre>
+</blockquote>
+<p>
+In this case, the load in each thread actually can see the store in the
+other thread, without problems.  The two operations in thread 2 are
+independent and unordered, so either the compiler or hardware can reorder them.
+<p>
+Essentially this issue has been an open issue in the Java specification
+for about 10 years.  The major advantage that we have in C++ is that the
+problem is confined to non-synchronizing atomics, i.e.
+<code>memory_order_relaxed</code>, and some
+<code>memory_order_consume</code> uses (or read-modify-write operations that
+effectively weaken the ordering on either the read or write to one of
+those).  Many of us expect those to be rarely used.
+<p>
+The current standard addresses this in 29.3p9-11, using words that
+none of us ever considered rock-solid.  (A 2007 or so discussion leading
+up to the current wording can be found
+<a href="http://www.hpl.hp.com/personal/Hans_Boehm/c++mm/thin_air.html">
+here</a>.)
+Unfortunately, we underestimated
+both the impact of this issue, and the problems with the current wording.
+In the meantime, a number of people, including Peter Sewell, Mark Batty,
+and more recently Brian Demsky have pointed out issues with the current wording.
+<p>
+This proposal is an attempt to repair the specification, at
+non-negligible cost relative to our original intent, though
+not so when compared to the literal text of the current document.
+This change would effectively imply
+stronger semantics for <code>memory_order_relaxed</code>, which
+would imply additional overhead for <code>memory_order_relaxed</code>
+on a number of architectures, including ARM, current Nvidia architectures,
+and possibly POWER.  Our proposal effectively conflates the
+above two examples, forbidding the <code>x</code> = <code>y</code> = 42
+outcome in both, in order to give us cleanly definable semantics.
+<p>
+Such restrictions on <code>memory_order_relaxed</code> are however not
+unprecedented; the current cache coherence requirements already imply
+that ordinary loads and stores do not suffice for
+<code>memory_order_relaxed</code> on Itanium.  (See
+<a href="http://www.cl.cam.ac.uk/~pes20/cpp/cpp0xmappings.html">
+Jaroslav Sevcik and Peter Sewell's table of C++11 atomic
+mappings</a>.) Indeed, there is no
+a priori reason to believe that load and store instructions designed
+for regular non-racing accesses should be directly suitable for
+atomic access.
+<p>
+We try to mitigate the required performance impact on these architectures
+by weakening the intended semantic requirements to normative encouragement
+from the current requirement.  The intent is that this should provide
+hardware vendors the time required to better support the revised semantics.
+We also propose to provide an alternative to <code>memory_order_relaxed</code>
+accesses for non-racing contexts, in which both the existing and proposed
+requirements are too strong.
+<p>
+We reiterate that this added overhead is relative to the
+<i>intent</i> of the C++11 standard,
+not relative to the actual specification.  The actual specification, as
+currently worded, seems to unintentionally require
+<code>memory_order_relaxed</code> to be implemented as something
+close to <code>memory_order_seq_cst</code>, and thus technically
+imposes a much larger penalty, as pointed out in
+<a href="http://cplusplus.github.io/LWG/lwg-active.html#2265">
+LWG2265</a>.
+<p>
+This proposal benefitted from a lengthy email discussion involving
+participants listed at the beginning of this paper, and others.
+This provided very useful
+input resulting in improvements to this proposal.  It unfortunately
+resulted in neither a clear consensus in that group,
+nor an alternate proposal with clearly better
+consensus behind it.
+<i>Not all of the listed contributors necessarily support this proposal.</i>
+Since I don't believe there is support for maintaining the status
+quo, I nonetheless bring forward this proposal.
+Mark Batty and Peter Sewell are currently considering submitting additional
+late papers on this topic, including an alternate proposal.
+
+<h2>Why it's important to prohibit out-of-thin-air results</h2>
+<p>
+In a Java context, it is necessary to prohibit out-of-thin-air results
+to be able to show that untrusted code cannot obtain access to
+certain information.  If untrusted code could somehow provoke the
+implementation into generating the user's secret password "out of thin air",
+that would be bad.  Since C++ does not attempt to support running
+untrusted code as part of a trusted executable, that's much less of an issue
+here.
+<p>
+However, as Brian Demsky and others have pointed out, allowing
+out-of-thin-air results also makes it very hard to reason formally, or
+perhaps even informally, about ordinary C++ code.
+<p>
+To see the problem, consider a program <i>P</i> that only ever assigns 0 or 1
+to the atomic variables <code>x</code> and <code>y</code>,
+though it does sometimes copy from one to the other using weakly
+ordered operations.
+Assume we have a library function <code>f()</code>,
+whose specification requires
+that its first argument be 0 or 1, and its specification
+says that if <code>f()</code>
+is called correctly it doesn't modify either global variables
+or its second by-reference argument.
+Let's say this program calls <code>f(x.load(memory_order_relaxed), y)</code>.
+<p>
+We would expect this to be sufficient to prove that the first argument
+to <code>f</code> is always 0 or 1.  But without an out-of-thin-air
+guarantee it is not.  
+If thread 1 copys <code>y</code> to <code>x</code> using
+<code>memory_order_relaxed</code> operations, while thread 2 calls
+<code>f(x.load(memory_order_relaxed), y)</code>, I still need to preclude
+the cases like the one in which thread 1 sees <code>y</code> = 42,
+copies 42 to <code>x</code>, causing thread 2 to pass 42 to <code>f()</code>,
+which, now operating outside its specification, stores 42 in <code>y</code>,
+thus justifying thread 1's load of 42.
+<p>
+This kind of argument is clearly impossible in any realistic setting in
+which <code>f()</code> is a library function for which we have have
+no idea how it behaves if its preconditions are not met.
+This necessity for reasoning about such "impossible" paths is
+what makes it untenable to allow any kind of out-of-thin-air results.
+
+
+<h2>Why it's hard to prohibit out-of-thin-air results</h2>
+
+<p>
+As the above illustrates, out-of-thin-air values occur when there are
+cyclic "dependency chains" between values.  Thus if we could define
+"dependency chains", we could define out-of-thin-air values,
+prohibit them, and we should be done.
+<p>
+This is essentially the approach taken by hardware memory models.
+They prohibit stores from becoming visible to other threads before the
+loads on which they depend, and this is sufficient to prevent
+out-of-thin-air values at the hardware level.  At the hardware level,
+it is relatively straightforward to define a notion of one value
+"depending" on another; the approach is similar in spirit to that
+taken  by our definition of "carries a dependency" in
+1.10 [intro.multithread].  Essentially anytime <i>a</i> is an argument
+to an operation that computes <i>b</i>, <i>b</i> is taken to depend on
+<i>a</i>, and similarly if <i>b</i> is computed by a chain of such
+operations.  Unlike our "carries a dependency" formulation, hardware
+models usually also consider <i>b</i> to depend on <i>a</i> if a branch
+preceding the computation of <i>b</i> depended on <i>a</i>.
+(Itanium is an exception, but not in a way that matters here.)
+<p>
+Hardware memory models then implicitly outlaw out-of-thin-air values
+by requiring that dependent operations become visible to other threads in
+order.  Since the hardware notion of dependency covers all cases in which
+one value can affect another, this suffices to solve the problem.
+<p>
+Our existing "carries a dependency" definition does not similarly suffice,
+since it covers only a subset of the ways in which one value can affect
+another.  For example, an evaluation inside the condition of an if-statement
+does not carry a dependency to evaluations in then- or else-statements
+even though it affects its values.  Even if we ensured ordering whenever
+<i>a</i> carries a dependency to <i>b</i>, we could not preclude the
+problem case from the last section, since the argument evaluation of
+<code>x.load(...)</code> may not carry a dependency to the store to
+<code>y</code> inside <code>f()</code>, for example because the assignment
+to <code>y</code> assigns a constant to it, but the code to do so is inside
+a conditional whose condition is false if the first argument to
+<code>f()</code> is less than 2.
+<p>
+To address this problem as the hardware does,
+we would have to generalize "carries a dependency"
+to include all methods by which one value can affect another, including
+control dependencies, and then insist that all such dependencies enforce
+ordering.  This appears impractical, since compilers routinely remove
+such dependencies as part of optimization.  Consider the code segment
+<blockquote>
+<pre>
+if (x) {
+  a[i++] = 1;
+} else {
+  a[i++] = 2;
+}
+</pre>
+</blockquote>
+<p>
+Any reasonable compiler will move the computation of
+<code>&amp;(a[i++])</code> out of the conditional, thereby removing
+the dependency of <code>i</code> on <code>x</code>.
+Since relevant dependencies may pass through separately compiled functions
+that don't mention atomics, we would have to prohibit such optimization
+in all parts of the program, at a cost that I would expect to be much higher
+than our proposal below.  We would also have to require recompilation of
+existing code not mentioning atomics to get the right semantics for atomics.
+<p>
+The fact that compilation can remove such syntactic dependencies, thus
+hiding them from the hardware, makes this problem fundamentally
+different at the programming language level from the hardware level.
+<p>
+Note that such elimination of dependencies does not actually introduce
+out-of-thin-air results.  It is simply at odds with this specification
+technique for prohibiting them.  The elimination of the syntactic dependency
+if <code>i</code> on <code>x</code> simply reflects the fact that
+the value of <code>i</code> doesn't really change as a result of a change of
+<code>x</code>.  Thus we can try to define a more "dynamic" notion
+of dependency that reflects this fact.
+<p>
+But that seems to be a fundamentally undefinable notion, and also not
+one that has been attempted by any hardware specifications.  To illustrate
+the difficulty, consider the function definition:
+<blockquote>
+<p>
+<code>int f(int x, int y) { return x - y; }</code>
+</blockquote>
+<p>
+Does the result "dynamically depend on" the input <code>x</code>?
+If <code>f()</code> is only called in contexts in which the
+arguments are equal, and the compiled determines that, e.g. by
+inlining <code>f()</code>, it may not.  Even if that's not always the case,
+the compiler may effectively clone a copy of <code>f()</code>,
+typically again by inlining, to handle the one call in which the arguments
+are equal.  Mark Batty and Peter Sewell point out that such a notion is
+fundamentally not definable by looking at just a single execution.
+Thus, at a minimum, we are again in a position in which we need to understand
+other hypothetical executions in order to understand program
+behavior on a given input.  Even then, it is not clear that any such
+definition could correctly deal with clones or specializations of
+functions.
+<p>
+Informally it seems clear that defining the correct notion of "dependency"
+is equivalent to defining "out-of-thin-air", and it appears that neither is
+possible.  Thus we are willing to propose a fairly drastic, of necessity
+long term, direction in order to sidestep the problem.
+
+<h2>The immediate problem</h2>
+<p>
+Brian Demsky and others point out
+in <a href="http://cplusplus.github.io/LWG/lwg-active.html#2265">
+LWG2265</a> that the current wording intended to avoid "out-of-thin-air"
+values is practically unimplementable
+on a number of important weakly-ordered architectures.  The current
+wording essentially requires that <code>memory_order_relaxed</code>
+be implemented as something much too close to
+<code>memory_order_seq_cst</code>, effectively defeating the point of
+introducing weakly ordered memory operations.
+This is an accident arising from our earlier efforts to at least
+partially address the "out-of-thin-air" problem.
+<p>
+The particular example in LWG2265 seems to be difficult to analyze.
+But there seems to be agreement that the following (somewhat abbreviated)
+variant of Brian Demsky's example, when compiled normally on
+POWER or ARM, can cause the T1 and
+T2 stores to be seen in different orders in T3 or T4 (as intended)
+in spite of that being accidentally disallowed by 29.3p9 [atomics.order], which
+requires a "finite sequence of program evaluations" to produce
+the value stored at line 32:
+<blockquote>
+<pre>
+1   atomic_int x[2];
+2   atomic_int z;
+3   int c1, c2;
+4   int d1, d2;
+5
+6   void T1 () {
+7     x[0].store(1, relaxed);
+8   }
+9
+10  void T2 () {
+11    x[1].store(1, relaxed);
+12  }
+13
+14  void T3 () {
+15    c1= x[0].load(relaxed, consume or acquire);
+16    c2= x[c1].load(relaxed);
+17 }
+18
+19  void T4 () {
+20    d1= x[1].load(relaxed, consume or acquire);
+21    d2= x[d1^1].load(relaxed);
+22  }
+23
+24  int user_main (int argc , char ** argv ) {
+25    x[0] = 0;
+26    x[1] = 0;
+27
+28    { T1 () || T2 () || T3 () || T4 () }  // run all in parallel
+29
+30    /* Can this store write 200 (i.e., c1=d1 =1, c2=d2 =0) ? */
+31    /* If so , what is the evaluation sequence that justifies it? */
+32    z.store((c1+d1)*100 + c2+d2);
+33  }
+</pre>
+</blockquote>
+<p>
+To produce this result, the required sequence of evaluations must
+have T1s and T2s assignments before T3s and T4s initial loads respectively,
+and the order the loads in each of T3 and T4 must be preserved.  If T4's
+initial load follows T3's, then T4's final load must see a 1, and similarly
+if T3's load is last.  Thus the sequence, as required by reasonable
+interpretations of the current text, can't exist.
+<p>
+On the other hand, preventing this outcome on POWER or ARM requires a
+heavy weight fence between the two loads in each of T3 and T4,
+forcing the loads to be treated more or less as sequentially consistent,
+completely defeating the purpose of <code>memory_order_relaxed</code>.
+And we do not believe that a typical compiler can usually see enough
+context to compile <code>memory_order_relaxed</code> as intended,
+even for more realistic examples.
+<p>
+As we pointed out in the last sections, there is no known way to fix this,
+and it seems very unlikely, and increasingly so, that we are overlooking
+a painless solution.
+
+<h2>The proposed long-term solution</h2>
+<p>
+We propose a fairly drastic change of wording, which effectively
+prevents a <code>memory_order_relaxed</code>
+(or <code>memory_order_consume</code>) load from being reordered
+with a subsequent <code>memory_order_relaxed</code> store,
+and imposes corresponding restrictions on some very weakly ordered
+atomic read-modify-write operations.  This is easily expressed
+as the restriction that the "write seen by" (inverse "reads-from")
+relation on atomics,
+together with the "happens-before" relation, cannot form a cycle or,
+more formally the transitive closure of the union of the two relations is
+irreflexive.  This clearly prohibits any sort of causal cycle;
+we can no longer follow a cyclic sequence of dependencies, since all
+such dependencies are clearly reflected in either a write-seen-by relationship
+or a happens-before relationship (or a data race).
+But it unfortunately also prohibits
+<a href="#example2">the second example</a> we
+gave at the beginning, in which one thread stores a constant.
+Instead of enforcing simply dependency ordering between a load
+and a later store, as the hardware does, we are treating every relaxed
+store as though it were dependent on every prior load, thus
+dodging the issue of defining dependencies.
+<p>
+Although details depend on specific machine memory models,
+the above restriction can generally be enforced by preventing load
+to store reordering
+of atomics.  To see that, assume we have a path consisting of
+a sequence of write-seen-by
+and happens-before relationships.  Each happens-before edge
+itself can be decomposed into synchronizes-with and
+sequenced-before edges.  (Ignore memory_order_consume for now.)
+The cycle thus consists of intra-thread segments, connected by
+write-seen-by or synchronizes with edges.  Each intra-thread
+segment must start with a load or acquire operation, and end with
+a release or store operation.  In either case, ordering is preserved.
+Thus every intra-thread segment must be completed after it started,
+and the same applies to the synchronization edges.  Thus we can't
+get back to an earlier action along the path, and a cycle is impossible.
+<p>
+(If such a path involves <code>memory_order_consume</code>, the
+same path will still exist if we ignore the additional properties
+of <code>memory_order_consume</code> and treat it as
+<code>memory_order_relaxed</code>.  The happens-before relationships
+induced by <code>memory_order_consume</code> can be replaced by the
+write-seen-by relationship beyween the <code>memory_order_release</code>
+store and <code>memory_order_consume</code> load, with sequenced-before
+taking the place of carries-a-dependency-to.  Thus the same
+argument continues to apply.)
+
+<h2>Performance consequences</h2>
+<p>
+Since our proposal does not require any enforcement of dependencies,
+it affects only code that uses weakly ordered atomic operations.
+The added guarantee already holds for code that consistently uses
+at least <code>memory_order_acquire</code> for loads,
+<code>memory_order_release</code> for stores and
+<code>memory_order_acq_rel</code> for read-modify-write operations.
+<p>
+On many architectures, a <code>memory_order_relaxed</code> load
+followed by a <code>memory_order_relaxed</code> store is already ordered,
+provided the compiler refrains from rearranging them.  The latter is usually
+a tiny cost, since there is rarely strong motivation for a compiler
+to reorder in that direction.  These architectures include TSO architectures
+like x86.  They include Itanium because we already imposed restrictions
+on <code>memory_order_relaxed</code> that prevent Itanium from using
+ordinary loads and stores.  They appear to include current implementations
+of POWER, though not the POWER architecture as officially specified.
+<p>
+The major architectures on which we add appreciable overhead for
+<code>memory_order_relaxed</code> appear to be
+<ul>
+	<li>ARM (both v8 and earlier)
+	<li>GPU architectures
+</ul>
+<p>
+(GPU architectures are relevant here, since OpenCL has adopted essentially
+the C++ memory model, and we would like to preserve that consistency.)
+<p>
+On ARM (and according to the POWER spec), we can enforce the required
+ordering by adding a never-taken conditional branch that tests the result
+of the <code>memory_order_relaxed</code> load after every such load,
+and before the next <code>memory_order_relaxed</code> atomic store
+to a different location.  The branch should either never actually be taken
+or target the next instruction.  (Again <code>memory_order_consume</code>
+might require similar treatment if it is not already compiled
+as <code>memory_order_acquire</code>.  Read-modify-write
+operations with weaker than <code>memory_order_acquire</code>
+ordering also need to be treated correspondingly.)
+This is believed to be considerably less expensive than adding
+a fence instruction, especially since the compiler may be able to
+postpone the branch significantly, thus hopefully avoiding a stall
+waiting for the load to complete.
+<p>
+On current ARM processors, this technique may have the negative effect
+of effectively wasting branch prediction slot.  We guess that should be
+avoidable in future revisions of the architecture.
+<p>
+The overhead seems to be potentially much larger on current Nvidia GPUs,
+since we have to wait for the load to complete, and that typically involves
+waiting for an actual memory access.  However, we hope and expect that typically
+this wait can be delayed until the result of the load is needed anyway,
+thus hopefully avoiding much of the overhead.
+<p>
+Since this does impact performance on some architectures, our goal is to
+<ul>
+<li> Weaken the current requirement to a more vaguely worded recommendation, and
+<li> Clearly state an intended future direction, which has the properties we desire, but may not be efficiently implementable on current hardware.
+</ul>
+<p>
+Note that even the future direction has less implementation impact than
+the current unintentional restrictions.
+
+<h2>Proposed wording for 29.3</h2>
+<p>
+The phrasing explicitly allows vendors to either find an alternate way to
+address the problem or, at least in the short term, ignore the recommendation
+completely.  But the hope is that, in the absence of a very insightful
+alternate vendor specification, the recommended direction will eventually
+become a requirement.
+
+<h2>Proposed wording</h2>
+<p>
+Change 29.3p9-11 [atomics.order] as follows
+<blockquote>
+<p>
+<del>An atomic store shall only store a value that has been computed from
+constants and program input values by a finite sequence of program
+evaluations, such that each evaluation observes the values of variables as
+computed by the last prior assignment in the sequence. The ordering of
+evaluations in this sequence shall be such that:</del>
+<ul>
+<li> <del>if an evaluation <i>B</i> observes a value computed by
+<i>A</i> in a different thread, then <i>B</i> does not happen
+before <i>A</i>, and</del>
+<li> <del>if an evaluation A is included in the sequence, then every
+evaluation that assigns to the same variable and happens before A is included.
+</del>
+</ul>
+<p>
+<ins>It is implementation defined when, for an
+atomic access <i>a</i> sequenced before an
+atomic update <i>b</i>,
+when <i>there is a dependency</i> from <i>a</i> to <i>b</i>.
+[ Note: This definition should include all cases in
+which the value read by <i>a</i> affects that stored at
+<i>b</i>.  Implementations are encouraged to conservatively define there to
+be a dependency from <i>a</i> to <i>b</i> whenever <i>a</i> is
+sequenced before <i>b</i>, since alternatives are difficult to
+define meaningfully and precisely. --end note ]
+[Note: This differs from the
+"carries a dependency" terminology in 1.10 in that "carries a
+dependency" describes a proper subset of such possible information
+flows. --end note. ]</ins>
+<p>
+<ins>We say that an evaluation <i>A</i> causally precedes an
+evaluation <i>B</i> if</ins>
+<ul>
+<li> <ins> <i>A</i> synchronizes with <i>B</i>, or </ins>
+<li> <ins>The evaluation <i>B</i> observes the value stored by
+modification <i>A</i>, or</ins>
+<li> <ins>There is a dependency from atomic access <i>A</i> to atomic
+update <i>B</i>, or</ins>
+<li> <ins>There is an evaluation <i>C</i> such that
+<i>A</i> causally precedes <i>C</i>, and <i>C</i> causally precedes <i>B</i>.
+</ins>
+</ul>
+<p>
+<ins>Implementations should ensure that no evaluation causally
+precedes itself.</ins>
+<p>
+[ Note: <del>The second requirement disallows</del>
+<ins> This recommendation can normally be implemented by ensuring that
+an atomic load operation is never reordered with a later atomic
+store operation performed by the same thread.
+It avoids</ins> "out-of-thin-air" or "speculative"
+stores of atomics when relaxed atomics are used.
+<del>Since unordered operations
+are involved, evaluations may appear in this sequence out of
+thread order.</del>For example, with x and y initially zero,
+<pre>
+<del>
+// Thread 1:
+r1 = y.load(memory_order_relaxed);
+x.store(r1, memory_order_relaxed);
+// Thread 2:
+r2 = x.load(memory_order_relaxed);
+y.store(42, memory_order_relaxed);
+</del>
+</pre>
+<p><del>
+is allowed to produce <code>r1</code> = <code>r2</code> = 42.
+The sequence of evaluations justifying this consists of:</del>
+<pre>
+<del>
+y.store(42, memory_order_relaxed);
+r1 = y.load(memory_order_relaxed);
+x.store(r1, memory_order_relaxed);
+r2 = x.load(memory_order_relaxed);
+</del>
+</pre>
+<p>
+<del>On the other hand,</del>
+
+<pre>
+// Thread 1:
+1: r1 = y.load(memory_order_relaxed);
+2: x.store(r1, memory_order_relaxed);
+// Thread 2:
+3: r2 = x.load(memory_order_relaxed);
+4: y.store(r2, memory_order_relaxed);
+</pre>
+<p>
+may not produce <code>r1</code> = <code>r2</code> = 42,
+since <ins>that would require (4)
+to provide the value for (1), which is sequenced before (2),
+which provides the value for (3), which is sequenced before (4),
+resulting in cyclic causally-precedes relationships.
+<del>there is no sequence of evaluations
+that results in the computation of 42. In the absence of "relaxed"
+operations and read-modify-write operations with weaker than
+<code>memory_order_acq_rel</code> ordering,
+the second requirement has no impact.</del> -end note ]
+<p>
+[ Note: <del>The requirements do allow</del>
+The recommendation similarly disallows</ins>
+<code>r1</code> == <code>r2</code> == 42 in the following example,
+with <code>x</code> and <code>y</code> initially zero:
+
+<pre>
+// Thread 1:
+r1 = x.load(memory_order_relaxed);
+if (r1 == 42) y.store(r1, memory_order_relaxed);
+// Thread 2:
+r2 = y.load(memory_order_relaxed);
+if (r2 == 42) x.store(42, memory_order_relaxed);
+</pre>
+<p>
+<del>However, implementations should not allow such behavior.</del> -end note ]
+</blockquote>
+
+<h2>Non-atomic loads and stores of atomics</h2>
+<p>
+As we pointed out, the above removes unintended requirements on
+<code>memory_order_relaxed</code>, while adding a new requirement,
+load-to-store ordering, that was not part of the original design.
+This slows down <code>memory_order_relaxed</code> on some platforms
+relative to what we initially thought was possible, though not relative to
+what the standard unintentionally requires.
+<p>
+A large fraction of <code>memory_order_relaxed</code> use cases are those
+in which the access to the atomic variable is in fact either known not
+to race with any other accesses, or will be discarded unless we can determine
+that there was no race.  These arguably cover the safest and simplest use
+cases, e.g. the second "check" in double-checked locking, and reads inside
+a seqlock reader critical section.
+<p>
+We can regain the performance in these cases, and sometimes gain a bit
+of additional performance, by supporting these cases with separate kinds
+of accesses.  Since these cases do not really apply to read-modify-write
+operations, it makes sense to add functions
+<code>non_atomic_load()</code> and <code>non_atomic_store()</code>
+analogous to
+<code>load()</code> and <code>store()</code> instead
+of new <code>memory_order_</code> values.  Since these
+operations cannot meaningfully be used in racy contexts, they may be
+performed in multiple steps, e.g. a byte at a time.  In a lock-based
+implementation, they do not need to acquire the lock.  They do not
+need to enforce cache coherence, and hence are subject to weaker
+optimization rules.  On Itanium, they may, unlike
+<code>memory_order_relaxed</code>, use ordinary load and store
+operations.
+<p>
+We introduce a helper class <code>race_or&lt;T&gt;</code>
+to express the result of a speculative
+<code>non_atomic_load()</code> operation that might
+have raced, but whose result will only be examined in the
+absence of a race.  Logically <code>race_or&lt;T&gt;</code>
+either contains a <code>T</code> value, or a special "race"
+value.  There is no way to test which case applies, and
+conversion to <code>T</code> yields undefined behavior if it
+contained a race value.
+<p>
+This allows us to call <code>non_atomic_load()</code> and
+then check that no race occurred, e.g. by examining a version number
+to confirm that there was no intervening store, as is done
+for seqlocks (cf.
+<a href="http://www.hpl.hp.com/techreports/2012/HPL-2012-68.html">my
+recent MSPC paper</a>), and in many transactional memory implementations.
+<p>
+There have been requests for supporting non-atomic operations on atomic
+values before.  And that may be a requirement for using C++11/C11
+atomics in the Linux kernel, for example.  Previously our counterargument
+was "<code>memory_order_relaxed</code> may be close enough; we'll reconsider
+if it isn't".  This may be a good time to reconsider.
+<p>
+I don't consider this addition essential at this point, provided we
+adopt the weak wording suggested above.  I do believe a change along these
+lines is required before we make load-to-store ordering a hard requirement,
+if and when we decide to do that.
+<h2>Tentative wording for non-atomic loads and stores</h2>
+<p>
+Disclaimer:  I am not qualified to write wording for new library classes.
+This didn't stop me. LWG help is requested.
+<p>
+29.2 [atomics.syn], add to synopsis:
+
+<blockquote>
+<pre>
+<ins>
+template&lt;class T&gt; struct race_or&lt;T&gt;;
+
+void atomic_store_non_atomic(volatile atomic-type*, T) noexcept;
+void atomic_store_non_atomic(atomic-type*, T) noexcept;
+
+race_or&lt;T&gt; atomic_load_non_atomic(const volatile atomic-type*) noexcept;
+race_or&lt;T&gt; atomic_load_non_atomic(const atomic-type*) noexcept;
+</ins>
+</pre>
+</blockquote>
+
+<p>
+Add a section after after 29.4 [atomics.lockfree]:
+
+<blockquote>
+<ins>
+<b>29.5 race_or template   [atomics.race_or]</b>
+
+<pre>
+namespace std {
+template &lt;class T&gt; struct race_or {
+  race_or() = default;
+  race_or(const race_or&amp;) = default;
+  race_or&amp; operator=(const race_or&amp;) = default;
+  operator T() const;
+}}
+</pre>
+</ins>
+<p>
+<ins>
+This is a helper class for the <code>load_non_atomic</code> functions.
+It represents a value that was potentially speculatively loaded
+and should not be examined before establishing that the load did
+not participate in a race.
+The type of the template argument T shall be trivially copyable.
+</ins>
+<p>
+<ins>
+A value of type <code>race_or&lt;T&gt;</code> represents either a value
+of type <code>T</code> or a race indication, representing the fact
+that the value not uniquely determined.
+[<i>Note:</i> There is no way to test a <code>race_or&lt;T&gt;</code> value
+to determine whether it
+contains a <code>T</code> value or a race indication.  Implementations will
+typically represent <code>race_or&lt;T&gt;</code> as a <code>T</code>.
+A <code>race_or</code> value can only be generated by
+copying another one or as the result produced by one of the
+<code>load_non_atomic</code> functions.  In the latter case, it
+provides the opportunity for the calling code to check whether a data
+race occurred, for example by checking a version number
+incremented by writers,
+after performing the load but before performing the conversion.
+<i>-- end note.</i>]
+</ins>
+<p>
+<ins>
+<pre>
+race_or() = default;
+</pre>
+</ins>
+<p>
+<ins>
+<i>Effects:</i> Initializes the object to a race indication.
+</ins>
+
+<p>
+<ins>
+<pre>
+operator T() const;
+</pre>
+</ins>
+<p>
+<ins>
+<i>Requires:</i> The object does not contain a race indication.
+</ins>
+<p>
+<ins>
+<i>Returns:</i> The contained type T object.
+</ins>
+
+</blockquote>
+
+<p>
+Add the following member functions to the synopsis at the beginning
+of 29.5 [atomics.types.generic]:
+
+<blockquote>
+<pre>
+<ins>
+void store_non_atomic(T) volatile noexcept;
+void store_non_atomic(T) noexcept;
+
+race_or&lt;T&gt; load_non_atomic() const volatile noexcept;
+race_or&lt;T&gt; load_non_atomic() const noexcept;
+</ins>
+</pre>
+</blockquote>
+
+<p>
+Insert the following after 29.6.5p10 [atomics.types.operations.req]:
+
+<blockquote>
+<pre>
+<ins>
+void atomic_store_non_atomic(volatile A* object, C desired) noexcept;
+void atomic_store_non_atomic(A* object, C desired) noexcept;
+void A::store_non_atomic(C desired) volatile noexcept;
+void A::store_non_atomic(C desired) noexcept;
+</ins>
+</pre>
+<p>
+<ins>
+<i>Effects:</i> Replaces the value pointed to by object or by this
+with the value of desired.  This is not an atomic operation
+(1.10 [intro.multithread]).
+</ins>
+</blockquote>
+
+<p>
+Insert after 29.6.5p15 [atomics.types.operations.req]:  (Note that some
+of the preceding effects clauses for load should probably be synchronization
+clauses, making things a bit inconsistent.)
+
+<blockquote>
+<pre>
+<ins>
+race_or&lt;C&gt; atomic_load_non_atomic(const volatile A* object) noexcept;
+race_or&lt;C&gt; atomic_load_non_atomic(const A* object) noexcept;
+race_or&lt;C&gt; A::load_non_atomic() const volatile noexcept;
+race_or&lt;C&gt; A::load_non_atomic() const noexcept;
+</ins>
+</pre>
+	
+<p>
+<ins>
+<i>Synchronization:</i> None.
+</ins>
+<p>
+<ins>
+<i>Effects:</i> For purposes of (1.10 [intro.multithread]) this is an
+atomic operation, in spite of its name.  It cannot, by itself, introduce
+a data race that results in undefined behavior.  [<i>Note:</i>
+The indication that such a data race would otherwise have occurred is
+instead captured in the return value, and deferred until that
+value is converted to C.<i>--end note</i>]
+[<i>Note:</i> Unlike an ordinary
+value computation, the implementation must respect the fact that the
+value being loaded may change while it's being loaded, and this must
+not result in any visible effects unless the result is subsequently
+converted to a T.  A data-race-checking implementation should
+explicitly distinguish the two cases in the race_or&lt;T&gt; representation,
+so that the race can be reported when the conversion occurs.
+<i>-- end note</i>]
+</ins>
+<p>
+<ins>
+<i>Returns:</i>If the visible sequence of side effects with respect
+to this value computation of <code>*object</code> or <code>*this</code>
+(1.10 [intro.multithread]) contains exactly one such side effect, then
+the resulting race_or object will contain the value stored by this side
+effect.  Otherwise it will contain an indication that the load involved
+a race.  
+</ins>
+</blockquote>
+
+</body>
+</html>
+

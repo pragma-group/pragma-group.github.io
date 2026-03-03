@@ -1,0 +1,379 @@
+<html>
+<head>
+<TITLE>
+ISO/IEC JTC1/SC22/WG21
+N3853
+</TITLE>
+</head>
+<body>
+<h1>
+<img align=top src="/pics/iso44.gif" alt="ISO/">
+<img align=top src="/pics/iec44.gif" alt="IEC">
+JTC1/SC22/WG21
+N3853
+</h1>
+<pre>
+Document number: N3853
+Date: 2014-01-17
+Project: Programming Language C++, Evolution Working Group
+Reply-to: Stephan T. Lavavej &lt;stl@microsoft.com>
+
+
+Range-Based For-Loops: The Next Generation
+
+
+I. Introduction
+
+This is a proposal to add the syntax "for (elem : range)". In addition to
+being easier for novices to learn and being clearer for everyone to read,
+this will encourage correctness and efficiency.
+
+
+II. The Problem
+
+C++11's range-based for-loops are awesome: they're less verbose than
+traditional for-loops, they handle both arrays and containers in a generic and
+extensible manner, and they allow users to focus on the elements they're
+interested in instead of iterators/pointers/indices. Unfortunately, range-based
+for-loops are currently vulnerable to misuse: they require users to specify
+element types, and most users don't know how to do that perfectly,
+even with auto.
+
+"for (auto elem : range)" is very tempting and very bad. It produces
+"auto elem = *__begin;" (see 6.5.4 [stmt.ranged]/1), which copies each element,
+which is bad because:
+    * It might not compile - for example, unique_ptr elements aren't copyable.
+        This is problematic both for users who won't understand the resulting
+        compiler errors, and for users writing generic code that'll happily
+        compile until someone instantiates it for movable-only elements.
+    * It might misbehave at runtime - for example, "elem = val;" will modify
+        the copy, but not the original element in the range. Additionally,
+        &elem will be invalidated after each iteration.
+    * It might be inefficient - for example, unnecessarily copying std::string.
+
+These problems are effectively regressions from C++98/03, whose traditional
+iterator/pointer/index loops don't copy elements.
+
+"for (auto& elem : range)" is much better, although it's not quite perfect.
+It works with const/modifiable elements, and allows them to be observed/mutated
+in-place. However, it won't compile for proxy objects - for example, if the
+range is vector&lt;bool>, then *__begin will be a temporary object returned by
+value (of type vector&lt;bool>::reference), and auto& refuses to bind to
+temporaries. It also won't compile for "move ranges", see Q5 below.
+Again, this is problematic due to incomprehensible compiler errors and
+stealth build breaks.
+
+"for (const auto& elem : range)" observes elements in-place, and mostly works
+for proxy objects, but it obviously can't mutate elements in-place.
+
+Note that this isn't auto's fault, and manually specifying element types is
+equally bad or even worse:
+    * "for (string elem : range)" still copies elements.
+    * "for (auto& elem : range)" works with const elements (if the loop's body
+        doesn't attempt to mutate them, of course), but
+        "for (string& elem : range)" gives up that ability.
+    * "for (const Elem& elem : range)" is pernicious if the Elem type is
+        incorrectly specified. If the range is map&lt;K, V>, then
+        "for (const pair&lt;K, V>& elem : range)" will convert-copy each element
+        (triggering the previously-described correctness/efficiency problems)
+        because the map's elements are actually pair&lt;const K, V>.
+
+There are two reasons why it's easy to unintentionally copy elements. First,
+given "string s1 = s2;" or "string s3 = v[0];", every C++98/03 programmer can
+see the copies. Given "auto t1 = t2;" or "auto t3 = v[0];", it's reasonably
+simple for new-to-C++11 programmers to learn how to see the copies, because the
+syntax is similar. (It still must be learned that t3 is copied even if v[0]
+returns string&.) However, "for (auto elem : range)" and
+"for (string elem : range)" conceal elem's initialization, making it harder to
+see the copies.
+
+Second, although there are other contexts that conceal copies (e.g. taking
+parameters by value), range-based for-loops are special. Programmers never
+think of elements as being separate from their ranges. In traditional
+for-loops, *iter, *ptr, and ptr[idx] all refer to elements in-place.
+(Even proxy objects attempt to simulate this.) In the rare event that users
+want to copy elements while looping, they do so explicitly in the loop body.
+
+What should we do about this problem? We can teach users to write
+"for (auto& elem : range)" or "for (const auto& elem : range)", but they're
+imperfect (for proxies or mutation, respectively), and they require novices to
+be introduced to auto and references earlier than otherwise necessary.
+As explained immediately below, "for (auto&& elem : range)" is superior, but
+it's terrible to teach to novices. Even experienced C++98/03 programmers can
+find it difficult to learn how rvalue references, the template argument
+deduction tweak, and reference collapsing interact to produce what Scott Meyers
+calls "universal references" (see [1]), and auto&& is far less commonly seen
+than T&& in perfect forwarding.
+
+
+III. The Solution
+
+The most effective way to encourage users to write good code is to offer them
+the path of least resistance: writing less syntax. Therefore, this proposal
+introduces the syntax "for (elem : range)",
+with the semantics of "for (auto&& elem : range)".
+
+auto&& binds to everything (including proxies, but see Q3 below) without
+copying, solving the compiletime correctness, runtime correctness, and
+efficiency problems.
+
+"for (elem : range)" is easier for novices to learn, because it mentions only
+the fundamental topics of loops, elements, and ranges. More advanced topics
+like automatic type deduction, references, and rvalue references can be
+introduced at appropriate times, instead of having to be mentioned as soon as
+the novice has a container to loop through.
+
+"for (elem : range)" is also clearer for everyone to read, because it
+eliminates the visual noise of "auto&&" (or "auto&", or "const auto&").
+In addition to reducing overall verbosity, making common cases terse has the
+bonus effect of making uncommon cases stand out due to their remaining
+verbosity. (For example, writing v.push_back(t) instead of v.insert(v.end(), t)
+makes any front-insertions or mid-insertions stand out.) It will still be
+possible to write range-based for-loops that copy elements (possibly to
+different types, e.g. widening uint8_t to uint64_t), but such unusual code
+will be more noticeable.
+
+
+IV. Impact On The Standard
+
+This proposal is a pure extension. It doesn't affect existing user code
+because "for (elem : range)" was previously ill-formed. (Even if elem had
+already been declared, the grammar simply did not permit a plain identifier
+to appear before the colon.)
+
+I am not aware of any interactions between this proposal and other proposals.
+
+
+V. Standardese
+
+1. In 6.5 [stmt.iter]/1 and A.5 [gram.stmt], after:
+
+    iteration-statement:
+        [...]
+        for ( for-range-declaration : for-range-initializer ) statement
+
+add:
+
+        for ( identifier : for-range-initializer ) statement
+
+2. At the end of 6.5.4 [stmt.ranged], add a new paragraph:
+
+    A range-based for statement of the form
+        for ( identifier : for-range-initializer ) statement
+    is equivalent to
+        for ( auto&& identifier : for-range-initializer ) statement
+
+
+VI. Questions And Answers
+
+Q1. What about constness?
+
+A1. This is controlled by the range's type. If the range is vector&lt;int>, elem
+will be modifiable. If the range is "const vector&lt;int>", elem will be const.
+If the range is a braced-init-list, elem will be const (because
+initializer_list&lt;E>::begin() returns "const E *", 18.9 [support.initlist]/1).
+
+Users with modifiable ranges who really want to view their elements as const
+can continue to say "for (const auto& elem : range)".
+
+Q2. What's decltype(elem)?
+
+A2. decltype observes the "declared type" after template argument deduction and
+reference collapsing.
+
+range:        vector&lt;int> ; decltype(elem): int&
+range:  const vector&lt;int> ; decltype(elem): const int&
+range: { "cat"s, "dog"s } ; decltype(elem): const string&
+range:       vector&lt;bool> ; decltype(elem): vector&lt;bool>::reference&&
+range: const vector&lt;bool> ; decltype(elem): bool&&
+
+Q3. Oh, that's interesting. Tell me more about proxies.
+
+A3. That's not a question, but proxies are the most difficult thing to deal
+with here. auto&& binds to proxy objects, effectively suspending them in
+midair. This allows vector&lt;bool> elements to be read from and written to, and
+"const vector&lt;bool>" elements to be read from. Most user code will work.
+However, decltype(elem) above indicates how this breaks down slightly in
+certain situations. First, for vector&lt;bool>, &elem will compile and point to a
+proxy object that will be destroyed after each iteration. Second, for
+"const vector&lt;bool>", in addition to &elem also compiling and being
+invalidated, "elem = false;" will compile (and modify the temporary bool
+suspended in midair, not the container; if vector&lt;bool>::const_reference
+was a separate proxy type instead of bool, this wouldn't compile). Argh.
+Note that *vb.begin() is a prvalue, so &*vb.begin() won't compile, and
+"*vb.begin() = false;" won't compile for "const vector&lt;bool>" (see [2]).
+
+These issues are caused by replacing a prvalue *__begin with an lvalue elem,
+so this is inherent to the range-based for-loop as specified by C++11, where
+the for-range-declaration introduces a named variable for the element.
+
+Q4. What can we do about proxies?
+
+A4. If the EWG considers these issues with proxies to be important to solve,
+there are a few options. (Note that here I'm considering alternative semantics
+for the new syntax in this proposal. I am not suggesting that the semantics of
+C++11's range-based for-loop should be changed, as that would alter the meaning
+of existing code.)
+
+First, we could simply make "for (elem : range)" ill-formed when *__begin is a
+prvalue. However, that would lead to stealth build breaks (consider generic
+code taking vector&lt;T>, where T might be bool someday), and it would prevent
+perfectly reasonable uses of proxies from compiling.
+
+Second, we could special-case prvalues. I believe that the Standardese for this
+would look like: "If *__begin is a glvalue, then use 'auto&& identifier'.
+Otherwise (i.e. if *__begin is a prvalue), replace every occurrence of
+identifier in statement with (*__begin)." Careful wordsmithing would be
+required to phrase "every occurrence", since things like ::elem should not be
+affected. This would make elem appear to be a named identifier that's actually
+a prvalue, but that's not completely unprecedented ("this" is a prvalue,
+9.3.2 [class.this]/1), and I believe that's an acceptable cost for solving the
+proxy problem. Note that such replacement shouldn't be performed for lvalues
+because dereferencing the iterator may be expensive, and it especially
+shouldn't be performed for xvalues.
+
+Third, I briefly considered what would happen if we kept using auto&& for
+everything, but added Standardese saying "If *__begin is a prvalue, then
+identifier is a prvalue in statement." This would fix vector&lt;bool>, but it
+would horribly damage other proxies (e.g. moving from std::string), so this
+is impossible.
+
+Fourth, we could choose to do nothing beyond using auto&&, which works for most
+uses of proxies. Compilers would be free to add coarse-grained warnings about
+prvalue elements, or fine-grained warnings about specific dangers like
+&elem for proxies.
+
+Q5. What about xvalues?
+
+A5. If __begin is a move_iterator&lt;string *>, then *__begin will return
+string&&. This can be bound to "auto&& elem" (observe that auto& wouldn't
+compile), producing "string&& elem". This follows the rule that named rvalue
+references are lvalues, so the body of "for (elem : move_range)" sees elem as
+an lvalue and can mention it repeatedly without accidentally stealing from it.
+move(elem) must be used to explicitly move from the element.
+
+Q6. Is there any precedent for using auto&& like this?
+
+A6. Yep! The range-based for-loop already uses "auto && __range = range-init;"
+to handle lvalue/xvalue/prvalue ranges. Note that __range is affected by a
+limitation of the Core Language (it'll prolong the lifetime of a prvalue range,
+but not the lifetimes of any temporaries in subexpressions of range-init),
+which does not affect "auto&& elem" (*__begin doesn't contain such
+subexpressions).
+
+Q7. What about shadowing?
+
+A7. Because "for (elem : range)" is equivalent to "for (auto&& elem : range)",
+they handle shadowing identically. That is, they always generate
+"auto&& elem = *__begin;" within the for-loop's body, even when there's an
+outer declaration of elem. Compilers can and should warn about this.
+
+(If Q4's prvalue replacement is chosen, compilers can and should still warn
+about shadowing, even though elem will not actually exist as a variable.)
+
+Q8. What about attributes?
+
+A8. 6.5 [stmt.iter]/1 says:
+
+for-range-declaration:
+    attribute-specifier-seq[opt] decl-specifier-seq declarator
+
+which permits attributes. The Standardese in this proposal,
+"for ( identifier : for-range-initializer ) statement", currently doesn't
+permit attributes.
+
+I have no objection to permitting attributes, if the EWG/CWG can tell me where
+to put them in the grammar. C++11's range-based for-loop will still be
+available, so I don't believe it's critical to permit attributes in the
+shorter form.
+
+Q9. Does this interact with anything that the Ranges Study Group is working on?
+
+A9. Despite appearances, this proposal actually deals with elements, not
+ranges. It's unaffected by anything outside of
+"for-range-declaration = *__begin;", such as changing how extensibility via ADL
+works, allowing __begin and __end to have different types, fixing the Core
+Language limitation about temporaries in subexpressions, providing range
+adapters or algorithms in the STL, etc.
+
+Q10. Is there any precedent for allowing "for (elem : range)" to declare elem
+without mentioning a type?
+
+A10. Earlier, I would have answered no, and strongly argued that it's fine
+because programmers never think of elements as being separate from
+their ranges.
+
+Now the answer is yes! Lambda init-captures permit
+"[x = 9 * 9 * 9] { return x + 10 * 10 * 10; }", which declares a non-static
+data member without mentioning its type (5.1.2 [expr.prim.lambda]/11).
+(Note that this is done via "auto init-capture ;" which differs from this
+proposal's auto&& as previously explained.)
+
+Although init-captures happen in a different context, they are similar to this
+proposal's syntax in a specific way. The init-capture grammar of
+"identifier initializer" places the newly-introduced identifier immediately
+before the initializer which provides its state and type information.
+This proposal's "identifier : for-range-initializer" places the
+newly-introduced identifier immediately before the range, which provides the
+element's state and type information.
+
+Q11. Has this been implemented?
+
+A11. Hi, Clark! Not yet.
+
+Q12. After "for (elem : range) { body; }", can elem be accessed?
+
+A12. No. It's out of scope, behaving identically to C++11's range-based
+for-loop.
+
+Q13. Can't we just use a macro for this?
+
+A13. C++11's range-based for-loop is a first-class citizen of the Core
+Language, unlike BOOST_FOREACH (see [3]). The central argument of this
+proposal is:
+
+"for (auto elem : range)" is very tempting and very bad.
+
+A proper solution to this problem must also be a first-class citizen of the
+Core Language; it cannot possibly be a macro.
+
+Q14. What about something like "for (auto iter : iterator_range(v))",
+where the body refers to *iter?
+
+A14. That would attempt to solve this problem on the wrong side of the colon.
+C++11's range-based for-loop is focused on elements, which are conceptually
+simpler to reason about than iteration variables. Inserting an adapter to make
+the range consist of iterators instead of elements defeats the entire purpose.
+Such an adapter may be useful in very specific situations (probably as part of
+a system of adapters), but it is not a solution to the problem presented here.
+It would require typing much more syntax, when the problem is that "auto elem"
+is more tempting than "auto& elem".
+
+
+VII. Acknowledgements
+
+Thanks to Ajay Vijayvargiya, Angel Hernandez Matos, Artur Laksberg,
+Bill Plauger, Billy O'Neal, Chris Guzak, Eric Niebler, Gabriel Dos Reis,
+Herb Sutter, Ian Bearman, Jon Kalb, Jonathan Caves, Marc Gregoire,
+Scott Meyers, and Sridhar Madhugiri for reviewing this proposal.
+
+
+VIII. References
+
+All of the Standardese citations in this proposal are to Working Paper <a hRef="../2013/n3797.pdf">N3797</a>:
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2013/n3797.pdf">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2013/n3797.pdf</a>
+
+[1] "Universal References in C++11" by Scott Meyers:
+<a href="http://isocpp.org/blog/2012/11/universal-references-in-c11-scott-meyers">http://isocpp.org/blog/2012/11/universal-references-in-c11-scott-meyers</a>
+
+[2] "Even Evil Has Standards" by TVTropes:
+<a href="http://tvtropes.org/pmwiki/pmwiki.php/Main/EvenEvilHasStandards">http://tvtropes.org/pmwiki/pmwiki.php/Main/EvenEvilHasStandards</a>
+For "Even Standards Have Evil", see 23.3.7 [vector.bool].
+
+[3] "Boost.Foreach" by Eric Niebler:
+<a href="http://www.boost.org/doc/libs/1_55_0/doc/html/foreach.html">http://www.boost.org/doc/libs/1_55_0/doc/html/foreach.html</a>
+
+(end)
+</pre>
+</body>
+</html>

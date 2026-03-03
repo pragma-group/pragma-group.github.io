@@ -1,0 +1,358 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+ "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8">
+<title>P0667R0: Moving std::future extensions forward</title>
+<style type="text/css">
+html { line-height: 135%; }
+ins { background-color: #DFD; }
+del { background-color: #FDD; }
+</style>
+</head>
+<body>
+<table>
+        <tr>
+                <th>Doc. No.:</th>
+                <td>WG21/P0668R0</td>
+        </tr>
+        <tr>
+                <th>Date:</th>
+                <td>2017-6-19</td>
+        </tr>
+        <tr>
+                <th>Reply-to:</th>
+                <td>Hans-J. Boehm</td>
+        </tr>
+        <tr>
+                <th>Email:</th>
+                <td><a href="mailto:hboehm@google.com">hboehm@google.com</a></td>
+        </tr>
+        <tr>
+                <th>Authors:</th>
+                <td>Hans-J. Boehm, Olivier Giroux, Viktor Vafeiades,
+		with input from from Will Deacon, Doug Lea, Daniel Lustig,
+		Paul McKenney and others</td>
+        </tr>
+        <tr>
+                <th>Audience:</th>
+                <td>SG1</td>
+        </tr>
+</table>
+
+<h1>P0668R0: Revising the C++ memory model</h1>
+<p>
+Although the current C++ memory model, adopted essentially in C++11, has served
+our user community reasonably well in practice, a number of problems have come
+to light. The first one of these is particularly new and troubling:
+</p><ol>
+<li>Existing implementation schemes on Power and ARM are not correct with
+respect to the current memory model definition. These implementation schemes can
+lead to results that are disallowed by the current memory model when the user
+combines acquire/release ordering with seq_cst ordering. On some architectures,
+especially Power and Nvidia GPUs, it is expensive to repair the implementations
+to satisfy the existing memory model. Details are discussed in (Lahav et al) <a
+href="http://plv.mpi-sws.org/scfix/paper.pdf">http://plv.mpi-sws.org/scfix/paper.pdf</a>
+(which this discussion relies on heavily). The same issues
+were briefly outlined at the Kona SG1 meeting. We summarize below.
+<li>Our current definition of <code>memory_order_seq_cst</code>, especially for
+fences, is too weak. This was caused by historical assumptions that
+have since been disproven.
+<li>We still do not have an acceptable way to make our informal (since C++14)
+prohibition of out-of-thin-air results precise. The primary practical effect of
+that is that formal verification of C++ programs using relaxed atomics remains
+infeasible. The above paper suggests a solution similar to <a
+href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2013/n3710.html">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2013/n3710.html</a>
+.  We continue to ignore the problem here, but try to stay out of the way of
+such a solution.
+<li>The current definition of <code>memory_order_consume</code> is widely
+acknowledged to be unusable, and implementations generally treat it as
+<code>memory_order_acquire</code>. The current draft "temporarily discourages"
+it.
+See <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0371r1.html">
+http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0371r1.html</a>
+. There are proposals to repair it (cf. <a
+href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/p0190r3.pdf">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/p0190r3.pdf</a> and
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/p0462r1.pdf">
+http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/p0462r1.pdf</a>
+), but nothing that is ready to go.</li></ol>
+<p>
+Here we concentrate on, and outline proposals for, the first two, and merely
+keep the last two in mind.
+</p>
+<h3>Power, ARM, and GPU implementability</h3>
+<p>
+Although we previously believed otherwise, it has recently been shown that the
+standard implementations of memory_order_acquire and memory_order_release on
+Power are insufficient. Very briefly, these are compiled using "lightweight"
+fences, which are insufficient to enforce required properties for
+memory_order_sq_cst accesses to the same location.
+</p>
+<p>
+To illustrate, we borrow the Z6.U example, from S 2.1 of <a
+href="http://plv.mpi-sws.org/scfix/paper.pdf">http://plv.mpi-sws.org/scfix/paper.pdf</a>
+(pseudo-C++ syntax, memory orders indicated by subscript, e.g. y =<sub>rel</sub>
+1 abbreviates <code>y.store(memory_order_release, 1)</code>):
+</p>
+<blockquote>
+<table border="1">
+<tr>
+<td>Thread 1</td> <td>Thread 2</td><td>Thread 3</td>
+</tr>
+<tr>
+<td rowspan=2><code>x =<sub>sc</sub> 1</code><br>
+<code>y =<sub>rel</sub> 1</code></td>
+
+<td rowspan=2><code>b = fetch_add(y)<sub>sc</sub></code> //1<br>
+<code>c = y<sub>rlx</sub></code> //3</td>
+
+<td rowspan=2><code>y =<sub>sc</sub> 3</code><br>
+<code>a = x<sub>sc</sub></code> //0</td>
+</tr>
+</table>
+</blockquote>
+<p>
+The comments here indicate the observed assigned value.
+</p>
+<p>
+The indicated outcome here is disallowed by the current standard: All
+<code>memory_order_seq_cst</code> (sc) accesses must occur in a single total
+order, which is constrained to have <code><b>a = x<sub>sc</sub> //0</b></code>
+before <code><b>x =<sub>sc</sub> 1</b></code> (since it doesn't observe the store),
+which must be before <code><b>b = fetch_add(y)<sub>sc</sub> //1</b></code>
+(since it happens before it), which must be before
+<code><b>y =<sub>sc</sub> 3</b></code>
+(since the fetch_add does not observe the store, which is
+forced to be last in modification order by the load in Thread 2). But this is
+disallowed since the standard requires the happens before ordering to be
+consistent with the sequential consistency ordering,
+and <code><b>y =<sub>sc</sub> 3</b></code>, the
+last element of the sc order, happens before
+<code><b>a = x<sub>sc</sub> //0</b></code>, the first one.
+</p>
+<p>
+On the other hand, this outcome is allowed by the Power implementation. Power
+normally uses the "leading fence" convention for sequentially consistent
+atomics. ( See <a
+href="http://www.cl.cam.ac.uk/~pes20/cpp/cpp0xmappings.html">http://www.cl.cam.ac.uk/~pes20/cpp/cpp0xmappings.html</a>
+) This means that there is only an lwsync fence between Thread 1's instructions.
+This does not have the "cumulativity"/transitivity properties that would be
+required to make the store to <code>x</code> visible to Thread 3 under
+these circumstances.
+</p>
+<p>
+This issue was missed in earlier analyses. This example is not a problem for the
+"trailing fence" mapping that could also have been used on Power. But Lahav et
+al contains examples that fail for that mapping as well, for similar reasons.
+</p>
+<p>
+This example relies crucially on the fact that a
+<code>memory_order_release</code> operation synchronizes with a
+<code>memory_order_seq_cst</code> operation on the same location. Code that
+consistently accesses each location only with <code>memory_order_seq_cst</code>,
+or only with weaker ordering, is not affected, and works correctly.
+</p>
+<p>
+Whether or not such code occurs in practice depends on coding style. One
+reasonable coding style is to initially use only seq_cst operations, and then
+selectively weaken those that are performance critical; it does result in such
+cases. Even in such cases, it seems clear that the current compilation strategy
+does not result in frequent failures; this problem was discovered through
+careful theoretical analysis, not bug reports. It is unclear whether there is
+any real code that can fail as a result of the current mapping; it would require
+careful analysis of the use cases to determine whether the weaker ordering
+provided by the hardware is in fact sufficient for these use cases.
+</p>
+<p>
+For ARM, the situation is theoretically similar, but appears to be much less
+severe in practice. On ARMv8, the usual compilation mode for loads and stores is
+currently to compile acquire/release operations as seq_cst operations, so there
+is currently no issue. On ARMv7, some compilation schemes for acquire/release
+have the same issues as for Power, but the most common scheme seems to be to use
+"dmb ish", which does not share this problem.
+</p>
+<p>
+Nvidia GPUs have a memory model similar to Power, and share the same issues,
+probably with larger cost differences. For
+very large numbers of cores, it is natural to share store buffers between
+threads, which may make stores visible to different threads in inconsistent
+orders. This lack of "multi-copy atomicity" is also the core distinguishing
+property of the Power and ARM memory models. We suspect that other GPUs are also
+affected, but cannot say that definitively.
+</p>
+<p>
+We are not aware of issues on other existing CPU architectures. Since it appears
+more attractive to drop multi-copy atomicity with higher core counts, we expect
+the same issue to recur with some future processor designs.
+</p>
+<h3>Alternative 1: "Just" fix the implementations</h3>
+<p>
+Repairing this on Power without changing the specification would prevent us from
+generating the lighter weight "lwsync" fence instruction for a
+<code>memory_order_release</code> operation (unless we either know it will never
+synchronize with a <code>memory_order_seq_cst</code> operation, or we make
+<code>memory_order_seq_cst</code> operations even more expensive), which would
+have a significant performance impact on acquire/release synchronization. It
+would also defeat a significant part, though not all, of the motivation for for
+introducing <code>memory_order_acquire</code> and
+<code>memory_order_release</code> to start with.
+</p>
+<p>
+The cost on GPUs is likely to be higher.
+</p>
+<p>
+Among people we informally surveyed, this was not a popular option. Many people
+felt that we would be penalizing a subset of the available machine architectures
+for an issue with little practical impact. The language would no longer be able
+to express pure acquire-release synchronization, which many people feel is
+essential.
+</p>
+<p>
+We could regain acquire-release synchronization by adding a new "weak" atomic
+type that does not support <code>memory_order_seq_cst</code>, and requires
+explicit<code> memory_order</code> arguments. Again there was general concern
+that this significantly increases the library API footprint for an issue without
+much practical impact.
+</p>
+<h3>Alternative 2: Fix the standard</h3>
+<p>
+This is the approach taken by Lahav et al, and the one we pursue here.
+</p>
+<p>
+The proposal in Lahav et al is mathematically elegant. Currently the standard
+requires that the sequential consistency total order S is consistent with the
+happens before relation. Essentially, if any two sc operations are ordered by
+happens before, then they must be ordered the same way by S. In our example,
+this requires x =<sub>sc</sub> 1 to be ordered before b =
+fetch_add(y)<sub>sc</sub> //1 in spite of the fact that the hardware mapping
+does not sufficiently enforce it. The core fix (S1fix in the paper) is to relax
+the restriction that a happens before ordering implies ordering in S to only the
+sequenced before case, or the case in which the happens before ordering between
+<em>a</em> and <em>b</em> is produced by a chain
+</p>
+<blockquote>
+<p><em>a</em> is sequenced before <em>x</em> happens before <em>y</em> is
+sequenced before <em>b</em></p>
+</blockquote>
+<p>
+The downside of this is that "happens before" now has a rather strange meaning,
+since sequentially consistent operations can appear to execute in an order
+that's not consistent with it.
+</p>
+<p>
+In the Z6.U example, <code><b>x =<sub>sc</sub> 1</b></code>
+must no longer precede <code><b>b = fetch_add(y)<sub>sc</sub> //1</b></code> in the
+sequential consistency order S, in spite of
+the fact that the former "happens before" the latter. And in the questionable
+execution that we now wish to allow, they indeed have the opposite order in S.
+</p>
+<p>
+We propose to make this somewhat less confusing by suitably renaming the
+relations in the standard as follows:
+</p>
+<p>
+Currently the initialization rules, etc. use "strongly happens before" in
+guaranteeing ordering. The current intent is to also use that to specify library
+ordering, such as for mutexes. We propose to modify that definition to require
+"sequenced before" ordering at both ends. This new improved "strongly happens
+before" would be used in the same contexts as now, and would remain strong
+enough to ensure that if <em>a</em> happens before <em>b</em>, and they both
+participate in the sc ordering S, then <em>a</em> also precedes <em>b</em> in S.
+"Strongly happens before" would continue to exclude any ordering via
+memory_order_consume, since such ordering is much more restrictive, and must be
+explicitly accommodated by the caller.
+</p>
+<p>
+Thus we would propose to change 4.7.1p11 [intro.races, a.k.a. 1.10] roughly as
+follows (this is an early attempt at wording, which is still under discussion):
+</p>
+<blockquote>
+<p>
+An evaluation A <em><del>strongly</del> <ins>simply</ins> happens before</em>
+an evaluation B if either</p>
+<ul>
+<li>
+A is sequenced before B, or
+<li>
+A synchronizes with B, or
+<li>
+A simply happens before X and X simply happens before B.
+</ul>
+<p>
+[ <em>Note: </em>In the absence of consume operations, the happens before and
+<del>strongly</del> <ins>simply</ins> happens before relations are identical.
+<del>Strongly</del> <ins>Simply</ins> happens
+before essentially excludes consume operations. <ins>It is used only in the
+definition of <em>strongly happens before below</em>.</ins> — <em>end note</em> ]
+</p>
+<p>
+<ins>An evaluation A <em>strongly happens before</em> an evaluation D if,
+either</ins>
+</p>
+<ul>
+<li><ins>A is sequenced before D, or</ins>
+<li><ins>A synchronizes with D, and both A and D are sequentially consistent atomic
+operations (32.4 [atomics.order]), or</ins>
+<li><ins>there are evaluations B and C such that A is sequenced before B, B simply
+happens before C, and C is sequenced before D, or</ins>
+<li><ins>there is an evaluation B such that A strongly happens before B, and B
+strongly happens before D.</ins>
+</ul>
+<p>
+<ins>[ <em>Note:</em> Informally, if A strongly happens before B, then A appears to
+be evaluated before B in all contexts. -<em>-end note</em> ]</ins>
+</p>
+</blockquote>
+<p>
+We would then adjust 32.4p3 [atomics.order] correspondingly:
+</p>
+<blockquote>
+<p>
+There shall be a single total order S on all
+<code>memory_order_seq_cst</code> operations,
+consistent with the "<ins>strongly</ins> happens before" order, and
+modification orders for all affected locations, such that each
+<code>memory_order_seq_cst</code> operation B that
+loads a value from an atomic object M
+observes one of the following values: …
+</p>
+</blockquote>
+<p>
+and add a second note at the end of p3:
+</p>
+<blockquote>
+<p>
+<ins>
+[ <em>Note:</em> We do not require consistency with "happens before" (4.7.1
+[intro.races]). This allows more efficient implementation of
+<code>memory_order_acquire</code> and <code>memory_order_release</code> on some
+machine architectures. It may produce more surprising results when these are
+mixed with <code>memory_order_seq_cst </code>accesses. -- <em>end note</em> ]
+</ins>
+</p>
+</blockquote>
+<h2>Strengthen SC fences</h2>
+<p>
+The current <code>memory_order_seq_cst</code> fence semantics
+do not guarantee that a program with only
+memory_order_relaxed accesses and <code>memory_order_seq_cst</code> fences
+between each pair actually exhibits sequential consistency. This was, at one
+point, intentional. The goal was to ensure that architectures like Itanium that
+allow stores to become visible to different processors in different orders, and
+do not provide fences to rectify this, could be supported. But it subsequently
+became clear that Itanium, as a result of failing to provide strong ordering for
+accesses to a single location) would need to use stronger primitives for
+memory_order_relaxed anyway. All known SC fence implementations provide the
+stronger semantics, and we should acknowledge that.
+</p>
+<p>
+We propose to strengthen the <code>memory_order_seq_cst</code> fence semantics
+as suggested in Lahav et al. (wording TBD)
+</p>
+<h2>Straw Polls</h2>
+<ol>
+<li>Should we change the standard to accommodate architectures (Power, GPU, ARM
+to some extent) to allow outcomes such as the Z6.U outcome discussed above?
+<li>Is this the right direction for doing so?
+<li>Should we clean up and strengthen seq_cst fences along the above lines?
+</ol>

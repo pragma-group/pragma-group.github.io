@@ -1,0 +1,194 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<html>
+  <head>
+    <title>Why a joining thread from P0206 is a Bad Idea</title>
+  </head>
+
+  <body>
+<table>
+  <tr>
+    <th align="left">Document Number:</th>
+    <td align="left">P0379R0</td>
+  </tr>
+  <tr>
+    <th align="left">Date:</th>
+    <td align="left">2016-05-27</td>
+  </tr>
+  <tr>
+    <th align="left">Audience:</th>
+    <td align="left">L(E)WG (P0206 didn't go through SG1)</td>
+  </tr>
+  <tr>
+    <th align="left">Reply to:</th>
+    <td align="left"><a href="mailto:dv@vollmann.ch">Detlef Vollmann</a></td>
+  </tr>
+</table>
+
+<h1>Why <tt>joining_thread</tt> from P0206 is a Bad Idea</h1>
+
+<h2>Abstract</h2>
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0206r1.html">P0206R1</a>
+proposes a class for joining threads that join on destruction.
+This paper shows why such a thread is a dangerous facility
+and should not be standardized.
+
+<h2>Motivation for joining threads</h2>
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0206r0.html">P0206R0</a>
+provides a single example for motivating joining threads:
+<pre>
+  <code>
+    std::vector&lt;std::pair&lt;unsigned int, unsigned int&gt;&gt; partitions =
+      utils::partition_indexes(0, size-1, num_threads);
+    std::vector&lt;std::thread&gt; threads;
+
+    LOG(LOG_DEBUG, "controller::reload_all: starting reload threads...");
+    for (unsigned int i=0; i&lt;num_threads-1; i++) {
+      threads.push_back(std::thread(reloadrangethread(this,
+      partitions[i].first, partitions[i].second, size, unattended)));
+    }
+
+    LOG(LOG_DEBUG, "controller::reload_all: starting my own reload...");
+    this-&gt;reload_range(partitions[num_threads-1].first,
+      partitions[num_threads-1].second, size, unattended);
+
+    LOG(LOG_DEBUG, "controller::reload_all: joining other threads...");
+    for (size_t i=0; i&lt;threads.size(); i++) {
+      threads[i].join();
+    }      
+  </code>
+</pre>
+
+<p>
+P0206R0 doesn't give any more background on this example, so let's look
+at a very similar example for which I have background.
+</p>
+<pre>
+  <code>
+    std::vector&lt;std::pair&lt;unsigned int, unsigned int&gt;&gt; partitions =
+        partitionIndexes(0, size-1, numThreads);
+    std::vector&lt;std::thread&gt; threads;
+
+    // starting computing threads...
+    for (unsigned int i=1; i&lt;numThreads; i++) {
+        threads.push_back(std::thread{computeRangeThread
+                                      , this
+                                      , partitions[i].first
+                                      , partitions[i].second});
+    }
+
+    // starting my own computation...
+    this-&gt;computeRange(partitions[0].first,
+                       partitions[0].second);
+
+    // joining other threads...
+    for (size_t i=0; i&lt;threads.size(); i++) {
+        threads[i].join();
+    }      
+  </code>
+</pre>
+<p>
+The main difference to the original example
+(apart from some renaming and removing unused arguments)
+is the fact that the starting thread doesn't compute the last partition,
+but the first.
+</p>
+
+<h2>Problem with the example</h2>
+<p>
+The new example still has the same problem as the old one: it may terminate
+if <tt>push_back</tt> throws.  This is a well known problem.
+P0206R1 proposes to introduce <tt>std::joining_thread</tt> that behaves
+like <tt>std::thread</tt> but joins on destruction if the thread
+is joinable (instead of calling <tt>terminate</tt>).<br/>
+If we modify the new example to use <tt>joining_thread</tt> the
+original problem is indeed gone: the program will not terminate
+if <tt>push_back</tt> throws an exception.
+Instead, it will deadlock!
+</p>
+
+<p>
+The new problem cannot be understood from just looking at the
+given piece of code, some more knowledge about <tt>computeRangeThread</tt>
+is required
+(unlike the old problem that didn't require additional knowledge to be seen).
+The new example comes from a course on parallelism in C++ that shows
+how to compute prime numbers using the Sieve of Eratosthenes in parallel.
+For this purpose, it makes sense to first compute an initial set
+of prime numbers and then using only these numbers for a pool of
+parallel threads that each runs the sieve algorithm on a specific range.<br/>
+For this, all the threads that are pushed into the vector have to wait
+until the initial set is ready before they can actually start.
+This is done inside <tt>computeRangeThread</tt> and <tt>computeRange</tt>
+using a latch.
+But if <tt>push_back</tt> throws, the initial set is never computed
+and thus the join in the destructor will wait forever: deadlock!
+</p>
+
+<p>
+While the sieve example may look constructed to demonstrate the problem
+(in this case we could just run the initial partition before we start
+the others), some synchronization between threads is very common.
+Actually, this is exactly why people are using <tt>std::thread</tt>
+instead of just using <tt>std::async</tt>.
+</p>
+
+<h2>Deadlock vs. terminate</h2>
+<p>
+Having to decide between deadlock and terminate, the choice should be easy:
+<tt>terminate()</tt> is well defined (and can be customized using
+<tt>set_terminate</tt>), deadlock is just undefined behaviour.
+And the general rule is anyway: "If you have to fail, fail fast."<br/>
+In many environments, a terminated process is just restarted automatically,
+while deadlock causes (possibly long) delays that may have safety and
+security impacts.
+</p>
+
+<h2>Solutions</h2>
+
+<h3>Parallelism</h3>
+<p>
+The example above fails because is requires concurrent forward
+progress guarantees
+(see <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0072r1.pdf">P0072R1</a>).
+If you have tasks that don't require this kind of synchronization, they
+only require parallel forward progress guarantees.  So use the tool
+that gives you exactly this: <tt>std::async()</tt>.
+<tt>async</tt> has a destructor that behaves well if <tt>push_back()</tt>
+and similar mechanisms fail with an exception.
+</p>
+
+<h3>Concurrency</h3>
+<p>
+<tt>std::async()</tt> shouldn't be used in the above (new) example.
+Even if <tt>launch::async</tt> gives concurrent forward progress guarantees,
+it will still deadlock if <tt>push_back()</tt> fails.
+Therefore <tt>std::thread</tt> is the right tool here, but
+some kind of wrapper guard is required similar to the one proposed
+as "Solution 3" in P206R0, but a wrapper that is <b>not</b> just
+joining, but provides a mechanism that fulfills the synchronization
+protocol in a way to avoid deadlocks.
+</p>
+
+<h3><tt>joining_thread</tt></h3>
+<p>
+<tt>joining_thread</tt> as proposed is a non-solution: it replaces one
+problem by another even more severe problem.
+</p>
+
+
+<h2>Conclusion</h2>
+<p>
+P0072 allows us to talk about the synchronization requirements of our tasks.
+And we have (even now) in C++ mechanisms that accommodate the different
+synchronization requirements:
+<tt>std::thread</tt> for concurrent forward progress guarantees
+and <tt>std::async</tt> for parallel forward progress guarantees.<br/>
+<tt>joining_thread</tt> would break this clear and easy to teach
+mapping: it looks like a thread and provides
+concurrent forward progress guarantees, but may cause deadlock
+when used with tasks that actually need this guarantee, thus defeating
+programmers, code reviewers, maintainers and teachers of C++ in their
+quest to produce safe, secure and understandable programs.
+</p>
+  </body>
+</html>

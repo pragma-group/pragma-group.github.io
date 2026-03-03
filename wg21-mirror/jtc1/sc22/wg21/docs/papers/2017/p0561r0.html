@@ -1,0 +1,548 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<!-- saved from url=(0039)http://100.108.225.61:8080/P0561R0.html -->
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+
+<style type="text/css">
+
+body { color: #000000; background-color: #FFFFFF; max-width: 60em}
+del { text-decoration: line-through; color: #8B0040; }
+ins { text-decoration: underline; color: #005100; }
+
+p.example { margin-left: 2em; }
+pre.example { margin-left: 2em; }
+div.example { margin-left: 2em; }
+
+code.extract { background-color: #F5F6A2; }
+pre.extract { margin-left: 2em; background-color: #F5F6A2;
+  border: 1px solid #E1E28E; }
+
+p.function { }
+.attribute { margin-left: 2em; }
+.attribute dt { float: left; font-style: italic;
+  padding-right: 1ex; }
+.attribute dd { margin-left: 0em; }
+
+blockquote.std { color: #000000; background-color: #F1F1F1;
+  border: 1px solid #D1D1D1;
+  padding-left: 0.5em; padding-right: 0.5em; }
+blockquote.stddel { text-decoration: line-through;
+  color: #000000; background-color: #FFEBFF;
+  border: 1px solid #ECD7EC;
+  padding-left: 0.5empadding-right: 0.5em; ; }
+
+blockquote.stdins { text-decoration: underline;
+  color: #000000; background-color: #C8FFC8;
+  border: 1px solid #B3EBB3; padding: 0.5em; }
+
+blockquote pre em { font-family: normal }
+
+table { border: 1px solid black; border-spacing: 0px;
+  margin-left: auto; margin-right: auto; }
+th { text-align: left; vertical-align: top;
+  padding-left: 0.8em; border: none; }
+th.multicol { text-align: center; vertical-align:top;
+  padding-left: 0.8em; border: none; }
+td { text-align: left; vertical-align: top;
+  padding-left: 0.8em; border: none; border-top: 1px solid black; }
+
+ul.function { list-style-type: none; margin-top: 0.5ex }
+ul.function > li { padding-top:0.25ex; padding-bottom:0.25ex }
+
+pre.function { margin-bottom:0.5ex }
+
+pre span.comment { font-family: serif; font-style: italic }
+
+caption { font-size: 1.25em; font-weight: bold; padding-bottom: 3px;}
+</style>
+
+<title>An RAII Interface for Deferred Reclamation</title>
+</head>
+
+<body>
+
+<p><b>Document number:</b> P0561R0
+<br><b>Date:</b> 2017-02-03
+<br><b>Reply to:</b>
+Geoff Romer &lt;<a href="mailto:gromer@google.com">gromer@google.com</a>&gt;,
+Andrew Hunter &lt;<a href="mailto:ahh@google.com">ahh@google.com</a>&gt;
+<br><b>Audience:</b> Concurrency Study Group
+</p>
+
+<h1>An RAII Interface for Deferred Reclamation</h1>
+
+<ol>
+  <li><a href="http://100.108.225.61:8080/P0561R0.html#background">Background</a></li>
+  <li><a href="http://100.108.225.61:8080/P0561R0.html#design">Design Overview</a></li>
+  <ol>
+    <li><a href="http://100.108.225.61:8080/P0561R0.html#read">Read API</a></li>
+    <li><a href="http://100.108.225.61:8080/P0561R0.html#update">Update API</a></li>
+    <li><a href="http://100.108.225.61:8080/P0561R0.html#other">Other Design Notes</a></li>
+  </ol>
+  <li><a href="http://100.108.225.61:8080/P0561R0.html#acknowledgements">Acknowledgements</a></li>
+</ol>
+
+<h2 id="background">Background</h2>
+
+<p>For purposes of this paper, <dfn>deferred reclamation</dfn>
+  refers to a pattern of concurrent data sharing with two components:
+  <em>readers</em> access the data while holding reader locks,
+  which guarante that the data will remain live while the lock is held.
+  Meanwhile the <em>updater</em> updates the data by replacing it
+  with a newly-allocated value. All subsequent readers will see
+  the new value, but the old value is not destroyed until all readers
+  accessing it have released their locks. Readers never block the updater
+  or other readers, and the updater never blocks readers.</p>
+
+<p>This pattern can be implemented in several ways, including reference
+  counting, RCU, and hazard pointers. Several of these have been proposed
+  for standardization (see e.g.
+  <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0233r2.pdf">P0233R2</a>,
+  <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0279r1.pdf">P0279R1</a>,
+  and <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0461r0.pdf">P0461R0</a>),
+  but the proposals have so far exposed these techniques through fairly
+  low-level APIs.</p>
+
+<p>In this paper, we will propose a high-level RAII API for deferred
+  reclamation, which emphasizes safety and usability rather than
+  fidelity to low-level primitives, but still permits highly efficient
+  implementation. This proposal is based on an API which is used internally
+  at Google, and our experience with it demonstrates the value of providing
+  a high-level API: we provide both a high-level API like the one proposed
+  here, and a more bare-metal RCU API comparable to <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0461r0.pdf">P0461</a>, and while the
+  high-level API has over 200 users, the low-level API has one.</p>
+
+<p>This proposal is intended to complement, rather than conflict with,
+  proposals for low-level APIs for RCU, hazard pointers, etc, and it
+  can be standardized independently of whether and when we standardize those
+  other proposals.</p>
+
+<h3>Underlying API assumptions</h3>
+
+<p>Although this proposal is designed to be independent of the low-level
+  API used to implement it, it is necessary to make a few key
+  assumptions. First of all, this design assumes that user code is not
+  required to periodically enter a "quiescent" state where no reader locks
+  are held. We see no way to satisfy such a requirement in a general-purpose
+  library, since it means that any use of the library, no matter how local,
+  imposes constraints on the global structure of the threads that use it
+  (even though the top-level thread code may otherwise be completely
+  unaware of the library). This would be quite onerous to comply with,
+  and likely a source of bugs. Neither <a href="http://liburcu.org/">Userspace RCU</a>,
+  Google's internal RCU implementation, nor <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0233r2.pdf">P0233R2</a>'s hazard pointer API
+  impose this requirement, so omitting it does not appear to be a major
+  implementation burden.</p>
+
+<p>This proposal also does not require user code to register and unregister
+  threads with the library, for more or less the same reasons: it
+  would cause local uses of the library to impose global constraints on
+  the program, creating an unacceptable usability and safety burden.
+  <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0233r2.pdf">P0233R2</a>
+  and Google's internal RCU do not impose this requirement, and
+  Userspace RCU provides a library that does not (although at some performance
+  cost). Furthermore, the standard library can satisfy this requirement if
+  need be, without exposing users to it, by performing the necessary
+  registration in <code>std::thread</code>.</p>
+
+<p>This proposal requires that when a reader lock is held, a read
+  operation cannot fail to access the underlying data. This appears to
+  preclude an implementation based on hazard pointers, unless augmented
+  with reference counting. Relatedly, this proposal does not bound the
+  amount of data that is ready for reclamation, but isn't yet reclaimed
+  (which hazard pointers can do but RCU cannot). In effect, this API
+  trades off space-efficiency for interface safety and simplicity. We believe
+  this is the right choice for a general-purpose API, reflecting the general
+  programming princple that one should first prefer simple, correct code,
+  and only add complexity when there's a demonstrable performance problem.</p>
+
+<p>Most importantly, this design does <em>not</em> assume that the reclamation
+  operation, which schedules cleanup code to be executed asynchronously after
+  all reader locks are released, can allocate memory. In implementations that
+  cannot allocate on reclamation, either reclamation must block, or the caller
+  (in this case the implementation of the high-level API) must supply an
+  object of a library-defined type (such as <code>rcu_head</code> in
+  <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0461r0.pdf">P0461R0</a>
+  or <code>hazptr_obj_base</code> in <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0233r2.pdf">P0233R2</a>) that encapsulates whatever
+  additional storage the library needs to add the callback to its internal
+  data structures, and that object (which we will hereinafter call a "control
+  block") must remain live until the callback is executed. We regard
+  blocking reclamation as an unacceptable safety risk (blocking with
+  a reader lock held can lead to deadlock), so this proposal is designed
+  to accommodate a control block.</p>
+
+<h2 id="design">Design Overview</h2>
+
+<p>The centerpiece of this proposal is the <code>cell&lt;T&gt;</code>
+  class template, a wrapper which is either empty or holds a single object
+  of type <code>T</code> (the name is intended to suggest a storage cell, but
+  we expect it to be bikeshedded). Rather than providing direct access to the
+  stored object, it allows the user to obtain a <em>snapshot</em> of the
+  current state of the object:</p>
+
+<pre>  template &lt;typename T, typename Alloc = allocator&lt;T&gt;&gt;
+  class cell {
+  public:
+    // Not movable or copyable
+    cell(cell&amp;&amp;) = delete;
+    cell(const cell&amp;) = delete;
+    cell&amp; operator=(cell&amp;&amp;) = delete;
+    cell&amp; operator=(const cell&amp;) = delete;
+
+    cell(nullptr_t = nullptr, const Alloc&amp; alloc = Alloc());
+    cell(std::unique_ptr&lt;T&gt; ptr, const Alloc&amp; alloc = Alloc());
+
+    update(nullptr_t);
+    void update(unique_ptr&lt;T&gt; ptr);
+
+    snapshot_ptr&lt;T&gt; get_snapshot() const;
+  };
+
+  template &lt;typename T&gt;
+  class snapshot_ptr {
+   public:
+    // Move only
+    snapshot_ptr(snapshot_ptr&amp;&amp;);
+    snapshot_ptr&amp; operator=(snapshot_ptr&amp;&amp;);
+    snapshot_ptr(const snapshot_ptr&amp;) = delete;
+    snapshot_ptr&amp; operator=(const snapshot_ptr&amp;) = delete;
+
+    constexpr snapshot_ptr(nullptr_t = nullptr);
+
+    // Converting operations, enabled if U* is convertible to T*
+    template &lt;typename U&gt;
+    snapshot_ptr(snapshot_ptr&lt;U&gt;&amp;&amp; rhs) noexcept;
+    template &lt;typename U&gt;
+    snapshot_ptr&amp; operator=(snapshot_ptr&lt;U&gt;&amp;&amp; rhs) noexcept;
+
+    T* get() const noexcept;
+    T&amp; operator*() const;
+    T* operator-&gt;() const noexcept;
+
+    explicit operator bool() const noexcept;
+    operator std::shared_ptr&lt;T&gt;() &amp;&amp;;
+
+    void swap(snapshot_ptr&amp; other);
+  };
+
+  template &lt;typename T&gt;
+  void swap(snapshot_ptr&lt;T&gt;&amp; lhs, snapshot_ptr&lt;T&gt;&amp; rhs);
+
+  template &lt;typename T&gt;
+  bool operator==(const snapshot_ptr&lt;T&gt;&amp; lhs, const snapshot_ptr&lt;T&gt;&amp; rhs);
+  // Similar overloads for !=, &lt;, &gt;, &lt;=, and &gt;=, and mixed
+  // comparison with nullptr_t.
+
+  template &lt;typename T&gt;
+  struct hash&lt;snapshot_ptr&lt;T&gt;&gt;;
+</pre>
+
+<h3 id="read">Read API</h3>
+
+<p><code>get_snapshot()</code> has a special guarantee that it can be called
+  concurrently with any other operation on the same object (other than
+  construction and destruction, naturally), including non-const operations.</p>
+
+<p><code>snapshot_ptr&lt;T&gt;</code>'s API is closely modeled on
+  <code>unique_ptr&lt;T&gt;</code>, and indeed it could be implemented as
+  an alias for <code>unique_ptr</code> with a custom deleter, except that
+  we don't want to expose operations such as <code>release()</code> or
+  <code>get_deleter()</code> that could violate API invariants or leak
+  implementation details.</p>
+
+<p>A <code>snapshot_ptr</code> is either null, or points to a live object of
+  type <code>T</code>, and it is only null if constructed from
+  <code>nullptr</code>, moved-from, or is the result of invoking
+  <code>get_snapshot()</code> on an empty <code>cell</code> (in particular,
+  a <code>snapshot</code> cannot spontaneously become null due to the actions
+  of other threads). The guarantee that the object is live means that calling
+  <code>get_snapshot()</code> is equivalent to acquiring a reader lock, and
+  destroying the resulting <code>snapshot_ptr</code> is equivalent to
+  releasing the reader lock.</p>
+
+<p>All operations on a <code>snapshot_ptr</code> are non-blocking.</p>
+
+<p><b>Open question:</b> should this library require the user to destroy
+  a <code>snapshot_ptr</code> in the same thread where it was obtained?
+  The library would be easier to implement with that requirement (because some
+  implementation libraries require lock acquire and release to happen
+  in the same thread), but this would make the library less useful by impeding
+  transfer of data across threads. Note that <code>unique_lock</code>
+  implicitly imposes the same requirement, so there is precedent for it.</p>
+
+<p>There are three possible guarantees that this library could make about
+  <code>snapshot_ptr</code>s: in increasing order of strictness, it
+  could guarantee that the data object remains live while a
+  <code>snapshot_ptr</code> points to it, or it could guarantee that accesses to
+  the data object are race-free, or it could guarantee that the data
+  object is immutable. Note that the liveness guarantee is the bare
+  minimum we require for a deferred reclamation library, and the immutability
+  guarantee is easily implemented by having the library provide only
+  const access to the data object. However, both the liveness and immutability
+  guarantees have substantial drawbacks: providing only a liveness guarantee
+  makes it too easy for users to carelessly instantiate types like
+  <code>cell&lt;int&gt;</code> which allow "readers" to cause data races
+  by mutating the data. On the other hand, providing an immutability guarantee
+  disallows use cases like a <code>cell&lt;atomic&lt;int&gt;&gt;</code>
+  whose "readers" mutate the data, which we have found to be useful in
+  practice.</p>
+
+<p>Consequently, we argue that this library should be designed to provide
+  at least an informal guarantee of race-freedom, which disallows manifestly
+  hazardous usages like <code>cell&lt;int&gt;</code>, but allows safe ones
+  like <code>cell&lt;atomic&lt;int&gt;&gt;</code>. This can be achieved
+  by establishing a new type trait <code>is_race_free&lt;T&gt;</code>,
+  which is true when concurrent operations on <code>T</code> cannot cause
+  a data race, and requiring that it be true for <code>cell</code>'s
+  template parameter:</p>
+
+<pre>  template &lt;typename T&gt; struct is_race_free : public false_type;
+
+  template &lt;typename T&gt;
+  constexpr bool is_race_free_v = is_race_free&lt;T&gt;::value;
+
+  template &lt;typename T&gt;
+  struct is_race_free&lt;std::atomic&lt;T&gt;&gt; : public true_type;
+
+  template &lt;typename T&gt;
+  struct is_race_free&gt;const T&gt; : public true_type;
+</pre>
+
+<p>User code would be permitted to specialize <code>is_race_free</code>
+  for user-defined types. The last specialization requires some additional
+  discussion. It expresses the principle that if two operations access the
+  same object through a const access path, they should not cause a data
+  race. This is generally true of C++ standard types (both core and library),
+  but may not be true for all user-defined types, so this specialization
+  may cause some false positives. However, this should be relatively rare,
+  both because it's emphatically a best practice for all types in concurrent
+  code to have this property, and because most types get this property
+  "for free" (to violate it, you generally need to have mutable members or
+  the moral equivalent). Furthermore, if <code>is_race_free</code> is
+  erroneously true, nothing actually breaks; we simply fail to prevent the
+  user from instantiating a <code>cell</code> type that is easy to misuse.
+  Consequently, we claim that the last specialization is a reasonable
+  compromise that enables many, many valid use cases, and only a few unsafe
+  use cases.</p>
+
+<p>Note, by the way, that the specification of <code>cell&lt;T&gt;</code> should
+  probably not explicitly guarantee that accesses to the data are race-free,
+  because this would need to be conditioned on the race-freedom of
+  <code>T</code>, and that would probably be quite difficult to formally
+  specify. However, the design of <code>cell</code> should be geared toward
+  informally enabling users to rely on that guarantee.</p>
+
+<p>The const semantics of <code>get_snapshot()</code> merit closer
+  scrutiny. With the API proposed above, users who have only const access
+  to a <code>cell&lt;T&gt;</code> can still obtain non-const access to
+  the underlying <code>T</code>. This is similar to the "shallow const"
+  semantics of pointers, but unlike the "deep const" semantics of other
+  wrapper types such as <code>optional</code>. This ensures that the
+  const/non-const distinctinction matches the reader/updater distinction
+  (readers need only const access, but updaters need non-const access), but
+  at the cost of not capturing the reader/writer distinction (both readers
+  and writers need only const access). In essence, the problem is that this
+  library naturally supports three distinct levels of access (read-only,
+  read-write, and read-write-update), but the const system can only express
+  two. Our intuition is that the writer/updater distinction is more fundamental
+  than the reader/writer distinction, so const should capture the former
+  rather than the latter, but it's a close call.</p>
+
+<p><b>Open question:</b> When in-place mutation is permitted, should
+  it require non-const access? If so, this could be implemented by
+  providing <code>get_snapshot()</code> as a const/non-const
+  overload pair:</p>
+
+<pre>  snapshot_ptr&lt;T&gt; get_snapshot();
+  snapshot_ptr&lt;const T&gt; get_snapshot() const;
+</pre>
+
+<p><b>Open question:</b> Should <code>snapshot_ptr</code> have an aliasing
+  constructor, as <code>shared_ptr</code> does? Such a constructor would
+  look like this:</p>
+
+<pre>  template &lt;typename U&gt;
+  snapshot_ptr(snapshot_ptr&lt;U&gt;&amp;&amp; other, T* ptr);
+</pre>
+
+<p>This would enable the user, given a <code>snapshot_ptr</code> to an
+  object, to construct a <code>snapshot_ptr</code> to one of its members.
+  However, it would mean we could no longer guarantee that a
+  <code>snapshot_ptr</code> is either null or points to a live object.
+  Google's implementation does not currently support this, although
+  it has recently been requested.</p>
+
+<h3 id="update">Update API</h3>
+
+<p>The update side is more complex. It consists of two parallel sets of
+  overloads, constructors and <code>update()</code>, which respectively
+  initialize the <code>cell</code> with a given value, and update the
+  <code>cell</code> to store a given value. All <code>update()</code>
+  overloads are non-const members, and so by the usual library rules the caller
+  must ensure that they are not called concurrently with any other operations
+  on the <code>cell</code> (except <code>get_snapshot()</code>, as noted
+  above). <code>update()</code> is also always non-blocking, and in
+  particular does not wait for the old data value to be destroyed.</p>
+
+<p>The constructor and <code>update()</code> overload taking
+  <code>nullptr_t</code> respectively initialize and set the <code>cell</code>
+  to the empty state. The fact that a <code>cell</code> can be empty is in
+  some ways unfortunate, since it's generally more difficult to reason about
+  types with an empty or null state, and users could always say
+  <code>cell&lt;optional&lt;T&gt;&gt;</code> if they explicitly want
+  an empty state. However, given that <code>snapshot_ptr</code> must have
+  a null state in order to be movable, eliminating the empty state would
+  not simplify user code much. Furthermore, as will be seen below, every
+  type that can be used to initialize a <code>cell</code> naturally has a
+  null value, so forbidding the empty state would actually complicate the
+  API.</p>
+
+<p>The constructor and <code>update()</code> overload that accept a
+  <code>unique_ptr ptr</code> take ownership of it, and respectively
+  initialize and set the current value of the cell to <code>*ptr</code>.</p>
+
+<p>It is worth noting that these operations might have to perform allocation
+  (hence the allocator parameter) in order to create a control block to
+  subsequently pass to the reclamation operation. Notably, that
+  allocation would be in addition to the allocation that the user presumably
+  performed to create <code>*ptr</code>. Now, update operations are
+  inherently costly (because they involve the allocation and construction
+  of an entirely new object), so use cases for the deferred reclamation
+  pattern are generally tolerant of overhead in the update phase, and
+  consequently this extra allocation may not be a substantial concern.
+  However, it's worth considering what it would take to eliminate that
+  overhead.</p>
+
+<p>The obvious answer is that the data object should be allocated together with
+  the control block, in much the same way that <code>make_shared()</code>
+  allocates the data object together with the <code>shared_ptr</code>'s
+  control block. Naively, we could implement this as an <code>emplace()</code>
+  method that takes constructor arguments for <code>T</code>, and uses them
+  to allocate and construct a <code>T</code> object together with its header.
+  However, this is not a complete solution, because it combines construction
+  of the data object with publication of the data object. In general, users
+  may need to perform some setup on the data object after constructing it,
+  before making it available in the <code>cell</code>.</p>
+
+<p>So to solve this in full generality, we would need to provide a way to
+  allocate and construct a <code>T</code> object together with the control
+  block, provide mutable access to it, and then store it in a <code>cell</code>.
+  This could look something like the following:</p>
+
+<pre>  template &lt;typename T, typename Alloc = std::allocator&lt;T&gt;&gt;
+  class cell_init {
+   public:
+    // Move only
+    cell_init(cell_init&amp;&amp;);
+    cell_init&amp; operator=(cell_init&amp;&amp;);
+    cell_init(const cell_init&amp;) = delete;
+    cell_init&amp; operator=(const cell_init&amp;) = delete;
+
+    template &lt;typename... Args&gt;
+    cell_init(Args&amp;&amp; args...);
+
+    template &lt;typename... Args&gt;
+    cell_init(allocator_arg_t, const Alloc&amp; alloc, Args&amp;&amp; args...);
+
+    T* get() const;
+    T&amp; operator*() const;
+    T* operator-&gt;() const;
+  };
+</pre>
+
+<p>The constructors forward their arguments to the constructor of
+  <code>T</code>, and the smart-pointer-like operations provide
+  mutable access to the data object. We would then simply augment
+  <code>cell</code> with a constructor and <code>update()</code>
+  overload that take a <code>cell_init&lt;T, Alloc&gt;</code> argument.</p>
+
+<p><b>Open question:</b> Are the performance savings of something like
+  <code>cell_init</code> worth the extra complexity it introduces?
+  We have no implementation/usage experience bearing on this question,
+  because Google's RCU implementation does not take a user-provided
+  control block. Instead, the reclamation operation maintains the cleanup
+  callbacks in an internal data structure akin to a per-CPU
+  <code>vector</code>. We believe this to be more efficient (better locality,
+  less cache contention, less space overhead, etc) as well as providing a
+  cleaner API, but it's predicated on the fact that our allocator never fails
+  (it uses memory overcommitment), which means we can allocate inside the
+  reclamation function.</p>
+
+<p><b>Open question:</b> Should we provide an emplacement-style constructor
+  and updater? As noted, these would not be fully general because
+  users sometimes need to configure the data object before publishing
+  it, but they could provide convenient syntactic sugar, and they would
+  be more efficient than the operations that take <code>unique_ptr</code>.</p>
+
+<p><b>Open question:</b> Should we support taking <code>unique_ptr</code>s
+  with non-default deleters? If so, should we make the deleter type a template
+  parameter of <code>cell</code>, or type-erase it? Both choices have
+  drawbacks: making the deleter a template parameter prevents us from
+  providing emplacement-style operations, because we have no way of knowing
+  how to allocate the <code>T</code> object such that it can be deallocated
+  by an arbitrary user-supplied deleter. Type erasure can impose nontrivial
+  costs, including storage overhead, extra allocations, and an extra pointer
+  indirection on the read path (which is supposed to be extremely fast).
+  On the other hand, implementations which use a control block may already
+  incur many of the same costs; this requires further investigation.</p>
+
+<p><b>Open question:</b> Relatedly, if we opt to introduce something like
+  <code>cell_init</code>, should we provide <code>unique_ptr</code> overloads
+  as well? <code>unique_ptr</code> is an ubiquitous vocabulary type for handling
+  dynamically-allocated memory, so this would probably be valuable for
+  users, but it would force the implementation to perform type erasure.</p>
+
+<p>It also bears mentioning that this library may need to impose
+  some restrictions on the allocators it supports. In particular,
+  it may need to require that the allocator's <code>pointer</code>
+  type is a raw pointer, or can safely be converted to one, since
+  the implementation layer is unlikely to be able to accept "fancy
+  pointers".</p>
+
+<p>One noteworthy property of <code>update()</code> is that there is
+  no explicit support for specifying in the <code>update()</code> call
+  how the old value is cleaned up, which we are told is required in some
+  RCU use cases in the Linux kernel. It is possible for the user to
+  approximate support for custom cleanup by using a custom destructor
+  or deleter whose behavior is controlled via a side channel, but this
+  is a workaround, and an awkward one at that. I've opted not to
+  include this feature because use cases for it appear to be quite
+  rare (our internal version of this API lacks this feature, and
+  nobody has asked for it), and because it would substantially
+  complicate the API. It would add an extra <code>update()</code>
+  parameter which most users don't need, and which would break the
+  symmetry between constructors and <code>update()</code> overloads.
+  More fundamentally, it would raise difficult questions about the
+  relationship between the user-supplied cleanup logic and the original
+  deleter: does the cleanup logic run instead of the deleter,
+  or before the deleter? Neither option seems very satisfactory.</p>
+
+<h3 id="other">Other API notes</h3>
+
+<p>We think that <code>cell</code>'s destructor should be non-blocking, and
+  should not require all outstanding <code>snapshot_ptr</code>s to be destroyed
+  first. This is motivated by the principle that concurrency APIs should strive
+  to avoid coupling between client threads that isn't mediated by the
+  API; concurrency APIs should solve thread coordination problems, not
+  create new ones. That said, destruction of the <code>cell</code> must
+  already be coordinated with the threads that actually read it,
+  so also coordinating with the threads that hold <code>snapshot_ptr</code>s
+  to it may not be much additional burden (particularly if we decide
+  to disallow passing <code>snapshot_ptr</code>s across threads).</p>
+
+<p>Some deferred reclamation libraries are built around the concept of
+  "domains", which can be used to isolate unrelated operations from each
+  other (for example with RCU, long-lived reader locks can delay all
+  reclamation within a domain, but do not affect other domains). This
+  proposal does not include explicit support for domains, so effectively
+  all users of this library would share a single global domain. So far
+  our experience has not shown this to be a problem, but if necessary
+  domain support can easily be added, by adding the domain as a constructor
+  parameter of <code>cell</code> (with a default value, so client code
+  can ignore domains if it chooses).</p>
+
+<h2 id="acknowledgements">Acknowledgements</h2>
+
+<p>Thanks to Paul McKenney and Maged Michael for valuable feedback on a
+  draft of this paper.</p>
+
+
+</body><style type="text/css">embed[type*="application/x-shockwave-flash"],embed[src*=".swf"],object[type*="application/x-shockwave-flash"],object[codetype*="application/x-shockwave-flash"],object[src*=".swf"],object[codebase*="swflash.cab"],object[classid*="D27CDB6E-AE6D-11cf-96B8-444553540000"],object[classid*="d27cdb6e-ae6d-11cf-96b8-444553540000"],object[classid*="D27CDB6E-AE6D-11cf-96B8-444553540000"]{	display: none !important;}</style></html>

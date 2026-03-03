@@ -1,0 +1,498 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+"http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=us-ascii">
+<title>Skeleton Proposal for Thread-Local Storage (TLS)</title>
+</head>
+<body>
+<h1>Skeleton Proposal for Thread-Local Storage (TLS)</h1>
+
+<p>
+ISO/IEC JTC1 SC22 WG21 P0108R1 - 2016-04-14
+</p>
+
+<p>
+Paul E. McKenney, paulmck@linux.vnet.ibm.com<br>
+JF Bastien, jfb@google.com<br>
+</p>
+
+<p>
+Audience: SG1, LEWG
+</p>
+
+<h2>Introduction</h2>
+
+<p>
+This document is a revision of
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/p0108r0.html">P0108R0</a>
+based on discussions
+in the SG1 study group in October 2015 in Kona.
+P0108R0 was in turn a follow-on to
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/n4376.html">N4376</a>,
+and provides an initial description of a potential solution to the TLS
+problem statement implied by that document.
+
+<h2>Summary of Problem Statement</h2>
+
+<p>
+We expect that lightweight executors will have problems
+with TLS as currently envisioned and implemented.
+For example, some types of executors nest hierarchically, so that
+a number of light-weight executors might run in the context of
+a single heavy-weight <tt>std::thread</tt>.
+If a given function accesses TLS, and is called both from the context
+of a <tt>std::thread</tt> and from the context of a task executing
+within an <tt>std::thread</tt>, what should its TLS accesses do?
+If the instances invoked from a task access task-level TLS data,
+the function must do different things when invoked in different contexts.
+If the <tt>std::thread</tt>-level TLS data is accesses, then the
+task-level accesses might introduce data races and thus undefined behavior.
+
+<p>
+This also can interact with signal handling.
+To see this, suppose that a signal arrives at a
+<tt>std::thread</tt> while that <tt>std::thread</tt>
+is running a light-weight executor, for example, a task.
+The signal handler will likely conceptually be part of the
+<tt>std::thread</tt> rather than the task.
+This would imply some additional context switching at signal-handler
+start and end.
+
+<p>
+TLS is most especially a problem for light-weight executors
+implementing same-instruction-multiple-data (SIMD) units
+and general-purpose graphical processing units (GPGPUs)
+because large programs can have very large amounts of TLS data,
+each item of which might have C++ constructors and destructors.
+Spending many milliseconds to run constructors and destructors
+for a SIMD computation that only takes a few microseconds to run
+is clearly not a reasonably way to achieve high performance.
+The use of lazy construction reduces this overhead, but the
+occasional &ldquo;vacation&rdquo; taken from processing to
+run some constructor might be quite unwelcome.
+
+<p>
+GPGPU code often has longer runtimes, but they also tend to run
+extremely large numbers of threads, adding a memory-footprint
+problem to the constructor-destructor overhead problem.
+To make matters worse, in some environments, the constructors and
+destructors must be run on heavyweight CPUs rather than on the
+lightweight GPGPU hardware threads, which severely restricts the
+computational resources that can be applied to run constructors
+and destructors for GPGPU TLS data.
+
+<p>
+At the source-code level, it isn't generally knowable which executor a
+function is called from, or even if a function is called from multiple
+executors.
+It is left up to the programmer to write code which correctly
+accesses state for the executor(s) that the code will execute in.
+(In theory, we could of course use a TLS variable to record what type
+of executor was currently executing, but in practice that of course
+requires a TLS implementation that is efficient enough to be used by
+light-weight executors, and if we had that, we wouldn't be writing
+this paper.)
+
+<h2>Tentative Goals</h2>
+
+<p>
+There are a number of possible ways of resolving this issue, as discussed in
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/n4376.html">N4376</a>,
+however, this paper focuses on the possibility that TLS is an optional component
+of an executor.  With this approach, <tt>std::thread</tt> implements TLS, but
+lighter-weight executors might choose not to.
+
+At a minimum developers intending to target lighter-weight executors may choose
+to author code which doesn't use TLS, thereby avoiding performance pitfalls or
+lack of support on those executors. The current Standard Library unfortunately
+implicitly uses TLS in a variety of places, making TLS avoidance difficult.
+
+<p>
+For this approach, we put forward the following tentative goals:
+
+<ol>
+<li>	Make TLS availability optional for light-weight executors,
+	as noted above.
+	<ol>
+	<li> Provide new Standard Library functionality which avoids using TLS.
+	<li> Offer a clear migration path from older versions of these library
+	APIs.
+	<li> Maintain the performance and scalability of high-quality
+	standard-library implementations.
+	</ol>
+<li>	Avoid source-code changes for existing code running in
+	existing executors (such as <tt>std::thread</tt>) that
+	provide TLS.
+<li>	Avoid the need to recompile existing code running in
+	existing executors (such as <tt>std::thread</tt>) that
+	provide TLS.
+<li>	Recruit sanitizer developers to help identify issues in
+	new code and in standard-library code related to this change.
+</ol>
+
+<p>
+The next section exercises these goals by attempting to apply them
+to the TLS <tt>errno</tt> facility as used by the standard math library,
+in the hope of sparking productive discussion.
+Note that when multiple lightweight executors run concurrently in the
+context of a single <tt>std::thread</tt>, setting <tt>errno</tt>
+implicitly (and for some, surprisingly) invokes
+undefined behavior, so a fix is a matter of some importance.
+At a minimum, lightweight executors that do not support TLS need to
+state that attempts to access TLS results in undefined behavior.
+
+<h2>The Curious Case of <tt>errno</tt> and the Standard Math Library</h2>
+
+<p>
+C++ provides a per-<tt>std::thread</tt> facility named <tt>errno</tt> (19.4) in
+order to provide POSIX compatibility.  This is also required to allow C++'s
+standard math library (26) maintain compatibility with that of C.  Section 7.12
+of the C standard specifies that <tt>math_errhandling &amp; MATH_ERRNO</tt>
+being non-zero indicates that certain errors are available via <tt>errno</tt>.
+Furthermore, Section 19.4 of the C++ standard specifies that <tt>errno</tt> is
+provided on a per-thread basis.  Therefore, <tt>errno</tt> is frequently
+implemented using TLS, which in turn means that the math library's use
+of <tt>errno</tt> forms an excellent initial test case for changes to TLS.
+
+<h3>Preferred Approach: <tt>status_value</tt></h3>
+
+<p>
+The preferred approach is to provide alternative wrappers for the functions in a
+new namespace, so that <tt>errno</tt>-oblivious code could simply assign the
+return value to a variable, relying on user-defined conversions to take up the
+slack.  The hope is that LEWG's
+proposed <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0262r0.html"><tt>status_value</tt></a>
+can serve this purpose, since it would make math functions look the same as
+other APIs being considered for inclusion in the Standard.
+
+
+<p>
+To truly "feel" the same as current <tt>errno</tt>-using math functions,
+the <tt>status_value</tt> class would need to be extended with an implicit
+conversion to return its <tt>Value</tt>, which we'll suggest to LEWG. It was
+also suggested that floating-point math functions could store their error status
+using <tt>NaN</tt> bits, which the current <tt>status_value</tt> design forbids
+(it must be able to hold both a status <em>and</em> a value).
+
+<p>
+Code sensitive to <tt>errno</tt> could assign the return value to
+a <tt>status_value</tt> and then extract both the <tt>errno</tt> and the return
+value.
+
+<p>
+This approach allows <tt>errno</tt>-ignoring code to run safely in light-weight
+executors, with modest changes for code that pays attention to <tt>errno</tt>.
+One way of preventing silent miscomputation by <tt>errno</tt>-ignoring code
+is to use exceptions, which <tt>status_value</tt> also supports.
+
+<h3>Alternative Approach: <tt>math_result</tt></h3>
+
+<p>
+If adding an implicit convertion to <tt>status_value</tt> to return
+its <tt>Value</tt> proves infeasible, it is of course easy to create a return
+type solely for the use of the math library.  We expect LEWG to provide guidance
+in this area. The following fanciful code defines a new <tt>class
+math_result</tt> for this purpose:
+
+<blockquote>
+<pre>
+ 1 namespace std {
+ 2 namespace experimental {
+ 3
+ 4 enum class math_error {
+ 5   divide_by_zero,
+ 6   inexact,
+ 7   overflow,
+ 8   underflow,
+ 9   invalid,
+10   // ...
+11 };
+12
+13 template &lt;typename T&gt;
+14 class math_result {
+15   math_error e;
+16   T val;
+17
+18  public:
+19   explicit operator math_error() const { return e; }
+20   operator T() const { return val; }
+21 };
+22
+23 math_result&lt;float&gt; tgamma(float x) {
+24   math_result&lt;float&gt; ret;
+25
+26   ret.val = tgammaf(x , &amp;ret.e);
+27   return ret;
+28 }
+29
+30 math_result&lt;double&gt; tgamma(double x) {
+31   math_result&lt;double&gt; ret;
+32
+33   ret.val = tgamma(x, &amp;ret.e);
+34   return ret;
+35 }
+36
+37 }  // namespace experimental
+38
+39 template &lt;&gt;
+40 struct is_error_code_enum&lt;experimental::math_error&gt; : std::true_type {};
+41
+42 }  // namespace std
+</pre>
+</blockquote>
+
+<h2>Paths Not Taken</h2>
+
+<p>
+The following sections serve as tombstones for approaches described
+in earlier versions of this paper that are now deprecated.
+
+<ol>
+<li>	Restricting configuration.
+<li>	Adding <tt>errno</tt> parameter via function overloading.
+<li>	Limit TLS via a class-hierarchy-like approach.
+<li>	Use IEEE NaNs or other machine state to record errors.
+</ol>
+
+<h3>Restricting Configuration</h3>
+
+<p>
+One approach is to require that <tt>math_errhandling &amp; MATH_ERREXCEPT</tt>
+be non-zero (as is required for IEC 60559) and that <tt>math_errhandling &amp;
+MATH_ERRNO</tt> be zero in all cases where math library functions are invoked
+from executors that do not provide TLS.  Note that <tt>math_errhandling</tt> is
+global and constant, which means that it cannot have different values in
+different contexts of the same execution.  However, this approach cannot be used
+in conjunction with existing code that invokes math functions and
+tests <tt>errno</tt>.  This could in turn be dealt with by forbidding use of
+code that checks for math errors using <tt>errno</tt>, but this would have the
+undesirable effect of acting as a barrier to the adoption of light-weight
+executors.  It also makes it difficults to check for math errors at all.
+
+<h3>Adding <tt>errno</tt> Parameter Via Function Overloading</h3>
+
+<p>
+Another approach is to use function overloading, so that an additional
+<tt>double sqrt(double, int *)</tt> declaration could be used in
+light-weight executors.
+Note that in some implementations this could require modifying the
+underlying C library in order to bypass <tt>errno</tt> setting.
+Code invoked both from light-weight and heavy-weight executors would
+need to use the new delaration, but code invoked only from
+heavy-weight executors could continue using the old API, consistent
+with the goals preserving existing source and binary code.
+It is tempting to instead overload on the return value, but C++
+of course does not support this notion.
+A (probably partial) list of new APIs is as follows:
+
+<ul>
+<li>	<tt>double acos(double x, int *errnm);</tt>
+<li>	<tt>float acosf(float x, int *errnm);</tt>
+<li>	<tt>long double acosl(long double x, int *errnm);</tt>
+<li>	<tt>double asin(double x, int *errnm);</tt>
+<li>	<tt>float asinf(float x, int *errnm);</tt>
+<li>	<tt>long double asinl(long double x, int *errnm);</tt>
+<li>	<tt>double atan2(double y, double x, int *errnm);</tt>
+<li>	<tt>float atan2f(float y, float x, int *errnm);</tt>
+<li>	<tt>long double atan2l(long double y, long double x, int *errnm);</tt>
+<li>	<tt>double acosh(double x, int *errnm);</tt>
+<li>	<tt>float acoshf(float x, int *errnm);</tt>
+<li>	<tt>long double acoshl(long double x, int *errnm);</tt>
+<li>	<tt>double atanh(double x, int *errnm);</tt>
+<li>	<tt>float atanhf(float x, int *errnm);</tt>
+<li>	<tt>long double atanhl(long double x, int *errnm);</tt>
+<li>	<tt>double cosh(double x, int *errnm);</tt>
+<li>	<tt>float coshf(float x, int *errnm);</tt>
+<li>	<tt>long double coshl(long double x, int *errnm);</tt>
+<li>	<tt>double sinh(double x, int *errnm);</tt>
+<li>	<tt>float sinhf(float x, int *errnm);</tt>
+<li>	<tt>long double sinhl(long double x, int *errnm);</tt>
+<li>	<tt>double exp(double x, int *errnm);</tt>
+<li>	<tt>float expf(float x, int *errnm);</tt>
+<li>	<tt>long double expl(long double x, int *errnm);</tt>
+<li>	<tt>double exp2(double x, int *errnm);</tt>
+<li>	<tt>float exp2f(float x, int *errnm);</tt>
+<li>	<tt>long double exp2l(long double x, int *errnm);</tt>
+<li>	<tt>double expm1(double x, int *errnm);</tt>
+<li>	<tt>float expm1f(float x, int *errnm);</tt>
+<li>	<tt>long double expm1l(long double x, int *errnm);</tt>
+<li>	<tt>int ilogb(double x, int *errnm);</tt>
+<li>	<tt>int ilogbf(float x, int *errnm);</tt>
+<li>	<tt>int ilogbl(long double x, int *errnm);</tt>
+<li>	<tt>double log(double x, int *errnm);</tt>
+<li>	<tt>float logf(float x, int *errnm);</tt>
+<li>	<tt>long double logl(long double x, int *errnm);</tt>
+<li>	<tt>double log10(double x, int *errnm);</tt>
+<li>	<tt>float log10f(float x, int *errnm);</tt>
+<li>	<tt>long double log10l(long double x, int *errnm);</tt>
+<li>	<tt>double log1p(double x, int *errnm);</tt>
+<li>	<tt>float log1pf(float x, int *errnm);</tt>
+<li>	<tt>long double log1pl(long double x, int *errnm);</tt>
+<li>	<tt>double log2(double x, int *errnm);</tt>
+<li>	<tt>float log2f(float x, int *errnm);</tt>
+<li>	<tt>long double log2l(long double x, int *errnm);</tt>
+<li>	<tt>double logb(double x, int *errnm);</tt>
+<li>	<tt>float logbf(float x, int *errnm);</tt>
+<li>	<tt>long double logbl(long double x, int *errnm);</tt>
+<li>	<tt>double scalbn(double x, int n, int *errnm);</tt>
+<li>	<tt>float scalbnf(float x, int n, int *errnm);</tt>
+<li>	<tt>long double scalbnl(long double x, int n, int *errnm);</tt>
+<li>	<tt>double scalbln(double x, long int n, int *errnm);</tt>
+<li>	<tt>float scalblnf(float x, long int n, int *errnm);</tt>
+<li>	<tt>long double scalblnl(long double x, long int n, int *errnm);</tt>
+<li>	<tt>double hypot(double x, double y, int *errnm);</tt>
+<li>	<tt>float hypotf(float x, float y, int *errnm);</tt>
+<li>	<tt>long double hypotl(long double x, long double y, int *errnm);</tt>
+<li>	<tt>double pow(double x, double y, int *errnm);</tt>
+<li>	<tt>float powf(float x, float y, int *errnm);</tt>
+<li>	<tt>long double powl(long double x, long double y, int *errnm);</tt>
+<li>	<tt>double sqrt(double x, int *errnm);</tt>
+<li>	<tt>float sqrtf(float x, int *errnm);</tt>
+<li>	<tt>long double sqrtl(long double x, int *errnm);</tt>
+<li>	<tt>double erfc(double x, int *errnm);</tt>
+<li>	<tt>float erfcf(float x, int *errnm);</tt>
+<li>	<tt>long double erfcl(long double x, int *errnm);</tt>
+<li>	<tt>double lgamma(double x, int *errnm);</tt>
+<li>	<tt>float lgammaf(float x, int *errnm);</tt>
+<li>	<tt>long double lgammal(long double x, int *errnm);</tt>
+<li>	<tt>double tgamma(double x, int *errnm);</tt>
+<li>	<tt>float tgammaf(float x, int *errnm);</tt>
+<li>	<tt>long double tgammal(long double x, int *errnm);</tt>
+<li>	<tt>long int lrint(double x, int *errnm);</tt>
+<li>	<tt>long int lrintf(float x, int *errnm);</tt>
+<li>	<tt>long int lrintl(long double x, int *errnm);</tt>
+<li>	<tt>long long int llrint(double x, int *errnm);</tt>
+<li>	<tt>long long int llrintf(float x, int *errnm);</tt>
+<li>	<tt>long long int llrintl(long double x, int *errnm);</tt>
+<li>	<tt>long int lround(double x, int *errnm);</tt>
+<li>	<tt>long int lroundf(float x, int *errnm);</tt>
+<li>	<tt>long int lroundl(long double x, int *errnm);</tt>
+<li>	<tt>long long int llround(double x, int *errnm);</tt>
+<li>	<tt>long long int llroundf(float x, int *errnm);</tt>
+<li>	<tt>long long int llroundl(long double x, int *errnm);</tt>
+<li>	<tt>double fmod(double x, double y, int *errnm);</tt>
+<li>	<tt>float fmodf(float x, float y, int *errnm);</tt>
+<li>	<tt>long double fmodl(long double x, long double y, int *errnm);</tt>
+<li>	<tt>double remainder(double x, double y, int *errnm);</tt>
+<li>	<tt>float remainderf(float x, float y, int *errnm);</tt>
+<li>	<tt>long double remainderl(long double x, long double y, int *errnm);</tt>
+<li>	<tt>double remquo(double x, double y, int *quo, int *errnm);</tt>
+<li>	<tt>float remquof(float x, float y, int *quo, int *errnm);</tt>
+<li>	<tt>long double remquol(long double x, long double y, int *quo, int *errnm);</tt>
+<li>	<tt>double nextafter(double x, double y, int *errnm);</tt>
+<li>	<tt>float nextafterf(float x, float y, int *errnm);</tt>
+<li>	<tt>long double nextafterl(long double x, long double y, int *errnm);</tt>
+<li>	<tt>double fdim(double x, double y, int *errnm);</tt>
+<li>	<tt>float fdimf(float x, float y, int *errnm);</tt>
+<li>	<tt>long double fdiml(long double x, long double y, int *errnm);</tt>
+<li>	<tt>double fma(double x, double y, double z, int *errnm);</tt>
+<li>	<tt>float fmaf(float x, float y, float z, int *errnm);</tt>
+<li>	<tt>long double fmal(long double x, long double y, long double z, int *errnm);</tt>
+</ul>
+
+<p>
+Note that new APIs need be provided only for those math functions that
+set <tt>errno</tt>.
+Note also that because C does not provide function overloading,
+different names will need to be used should C adopt similar functionality.
+
+<p>One might expect some dissatisfaction with the invention of more than
+100 new functions, especially given that a great many uses of these functions
+ignore <tt>errno</tt>.
+Although one can argue that ignoring <tt>errno</tt> is a bad idea,
+one might also expect strenuous objections to pointless modifications
+of existing <tt>errno</tt>-ignoring code.
+
+<h3>Machine Registers: The Ultimate TLS Implementation</h3>
+
+<p>
+The logically extreme TLS implementation is a reserved machine register,
+so extreme <tt>errno</tt> would simply reserve a register for <tt>errno</tt>.
+If common code was to be invoked from both light-weight and heavy-weight
+executors, a simple solution is to always reserve a register for
+<tt>errno</tt>.
+
+<p>
+Of course, this approach simply does not scale with increasing numbers
+of TLS objects, as even modern machines
+have a rather limited number of registers.
+In addition, some TLS constructors might not react well to finding that
+all of their data was in machine registers, especially those constructors
+expecting to create linked structures.
+Neverthless, this approach might work well for restricted quantities of
+TLS data, such as that which might be needed for a non-hosted small-library
+implementation.
+
+<h3>Applying Lessons from Class Hierarchies</h3>
+
+<p>
+Suppose that we (very loosely) modeled TLS data with a class-like
+hierarchy.
+The &ldquo;base class&rdquo; would contain only that TLS data required by the
+core language, and &ldquo;subclasses&rdquo; would add TLS data required by
+libraries and by the user application.
+Ignoring the analogies with abstract classes for the moment, light-weight
+executors might confine themselves to TLS data relatively high up in
+this TLS hierarchy, while heavy-weight executors might take the entire
+class hierarchy, lock, stock, and barrel.
+
+<p>
+Any executor expecting to use the math library would need to maintain
+that part of the TLS hierarchy containing <tt>errno</tt>.
+Future work might identify a minimum subset for various types of
+executors.
+
+<h3>Use Hardware State (NaNs) to Record Errors</h3>
+
+<p>
+IEEE floating-point not-a-number (NaN) values were designed to
+record error conditions and to flow them through the remainder of the
+computation.
+Non-IEEE hardware often has other facilities for this purpose,
+and some IEEE hardware has cheaper ways to maintain this information.
+
+<p>
+The key point here is to provide an API to read this information out.
+The API must take a floating-point number as input for the NaN case,
+however, implementations that do not use NaNs are free to ignore
+this number and instead read out hardware state.
+The return value is an integer <tt>errno</tt>.
+
+<blockquote>
+<pre>
+ 1 int recent_errno(float x);
+ 2 int recent_errno(double x);
+ 3 int recent_errno(long double x);
+ 4
+ 5 extern "C" {
+ 6   int recent_fp_errno(float x);
+ 7   int recent_dp_errno(double x);
+ 8   int recent_ldp_errno(long double x);
+ 9 }
+</pre>
+</blockquote>
+
+<p>
+This approach only applies to functions that return a floating-point
+number.
+Functions that return integral types (integer log functions and
+round-to-integer functions) must use some other alternative to stop
+using <tt>errno</tt>.
+
+<p>
+Note that NaNs can be used, if desired, in conjunction with either
+the preferred <tt>status_value</tt> approach or the alternative
+<tt>math_result</tt> approach.
+
+<h2>Additional Information</h2>
+
+<p>
+Floating-point state is stored on a per-thread basis, which means that
+if a light-weight executor can be preempted or migrated among
+<tt>std::thread</tt> instance, things like rounding modes and
+error/exception indications can be subject to unscheduled revision.
+
+<!-- Test/c/ornatereturn.C -->
+
+</body></html>

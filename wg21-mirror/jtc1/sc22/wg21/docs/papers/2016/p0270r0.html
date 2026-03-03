@@ -1,0 +1,165 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+ "http://www.w3.org/TR/html4/strict.dtd">
+<html><head>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8">
+<title>P0270R0: Removing C dependencies from signal handler wording</title>
+</head>
+<body>
+<table>
+	<tr>
+                <th>Doc. No.:</th>
+                <td>WG21/P0270R0</td>
+        </tr>
+        <tr>
+                <th>Date:</th>
+                <td>2016-02-12</td>
+        </tr>
+        <tr>
+                <th>Author:</th>
+                <td>Hans-J. Boehm</td>
+        </tr>
+        <tr>
+                <th>Email:</th>
+                <td><a href="mailto:hboehm@google.com">hboehm@google.com</a></td>
+        </tr>
+</table>
+	
+<h1>P0270R0: Removing C dependencies from signal handler wording</h1>
+<p>
+This topic was briefly addressed on P0063R0, but the authors subsequently decided
+to address it separately.
+<p>
+The current C++ working draft restricts signal handlers to functions in
+the intersection of C and C++.  We believe this is dubious for at least three
+reasons:
+<ul>
+<li> The semantics implicitly change if we refer to a newer version of
+the C standard.  P0063R1 proposes to normatively refer to C11 instead of C99.
+This, for example, raises the question of weather thread_local variables,
+which are supported in C11 with slightly different keyword conventions,
+are now allowed in signal handlers.  This was never our intent, since it
+would preclude some implementation techniques.
+<li> The current wording is not as clear as it should be.  For example,
+Richard Smith points out that C functions, and hence POFs cannot have
+C linkage, since there is no way to specify C linkage in C.
+<li> The current restrictions don't appear to reflect those that
+are really necessary or desirable in signal handlers.  There is no good reason
+that signal handlers can't mention <tt>nullptr</tt> for example.
+The real restrictions we need are that such functions should have
+C linkage, should not introduce data races (already addressed by the
+"potentially concurrent" notion in 1.10), and if they avoid certain
+facilities that are frequently implemented in a signal-unsafe manner,
+particularly anything that may require a hidden lock.
+</ul>
+<p>
+We propose to remedy this by replacing the notion of a "POF",
+"plain old function" with a "signal-safe function" defined
+entirely in C++ terms.  The definition we use largely excludes use
+of the library, thus avoiding any need to reimplement that in a signal-safe
+manner.  This makes the definition rather restrictive.  But we believe
+it remains at least theoretically possible for the user to write very
+sophisticated signal handlers through the use of atomics.
+<p>
+We expect that, although these changes are clearly substantive, there is
+no real practical impact.  Existing implementations and user code
+should continue to work unchanged (or remain as broken as they always were.)
+<p>
+We do not exclude lambda expressions from signal handlers, on the assumption
+that the lambda expression itself should not require memory allocation.  We do
+not say anything about non-function-local statics, since it should not be
+possible to trigger construction or destruction from within a signal handler.
+<p>
+We somewhat separably propose to make the behavior of non-signal-safe
+functions in signal handlers undefined, instead of implementation-defined.
+We are not aware of any implementations that actually attempt to define this.
+<p>
+We do not exclude lambda expressions from signal handlers, on the assumption
+that the lambda expression itself should not require memory allocation.
+<p>
+The restriction on static intialization warrants discussion.
+We currently allow even the call of a POF that doesn't access any
+globals to trigger static initialization (3.6.2p4 [basic.start.init]).
+It's not clear how to make that work if a thread already part way through the
+initialization receives the signal.  This apears to me to be a
+preexisting problem that this exposes, rather than a problem
+introduced by this change.
+<p>
+It may make sense to eventually relax these restrictions invoked through
+an explicit synchronous <tt>raise()</tt> call.  It's unclear that this
+is important enough to bother.
+<p>
+These changes are arguably not essential for the adoption of the P0063.
+But we believe they are highly desirable and should follow P0063 in
+fairly short order.
+<h2>Proposed wording changes:</h2>
+<p>
+Update 18.10p10 [support.runtime] as follows:
+<blockquote>
+<p>
+<del>The common subset of the C and C ++ languages consists of all
+declarations, definitions, and expressions that may appear in a well formed C
+++ program and also in a conforming C program.</del> A <del>POF (“plain old
+function”)</del><ins> <i>signal-safe function"</i></ins> is a function that
+<del>uses only features from this common subset, and that does not directly or
+indirectly use any function that is not a POF,</del> <ins>has C linkage, and
+neither directly nor indirectly:</ins>
+<ul>
+<li><ins>Calls any library functions defined in clause 18 through 30, except
+that it may call a function explicitly identified as signal-safe, and</ins> except
+that it may use <ins>operations on <tt>nullptr_t</tt> and</ins> plain lock-free
+atomic operations. A plain lock-free atomic operation is an invocation of a
+function f from Clause 29, such that <del>f is not a member function, and</del>
+either f is the function atomic_is_lock_free(), <ins>or the member function
+is_lock_free(),</ins> or for every atomic argument A passed to f, <ins>and
+every atomic object of class A on which a member function is invoked, </ins>
+atomic_is_lock_free(A) yields true.  <del>All signal handlers shall have C
+linkage.</del> <ins>[Note: This implicitly excludes the use of new and delete
+expressions that rely on a library-provided memory allocator. -- end
+note]</ins>
+<li><ins>Accesses a thread duration object.</ins>
+<li><ins>Throws an exception.</ins>
+<li><ins>Initializes a variable of static duration and the initialization
+is not a static initialization.</ins>
+</ul>
+<p>
+The behavior of any function other than a <del>POF</del><ins>signal-safe
+function</ins> used as a signal handler in a C ++ program is
+<del>implementation-defined</del> <ins>undefined</ins>.
+<p>
+The <tt>signal()</tt> function is signal-safe.
+</blockquote>
+<p>
+We suggest the following additions, partially as examples.  We expect that a few
+other functions should also eventually be declared signal-safe, but these are
+among the more blatant cases. <tt>abort()</tt> and <tt>quick_exit()</tt>
+are treated as safe by C.
+<p>
+Add after the title of 18.3.2.4 [numeric.limits.members]:
+<blockquote>
+<p>
+<ins>Each member function defined in this section is signal-safe (18.10 [support.runtime]).</ins>
+</blockquote>
+<p>
+Add at the end of 18.5p3 [support.start.term]:
+<blockquote>
+<p>
+<ins>The _Exit() function is signal-safe (18.10 [support.runtime]).</ins>
+</blockquote>
+<p>
+Add at the end of 18.5p4 [support.start.term]:
+<blockquote>
+<p>
+<ins>The abort() function is signal-safe (18.10 [support.runtime]).</ins>
+</blockquote>
+<p>
+Add at the end of 18.5p10 [support.start.term]:
+<blockquote>
+<p>
+<ins>The quick_exit() function is signal-safe (18.10 [support.runtime]).
+[Note: It may still be unsafe to call from a handler, because the functions
+registered with <tt>at_quick_exit()</tt> may not be. --end note]</ins>
+</blockquote>
+<h2>Acknowledgment</h2>
+<p>
+Clark Nelson provided many useful suggestions, but not necessarily agreement.
+</html>

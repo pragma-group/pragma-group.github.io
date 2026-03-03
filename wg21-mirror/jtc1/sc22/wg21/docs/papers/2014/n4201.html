@@ -1,0 +1,433 @@
+<h1>Alignment helpers for C++</h1>
+
+<ul>
+<li>Document Number: N4201</li>
+<li>Date: 2014-08-20</li>
+<li>Programming Language C++, Library Evolution Working Group</li>
+<li>Reply-to: Matthew Fioravante <a href="&#109;&#97;&#x69;l&#x74;&#111;:&#x66;&#109;&#x61;&#x74;t&#x68;e&#119;&#x35;&#x38;&#55;&#54;&#64;&#x67;&#109;&#x61;&#x69;&#108;&#46;&#x63;&#x6F;&#x6D;">&#x66;&#109;&#x61;&#x74;t&#x68;e&#119;&#x35;&#x38;&#55;&#54;&#64;&#x67;&#109;&#x61;&#x69;&#108;&#46;&#x63;&#x6F;&#x6D;</a></li>
+</ul>
+
+<p>The latest draft, reference header, and links to past discussions on Github: </p>
+
+<ul>
+<li><a href="https://github.com/fmatthew5876/stdcxx-align">https://github.com/fmatthew5876/stdcxx-align</a></li>
+</ul>
+
+<h1>Introduction</h1>
+
+<p>This proposal adds support for a few mnemonics which are useful for
+low level code which has to manually align blocks of memory. It also adds two
+new alignment casts, which allow safe alignment up or down conversions between differently typed pointers.</p>
+
+<p>This proposal was originally a small part of [<a href="#N3864">N3864</a>] but has been broken out as it is somewhat unrelated to the core
+purpose of that paper.</p>
+
+<p>This proposal is intended for a C++ Technical Specification.</p>
+
+<h1>Impact on the standard</h1>
+
+<p>This proposal is a pure library extension. 
+It does not require any changes in the core language and
+does not depend on any other library extensions.
+The proposal is composed entirely of free functions. The
+proposed functions are added to the <code>&lt;memory&gt;</code> header.
+No new headers are introduced and the implementations 
+of these functions on common modern platforms are trivial.</p>
+
+<h1>Motivation and Design</h1>
+
+<p>Manually aligning blocks of memory is an operation often required
+in low level applications such as memory allocators, simd code, device
+drivers, compression routines, encryption, and binary IO.</p>
+
+<p>The operations <code>is_aligned()</code>, <code>align_up()</code>, and <code>align_down()</code>
+are commonly re-implemented over and over again as macros in C and/or
+inline template functions in C++.</p>
+
+<p>We propose to standardize these 3 simple mnemonics for the following
+reasons:</p>
+
+<ul>
+<li>They are fundamental low level building blocks which are universally applicable to a wide variety of domains.</li>
+<li>There are many applications which could take advantage of these functions today.</li>
+<li>By providing standard library implementations, users do not have to google, write, test, and maintain their own when they need them.</li>
+<li>These are so trivial to implement on most platforms that the an example implementation is included in this paper.</li>
+<li>Implementation-defined behaviors allow implementors to provide deeper access into platform specific memory model.</li>
+</ul>
+
+<h1>Current state of the art</h1>
+
+<p>We currently have <code>std::align</code> in the standard for doing alignment calculations.
+The function <code>std::align</code>
+has one specific use case, that is to carve out an aligned buffer of a known size within a larger buffer.
+In order to use <code>std::align</code>, the user must a priori know the size of the aligned buffer
+they require. Unfortunately in some use cases, even calculating the size of this buffer
+as an input to <code>std::align</code> itself requires doing alignment calculations.
+Consider the following example of using aligned SIMD registers to process a memory buffer.
+The alignment calculations here cannot be done with <code>std::align</code>.</p>
+
+<pre><code>void process(char* b, char* e) {
+  char* pb = std::min((char*)std::align_up(b, sizeof(simd16)), e);
+  char* pe = (char*)std::align_down(e, sizeof(simd16));
+
+  for(char* p = b; p &lt; pb; ++p) {
+    process1(p);
+  }
+  for(char* p = pb; p &lt; pe; p += sizeof(simd16)) {
+    simd16 x = simd16_aligned_load(p);
+    process16(x);
+    simd16_aligned_store(x, p);
+  }
+  for(char* p = pe; p &lt; e; ++p) {
+    process1(p);
+  }
+}
+</code></pre>
+
+<p>We conclude that <code>std::align</code> is much too specific for general alignment calculations. It has a narrow
+use case and should only be considered as a helper function for when that use case is needed.
+<code>std::align</code> could also be implemented using this proposal.</p>
+
+<h2>Implementation vs Undefined behavior</h2>
+
+<p>Consider the following code fragment</p>
+
+<pre><code>void process(char* ptr, char* end) {
+   char* simd_ptr = std::align_down(ptr);
+   char* simd_end = std::align_down(end);
+
+   int128_t simd;
+   simd = simd_load_aligned(simd_ptr);
+   simd &amp;= mask_leading_bits(ptr-simd_ptr);
+   process16(simd_ptr);
+   simd_ptr += sizeof(int128_t);
+
+   for(;simd_ptr &lt; simd_end; ++simd_ptr) {
+ simd = simd_load_aligned(simd_ptr);
+     process16(simd_ptr);
+   }
+   simd = simd_load_aligned(simd_ptr);
+   simd_ptr &amp;= mask_trailing_bits(end - simd_ptr);
+   process16(simd_ptr);
+}
+</code></pre>
+
+<p>If implemented by hand today in C++, this code would trigger
+undefined behavior if <code>simd_ptr</code> and/or <code>simd_end</code> were located
+outside of the <em>memory block</em> containing <code>ptr</code>.</p>
+
+<p>In general, undefined behavior is a reasonable expectation because
+<code>simd_ptr</code> could now point to an invalid or restricted memory address.
+On most modern machines, one can read and write to any memory address
+within the same memory page. Each page is aligned to and is of size <code>PAGE_SIZE</code>,
+which is commonly 4096 bytes. Since simd registers are typically
+nowhere near this size, on these implementations one can safely <code>align_down</code> or
+<code>align_up</code> and arbitrary pointer.</p>
+
+<h1>Terminology</h1>
+
+<p>When we say a <em>memory block</em>, we mean a block of valid memory allocated to the application either on the stack, heap, or elsewhere.
+As is described in &sect;5.7/5 [<a href="#IsoCpp">IsoCpp</a>], the valid set of addresses in this block span from the <code>first address</code>
+of the block up to and including <code>1 + the last address</code>.</p>
+
+<h1>Technical Specification</h1>
+
+<p>We will now describe the additions to the <code>&lt;memory&gt;</code> header. This is a procedural library implemented
+entirely using templated and overloaded free functions.
+Each pre-condition has
+either undefined or implementation defines results and each case is documented below.</p>
+
+<h2>Integral alignment math</h2>
+
+<p>For all of the following, <code>std::is_integral&lt;integral&gt;::value &amp;&amp; !std::is_same&lt;integral&lt;bool&gt;::value == true</code></p>
+
+<pre><code>template&lt;class integral&gt;
+  constexpr bool is_aligned(integral x, size_t a) noexcept;
+</code></pre>
+
+<p><strong>Returns</strong>: <code>true</code> if <code>x == 0</code> or <code>x</code> is a multiple of <code>a</code>.</p>
+
+<pre><code>template&lt;class integral&gt;
+  constexpr integral align_up(integral x, size_t a) noexcept;
+</code></pre>
+
+<p><strong>Returns</strong>: <code>n</code>, where <code>n</code> is the least number <code>&gt;= x</code> and <code>is_aligned(n, a)</code>.</p>
+
+<pre><code>template&lt;class integral&gt;
+  constexpr integral align_down(integral x, size_t a) noexcept;
+</code></pre>
+
+<p><strong>Returns</strong>: <code>n</code>, where <code>n</code> is the greatest number <code>&lt;= x</code> and <code>is_aligned(n, a)</code>.</p>
+
+<h3>Shared Requirements</h3>
+
+<p>The result is undefined if any of:</p>
+
+<ul>
+<li><code>a == 0</code></li>
+<li><code>a</code> is not a power of 2</li>
+<li><code>x &lt; 0</code></li>
+<li><code>integral</code> is a signed type and the result causes an overflow in either <code>integral</code> or its promoted arithmetic type.</li>
+</ul>
+
+<p>The result is 0 if the result is not undefined and any of:</p>
+
+<ul>
+<li><code>integral</code> is an unsigned type and the result causes an overflow in either <code>integral</code> or its promoted arithmetic type.</li>
+</ul>
+
+<h3>Example Implementations</h3>
+
+<p>All of these implementations are trivial, efficient, and portable.</p>
+
+<pre><code>template &lt;class integral&gt;
+  constexpr bool is_aligned(integral x, size_t a) noexcept {
+    return (x &amp; (integral(a) - 1)) == 0;
+  }
+
+template &lt;class integral&gt;
+  constexpr integral align_up(integral x, size_t a) noexcept {
+    return integral((x + (integral(a) - 1)) &amp; ~integral(a-1));
+  }
+
+template &lt;class integral&gt;
+  constexpr integral align_down(integral x, size_t a) noexcept {
+    return integral(x &amp; ~integral(a-1));
+  }
+</code></pre>
+
+<ul>
+<li>Implementations should support all extended integral types.</li>
+<li>On 2's complement machines <code>~integral(a-1)</code> can be optimized to <code>-integral(a)</code>.</li>
+</ul>
+
+<h2>Pointer alignment</h2>
+
+<h3>Pointer Alignment check</h3>
+
+<pre><code>bool is_aligned(const volatile void* p, size_t a);
+</code></pre>
+
+<p><strong>Returns</strong>: <code>true</code> if <code>p == nullptr</code> or <code>p</code> is aligned to <code>a</code>, otherwise return <code>false</code>.</p>
+
+<h4>Requirements</h4>
+
+<p>The result is undefined if any of:</p>
+
+<ul>
+<li><code>a == 0</code></li>
+<li><code>a</code> is not a power of 2</li>
+<li><code>a &gt; std::numeric_limits&lt;uintptr_t&gt;::max()</code> [<em>note</em>: this would require a platform where <code>sizeof(size_t) &gt; sizeof(uintptr_t)</code> <em>--end note</em>].</li>
+</ul>
+
+<p>The result is implementation-defined if the result is not undefined and any of:</p>
+
+<ul>
+<li><code>a &gt; PTRDIFF_MAX</code></li>
+<li><code>p != nullptr</code> and <code>p</code> does not point to an existing <em>memory block</em></li>
+<li>The result does not reside within the same <em>memory block</em> as <code>p</code></li>
+</ul>
+
+<h3>Pointer alignment adjustment</h3>
+
+<p>For all of the following <code>std::is_pointer&lt;pointer&gt;::value == true</code></p>
+
+<pre><code>template &lt;class pointer&gt;
+  pointer align_up(pointer p, size_t a);
+</code></pre>
+
+<p><strong>Returns</strong>: the least pointer <code>t</code> such that <code>t &gt;= p</code> and <code>is_aligned(t, a) == true</code>, or <code>nullptr</code> if <code>p == nullptr</code>.</p>
+
+<pre><code>template &lt;class pointer&gt;
+  pointer align_down(pointer p, size_t a);
+</code></pre>
+
+<p><strong>Returns</strong>: the greatest pointer <code>t</code> such that <code>t &lt;= p</code> and <code>is_aligned(t, a) == true</code>, or <code>nullptr</code> if <code>p == nullptr</code>.</p>
+
+<pre><code>nullptr_t align_up(nullptr_t, size_t) { return nullptr; }
+nullptr_t align_down(nullptr_t, size_t) { return nullptr; }
+</code></pre>
+
+<p>We also add special overloads for <code>nullptr_t</code> because <code>align_up(nullptr, a)</code> and <code>align_down(nullptr, a)</code> will not compile.</p>
+
+<h4>Shared Requirements</h4>
+
+<p>The result is undefined if any of:</p>
+
+<ul>
+<li><code>a == 0</code></li>
+<li><code>a</code> is not a power of 2</li>
+<li><code>a &gt; std::numeric_limits&lt;uintptr_t&gt;::max()</code> [<em>Note</em>: this result would require a platform where <code>sizeof(size_t) &gt; sizeof(uintptr_t)</code> <em>--end note</em>].</li>
+</ul>
+
+<p>The result is implementation-defined if the result is not undefined and any of:</p>
+
+<ul>
+<li><code>a &gt; PTRDIFF_MAX</code></li>
+<li><code>p != nullptr</code> and <code>p</code> does not point to an existing <em>memory block</em></li>
+<li>The result does not reside within the same <em>memory block</em> as <code>p</code></li>
+</ul>
+
+<h3>Example Implementations for Pointer Operations</h3>
+
+<pre><code>bool is_aligned(const volatile void* p, size_t a) {
+  return is_aligned(reinterpret_cast&lt;uintptr_t&gt;(p), a);
+}
+
+template &lt;class pointer&gt;
+  pointer align_up(pointer p, size_t a) {
+    return reinterpret_cast&lt;pointer&gt;(align_up(reinterpret_cast&lt;uintptr_t&gt;(p), a));
+  }
+
+template &lt;class pointer&gt;
+  pointer align_down(pointer p, size_t a) {
+    return reinterpret_cast&lt;pointer&gt;(align_down(reinterpret_cast&lt;uintptr_t&gt;(p), a));
+  }
+</code></pre>
+
+<p>Note that the above assumes the above assume a flat address space and that arithmetic on <code>uintptr_t</code> is
+equivalent to arithmetic on <code>char*</code>. While these conditions prevail for the majority of modern platforms, 
+neither of which is required by the standard. It is entirely possible
+for an implementation to perform any transformation when casting <code>void*</code> to <code>uintptr_t</code> as long the 
+transformation can be reversed when casting back from <code>uintptr_t</code> to <code>void*</code>.</p>
+
+<h2>Alignment casts</h2>
+
+<p>For all of the following, <code>std::is_pointer&lt;pointer&gt;::value == true</code></p>
+
+<p>These functions are designed to become the standard way of doing a <code>reinterpret_cast</code> and an alignment adjustment all in one operation which
+can optionally be checked by the implementation for correctness.</p>
+
+<pre><code>template &lt;class pointer, class U&gt;
+  pointer align_up_cast(U* p, size_t a=alignof(typename std::remove_pointer&lt;pointer&gt;::type))
+</code></pre>
+
+<p><strong>Returns</strong>: the least pointer <code>t</code> where <code>reinterpret_cast&lt;void*&gt;(t) &gt;= reinterpret_cast&lt;void*&gt;p</code> and <code>t</code> is aligned to <code>a</code>, or <code>nullptr</code> if <code>p == nullptr</code>.</p>
+
+<pre><code>template &lt;class pointer, class U&gt;
+  pointer align_down_cast(U* p, size_t a=alignof(typename std::remove_pointer&lt;pointer&gt;::type))
+</code></pre>
+
+<p><strong>Returns</strong>: the greatest pointer <code>t</code> where <code>reinterpret_cast&lt;void*&gt;(t) &gt;= reinterpret_cast&lt;void*&gt;p</code> and <code>t</code> is aligned to <code>a</code>, or <code>nullptr</code> if <code>p == nullptr</code>.</p>
+
+<pre><code>template &lt;class pointer&gt;
+  nullptr_t align_up_cast(nullptr_t, size_t a=1) { (void)a; return nullptr; }
+
+template &lt;class pointer, class U&gt;
+  nullptr_t align_down_cast(nullptr_t, size_t a=1) { (void)a; return nullptr; }
+</code></pre>
+
+<p>Again, we add <code>nullptr_t</code> overloads. </p>
+
+<h3>Shared Requirements</h3>
+
+<p>The result is undefined if any of:</p>
+
+<ul>
+<li><code>a == 0</code></li>
+<li><code>a</code> is not a power of 2</li>
+<li><code>a &gt; std::numeric_limits&lt;uintptr_t&gt;::max()</code> [<em>Note</em>: this would require a platform where <code>sizeof(size_t) &gt; sizeof(uintptr_t)</code> <em>--end note</em>].</li>
+</ul>
+
+<p>The result is implementation-defined if the result is not undefined and any of:</p>
+
+<ul>
+<li><code>a &gt; PTRDIFF_MAX</code></li>
+<li><code>p != nullptr</code> and <code>p</code> does not point to an existing <em>memory block</em></li>
+<li>The result does not reside within the same <em>memory block</em> as <code>p</code></li>
+</ul>
+
+<h3>Example implementation</h3>
+
+<pre><code>template &lt;class pointer, class U&gt;
+  inline pointer align_up_cast(U* p, size_t a=alignof(typename std::remove_pointer&lt;pointer&gt;::type)) {
+    return reinterpret_cast&lt;pointer&gt;(align_up(p, a));
+  }
+
+template &lt;class pointer, class U&gt;
+  inline pointer align_down_cast(U* p, size_t a=alignof(typename std::remove_pointer&lt;pointer&gt;::type)) {
+    return reinterpret_cast&lt;pointer&gt;(align_down(p, a));
+  }
+</code></pre>
+
+<h3>Compiler cast alignment warnings (-Wcast-align)</h3>
+
+<p>Some compilers throw a warning if you cast a type with lesser alignment to a type with greater alignment.</p>
+
+<p>For example, on clang 3.4 [<a href="#clang">clang</a>] with <code>-Wcast-align</code> enabled, the following code has a warning: <code>cast from 'char*' to 'int*' increases required alignment from 1 to 4 [-Wcast-align]</code></p>
+
+<pre><code>int foo(void* f) {
+  return *(int*)(char*)f;
+}
+</code></pre>
+
+<p>Implementations should not fire such warnings for <code>align_up_cast</code> or <code>align_down_cast</code>.</p>
+
+<h1>Use Cases</h1>
+
+<ul>
+<li>Future C++ standardization work on aligned allocators and support for over aligned types.</li>
+<li>Operating system kernels, where pointers are represented or interchangeable with <code>uintptr_t</code></li>
+<li>Device drivers and memory mapped IO</li>
+<li>Custom Memory allocators</li>
+<li>Encryption algorithms</li>
+<li>Hashing algorithms</li>
+<li>IO and serialization</li>
+<li>Simd loops</li>
+<li>Simd aligned loads and stores</li>
+<li>Marshaling data for device drivers</li>
+<li>Formatting data for GPU buffers in Graphics API's such as OpenGL</li>
+</ul>
+
+<h2>Usage Examples</h2>
+
+<p>Compute page boundaries using integers:</p>
+
+<pre><code>uintptr_t addr_in_page = /* something */
+auto page_begin = align_down(addr_in_page, PAGE_SIZE);
+auto page_end = align_up(addr_in_page, PAGE_SIZE);
+</code></pre>
+
+<p>In a disk device driver, optimize reads and write from buffers which are already block size aligned.</p>
+
+<pre><code>void* user_buffer = /* something */
+if(is_aligned(user_buffer, BLOCK_SIZE) {
+   fast_direct_write(user_buffer, size, block_device);
+} else {
+   slow_buffered_write(user_buffer, size, block_device);
+}
+</code></pre>
+
+<p>Cast array of ints to array of simd ints.</p>
+
+<pre><code>int32_t* x = /* something */
+auto* s = align_up_cast&lt;int128_t*&gt;(x);
+</code></pre>
+
+<p>Get a pointer of type <code>float*</code> which is aligned for 16 byte floating operations</p>
+
+<pre><code>float* f = /* something */
+f = align_up(f, 16);
+</code></pre>
+
+<h1>External usage</h1>
+
+<ul>
+<li>Linux kernel alignment macros in C: <code>IS_ALIGNED</code>, <code>ALIGN_MASK</code>, and <code>ALIGN</code> [<a href="#LXR">LXR</a>].</li>
+</ul>
+
+<h1>Acknowledgments</h1>
+
+<ul>
+<li>Thank you to everyone who has been credited by N3864 for also helping with this proposal.</li>
+<li>Special thanks for Melissa Mears, Thiago Macieira, and David Krauss for their help in discussing issues and helping to improve this proposal.</li>
+</ul>
+
+<h1>References</h1>
+
+<ul>
+<li><a name="N3864"></a>[N3864] Fioravante, Matthew <em>N3864 - A constexpr bitwise operations library for C++</em>, Available online at <a href="https://github.com/fmatthew5876/stdcxx-bitops">https://github.com/fmatthew5876/stdcxx-bitops</a></li>
+<li><a name="LXR"></a>[LXR] <em>Linux/include/linux/kernel.h</em> Available online at <a href="http://lxr.free-electrons.com/source/include/linux/kernel.h#L50">http://lxr.free-electrons.com/source/include/linux/kernel.h#L50</a></li>
+<li><a name="IsoCpp"></a>[IsoCpp] <em>ISO C++ standard</em></li>
+<li><a name="clang"></a> <em>"clang" C Language Family Frontend for LLVM</em> Available online at <a href="http://clang.llvm.org/">http://clang.llvm.org/</a></li>
+</ul>

@@ -1,0 +1,921 @@
+<html>
+<head>
+<title>P0221R0: Default comparisons</title>
+
+<style type="text/css">
+  ins { text-decoration:none; font-weight:bold; background-color:#A0FFA0 }
+  .new { text-decoration:none; font-weight:bold; background-color:#D0FFD0 }
+  .rule { background-color:#FFFF40 }
+  .ex { background-color: #D0FFF0 }
+  del { text-decoration:line-through; background-color:#FFA0A0 }  
+  strong { font-weight: inherit; color: #2020ff }
+  .hl { font-weight:bold; color: #ff0000 }
+</style>
+</head>
+
+<body>
+P0221R0<br/>
+revises: N4532<br/>
+Jens Maurer &lt;Jens.Maurer@gmx.net><br/>
+Audience: Evolution Working Group<br/>
+2016-02-10<br/>
+
+<h1>P0221R0: Proposed wording for default comparisons, revision 2</h1>
+
+<h2>Introduction</h2>
+
+This paper presents design rationale and proposed wording to implement
+default comparisons for class types.  It is a revision of N4532 with
+additional updates from the Evolution Working Group session at the
+Kona meeting of WG21 and in-depth discussions with interested parties.
+<strong>Blue text</strong> in the proposed wording indicates changes
+compared to N4532.
+<p>
+
+This paper assumes that the reader is familar with N4475 "Default
+comparisons (R2)" by Bjarne Stroustrup.  In particular, default
+comparisons are assumed to be implicit (i.e. require no extra syntax
+to be available).
+
+
+<h2>Design</h2>
+
+The fundamental open design questions are:
+
+<ul>
+<li>When exactly is a default comparison chosen over a user-declared
+one?</li>
+
+<li>Once chosen, what exactly are the semantics of the default
+comparison?  In particular, which comparison operators on the
+subobjects are looked up where?</li>
+
+</ul>
+
+
+<h3>Aims</h3>
+
+These are general high-level aims and are not all fully satisfied by
+the design presented further below.  The numbering does not indicate a
+priority, but is intended for easier reference.
+
+<ol>
+
+<li>A class author should have no valid reason to write a comparison
+function by hand if the default semantics suffice.</li>
+
+<li>A default comparison yields the same result for the same
+arguments, regardless where the default comparison appears
+(consistency).</li>
+
+<li>Do not invalidate existing code.</li>
+
+<li>Prevent slicing of objects.</li>
+
+<li>Do not impose substantial new burdens on implementers.</li>
+
+<li>Make comparisons and copy-assignment similar.</li>
+
+</ol>
+
+In an ideal world, the comparison operators would be declared
+alongside the class they apply to, i.e. as members or (preferrably) as
+non-members in the immediately enclosing namespace of the
+class. Unconstrained template parameters in comparison operators or
+declarations in unrelated namespaces are considered a bug in the
+user's code.  That said, in order to avoid breaking existing code,
+existing semantics of code are preserved by this proposal as much as
+possible without jeopardizing the other aims.  If in doubt, an error
+is generated instead of silently using a default comparison.
+<p>
+Given aim 3, we're 30+ years late in mandating the ideal world, which
+is too late.  In particular, that means we cannot enforce the
+important principle that x==y appearing in different corners of the
+source code has the same semantics everywhere.  We can, however, make
+sure that the default (if used) has the same semantics everywhere.
+
+<h3>Rules</h3>
+
+<p>
+The following rules reflect the aims above.  Note that they change the
+meaning of existing (arguably broken) code, as highlighted in the
+examples below.  These rules are given in informal language; for a
+precise wording of the rules, refer to the "wording" section below.
+</p>
+
+<p>
+First, we modify the existing rules for overload resolution of the =,
+equality, and relational operators as well as copy construction.  This
+is intended to prevent slicing (aim 4, aim 6). We allow for benign
+slicing when the derived class adds no data members (aim 3), which is
+needed to continue to support tag dispatch for standard library
+algorithms.
+</p>
+
+<blockquote class="rule">
+R1: For a class B and a class D derived from B, attempting to bind a
+<code>const B&</code> parameter of the copy constructor or of the
+operator=, equality, or relational functions to a value of type D
+makes overload resolution fail, unless all other (if any) base classes
+of D are empty and the definition of D declares no data members and no
+virtual functions.
+
+</blockquote>
+
+Second, we introduce declarations (but not definitions) of the default
+comparisons for each class that is defined (aim 1).  Note that a class
+template specialization is a class that is defined when the class
+template is instantiated or explicitly specialized. A friend
+declaration is only visible to argument-dependent lookup, thus we can
+only find it for function calls, but not for taking the address.
+
+<blockquote class="rule">
+R2: For each class that is defined, equality (5.10 expr.eq) and
+relational (5.9 expr.rel) operator functions according to the pattern
+
+<pre>bool operator <em>op</em>(const C&, const C&);</pre>
+
+are implicitly declared (unless there was a preceding user declaration
+with a similar signature), but not yet defined.  (A member declaration
+of <em>op</em> is transformed into the equivalent non-member form by
+introducing the implicit object parameter (13.3.1 over.match.funcs)
+for the check.) The declaration is as-if by a friend declaration
+immediately before the closing brace of the class definition.
+
+</blockquote>
+
+Third, we allow a user declaration of one of those operator functions
+to hide the implicitly-declared one (aim 3):
+
+<blockquote class="rule">
+R3: A user-declared comparison function hides the corresponding
+implicitly-declared one for class C with a similar signature (if any).
+Hiding means that if both appear in a lookup set, only the
+user-declared comparison function is considered in overload
+resolution.
+
+</blockquote>
+
+Fourth, the definition of a default comparison (aim 2, aim 6):
+
+<blockquote class="rule">
+R4: An implicitly-declared comparison function for a class C is
+defined if it is odr-used (3.2 basic.def.odr).  It performs subobject
+decomposition and then subobject comparisons (see "wording" below).
+The subobject comparisons are performed in the context of class C
+as-if immediately before the closing brace of the class definition.
+If subobject comparison would be ill-formed, the comparison is defined
+as deleted.
+
+</blockquote>
+
+Fifth, using both a default comparison and the corresponding
+user-declared comparison is a syntax error (aim 2):
+
+<blockquote class="rule">
+R5: If an expression or the definition of a default comparison uses a
+default comparison, but would use a user-declared comparison if the
+former appeared later in the translation unit, the program is
+ill-formed.  No diagnostic is required if the use and the competing
+declaration are in different translation units.
+
+</blockquote>
+
+Sixth, do not apply user-defined conversions for a homogenous comparison:
+
+<blockquote class="rule">
+R6: In a comparison applied to operands of the same type, no
+user-declared conversions are considered when converting the operands
+to the parameter types of the comparison operator function.
+
+</blockquote>
+
+Seventh, define "similar signature". <em>This could be extended to (some
+kinds of) function templates if desired.</em>
+
+<blockquote class="rule">
+Two operator functions have a <em>similar signature</em> if they
+
+<ul>
+<li>have the same name and,</li>
+
+<li>given a class type C and the types T1 and T2 of corresponding
+parameters, each of T1 and T2 is either C or reference to <em>cv</em>
+C</li>
+
+</ul>
+
+</blockquote>
+
+Note that the wording below takes a slightly different approach by
+reusing the intermediate results of overload resolution to determine
+whether a default comparison should be generated.
+
+
+<h2>Examples</h2>
+
+In the examples, cases where currently well-formed code becomes
+ill-formed or changes semantics is highlighted in <span
+class="hl">red</span>.
+
+
+<h3>Basic case</h3>
+
+<blockquote>
+<pre class="ex">
+struct B { int x; };
+B b;
+bool result = B() == b;   // ok, default== for B
+</pre>
+</blockquote>
+
+<h3>No slicing with defaults</h3>
+
+<blockquote>
+<pre class="ex">
+struct B { int x; };
+struct D : B { int y; };
+B b1, b2;
+D d1, d2;
+
+B b3(b1);             // ok, direct-initialization
+B b4(d1);             // <span class="hl">error</span>, violates R1 for the implicit copy constructor of B
+B b5(static_cast&lt;B&>(d1));   // ok, binds parameter of copy constructor to "lvalue of type B"
+D d3(d1);             // ok, direct-initialization
+D d4(b1);             // error, can't convert B to D
+
+int f(B);
+int i1 = f(b1);       // ok, copy-initialization
+int i2 = f(d1);       // <span class="hl">error</span>, violates R1 for the implicit copy
+int i3 = f(static_cast&lt;B&>(d1));  // ok, binds parameter of copy constructor to "lvalue of type B"
+
+int g(const B&);
+int i4 = g(b1),       // ok, direct reference binding
+int i5 = g(d1);       // ok, direct reference binding to B subobject of d1
+
+void h() {
+  b2 = b1;            // ok, copy-assignment
+  b2 = d1;            // <span class="hl">error</span>, violates R1 for the implicit copy-assignment of B
+  b2 = static_cast&lt;B&>(d1);   // ok, binds parameter of copy-assignment operator to "lvalue of type B"
+  d2 = d1;            // ok, copy-assignment
+  d2 = b1;            // error, can't convert B to D
+}
+
+bool r1 = b1 == b2;   // ok, default== for B
+bool r2 = d1 == d2;   // ok, default== for D
+bool r3 = b1 == d2;   // <span class="hl">error</span>: violates R1 for the default== for B
+</pre>
+</blockquote>
+
+<h3>No slicing with user-declared functions</h3>
+
+<blockquote>
+<pre class="ex">
+struct B {
+  B(const B&);                 // #1
+  B& operator=(const B&);      // #2
+  int x;
+};
+bool operator==(const B&, const B&);
+struct D : B { int y; };
+B b1, b2;
+D d1, d2;
+
+B b3(b1);              // ok, direct-initialization
+B b4(d1);              // <span class="hl">error</span>, violates R1 for the call to #1
+D d3(d1);              // ok, direct-initialization, calls #1 for copying the B subobject of d1
+D d4(b1);              // error, can't convert B to D
+
+int f(B);
+int i1 = f(b1);        // ok, copy-initialization
+int i2 = f(d1);        // <span class="hl">error</span>, violates R1 for the implicit copy
+
+int g(const B&);
+int i3 = g(b1),        // ok, direct reference binding
+int i4 = g(d1);        // ok, direct reference binding to B subobject of d1
+
+void h() {
+  b2 = b1;            // ok, copy-assignment
+  b2 = d1;            // <span class="hl">error</span>, violates R1 for the call to #2
+  d2 = d1;            // ok, copy-assignment
+  d2 = b1;            // error, can't convert B to D
+}
+
+bool r1 = b1 == b2;    // ok, operator== for B
+bool r2 = d1 == d2;    // ok, <span class="hl">default==</span> for D, invokes operator== for B subobjects
+bool r3 = b1 == d2;    // <span class="hl">error</span>: violates R1 for user-declared operator==
+</pre>
+</blockquote>
+
+
+<h3>Benign slicing</h3>
+
+This continues to allow tag dispatch for differentiating iterator
+categories, for example.
+
+<blockquote>
+<pre class="ex">
+struct B { int x; }
+struct D : B { };   // no additional subobjects vs. B
+
+B b1, b2;
+D d1, d2;
+
+B b3(b1);             // ok, direct-initialization
+B b4(d1);             // ok, slicing is harmless and permitted
+D d3(d1);             // ok, direct-initialization
+D d4(b1);             // error, can't convert B to D
+
+int f(B);
+int i1 = f(b1);       // ok, copy-initialization
+int i2 = f(d1);       // ok, slicing is harmless and permitted
+
+int g(const B&);
+int i4 = g(b1),       // ok, direct reference binding
+int i5 = g(d1);       // ok, direct reference binding to B subobject of d1
+
+void h() {
+  b2 = b1;            // ok, copy-assignment
+  b2 = d1;            // ok, slicing is harmless and permitted
+  d2 = d1;            // ok, copy-assignment
+  d2 = b1;            // error, can't convert B to D
+}
+
+bool r1 = b1 == b2;   // ok, default== for B
+bool r2 = d1 == d2;   // ok, <span class="hl">default==</span> for D
+bool r3 = b1 == d2;   // ok, default== for B (see R2; slicing allowed by R1)
+</pre>
+</blockquote>
+
+<h3>Hiding by user-declared functions I</h3>
+
+<blockquote>
+<pre class="ex">
+struct S {
+  bool operator==(const S&);   // #1; note: non-const (user oversight)
+};
+
+S s;
+bool b1 = s == s;               // calls #1
+bool b2 = S() == S();           // error, can't call #1 and no default==
+
+struct S2 { };
+bool operator==(const S2&, const S2&);  // #2
+
+bool b3 = S2() == S2();         // calls #2
+
+struct S3 { };
+S operator==(const S3&, S3&);   // #3 (strange)
+S3 s3;
+S b4 = s3 == s3;                // calls #3; no default==
+S b5 = S3() == S3();            // error, can't call #3 and no default==
+
+</pre>
+
+</blockquote>
+
+<h3>Hiding by user-declared functions II</h3>
+
+<blockquote>
+<pre class="ex">
+struct S { };
+namespace N {
+  bool operator==(const S&, const S&);  // #1
+  bool operator==(const S&, S&);        // #2
+  bool b = S() == S();   // calls #1 (note: some prefer default== or error)
+  S s;
+  bool b2 = S() == s;    // calls #2 (note: some prefer default== or error)
+}
+</pre>
+
+</blockquote>
+
+
+<h3>Hijacking declarations I</h3>
+
+<blockquote>
+<pre class="ex">
+struct S { };
+bool b1 = S() == S();     // <span class="hl">ok, use default==</span>
+namespace N {
+  bool operator==(S,S);   // #1
+  bool b2 = S() == S();   // ok, use N::operator==
+}
+</pre>
+
+</blockquote>
+
+<h3>Hijacking declarations II</h3>
+
+<blockquote>
+<pre class="ex">
+struct S { };              // #1
+struct S2 { S s; };
+namespace N {
+  bool operator==(S,S);    // #2
+  bool b = S2() == S2();   // #3  error
+}
+</pre>
+
+For #3, we use the default== on S2.  Its definition uses the default==
+on S introduced at #1, but that violates R5 at #2.
+
+</blockquote>
+
+
+<h3>User-declared conversions</h3>
+
+<blockquote>
+<pre class="ex">
+struct S {
+  operator int() const;
+};
+bool b = S() == S();        // ok, <span class="hl">default== for S</span>
+</pre>
+
+</blockquote>
+
+
+<h3>Templates I</h3>
+
+<blockquote>
+<pre class="ex">
+struct C { };
+template&lt;class T>
+bool operator==(const T&, const T&);
+bool b = C() == C();           // ok, use operator== template
+</pre>
+
+</blockquote>
+
+
+<h3>Templates II</h3>
+
+<blockquote>
+<pre class="ex">
+template&lt;class T>
+class S { };
+template&lt;class T>
+bool operator==(const S&lt;T>&, const S&lt;T>&);
+S&lt;int> s;
+bool b = s == s;       // use user-declared operator==
+</pre>
+
+<pre class="ex">
+template&lt;class T>
+class S2 {
+  friend bool operator==(const S2&lt;T>&, const S2&lt;T>&) { ... }
+};
+S&lt;int> s;
+bool b2 = s == s;      // uses user-declared operator==
+</pre>
+
+</blockquote>
+
+
+<h3>Templates III (examples by Herb Sutter)</h3>
+
+<blockquote>
+Case 1: User-written == appears as a member of C, or in the same
+namespace as C and mentions C specifically. All of these cases call
+the user-written ==.  Varying the parameter types between C, const C&,
+and C& does not change the outcome, except that the rules preventing
+binding prvalues to lvalue references remain in force.
+
+<pre class="ex">
+// case 1a: obvious case
+struct C1 { 
+  bool operator==(const C1&) const;
+};
+bool b = C1() == C1();                // uses user-declared == for C1
+
+// case 1b: obvious case, non-member
+struct C2 { };
+bool operator==(const C2&, const C2&);
+bool b = C2() == C2();                // uses user-declared == for C2
+
+// case 1c: class template member
+template&lt;class T>
+struct C3 { 
+  bool operator==(const C3&) const;
+};
+bool b = C3() == C3();                // uses user-declared == for C3
+
+// case 1d: function template for a class template
+template&lt;class T> struct C4 { };
+template&lt;class T> bool operator==(const C4&lt;T>&, const C4&lt;T>&);
+bool b = C4() == C4();                // uses user-declared == for C4
+
+
+// case 2a: fully general template
+struct C5 { };
+template&lt;class T> bool operator==(const T&, const T&);
+C5 c5;
+bool b = C5() == C5();              // calls operator function template
+
+// case 2b: same with concept
+struct C6 { };
+template&lt;My_concept T> bool operator==(const T&, const T&);
+bool b = C6() == C6();              // calls operator function template
+
+// case 2c: conversion
+struct C7 { };
+struct X { X(const C7&){} };         // convertible from C7
+bool operator==(const X&, const X&);
+bool b = C7() == C7();               // <span class="hl">uses default== for C7</span>
+</pre>
+</blockquote>
+
+
+<h2>Open Issues</h2>
+
+(none at this time)
+
+
+<h2>Closed Issues</h2>
+
+<ul>
+<li>We generate != from == even if the class doesn't satisfy the
+constraints.  This would only be possible if a user-defined operator==
+exists, of course.  We generate any relational operators other than
+&lt; if both user-defined == and &lt; exist.  Example:
+
+<pre>
+  struct S {
+    int i = 0;
+  };
+  bool operator==(const S&, const S&)
+  { return true; }
+
+  int f() {
+    S() != S();    // well-formed, yields false
+  }
+</pre>
+
+</li>
+
+<li>A class with a mutable member does not get a memberwise operator==
+or operator&lt; (deviating from N4475 page 17).</li>
+
+<li><code>struct S { int a[3]; }</code> will acquire generated
+comparison functions, but top-level (standalone) <code>int[3]</code>
+(i.e. an array not wrapped in a struct) will not.</li>
+
+<li>"T has operator op declared" is interpreted to mean: there is a
+viable function for x op y, where x and y are lvalues of type
+T. Examples:
+
+<pre>
+struct A { };
+void operator==(const A&, const A&);            // yes
+void operator==(const A&, int);                 // no
+void operator==(A&, const A&);                  // yes
+void operator==(A&&, volatile A&);              // no
+void operator==(const volatile A&&, const A&);  // no
+void operator==(A, const A&);                   // yes
+template&lt;class T>
+void operator==(const T&, A);                   // yes
+template&lt;class T>
+void operator==(const T&, const T&);            // yes
+template&lt;class T>
+void operator==(T&&, T&&);                      // no
+</pre>
+</li>
+
+<li>What kind of lookup is performed for the operator function name
+when determining that "a class has a given operator declared"?  Usual
+unqualified lookup from which context? Just argument-dependent lookup?
+Something else?  Example:
+<pre>
+struct A { int x, y; } a;
+namespace N {
+  void *operator&lt;(A, A);
+  auto q = a > a;
+}
+</pre>
+
+Consistent with aim 2, we cannot use N::operator&lt;.  This is
+ill-formed to avoid silent surprises.</li>
+
+
+<li>Generation of memberwise operator&lt; relies on memberwise
+operator==.  We do not generate operator&lt; for a class C (implicitly
+using memberwise == in its definition) if we have a user-declared
+operator== for C. The latter expresses special comparison semantics
+for class C, so it's likely that operator&lt; needs to be special as
+well.
+
+Example:
+<pre>
+ struct S {
+   int x;
+ };
+ bool operator==(const S&, const S&);
+
+ S s;
+ bool b = s < s;    // error
+</pre>
+</li>
+
+
+<li><strong>Deviating from the recommendation in N4367 "Comparison in
+C++" by Lawrence Crowl, there is no special case for classes with a
+single member.</strong></li>
+
+</ul>
+
+
+<h2>Wording</h2>
+
+Add at the end of 3.9.2 [basic.compound]:
+
+<blockquote class="new">
+A type <em>cv</em> T <em>supports comparison by subobject</em>
+if T is an array type,
+or is a non-union class type that satisfies the following constraints:
+
+<ul>
+
+<li>T has no virtual base class (clause 10 [class.derived]),</li>
+<li>T has no virtual member function (10.3 [class.virtual]),</li>
+<li>T has no direct mutable member (7.1.1 [dcl.stc]),</li>
+
+<li>T has no direct non-static data member of pointer type (9.2
+[class.mem]), and</li>
+
+<li>T has no user-provided or deleted copy/move constructor or
+assignment operator (12.8 [class.copy]).</li>
+
+</ul>
+
+T <em>supports operator op</em> if overload resolution (13.3.1.2
+[over.match.oper]) finds a viable function for the expression <code>x
+<em>op</em> y</code>, where x and y are lvalues of type T.
+
+<p>
+
+T <em>supports equality comparison by subobject</em> if T supports
+comparison by subobject and does not support operator== and operator!=.
+
+<p>
+
+T <em>supports relational comparison by subobject</em> if T supports
+equality comparison by subobject and does not support operator &lt;,
+operator &lt;=, operator &gt;, and operator &gt;=.
+
+</blockquote>
+
+
+Change in 9 [class] paragraph 7 bullet 6:
+
+<blockquote>
+<ul>
+<li>...</li>
+
+<li>has all non-static data members and bit-fields in the class and
+its base classes <del>first declared in</del> <ins>as direct members
+of</ins> the same class, and</li>
+
+<li>...</li>
+
+</ul>
+
+</blockquote>
+
+Change in 9.2 [class.mem] paragraph 1:
+
+<blockquote>
+The <em>member-specification</em> in a class definition declares the
+full set of members of the class; no member can be added elsewhere.  <ins>A <em>direct
+member</em> of a class is a member of that class that was first
+declared within the class's <em>member-specification</em>.</ins> ...
+
+</blockquote>
+
+Add a new section 9.10 [class.oper]:
+
+<blockquote class="new">
+<b>9.10 Operators [class.oper]</b>
+<p>
+
+[ Note: This section specifies the meaning of relational (5.9
+[expr.rel]) or equality (5.10 [expr.eq]) operators applied to values
+of class or array type. ]
+
+<p>
+Comparing for equality two objects x and y that have the same class or
+array type T (ignoring cv-qualification) is defined as follows:
+
+<ul>
+
+<li>A sequence of corresponding subobjects of x and y is formed by starting
+with a sequence comprising x corresponding to y, and repeatedly
+replacing each element whose type supports equality comparison by
+subobject (3.9.2 [basic.compound]) with a sequence of the
+corresponding subobjects of the direct base classes and direct members
+of that type, in order of declaration or order of increasing array
+subscript.</li>
+
+<li>For each element in the sequence of corresponding subobjects, the
+corresponding subobjects are compared using ==. If this comparison,
+when contextually converted to <code>bool</code>, yields false, no
+further subobjects are compared, and <code>x == y</code> yields false
+and <code>x != y</code> yields true.  If all such comparisons yield
+true, then <code>x == y</code> yields true and <code>x != y</code>
+yields false.</li>
+
+</ul>
+
+<p>
+Comparing two objects x and y that have the same class or array type T (ignoring cv-qualification) is defined as follows:
+
+<ul>
+<li>For x &gt; y, the result is y &lt; x.  For x &gt;= y, the result
+is y &lt;= x.</li>
+
+<li>A sequence of corresponding subobjects of x and y is formed by starting
+with a sequence comprising x corresponding to y, and repeatedly
+replacing each element whose type supports relational comparison by
+subobject (3.9.2 [basic.compound]) with a sequence of the
+corresponding subobjects of the direct base classes and direct members
+of that type, in order of declaration or order of increasing array
+subscript.</li>
+
+<li>For each element in the sequence of corresponding subobjects, the
+corresponding subobjects are compared using ==. If this comparison,
+when contextually converted to bool, yields false for the first time,
+that element is the first differing one.  If the final element is
+reached for a &lt; comparison, that element is the first differing
+one, and is not compared with ==. Otherwise, if all such comparisons
+yield true, there is no first differing element.</li>
+
+<li>If there is no first differing element, the result of the &lt;=
+comparison is true. Otherwise, the corresponding subobjects of the
+first differing element are compared using &lt;. The result of this
+comparison, when contextually converted to bool, is the result of
+the overall comparison.</li>
+
+</ul>
+
+<strong>When comparing corresponding subobjects using == or &lt;, if
+the initial x corresponding y is compared, the context for the use of
+the operator is where the comparison appears, and if a viable function is
+not a member of T or a member of the innermost enclosing namespace of
+T, the program is ill-formed.  Otherwise, the context for the use of
+the operator is immediately before the closing } of the class
+definition of T. [ Note: The context determines operator function
+lookup and access control. ]</strong>
+
+<p>
+
+
+[ Example:
+<pre>
+struct B {
+  int i = 0;
+};
+
+struct S : B {
+  int j = 1;
+};
+
+struct T : S {
+   bool operator>(T) = delete;
+};
+
+void f()
+{
+  B b;
+  S s1, s2;
+  s2.j = 2;
+  s1 == s1;      // yields true
+  s1 != s2;      // yields true
+  s1 &lt; s1;       // yields false
+  s1 &lt; s2;       // yields true
+  s1 == b;       // error: not the same class type
+  T() == T();    // yields true
+  T() &lt; T();     // error: operator> is user-declared
+}
+</pre>
+-- end example ]
+
+</blockquote>
+
+<strong>Add a paragraph before 13.3.1.2 [over.match.oper] paragraph 5:</strong>
+
+<blockquote>
+<ins>For a relational (5.9 [expr.rel]) or equality (5.10 [expr.eq])
+operator where both operands are of the same class type, no
+user-defined conversions are applied to any of the operands.</ins>
+<p>
+For all other operators, no such restrictions apply.
+</blockquote>
+
+
+Add a paragraph after 13.3.1.2 [over.match.oper] paragraph 7:
+
+<blockquote class="new">
+If overload resolution yields no viable function (13.3.2
+[over.match.viable]) for a relational (5.9 [expr.rel]) or equality
+(5.10 [expr.eq]) operator and the operands are of the same class type
+T (ignoring cv-qualification), then:
+
+<ul>
+<li>If the operator is == and T does not support equality comparison
+by subobject, the program is ill-formed.</li>
+
+<li>If the operator is &lt; and T does not support relational comparison by subobject, the program is ill-formed.
+
+<li>Otherwise, the operator is treated as a built-in
+operator and interpreted according to 9.10 [class.oper].</li>
+
+</ul>
+
+<strong>If a comparison operator is treated as a built-in operator in a
+context whose nearest enclosing namespace is N, and a comparison with
+the same operator and the same operand types in another context whose
+nearest enclosing namespace is also N is not treated as a built-in
+operator, the program is ill-formed. No diagnostic is required if the
+two comparisons appear in different translation units.</strong> [ Example:
+
+<pre>
+struct S { };
+bool b = S() == S();   // built-in ==
+
+bool operator==(const S&, const S&);
+S s;
+bool b2 = s == s;      // error: not using built-in ==
+</pre>
+
+-- end example ]
+
+</blockquote>
+
+<strong>Change in 13.3.2 [over.match.viable] paragraph 3</strong>:
+
+<blockquote>
+Second, for F to be a viable function, there shall exist for each
+argument an implicit conversion sequence (13.3.3.1) that converts that
+argument to the corresponding parameter of F. If the parameter has
+reference type, the implicit conversion sequence includes the
+operation of binding the reference, and the fact that an lvalue
+reference to non-const cannot be bound to an rvalue and that an rvalue
+reference cannot be bound to an lvalue can affect the viability of the
+function (see 13.3.3.1.4).  <ins>If F is a</ins>
+<ul>
+<li><ins>copy constructor (12.8 [class.copy]),</ins></li>
+<li><ins>copy assignment operator function, or</ins></li>
+<li><ins>relational (5.9 [expr.rel]) or equality (5.10 [expr.eq]) operator function,</ins></li>
+</ul>
+
+<ins>an implicit conversion sequence shall not bind a parameter of
+type "reference to <em>cv</em> B" to an argument of class type D
+derived from B, unless all non-static data members of D are inherited
+from B and D has no virtual functions and no virtual base
+classes.</ins>
+
+</blockquote>
+
+<strong>Add a new section to Annex C:</strong>
+
+<blockquote class="new">
+<b>C.4.4 Clause 13: Overloading [diff.cpp14.over]</b>
+<p>
+
+13.3.1.2 [over.match.oper]<br/>
+<b>Change:</b> Disallow derived-to-base and user-defined conversions for comparison operators<br/>
+<b>Rationale:</b> Avoid a common source of errors.<br/>
+<b>Effect on original feature:</b> Valid C++ 2014 code may fail to compile or change meaning in this International Standard:<br/>
+<pre>
+  struct B { };
+  bool operator==(const B&, const B&);
+  struct D : B { int *p; };
+  bool b1 = D() == B();     // ill-formed; previously well-formed
+  bool b2 = D() == D();     // ill-formed; previously well-formed
+  struct S { operator int() const; int * p; };
+  bool b3 = S() == S();     // ill-formed; previously well-formed
+</pre>
+
+13.3.2 [over.match.viable]<br/>
+<b>Change:</b> Disallow derived-to-base conversions for copy construction and copy assignment ("slicing").<br/>
+<b>Rationale:</b> Avoid a common source of errors.<br/>
+<b>Effect on original feature:</b> Valid C++ 2014 code may fail to compile or change meaning in this International Standard:<br/>
+<pre>
+  struct B { };
+  struct D : B { int x = 0; };
+  D d;
+  B b1 = d;     // ill-formed; previously well-formed
+  B b2 = static_cast&lt;const B&>(d);   // well-formed
+</pre>
+
+</blockquote>
+
+
+<h2>Acknowledgements</h2>
+
+Thanks to Richard Smith for valuable input, and the majority of the
+drafting presented above.  All errors are mine, of course.  Thanks to
+Bjarne Stroupstrup and Herb Sutter for in-depth discussions.
+
+</body>
+</html>

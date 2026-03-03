@@ -1,0 +1,201 @@
+﻿<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+
+<meta http-equiv="Content-Type" content="text/html;charset=UTF-8">
+
+<style type="text/css">
+
+body { color: #000000; background-color: #FFFFFF; }
+del { text-decoration: line-through; color: #8B0040; }
+ins { text-decoration: underline; color: #005100; }
+
+p.example { margin-left: 2em; }
+pre.example { margin-left: 2em; }
+div.example { margin-left: 2em; }
+
+code.extract { background-color: #F5F6A2; }
+pre.extract { margin-left: 2em; background-color: #F5F6A2;
+  border: 1px solid #E1E28E; }
+
+p.function { }
+.attribute { margin-left: 2em; }
+.attribute dt { float: left; font-style: italic;
+  padding-right: 1ex; }
+.attribute dd { margin-left: 0em; }
+
+blockquote.std { color: #000000; background-color: #F1F1F1;
+  border: 1px solid #D1D1D1;
+  padding-left: 0.5em; padding-right: 0.5em; }
+blockquote.stddel { text-decoration: line-through;
+  color: #000000; background-color: #FFEBFF;
+  border: 1px solid #ECD7EC;
+  padding-left: 0.5empadding-right: 0.5em; ; }
+
+blockquote.stdins { text-decoration: underline;
+  color: #000000; background-color: #C8FFC8;
+  border: 1px solid #B3EBB3; padding: 0.5em; }
+
+table { border: 1px solid black; border-spacing: 0px;
+  margin-left: auto; margin-right: auto; }
+th { text-align: left; vertical-align: top;
+  padding-left: 0.8em; border: none; }
+td { text-align: left; vertical-align: top;
+  padding-left: 0.8em; border: none; }
+
+</style>
+
+<title>Generic lambda-capture initializers, supporting capture-by-move</title>
+</head>
+<body>
+<h1>Generic lambda-capture initializers, supporting capture-by-move</h1>
+
+<p>
+ISO/IEC JTC1 SC22 WG21 N3610 - 2013-03-15
+</p>
+
+<address>
+Ville Voutilainen, ville.voutilainen@gmail.com
+</address>
+
+<h2><a name="Introduction">Introduction</a></h2>
+
+<p>
+C++11 lambdas do not support capture-by-move. There has been
+at least two rejected NB comments on this for C++11, the first one
+was <a href="http://open-std.org/JTC1/SC22/WG21/docs/papers/2009/n2863.html#JP9">JP9 on CD1</a>, the second was <a href="http://open-std.org/JTC1/SC22/WG21/docs/papers/2010/n3118.html#FI8">FI8 on FCD</a>. FI8 refers to a Core reflector
+message by Roshan Naik, where Roshan explains that it would be very useful
+to be able to move-capture containers and other objects that are expensive
+to copy. Furthermore, move-only types like iostreams (especially stringstreams)
+and unique_ptrs can't be captured without wrapping them. This lack of
+cooperation between move semantics and lambdas was briefly discussed
+in the Evolution Working Group in Portland 2012 as one of potential
+extensions that would "complete C++11". Unfortunately, scheduling conflicts
+and lack of time has prevented producing a wording proposal for such
+an extension; this paper tries to explain the intended design.
+</p>
+
+<h2><a name="The_problem_and_its_ugly_work-around">The problem, and its ugly work-around</a></h2>
+<p>
+The following code doesn't work:
+<pre>
+<code>
+#include &lt;memory&gt;
+#include &lt;iostream&gt;
+#include &lt;utility&gt;
+
+template &lt;class T&gt; void run(T&& runnable)
+{
+  runnable();
+};
+
+int main()
+{
+  std::unique_ptr&lt;int&gt; result(new int{42});
+  run([result](){std::cout &lt;&lt; *result &lt;&lt; std::endl;});
+}
+</code>
+</pre>
+The assumption here is that by design, the function object invoked
+by run() is not supposed to capture 'result' by reference. Chances
+are it may run in a separate thread and result is no longer available,
+or for other reasons it really wants a move-constructed object. This
+doesn't work because a unique_ptr isn't copyable.
+</p>
+
+<p>
+The problem has a work-around that should make people's stomach crawl:
+write a wrapper that performs move-on-copy, much like the deprecated
+auto_ptr:
+
+<pre>
+<code>
+#include &lt;memory&gt;
+#include &lt;iostream&gt;
+#include &lt;utility&gt;
+
+template &lt;class T&gt; void run(T&& runnable)
+{
+  runnable();
+};
+
+template &lt;class T&gt; struct evil_wrap
+{
+  T payload;
+  evil_wrap(T&& payload) : payload(std::forward&lt;T&gt;(payload)) {}
+  evil_wrap(evil_wrap& other) : payload(std::move(other.payload)) {}
+};
+
+int main()
+{
+  evil_wrap&lt;std::unique_ptr&lt;int&gt;&gt; result{std::unique_ptr&lt;int&gt;{new int{42}}};
+  run([result](){std::cout &lt;&lt; *result.payload &lt;&lt; std::endl;});
+}
+</code>
+</pre>
+This wrapper arguably makes capture-by-move work for move-only types, but it's tedious
+to get right, and probably not suitable for non-novices, and the
+technique is a polar opposite of what we tried to achieve by
+deprecating auto_ptr and introducing unique_ptr.
+</p>
+
+<h2><a name="Proposed_solution">Proposed solution</a></h2>
+<p>
+Rather than merely add support for capture-by-move, it has been
+suggested that we should add support for generic capture initialization.
+An example was proposed in the Portland 2012 meeting:
+<pre>
+<code>
+[ x { move(x) }, y = transform(y, z), foo, bar, baz ] { ... } 
+</code>
+</pre>
+In this case x is direct initialized by moving x, y is copy initialized with the result of calling transform, and the remainder are captured by value. 
+</p>
+
+<h3><a name="Why_not_ref_ref">Why not capture with &&?</a></h3>
+
+<p>
+It's often asked why we wouldn't just support something like
+<pre>
+<code>
+[&&x] { ... } 
+</code>
+</pre>
+The issue here is that we're not capturing by an rvalue reference, we are
+attempting to move. If we would capture by rvalue reference, the move
+would occur too late, since it's intended to happen at capture time, 
+not at call time. And as long as we're capturing something that has
+a name, we shouldn't do a hidden move from it.
+</p>
+
+<h2><a name="Effect_and_dependencies_to_other_features">Effect and dependencies to other features</a></h2>
+
+<p>
+There are potential similar issues to polymorphic lambdas and concepts. 
+We didn't want to omit the type specifier from parameters of polymorphic
+lambdas, to avoid ambiguities and to allow constraints to be used. With
+generic capture initializers, the type of the capture may be deducible
+from its brace-or-equal-initializer, but we should perhaps consider
+whether we allow specifying the type of the capture, or to allow
+constraining the type. Example:
+
+<pre>
+<code>
+[int x = get_x()] { ... } 
+[Container y{get_container()}] { ... }
+[int z = 5] { ... }
+</code>
+</pre>
+As is probably clear from the example above, such capture initializers
+practically allow specifying named members for a lambda regardless
+of how they are initialized.
+</p>
+
+<h2><a name="Wording">Wording</a></h2>
+
+<p>
+At this time, there unfortunately is no wording proposed.
+</p>
+</body>
+</html>

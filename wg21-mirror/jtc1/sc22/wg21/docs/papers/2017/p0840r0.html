@@ -1,0 +1,178 @@
+<!doctype html>
+<title>Language support for empty objects</title>
+
+<style type="text/css">
+  ins, ins * { text-decoration:none; font-weight:bold; background-color:#A0FFA0 }
+  del, del * { text-decoration:line-through; background-color:#FFA0A0 }
+  #hidedel:checked ~ * del, #hidedel:checked ~ * del * { display:none; visibility:hidden }
+
+blockquote {
+  padding: .5em;
+  border: .5em;
+  border-color: silver;
+  border-left-style: solid;
+}
+
+blockquote.std { color: #000000; background-color: #F1F1F1;
+  border: 1px solid #D1D1D1;
+  padding-left: 0.5em; padding-right: 0.5em; }
+blockquote.stdins { text-decoration: underline;
+  color: #000000; background-color: #C8FFC8;
+  border: 1px solid #B3EBB3; padding: 0.5em; }
+blockquote.stddel { text-decoration: line-through;
+  color: #000000; background-color: #FFEBFF;
+  border: 1px solid #ECD7EC;
+  padding-left: 0.5em; padding-right: 0.5em; }
+
+p.grammarlhs { margin-bottom: 0 }
+p.grammarrhs { margin-left:8em; margin-top:0; margin-bottom:0; text-indent:-4em }
+</style>
+
+<div style="text-align: right; float: right">
+ISO/IEC JTC1 SC22 WG21<br>
+P0840R0<br>
+Richard Smith<br>
+richard@metafoo.co.uk<br>
+2017-10-16<br>
+</div>
+
+<h1>Language support for empty objects</h1>
+
+<h2>Motivation</h2>
+
+<p>
+Classes in generic code often wish to be handed a type from the user (such as
+an allocator) which will commonly be empty, and store an instance of it that
+will be used to customize the class's behavior. The generic code wishes to not
+pay to store the object in the case where it is empty. This is usually
+accomplished via the so-called "Empty Base Optimization" (EBO), whereby the
+class itself, or one of its data members, derives from the provided type, and
+the implementation reuses the "tail padding" of the empty type to store other
+portions of the class's data.
+
+<p>
+EBO introduces a number of problems, however:
+
+<ul>
+<li>Limited applicability: EBO is not available for final classes, nor for
+classes with virtual bases that have non-public destructors.
+<li>Name leakage: member names of base classes are visible to users of the
+derived class (unless shadowed), even if the base class is inaccessible.
+(Access checking is performed after the meaning of the name is identified.)
+In particular, unqualified lookups in code deriving from the class employing
+EBO is affected by names in the EBO base class.
+<li>Implementation awkwardness: EBO requires state that would naturally be
+represented as a data member to be moved into a base class.
+</ul>
+
+An approach without these problems would be preferred.
+
+<h2>Proposal</h2>
+
+<p>
+We propose the addition of an attribute, <tt>[[no_unique_address]]</tt> to
+indicates that a unique address is not required for an non-static data member
+of a class. A non-static data member with this attribute may share its address
+with another object, if it could have zero size as a base class and the objects
+have distinct types.
+
+<p>
+Example:
+
+<pre>
+template&lt;typename Key, typename Value, typename Hash, typename Pred, typename Allocator>
+class hash_map {
+  [[no_unique_address]] Hash hasher;
+  [[no_unique_address]] Pred pred;
+  [[no_unique_address]] Allocator alloc;
+  Bucket *buckets;
+  // ...
+public:
+  // ...
+};
+</pre>
+
+Here, <tt>hasher</tt>, <tt>pred</tt>, and <tt>alloc</tt> could have the same
+address as <tt>buckets</tt> if their respective types are all empty.
+
+<!--
+Specifically, we would change [intro.object]p8 to apply the same rules to
+fields with this attribute as already apply to base class subobjects:
+
+<blockquote class="std">
+Unless an object is a bit-field<ins>, a field with the
+<tt>no_unique_address</tt> attribute,</ins> or a base class subobject of zero size,
+the address of that object is the address of the first byte it occupies.
+Two objects a and b with overlapping lifetimes that are not bit-fields may have the
+same address if one is nested within the other, or if at least one is a base
+class subobject
+<ins>or field with the <tt>no_unique_address</tt> attribute</ins>
+of zero size and they are of different types; otherwise, they have distinct addresses.
+</blockquote>
+-->
+
+<h3>Can we really use an attribute for this?</h3>
+
+<p>
+There is a lack of clarity concerning the problems for which an attribute is a
+reasonable solution. It is generally acknowledged that attributes cannot have
+arbitrary effects on the program semantics, but the precise reason why and its
+impact has less consensus.
+
+<p>
+I propose that the key constraint here is that of program portability: suppose
+a program uses a vendor-specific attribute, or a standard attribute from a
+later version of C++, or even a standard attribute that their implementation
+just doesn't implement yet. The result of compiling their program on that
+implementation should still be a program that behaves correctly, according to
+the specification of the attribute. Therefore I propose the following criterion
+for determining whether an attribute is a valid approach to a problem:
+
+<blockquote>
+compiling a valid program with all instances of a particular attribute ignored
+must result in a correct interpretation of the original program
+</blockquote>
+
+This criterion is satisfied by the proposed <tt>[[no_unique_address]]</tt> attribute
+(and by all existing standard attributes).
+
+<p>
+It is worth noting that the above rule permits an attribute to affect the program's ABI,
+and we would expect the <tt>[[no_unique_address]]</tt> attribute to affect ABI,
+as it is intended to change struct layout.
+
+<h3>Implementation concerns</h3>
+
+<p>
+In practice, implementations distinguish between objects with a known
+most-derived class type, and objects that might be base class subobjects in
+some cases.  For an object that might be a base class subobject,
+implementations are careful not to touch the tail padding of the object,
+because the derived class might be reusing it for some other purpose.
+However, for an object with a known most-derived class, it is sometimes assumed
+that the tail padding "belongs" to the object and thus it is valid to widen a
+store into it.
+
+<p>
+Example:
+
+<pre>
+struct HasTailPadding {
+  HasTailPadding() : a(1), b(2) {}
+  int a;
+  char b;
+};
+</pre>
+
+When emitting a store to the <tt>b</tt> member of <tt>HasTailPadding</tt>, it
+may be profitable to use a 4-byte store instead of a 1-byte store (or even to
+use an 8-byte store to initialize the entire object). This is valid if the
+object is known to be of most-derived type <tt>HasTailPadding</tt>, but is
+otherwise not necessarily correct, as the store may overwrite some member of
+the derived class that was allocated into the tail padding.
+
+<p>
+This proposal would remove the ability for the compiler to perform such
+optimizations in the specific case where the class is empty. The author knows
+of no case where optimizers take advantage of this freedom for empty classes,
+however, so this is believed to be a purely theoretical problem.

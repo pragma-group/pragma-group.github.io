@@ -1,0 +1,409 @@
+<html>
+<head>
+<title>std::is_constant_evaluated</title>
+<style type="text/css">
+blockquote.std { color: #000000; background-color: #F1F1F1;
+                 border: 1px solid #D1D1D1;
+                 padding-left: 0.5em; padding-right: 0.5em; }
+blockquote.stddel { text-decoration: line-through;
+                    color: #000000; background-color: #FFA0A0;
+                    border: 1px solid #ECD7EC;
+                    padding-left: 0.5em; padding-right: 0.5em; }
+
+blockquote.stdins { color: #000000; background-color: #A0FFA0;
+                    border: 1px solid #B3EBB3; padding: 0.5em; }
+
+
+ins { background-color:#A0FFA0; text-decoration: none }
+del { background-color:#FFA0A0; text-decoration: line-through; }
+span.ednote { background-color:#AAAAAA; }
+#hidedel:checked ~ * del, #hidedel:checked ~ * del * { display:none; visibility:hidden }
+
+tab { padding-left: 4em; }
+tab2 { padding-left: 2em; }
+</style>
+</head>
+<body>
+<p align=right>
+	<b>P0595R2, 2018-11-09</b>
+	<br/>CWG, LWG
+</p>
+
+<p align=right>
+	<br/>Richard Smith (richard@metafoo.co.uk)
+	<br/>Andrew Sutton (andrew.n.sutton@gmail.com)
+	<br/>Daveed Vandevoorde (daveed@edg.com)
+</p>
+
+<h1 align="center"><tt>std::is_constant_evaluated()</tt></h1>
+
+<p>
+	<br>R0: Original proposal: <tt>constexpr</tt> operator.
+	<br>R1: Switch to magic predeclared standard library function. Provided initial wording.
+	<br>R2: Moved to <tt>&lt;type_traits&gt;</tt> (no longer predeclared) as requested by LEWG.
+	<br><tab2> Address bugs found by CWG.
+	<br><tab2> Also rebased on N4778. 
+</p>
+	
+<h3>Introduction and Motivation</h3>
+
+<p>
+We propose a library function as follows (declared in the <tt>&lt;type_traits&gt;</tt> header):
+<pre><tt>    namespace std {
+      constexpr bool is_constant_evaluated() noexcept;
+    }
+</pre></tt>
+</p>
+	
+<p>
+This function could be used as follows:
+</p>
+<pre><tt>    constexpr double power(double b, int x) {
+      if (std::is_constant_evaluated() && x &gt;= 0) {
+        // A constant-evaluation context: Use a
+	// constexpr-friendly algorithm.
+        double r = 1.0, p = b;
+        unsigned u = (unsigned)x;
+        while (u != 0) {
+          if (u & 1) r *= p;
+          u /= 2;
+          p *= p;
+        }
+        return r;
+      } else {
+        // Let the code generator figure it out.
+        return std::pow(b, (double)x);
+      }
+    }
+    
+    constexpr double kilo = power(10.0, 3);  // (1)
+    int n = 3;
+    double mucho = power(10.0, n);  // (2)
+    double thousand() {
+      return power(10.0, 3);
+    }
+</pre></tt>
+    
+<p>
+Call (1) occurs in a constant-expression context, and, therefore,
+<tt>std::in_constexpr_call()</tt> will be <tt>true</tt> during the
+computation of <tt>power(10.0, 3)</tt>, which in turn allows the
+evaluation to complete as a constant-expression.
+</p>
+<p>
+Call (2) isn't a constant-expression because <tt>n</tt> cannot be
+converted to an rvalue in a constant-expression context. So it will
+be evaluated in a context where <tt>std::is_constant_evaluated()</tt>
+is <tt>false</tt>; this is known at translation time, and the
+run-time code generated for the function can therefore easily be
+reduced to the equivalent of just
+<pre><tt>    inline double power'(double b, int x) {
+      return std::pow(b, (double)x);
+    }
+</pre></tt>
+</p>
+<p>
+Call (3) is a core constant expression, but an implementation is
+not required to evaluate it at compile time.  We therefore specify
+that it causes <tt>std::is_constant_evaluated()</tt> to produce
+<tt>false</tt>.  It's tempting to leave it unspecified whether
+<tt>true</tt> or <tt>false</tt> is produced in that case, but that
+raises significant semantic concerns: The answer could then
+become inconsistent across various stages of the compilation.
+For example:
+<pre><tt>    int *p, *invalid;
+    constexpr bool is_valid() {
+      return std::is_constant_evaluated() ? true : p != invalid;
+    }
+    constexpr int get() { return is_valid() ? *p : abort(); }
+</pre></tt>
+This example tries to count on the fact that constexpr evaluation
+detects undefined behavior to avoid the non-constexpr-friendly
+call to <tt>abort()</tt> at compile time.  However, if
+<tt>std::is_constant_evaluated()</tt> can return <tt>true</tt>, we
+now end up with a situation where an important run-time check is
+by-passed.
+</p>
+
+<h4>Details</h4>
+<p>
+Ideally, we'd like this function to return <tt>true</tt> when it is evaluated at
+compile time, and <tt>false</tt> otherwise.  However, the standard doesn't actually
+make a distinction between "compile time" and "run time", and hence a more careful
+specification is needed, one that fits the standard framework of "constant
+expressions".
+</p>
+<p>
+Our approach is to precisely identify a set of expressions that are "manifestly constant-evaluated"
+(a new technical phrase) and specify that our new function
+returns <tt>true</tt> during the evaluation of such expressions and <tt>false</tt>
+otherwise.
+</p>
+<p>
+Specifically, we include two kinds of expressions in our set of expressions
+"manifestly constant-evaluated".  The first kind is straightforward:
+Expressions in contexts where the standard already requires a constant result,
+such as the dimension of an array or the initializer of a constexpr variable.
+</p>
+<p>
+The second kind is a little more subtle: Expressions appearing in the initializers
+of variables that are not constexpr, but whose "constant-ness" has a significant
+semantic effect.
+Consider the following example:
+<pre><tt>    template&lt;int&gt; struct X {};
+    constexpr auto f() {
+      int const N = std::is_constant_evaluated() ? 13 : 17;
+      X&lt;N&gt; x1;
+      X&lt;std::is_constant_evaluated() ? 13 : 17&gt; x2;
+    }
+</pre></tt>
+We want to ensure that <tt>x1</tt> and <tt>x2</tt> have the same type.  However,
+the initializer of <tt>N</tt>, in itself, it not required to have a constant
+value.  It's only when we use <tt>N</tt> as a template argument later on that
+the requirement of a constant value arises, but by then a compiler already has
+committed its decision regarding the result of <tt>std::is_constant_evaluated()</tt>.
+In contrast, the second evaluation of <tt>std::is_constant_evaluated()</tt> falls
+squarely in the first kind of expressions "manifestly constant-evaluated".
+</p>
+<p>
+Our approach for the second kind, then, is to specify that the initializer for a
+variable whose "constant-ness" matters for the semantics of the program is also
+"manifestly constant-evaluated" if evaluating it with
+<tt>std::is_constant_evaluated() == true</tt> would produce a constant.
+(The variables for which "constant-ness" matters are those of reference type or 
+non-volatile const integral type because they can be used to form constant values,
+as well as those of non-automatic storage duration because the "constant-ness" of
+their initializers can affect initialization timing.)
+This implies that compilers have to perform a "tentative constant evaluation" for
+the initializers of such variables.  Fortunately, that is already what current
+implementations do.
+</p>
+<p>
+It is worth noting that despite the precise specification proposed here, this
+feature has potential sharp edges.  The following example illustrates that:
+<pre><tt>    constexpr int f() {
+      const int n = std::is_constant_evaluated() ? 13 : 17; // n == 13
+      int m = std::is_constant_evaluated() ? 13 : 17; // m might be 13 or 17 (see below)
+      char arr[n] = {}; // char[13]
+      return m + sizeof(arr);
+    }
+    int p = f(); // m == 13; initialized to 26
+    int q = p + f(); // m == 17 for this call; initialized to 56
+</tt></pre>
+The initializer of <tt>p</tt> (which has static storage duration and therefore
+is "manifestly constant-evaluated") does produce a constant value with
+<tt>std::is_constant_evaluated() == true</tt>, and thus that is the value used
+for the actual evaluation: This results in <tt>m</tt> being initialized to
+<tt>13</tt> during the call to <tt>f()</tt>.  In contrast, The initializer of
+<tt>q</tt> (also "manifestly constant-evaluated") does <i>not</i> produce a
+constant value with <tt>std::is_constant_evaluated() == true</tt> because the
+use of <tt>p</tt> in the initializer is not a core constant expression.  Thus
+the tentative evaluation with <tt>std::is_constant_evaluated() == true</tt> is
+discarded and the actual evaluation finds
+<tt>std::is_constant_evaluated() == false</tt>: This time, <tt>m</tt> is
+initialized to <tt>17</tt> during the call to <tt>f()</tt>.  In other words,
+identical-looking expressions produce distinct results.  A reasonable coding
+guideline in this context is that any dependence on
+<tt>std::is_constant_evaluated()</tt> should not affect the result of the
+computation: The initialization of <tt>m</tt> in the above example is thus
+arguably poor practice.
+</p>
+
+<h4>Notes</h4>
+<p>
+As the introductory example shows, <tt>std::is_constant_evaluated()</tt>
+is useful to enable alternative implementations of functions for
+compile time when the corresponding implementation for run time 
+would not comply to the constraints of core constant expressions.
+A forthcoming important special case of this principle is
+<tt>std::string</tt>: P0578 (already approved by EWG) enables
+constexpr destructors, allocation, and deallocation, which in
+principle allows for the support of constexpr container types.
+However, <tt>std::string</tt> implementations typically include
+a "short string optimization" that is unfriendly to the constexpr
+evaluation constraints: With the facility presented here, the
+implementation of <tt>std::string</tt> can avoid the short
+string optimization when evaluation happens at compile time.
+(In turn, the ability to produce <tt>std::string</tt> objects at
+compile time is expected to be beneficial for reflection
+interfaces.)
+</p>
+
+<p>
+A previous version of this paper was presented in Kona (2017) using
+the special-purpose notation <tt>constexpr()</tt> instead of a (magic)
+library function call.  The following two poll results were
+recorded at the time:
+<blockquote>
+	The constexpr operator as presented?<br/>
+	SF: 4 | F: 13 | N: 7 | A: 2 | SA: 2
+<br/><br/>
+	Same feature with a magic library function?<br/>
+	SF: 5 | F: 12 | N: 5 | A: 2 | SA: 1
+</blockquote>
+</p>
+
+<h3>Wording Changes</h3>
+
+<p>Modify [basic.start.static] paragraph 2 as follows:</p>
+<blockquote style="padding-left: 60px;">
+<del>
+A <i>constant initializer</i> for a variable or temporary object <tt>o</tt> is an initializer whose
+full-expression is a constant expression, except that if <tt>o</tt> is an object, such an initializer
+may also invoke constexpr constructors for <tt>o</tt> and its subobjects even if those objects are of
+non-literal class types. [<i>Note:</i> Such a class may have a non-trivial destructor.
+<i>--end note</i>]
+</del>
+<i>Constant initialization</i> is performed if a variable or temporary
+object with static or thread storage duration is initialized by a constant initializer
+<ins>(_expr.const_)</ins> for the entity. [...]
+</blockquote>
+
+<!--
+<p>Add a bullet [expr.const] paragraph 2 (adjust punctuation dependending on where it is inserted):</p>
+<blockquote style="padding-left: 60px;" class="stdins">
+<ul>
+	<li>a call to <tt>std::is_constant_evaluated()</tt> (_meta.is_constant_evaluated_)
+	    that returns false;</li>
+</blockquote>
+-->
+
+<p>Add a paragraph prior to [expr.const] paragraph 2:</p>
+<blockquote style="padding-left: 60px;" class="stdins">
+A <i>constant initializer</i> for a variable or temporary object <tt>o</tt>
+is an initializer for which interpreting its full-expression as a
+<i>constant-expression</i> results in a constant expression,
+except that if <tt>o</tt> is an object, such an initializer may also
+invoke constexpr constructors for <tt>o</tt> and its subobjects
+even if those objects are of non-literal class types.
+[<i>Note:</i> Such a class may have a non-trivial destructor.
+Within this evaluation, <tt>std::is_constant_evaluated()</tt>
+(_meta.is_constant_evaluated_) returns true.  <i>--end note</i>]
+A variable is <i>usable in constant expressions</i> after its initializing
+declaration is encountered if it is a constexpr variable, or it is of
+reference type or of const-qualified integral or enumeration type, and its
+initializer is a constant initializer.
+</blockquote>
+
+
+<p>Modify [expr.const] paragraph 2 as follows:</p>
+<blockquote style="padding-left: 60px;">
+<ul>
+<li>an lvalue-to-rvalue conversion (7.3.1) unless it is applied to
+<ul>
+  <li><ins>a non-volatile glvalue that refers to an object that is usable in constant expressions, or</ins></li>
+  <li><del>a non-volatile glvalue of integral or enumeration type that refers to a complete non-volatile const
+object with a preceding initialization, initialized with a constant expression, or</del></li>
+  <li><del>a non-volatile glvalue that refers to a subobject of a string literal (5.13.5), or</del></li>
+  <li><del>a non-volatile glvalue that refers to a non-volatile object defined with <tt>constexpr</tt> or a
+     template parameter object (12.1), or that refers to a non-mutable subobject of such an object, or</del></li>
+  <li>a non-volatile glvalue of literal type that refers to a non-volatile object whose lifetime began within
+      the evaluation of <tt>e</tt>;</li>
+</ul>
+</li>
+<li>...</li>
+<li>
+an <i>id-expression</i> that refers to a variable or data member of reference type unless the reference
+has a preceding initialization and either
+<ul>
+<li>it is <del>initialized with a</del> <ins>usable in</ins> constant expression<ins>s</ins> or</li>
+<li>...</li>
+</ul>
+</li>
+<li>...</li>
+</ul>
+</blockquote>
+
+
+
+<p>Add a paragraph to [expr.const] just before the definition of "potentially constant evaluated"
+(currently paragraph 8):</p>
+<blockquote style="padding-left: 60px;" class="stdins">
+An expression or conversion <tt>e</tt> is <i>manifestly constant-evaluated</i> if it is:
+<ul>
+<li>a <i>constant-expression</i>, or</li>
+<li>the condition of a constexpr if statement (_stmt.if_), or</li>
+<li>the initializer of a constexpr variable (_dcl.constexpr_), or</li>
+<li>an immediate invocation, or <span class="ednote">[EDITOR: Only if immediate functions (P1073R3) are integrated]</span></li>  
+<li>a <i>constraint-expression</i> (_temp.constr.decl_) (possibly one
+    formed from the <i>constraint-logical-or-expression</i> of a <i>requires-clause</i>), or</li>
+<li>the initializer of a variable that is usable in constant expressions
+    or has constant initialization.
+    [Footnote: Testing this condition may
+               involve a trial evaluation of its initializer as described above.]</li>
+</ul>
+	</ol>
+	<p>[ <i>Example:</i>
+<pre><tt>  template&lt;bool> struct X {};
+  X&lt;std::is_constant_evaluated()&gt; x; // type X&lt;true&gt;
+  int y;
+  const int a = std::is_constant_evaluated() ? y : 1; // dynamic initialization to 1
+  double z[a];  // ill-formed: "a" is not "usable in constant expressions"
+  const int b = std::is_constant_evaluated() ? 2 : y; // static initialization to 2 
+  int c = y + (std::is_constant_evaluated() ? 2 : y); // dynamic initialization to y+y
+  
+  constexpr int f() {
+    const int n = std::is_constant_evaluated() ? 13 : 17; // n == 13
+    int m = std::is_constant_evaluated() ? 13 : 17; // m might be 13 or 17 (see below)
+    char arr[n] = {}; // char[13]
+    return m + sizeof(arr);
+  }
+  int p = f(); // m == 13; initialized to 26
+  int q = p + f(); // m == 17 for this call; initialized to 56
+</tt></pre>
+  &mdash; <i>end example</i> ]</p>
+</blockquote>
+
+
+
+
+<p>Add a declaration to the synopsis at the beginning of 19.15.2 [meta.type.synop] follows:</p>
+<blockquote style="padding-left: 60px;">
+		<pre><tt>
+	namespace std {
+	  ...
+	  <ins>constexpr bool is_constant_evaluated() noexcept;</ins>
+	  ...
+	}
+		</pre></tt>
+</blockquote>
+
+<p>Add a new section at the end of section 19.15 [meta]</p>
+
+<blockquote style="padding-left: 60px;" class="stdins">
+
+	<h4>19.15.X Constexpr evaluation context  [meta.is_constant_evaluated]</h4>
+
+	<p>
+		<pre><tt>
+constexpr bool is_constant_evaluated() noexcept;
+		</pre></tt>
+	</p>
+	<p><i>Returns:</i> <tt>true</tt> if and only if evaluation of the call occurs within the evaluation
+		of an expression or conversion that is manifestly constant-evaluated (_expr.const_).
+	</p>
+	<p>[ <i>Example:</i>
+<pre><tt>
+  constexpr void f(unsigned char *p, int n) {
+    if (std::is_constant_evaluated()) {  // should not be a constexpr if statement
+      for (int k = 0; k&lt;n; ++k) p[k] = 0;
+    } else {
+      memset(p, 0, n);  // not a core constant expression
+    }
+  }
+</tt></pre>
+  &mdash; <i>end example</i> ]</p>
+</blockquote>
+
+<p>Add a feature test macro to [support.limits.general] Table 35 "Standard library feature test macros":</p>
+
+<blockquote>
+  <table><tr><th>Macro name</th><th>Value</th><th>Header(s)</th></tr>
+    <tr><td><ins><tt>__cpp_lib_is_constant_evaluated</tt></ins></td><td>(at Project Editor's discretion)</td><td><ins><tt>&lt;type_traits&gt;</tt></ins></td></tr>
+  </table>
+</blockquote>
+
+
+</body>
+</html>
+

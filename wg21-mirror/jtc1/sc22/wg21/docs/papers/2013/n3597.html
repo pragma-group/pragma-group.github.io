@@ -1,0 +1,477 @@
+﻿<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+
+<meta http-equiv="Content-Type" content="text/html;charset=UTF-8">
+
+<style type="text/css">
+
+body { color: #000000; background-color: #FFFFFF; }
+del { text-decoration: line-through; color: #8B0040; }
+ins { text-decoration: underline; color: #005100; }
+
+p.example { margin-left: 2em; }
+pre.example { margin-left: 2em; }
+div.example { margin-left: 2em; }
+
+code.extract { background-color: #F5F6A2; }
+pre.extract { margin-left: 2em; background-color: #F5F6A2;
+              border: 1px solid #E1E28E; }
+
+p.function { }
+.attribute { margin-left: 2em; }
+.attribute dt { float: left; font-style: italic;
+                padding-right: 1ex; }
+.attribute dd { margin-left: 0em; }
+
+blockquote.std { color: #000000; background-color: #F1F1F1;
+                 border: 1px solid #D1D1D1;
+                 padding-left: 0.5em; padding-right: 0.5em; }
+blockquote.stddel { text-decoration: line-through;
+                    color: #000000; background-color: #FFEBFF;
+                    border: 1px solid #ECD7EC;
+                    padding-left: 0.5em; padding-right: 0.5em; }
+
+blockquote.stdins { text-decoration: underline;
+                    color: #000000; background-color: #C8FFC8;
+                    border: 1px solid #B3EBB3; padding: 0.5em; }
+
+table { border: 1px solid black; border-spacing: 0px;
+        margin-left: auto; margin-right: auto; }
+th { text-align: left; vertical-align: top;
+     padding-left: 0.8em; border: none; }
+td { text-align: left; vertical-align: top;
+     padding-left: 0.8em; border: none; }
+
+</style>
+
+<title>Relaxing constraints on constexpr functions</title>
+</head>
+
+<body>
+
+<div style="text-align: right; float: right">
+<p>ISO/IEC JTC1 SC22 WG21<br>N3597<br>Richard Smith<br>2013-03-15</p>
+</div>
+
+<h1>Relaxing constraints on <tt>constexpr</tt> functions</h1>
+
+<h2>Overview</h2>
+
+<p>The features of a programming language are more useful and easy to understand
+if they are orthogonal, and can be naturally combined with one another.
+<tt>constexpr</tt> functions currently carry a number of restrictions which
+prevent their natural combination with many other language facilities (for
+instance, <tt>for</tt> loops, variable modifications, exceptions, and so
+on), and make them harder to write. Working around these restrictions often
+requires the sacrifice of expressiveness, and causes programmer frustration.</p>
+
+<p>This paper explores the removal of most of the restrictions on
+<tt>constexpr</tt> function definitions, in order to make them a simpler and
+more uniform extension of runtime C++ code. Idiomatic C++ code would be permitted
+within <tt>constexpr</tt> functions, usually with little or no modification from
+its non-<tt>constexpr</tt> form other than the addition of the
+<tt>constexpr</tt> keyword.</p>
+
+<h2>Problem</h2>
+
+<p>Prior to <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2011/n3268.htm">N3268</a>,
+the body of a <tt>constexpr</tt> function was required to be of the form</p>
+
+<pre class="extract"><code>{ return <i>expression</i>; }</code></pre>
+
+<p>N3268 loosened up the rules to allow (7.1.5/3):</p>
+
+<blockquote class="std">
+<ul><li>null statements,</li>
+    <li><i>static_assert-declaration</i>s,</li>
+    <li><tt>typedef</tt> declarations and <i>alias-declaration</i>s that do not
+        define classes or enumerations,</li>
+    <li><i>using-declaration</i>s,</li>
+    <li><i>using-directive</i>s,</li>
+    <li>and exactly one <code>return</code> statement.</li>
+</ul>
+</blockquote>
+
+<p>These restrictions on <tt>constexpr</tt> function definitions are still very
+severe, and the relaxation of the rules has resulted in them becoming harder to
+teach and to justify. Non-trivial <tt>constexpr</tt> functions tend to be
+complex and to use a style of coding which is unfamiliar to many, because code
+must be contorted to fit within the syntactic constraits, even if it already has
+a pure functional interface.</p>
+
+<p>Consider <tt>std::bitset&lt;N&gt;::all</tt>. Here is one possible
+implementation:</p>
+
+<pre class="extract"><code>template &lt;size_t N&gt;
+bool bitset&lt;N&gt;::all() const noexcept {
+  if (std::any_of(storage, storage + num_full_words, [] (word w) { return ~w; }))
+    return false;
+  if (num_full_words != num_words &amp;&amp; storage[num_full_words] != last_word_mask)
+    return false;
+  return true;
+}</code></pre>
+
+<p>This code is simple and idiomatic, and can make use of other library
+components.  However, if we wish to make this function <tt>constexpr</tt>,
+we must rewrite it:</p>
+
+<pre class="extract"><code>constexpr bool any_unset(word *it, word *end) {
+  return it == end ? false :
+         ~*it ? true :
+         any_unset(it + 1, end);
+}
+
+template &lt;size_t N&gt;
+constexpr bool bitset&lt;N&gt;::all() const noexcept {
+  return !any_unset(storage, storage + num_full_words) &amp;&amp;
+         (num_full_words == num_words ||
+          storage[num_full_words] == last_word_mask);
+}</code></pre>
+
+<p>This implementation suffers from several of the <tt>constexpr</tt>
+restrictions:</p>
+<ul>
+  <li>Most of the algorithms in the standard library cannot be made
+  <tt>constexpr</tt>, because iterators cannot be incremented in a
+  <tt>constexpr</tt> function. We are forced to reimplement
+  <tt>std::any_of</tt> to be <tt>constexpr</tt>-compatible.</li>
+  <li>We cannot pass a lambda to our reimplementation, because lambdas
+  are forbidden in <tt>constexpr</tt> functions.</li>
+  <li><tt>for</tt> loops are forbidden, so we must use recursion to
+  walk over the array.</li>
+  <li><tt>if</tt> is forbidden, so we must use <tt>?:</tt>,
+  <tt>&amp;&amp;</tt>, and <tt>||</tt> instead.</li>
+</ul>
+
+<h2>Alternatives</h2>
+
+<p>Discussion at Portland (October 2012) has identified that support for a
+simple <tt>for</tt>-loop is a minimum requirement for a satisfactory relaxation
+of the <tt>constexpr</tt> rules. This requirement can be attained in a number
+of ways:</p>
+
+<ul>
+  <li>Addition of a brand new looping construct to the language, which interacts
+  well with the functional programming style required by <tt>constexpr</tt>.
+  While solving the immediate lack of a looping construct, this does not remove
+  the programmer frustration for existing language constructs.</li>
+
+  <li>Allow a minimal feature set which supports the traditional C
+  <tt>for</tt> statement. Since we wish for differing iterations of the loop
+  to act differently, we require at least minimal support for mutation of
+  local variables within an evaluated <tt>constexpr</tt> function. This could
+  be restricted to the syntactic form
+  <code class="extract">for (T var = <i>expr1</i>; var != <i>expr2</i>; ++var)</code>
+  for a built-in integral type <tt>T</tt>.
+  </li>
+
+  <li>Allow a minimal feature set which supports the range-based for
+  statement. An additional mechanism would be required to allow multiple
+  iterations of the loop to communicate with each other. Such a loop could
+  not be used with user-defined iterator types without further relaxing the
+  language rules.</li>
+
+  <li>Allow a coherent and broad subset of C++ to be used in <tt>constexpr</tt>
+  functions, possibly all of C++.</li>
+</ul>
+
+<p>The first option risks further fracturing the C++ language into a
+<tt>constexpr</tt> piece and a "rest of C++" piece. The second and third
+options both require adding flow control and variable mutation to constant
+expression evaluation, and would make the restrictions on <tt>constexpr</tt>
+functions seem more arbitary than they do today. Therefore we consider the
+final option in detail, and seek to identify an appropriate subset of C++
+which improves simplicity of use without sacrificing simplicity of
+implementation much beyond that required to support a for-loop.</p>
+
+<p>We must restrict our attention to a subset of C++ which it is reasonable to
+expect all major implementors to be able to support within constant expressions.
+Additionally, it is important to maintain a distinction between translation time
+and runtime, and to avoid permitting constructs which cannot be supported in
+the translation environment (for instance, there would be significant
+implementation problems in supporting a <tt>new</tt> at translation time and a
+corresponding <tt>delete</tt> at runtime).</p>
+
+<h2>Proposed solution</h2>
+
+<p>Promote <tt>constexpr</tt> to a largely unrestricted compile-time function
+evaluation mechanism. There is implementation experience of such a mechanism in
+the D programming language, where it is a popular feature (see the <a
+href="http://dlang.org/function.html#interpretation">documentation</a> for this
+feature). The programmer's model would become simple: <tt>constexpr</tt> allows
+their code to run during compilation.</p>
+
+<h3>Constant expressions</h3>
+
+<p>An expression is a <i>constant expression</i> if evaluating it following
+the rules of the C++ abstract machine succeeds without encountering
+<ul>
+  <li>globally-visible side-effects, such as modification of an object of static
+  storage duration (other than the object being constructed, if any);</li>
+  <li>expressions which cannot be evaluated during translation, such as
+  dynamic memory allocation, comparisons with unspecified results and
+  lvalue-to-rvalue conversions on objects which are neither constant nor
+  created during the evaluation;</li>
+  <li>non-portable constructs, such as an attempt to violate type-safety or
+  to inspect the underlying storage of the abstract machine (for instance,
+  through a <tt>reinterpret_cast</tt>), or use of inline <tt>asm</tt>;
+  <li>invocation of a function which is not <tt>constexpr</tt>; or</li>
+  <li>undefined behavior.</li>
+</ul>
+and if the resulting value is fully-initialized and does not contain any
+references or pointers which denote temporaries, or objects with automatic,
+dynamic, or thread storage duration.</p>
+
+<p>C++11's <i>function invocation substitution</i> is not needed in this model.
+<tt>constexpr</tt> function invocations are instead handled as normal by the C++
+abstract machine.</p>
+
+<p>Due to concerns over the simplicity of implementation, the evaluation of a
+<i>lambda-expression</i>, a <i>throw-expression</i>, and the creation of an
+object with a non-trivial destructor will continue to render an expression
+non-constant.</p>
+
+<h3>Object mutation within constant expressions</h3>
+
+<p>Objects created within a constant expression can be modified within the
+evalution of that constant expression (including the evaluation of any
+<tt>constexpr</tt> function calls it makes), until the evaluation of that
+constant expression ends, or the lifetime of the object ends, whichever
+happens sooner. They cannot be modified by later constant expression
+evaluations. Example:</p>
+
+<pre class="extract"><code>constexpr int f(int a) {
+  int n = a;
+  ++n;                  // '++n' is not a constant expression
+  return n * a;
+}
+
+int k = f(4);           // OK, this is a constant expression.
+                        // 'n' in 'f' can be modified because its lifetime
+                        // began during the evaluation of the expression.
+
+constexpr int k2 = ++k; // error, not a constant expression, cannot modify
+                        // 'k' because its lifetime did not begin within
+                        // this expression.
+
+struct X {
+  constexpr X() : n(5) {
+    n *= 2;             // not a constant expression
+  }
+  int n;
+};
+constexpr int g() {
+  X x;                  // initialization of 'x' is a constant expression
+  return x.n;
+}
+constexpr int k3 = g(); // OK, this is a constant expression.
+                        // 'x.n' can be modified because the lifetime of
+                        // 'x' began during the evaluation of 'g()'.
+</code></pre>
+
+<p>This approach allows arbitrary variable mutations within an evaluation, while
+still preserving the essential property that constant expression evaluation
+is independent of the mutable global state of the program. Thus a constant
+expression evaluates to the same value no matter when it is evaluated, excepting
+when the value is unspecified (for instance, floating-point calculations can
+give different results and, with these changes, differing orders of evaluation
+can also give different results).</p>
+
+<p>The rules for use of objects whose lifetime did not begin within the
+evaluation are unchanged: they can be read (but not modified) if either:
+<ul>
+<li>they are declared with <tt>constexpr</tt>, or
+<li>they are <tt>const</tt> and of integral or unscoped enumeration type.
+</ul></p>
+
+<h3><tt>constexpr</tt> functions</h3>
+
+<p>As in C++11, the <tt>constexpr</tt> keyword is used to mark functions
+which the implementation is required to evaluate during translation, if they
+are used from a context where a constant expression is required.
+Any valid C++ code is permitted in <tt>constexpr</tt> functions, including
+the creation and modification of local variables, and almost all statements,
+with the restriction that it must be possible for a <tt>constexpr</tt> function
+to be used from within a constant expression. A constant expression may still
+have side-effects which are local to the evaluation and its result. For
+instance:</p>
+
+<pre class="extract"><code>constexpr int min(std::initializer_list&lt;int&gt; xs) {
+  int min = std::numeric_limits&lt;int&gt;::max();
+  for (int x : xs)
+    if (x &lt; min)
+      min = x;
+  return min;
+}
+
+constexpr int fn(int a) {
+  return a / (a - a); // ill-formed, no diagnostic required, never constant
+}</code></pre>
+
+<p>A handful of syntactic restrictions on <tt>constexpr</tt> functions are
+retained:</p>
+<ul>
+<li><i>asm-declaration</i>s are not permitted.</li>
+<li><i>try-block</i>s and <i>function-try-block</i>s are not permitted.</li>
+<li>Declarations of variables with static and thread storage duration have some
+restrictions (see below).</li>
+</ul>
+
+<h3><tt>constexpr</tt> constructors</h3>
+
+<p>In any <tt>constexpr</tt> constructor, because the lifetime of the object under
+construction began during the evaluation of the surrounding constant expression
+(if any), the constructor and later parts of the evaluation are permitted to
+modify its fields. Example:</p>
+
+<pre class="extract"><code>struct lookup_table {
+  int value[32];
+  constexpr lookup_table() {
+    for (int n = 0; n &lt; 32; ++n) {
+      double x = n / 4;
+      double f = x * std::cbrt(x) * std::pow(2, (n &amp; 3) * 0.25);
+      value[n] = (int)(f * 1000000.);
+    }
+  }
+  // OK, would be an error if implicit ~lookup_table was not constexpr.
+  constexpr ~lookup_table() = default;
+};
+constexpr lookup_table table; // OK, table has constant initialization, and
+                              // destruction is a constant expression.
+
+struct override_raii {
+  constexpr override_raii(int &amp;a, int v) : a(a), old(a) {
+    a = v;
+  }
+  constexpr ~override_raii() {
+    a = old;
+  }
+  int &amp;a, old;
+};
+
+constexpr int h(const lookup_table &amp;lut) { /* ... */ }
+constexpr int f() {
+  lookup_table lut;
+  override_raii override(lut.value[4], 123);
+  return h(lut);
+  // OK, destructor runs here.
+}
+</code></pre>
+
+<h3>Block-scope static local variables</h3>
+
+<p>If a <tt>constexpr</tt> function contains a declaration of a variable of
+static or thread storage duration, some additional restrictions are required
+to prevent the evaluation from having side-effects.</p>
+
+<ul>
+<li>Such a variable must be initialized by a constant expression. This prevents
+the initial value of the variable from depending on the order in which the
+implementation chooses to evaluate <tt>constexpr</tt> function calls:
+
+<pre class="extract"><code>constexpr int first_val(int n) {
+  static int value = n; <i>// error: not a constant expression</i>
+  return value;
+}
+const int N = first_val(5);
+int arr[first_val(10)];
+  </code></pre></li>
+
+<li>The destructor of such a variable must be trivial.  This allows an
+implementation to evaluate a <tt>constexpr</tt> function call at will, without
+any concern about whether such evaluation causes a side-effect at program
+termination.</li>
+
+<li>Such a variable cannot be modified, even if its lifetime began
+within the constant expression evaluation.</li>
+</ul>
+
+<p>In all other respects, such <tt>static</tt> or <tt>thread_local</tt>
+variables can be used within <tt>constexpr</tt> functions in the same ways that
+they could be used if they were declared outside the function. In particular,
+they do not need to be <tt>constexpr</tt> nor have a literal type if their value
+is not used:</p>
+
+<pre class="extract"><code>constexpr mutex &amp;get_mutex(bool which) {
+  static mutex m1, m2; <i>// non-const, non-literal, ok</i>
+  if (which)
+    return m1;
+  else
+    return m2;
+}
+</code></pre>
+
+
+<h2>Possible additional features</h2>
+
+<p>Some of the remaining restrictions on <tt>constexpr</tt> functions and
+constant expression evaluation could be relaxed, if the value of the
+language feature within a constant expression is thought to be sufficient
+to justify the implementation cost:</p>
+
+<h3><tt>constexpr</tt> destructors</h3>
+
+<p>In most cases, in order to create an object of a type T in a constant
+expression, the destruction of T must be trivial. However, non-trivial
+destructors are an important component of modern C++, partly due to widespread
+usage of the RAII idiom, which is also applicable in <tt>constexpr</tt>
+evaluations. Non-trivial destructors could be supported in constant expressions,
+as follows:</p>
+
+<ul>
+  <li>Allow destructors to be marked as <tt>constexpr</tt></li>
+  <li>Make defaulted destructors <tt>constexpr</tt> if they only invoke
+  <tt>constexpr</tt> destructors</li>
+  <li>For <tt>constexpr</tt> variables, require that evaluating the destructor
+  is a constant expression (except that the object being destroyed may be
+  modified in its own destructor</li>
+</ul>
+
+<p>However, no compelling use cases are known for such a feature, and there
+would be a non-trivial implementation cost ensuring that destructors are run at
+the right times.</p>
+
+<h3>Lambdas</h3>
+
+<p><a href=http://http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2009/n2859.pdf">N2859</a>
+notes that severe implementation difficulties would arise if lambdas were
+permitted in contexts which require their contents to be part of a mangled
+name, and the prohibition on lambdas in constant expressions form part of
+the resolution to those difficulties. Also, concerns have been raised about
+the implementation cost of permitting lambdas in constant expressions, so
+they are not proposed here.</p>
+
+<h3>Exceptions</h3>
+
+<p>Throwing and catching exceptions within constant expression evalutations is
+possible to support, but we do not know of a compelling use case for it, so it
+is not proposed.</p>
+
+<h3>Variadic functions</h3>
+
+<p>It would be possible to support C-style variadic functions and the <tt>va_arg</tt>
+macro within <tt>constexpr</tt> functions, but this is thought to have little
+value in the presence of variadic function templates, so is not proposed.</p>
+
+<h2>Acknowledgements</h2>
+
+<p>The author wishes to thank Bjarne Stroustrup and Gabriel Dos Reis for their
+encouragement and insights on this proposal, and is also grateful to Lawrence
+Crowl, Jeffrey Yasskin, Dean Michael Berris, and Geoffrey Romer for their
+comments and corrections on earlier drafts of this paper.</p>
+
+<!--
+
+<h2>Wording changes</h2>
+
+<p>TODO</p>
+
+<h2>Implementation</h2>
+
+<p>TODO</p>
+
+-->
+
+</body>
+</html>

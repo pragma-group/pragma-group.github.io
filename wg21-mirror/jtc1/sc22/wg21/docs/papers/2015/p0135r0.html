@@ -1,0 +1,235 @@
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=windows-1252">
+<title>Guaranteed copy elision through simplified value categories</title>
+
+<style type="text/css">
+  ins, ins * { text-decoration:none; font-weight:bold; background-color:#A0FFA0 }
+  del, del * { text-decoration:line-through; background-color:#FFA0A0 }
+  #hidedel:checked ~ * del, #hidedel:checked ~ * del * { display:none; visibility:hidden }
+
+blockquote { color: #000000; background-color: #F1F1F1;
+  border: 1px solid #D1D1D1;
+  padding-left: 0.5em; padding-right: 0.5em; }
+blockquote.stdins { text-decoration: underline;
+  color: #000000; background-color: #C8FFC8;
+  border: 1px solid #B3EBB3; padding: 0.5em; }
+blockquote.stddel { text-decoration: line-through;
+  color: #000000; background-color: #FFEBFF;
+  border: 1px solid #ECD7EC;
+  padding-left: 0.5empadding-right: 0.5em; ; }
+</style>
+
+</head>
+
+<body>
+<div style="text-align: right; float: right">
+ISO/IEC JTC1 SC22 WG21<br>
+P0135R0<br>
+Richard Smith<br>
+richard@metafoo.co.uk<br>
+2015-09-27<br>
+</div>
+
+<h1>Guaranteed copy elision through simplified value categories</h1>
+
+This paper presents a case for guaranteeing that certain forms of copy elision
+always occur (in particular, when the source object is a temporary), and
+removing the semantic checks on the copy or move constructor in the case where
+the guaranteed elision occurs. The approach described herein achieves this not
+by eliding a copy, but by reworking the definition of the value categories
+(glvalue versus prvalue) such that it is unnatural to perform the copy in the
+first place.
+
+<h2>Copy elision</h2>
+
+ISO C++ permits copies to be elided in a number of cases:
+
+<ul>
+  <li>when a temporary object is used to initialize another object (including
+      the object returned by a function, or the exception object created by
+      a <i>throw-expression</i>)
+  <li>when a variable that is about to go out of scope is returned or thrown
+  <li>when an exception is caught by value
+</ul>
+
+Whether copies are elided in the above cases is up to the whim of the
+implementation. In practice, implementations always elide copies in the first
+case, but source code cannot rely on this, and must provide a copy or move
+operation for such cases, even when they know (or believe) it will never be
+called.
+
+<p>This paper addresses only the first case. While we believe that reliable
+NRVO ("named return value optimization", the second bullet) is an important
+feature to allow reasoning about performance, the cases where NRVO is
+possible are subtle and a simple guarantee is difficult to give.
+
+<h3>Why should copy elision be mandatory?</h3>
+
+A <a href="https://groups.google.com/a/isocpp.org/forum/#!topic/std-proposals/LEzTGnc4FZo">recent
+  thread on the std-proposals mailing list</a> provides a long list of reasons
+why the current approach to copy elision is problematic. Here are some highlights:
+
+<ul>
+  <li>The language requires provision of a copy or move constructor for a
+      type <i>even if</i> the programmer and the compiler agree that it will
+      never be called. This means it is impossible or very difficult to write
+      factory functions / "named constructors" for non-moveable types:
+      <pre>
+      struct NonMoveable { /* ... */ };
+      NonMoveable make() { /* how to make this work without a copy? */ }</pre>
+      As a result, programmers are forced to work around this limitation via
+      dynamic memory allocation or similar.
+  <li>The performance difference between elision and move construction is
+      not always negligible (particularly for large objects), but portable code
+      cannot rely on elision occurring today. As a result, some programmers still
+      prefer to use out-parameters rather than simply returning by value.
+  <li>The "almost always <tt>auto</tt>" style has a big problem: the "almost".
+      This is because there's no way to initialize a variable of a non-moveable
+      type from an expression of that type.
+      <pre>
+      auto x = make(); // error, can't perform the move you didn't want,
+                       // even though compiler would not actually call it</pre>
+  <li>Allowing the execution semantics of a program to be up to the
+      implementation harms portability and the ability to reason about the code.
+</ul>
+
+<h3>What would mandatory copy elision look like?</h3>
+
+<pre>
+struct NonMoveable {
+  NonMoveable(int);
+  NonMoveable(NonMoveable&amp;) = delete;
+  void NonMoveable(NonMoveable&amp;) = delete;
+  std::array&lt;int, 1024> arr;
+};
+NonMoveable make() {
+  return NonMoveable(42); // ok, directly constructs returned object
+}
+auto nm = make(); // ok, directly constructs 'nm'
+</pre>
+
+<h2>Value categories</h2>
+
+The approach we take to provide guaranteed copy elision is to tweak the
+definition of C++'s 'glvalue' and 'prvalue' value categories (which,
+counterintuitively, categorize <i>expressions</i>, not values).
+C++ currently specifies the value categories as follows:
+
+<blockquote>
+<ul>
+  <li>An <i>lvalue</i> (so called, historically, because lvalues could appear on the left-hand side of an assignment expression) designates a function or an object. [ Example: If E is an expression of pointer type, then *E is an lvalue expression referring to the object or function to which E points. As another example, the result of calling a function whose return type is an lvalue reference is an lvalue. - end example ]
+  <li>An <i>xvalue</i> (an "eXpiring" value) also refers to an object, usually near the end of its lifetime (so that its resources may be moved, for example). Certain kinds of expressions involving rvalue references (8.3.2) yield xvalues. [ Example: The result of calling a function whose return type is an rvalue reference to an object type is an xvalue (5.2.2). - end example ]
+  <li>A <i>glvalue</i> ("generalized" lvalue) is an lvalue or an xvalue.
+  <li>An <i>rvalue</i> (so called, historically, because rvalues could appear on the right-hand side of an assignment expression) is an xvalue, a temporary object (12.2) or subobject thereof, or a value that is not associated with an object.
+  <li>A <i>prvalue</i> ("pure" rvalue) is an rvalue that is not an xvalue. [ Example: The result of calling a function whose return type is not a reference is a prvalue. The value of a literal such as 12, 7.3e5, or true is also a prvalue. - end example ]
+</blockquote>
+
+However, these rules are hard to internalize and confusing -- for instance, an
+expression that creates a temporary object designates an object, so why is it
+not an lvalue? Why is <tt>NonMoveable().arr</tt> an xvalue rather than a
+prvalue? This paper suggests a rewording of these rules to clarify their
+intent. In particular, we suggest the following definitions for glvalue and
+prvalue:
+
+<ul>
+  <li>A <i>glvalue</i> is an expression whose evaluation computes the location of an object, bit-field, or function.
+  <li>A <i>prvalue</i> is an expression whose evaluation initializes an object, bit-field, or operand of an operator, as specified by the context in which it appears.
+</ul>
+
+That is: <b>prvalues perform initialization, glvalues produce locations</b>.
+
+<p>Denotationally, we have:<br>
+&nbsp;glvalue :: Environment -> (Environment, Location)<br>
+&nbsp;prvalue :: (Environment, Location) -> Environment
+
+<p>So far, this is not a functional change to C++; it does not change the classification of any existing expression. However, it makes it simpler to reason about why expressions are classified as they are:
+
+<pre>
+struct X { int n; };
+extern X x;
+X{4};   // prvalue: represents initialization of an X object
+x.n;    // glvalue: represents the location of x's member n
+X{4}.n; // glvalue: represents the location of X{4}'s member n;
+        //          in particular, xvalue, as member is expiring
+
+using T = X[2];
+T{{5}, {6}};    // prvalue: represents initialization of an array of 2 X's
+T{{5}, {6}}[0]; // xvalue: represents location of expiring array element</pre>
+
+<h3>Implications of refined value categories</h3>
+
+<p>Now we have a simple description of value categories, we can reconsider how
+expressions in those categories should behave.
+In particular, given a class type <tt>A</tt>, the expression
+<tt>A()</tt> is currently specified as creating a temporary object, but this is
+not necessary: because the purpose of a prvalue is to performs initialization,
+it should not be the responsibility of the <tt>A()</tt> expression to create a
+temporary object. That should instead be performed by the context in which the
+expression appears, <b>if necessary</b>. However, in many contexts, it is
+not necessary to create this temporary object. For instance:
+
+<pre>
+// make() is a prvalue (it returns "by value"). Therefore, it models the
+// initialization of an object of type NonMoveable.
+NonMoveable make() {
+  // The object initialized by 'make()' is initialized by the following
+  // constructor call.
+  return NonMoveable(42);
+}
+// Use 'make()' to directly initialize 'nm'. No temporary objects are created.
+auto nm = make();
+
+NonMoveable x = {5}; // ok today
+NonMoveable x = 5; // equivalent to NonMoveable x = NonMoveable(5),
+                   // ill-formed today (creates a temporary but can't move it),
+                   // ok under this proposal (does not create a temporary object)
+</pre>
+
+<p>We conclude that a prvalue expression of class or array type should
+<b>not</b> create a temporary object. Instead, the temporary object is created
+by the context where the expression appears, if it is necessary. The contexts
+that require a temporary object to be created ("materialized") are as follows:
+
+<ul>
+  <li>when a prvalue is bound to a reference
+  <li>when member access is performed on a class prvalue
+  <li>when array subscripting is performed on an array prvalue
+  <li>when an array prvalue is decayed to a pointer
+  <li>when a derived-to-base conversion os performed on a class prvalue
+  <li>when a prvalue is used as a discarded value expression
+</ul>
+
+Note that the first rule here already exists in the standard, to support
+prvalues of non-class, non-array type. The difference is that, with the
+proposed change, the language rules are now uniform for class and non-class
+types.
+
+<h2>Alternatives</h2>
+
+There appear to be two main alternatives to this proposal:
+
+<ul>
+  <li><b>Do nothing</b>. We have lived with the current rules for a long time,
+  and we can continue to do so. This means:
+  <ul><li>we have no guarantee of efficiency around temporaries
+      <li>we need to provide copy / move constructors that we know will /
+          should never be called
+      <li>we don't have a good way to write factory functions for non-moveable
+          typesk
+  </ul>
+  <li><b>Guarantee copy-elision in a different way</b>. It's not clear how we
+  would do this. We would also miss the opportunity to make value categories
+  easier to understand and learn.
+</ul>
+
+The main advantages of those approaches over this proposal is that they retain
+the conceptual model that <tt>Type(...)</tt> creates a temporary object. However,
+that model is partially an illusion: it only explains the behavior when
+<tt>Type</tt> is a class type.
+
+<h2>Acknowledgements</h2>
+
+The author wishes to thank David Krauss and Jonathan Coe for their feedback on
+this proposal, and all the contributors to the std-proposals discussions on
+this topic for their ideas.
+
+</body></html>

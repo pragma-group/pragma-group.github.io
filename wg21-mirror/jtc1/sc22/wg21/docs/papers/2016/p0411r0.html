@@ -1,0 +1,2501 @@
+<html><head><meta charset="UTF-8">
+<title>Separating Library Requirements and Preconditions</title>
+  <style type='text/css'>
+  body {font-variant-ligatures: none;}
+  p {text-align:justify}
+  li {text-align:justify}
+  blockquote.note, div.note
+  {
+          background-color:#E0E0E0;
+          padding-left: 15px;
+          padding-right: 15px;
+          padding-top: 1px;
+          padding-bottom: 1px;
+  }
+  p code {color:navy}
+  ins p code {color:#00A000}
+  p ins code {color:#00A000}
+  p del code {color:#A00000}
+  ins {color:#00A000}
+  del {color:#A00000}
+  table#boilerplate { border:0 }
+  table#boilerplate td { padding-left: 2em }
+  table.bordered, table.bordered th, table.bordered td {
+    border: 1px solid;
+    text-align: center;
+  }
+  ins.block {color:#00A000; text-decoration: none}
+  del.block {color:#A00000; text-decoration: none}
+  </style>
+</head><body>
+<table id="boilerplate">
+<tr><td>Document number</td><td>P0411R0</td></tr>
+<tr><td>Date</td><td>2015-07-07</td></tr>
+<tr><td>Project</td><td>Programming Language C++, Library Evolution Working Group</td></tr>
+<tr><td>Reply-to</td><td>Jonathan Wakely &lt;cxx&#x40;kayari.org&gt;</td></tr>
+</table><hr>
+<h1>Separating Library Requirements and Preconditions</h1>
+<style>
+div.question {
+  background-color:yellow;
+  text-color:navy;
+}
+</style>
+
+
+
+
+<h2>Introduction</h2>
+
+<p>The C++ Standard Library describes preconditions and requirements using the
+<em>Requires:</em> element (17.5.1.4 [structure.specifications]) and failure to
+meet these requirements usually results in undefined behaviour:</p>
+
+<blockquote><p><strong>17.6.4.11 Requires paragraph [res.on.required]</strong></p>
+
+<p>Violation of the preconditions specified in a function's <em>Requires:</em>
+paragraph results in undefined behavior unless the function's <em>Throws:</em>
+paragraph specifies throwing an exception when the precondition is violated.</p></blockquote>
+
+<p>There are many requirements which can be statically checked and so could
+produce a diagnostic, rather than the entirely unpredictable outcome implied by
+undefined behaviour. I propose separate categories for requirements which
+produce a compile-time diagnostic when violated and for those which result in
+undefined behaviour when violated.</p>
+
+<h2>Motivation and Scope</h2>
+
+<p>Some library preconditions describe the types that a function template is
+expected to work with, for example the sequence container requirements say that
+<code>insert(p, t)</code> on a <code>vector</code> or <code>deque</code> requires <code>CopyAssignable</code>. Failure to
+meet that requirement is not a run-time violation of a contract, and will not
+give unpredictable or non-portable results, it will simply fail to compile.
+There is no good reason why that particular requirement should be be specified
+so that violating it is undefined. A future update to the Standard Library that
+uses Concepts would probably constrain such a function with a <code>requires</code> clause
+which would make violations ill-formed.</p>
+
+<p>On the other hand, the requirement that the pointer passed to <code>operator delete</code>
+is not a null pointer and that its value was returned by <code>operator new</code> is a
+real precondition. In general it's impossible to check that requirement at
+compile-time, and violating it really can produce unpredictable results
+such as corrupting the heap, leading to crashes, memory leaks or data loss.
+Allowing that kind of precondition to result in undefined behaviour also allows
+tools such as valgrind or AddressSanitizer to perform extra checks to diagnose
+violations at run-time.</p>
+
+<p>We already give useful guarantees about some types, e.g. attempting to copy a
+<code>unique_ptr</code> is guaranteed to be ill-formed, so users can be confident that
+attempts to misuse it will be caught by the compiler. But then we state other
+requirements in terms of undefined behaviour, which technically means users
+can't rely on the compiler telling them when they do something nonsensical.  We
+should not place the burden of verifying such preconditions on users, with the
+threat of undefined behaviour if they fail to do so.</p>
+
+<p>The aim of the proposal is not to require any implementations to change, but
+only to inform users whether violating requirements will result in a
+diagnostic, or whether it is their responsibility to check for precondition
+violations. For example, the following function template has undefined
+behaviour unless <code>is_copy_constructible_v&lt;T&gt;</code> is true:</p>
+
+<pre><code>    template&lt;typename T&gt;
+      std::optional&lt;T&gt; nonempty(const std::optional&lt;T&gt;&amp; val) {
+        return val ? val : std::optional&lt;T&gt;{ T{} };
+      }
+</code></pre>
+
+<p>That means calling <code>nonempty(std::optional&lt;std::unique_ptr&lt;int&gt;&gt;{})</code> could
+theoretically compile, but crash at run-time, or do something worse.
+A paranoid author of that function would add a <code>static_assert</code> to verify
+that no undefined behaviour is possible, but that's totally unnecessary
+because in practice the <code>optional</code> copy constructor would be ill-formed and
+so the function would fail to compile anyway.</p>
+
+<p>In keeping with the meaning of a <em>requires-expression</em> in the Concepts TS, I
+propose that the <em>Requires:</em> element be used for requirements on types that can
+be statically-enforced, and a new <em>Preconditions:</em> element be used for
+requirements that must be met to avoid undefined behaviour.</p>
+
+<h2>The Solution</h2>
+
+<p>The solution is conceptually simple, even if it involves a lot of changes to
+the specification of the library. Every <em>Requires:</em> that naturally produces a
+diagnostic anyway should stay as a <em>Requires:</em> element. This shouldn't require
+implementations to change, and simply standardizes existing practice. All other
+<em>Requires:</em> should be changed to <em>Preconditions:</em>, meaning that violations
+result in undefined behaviour.</p>
+
+<p>In many cases it's obvious whether a <em>Requires:</em> element should be converted to
+<em>Preconditions:</em> but some cases are less obvious. For example, the generic
+<code>std::swap</code> requires <code>is_move_constructible</code> and <code>is_move_assignable</code> to be
+true, which are exactly the operations performed by the function. However the
+<code>std::swap</code> overload for arrays requires "<code>a[i]</code> shall be swappable with
+(17.6.3.2) <code>b[i]</code> for all <code>i</code> in the range <code>[0, N)</code>." The "swappable with"
+requirement includes postconditions on the values of the objects after they are
+swapped, which cannot be verified even at run-time for some types, let alone at
+compile-time.</p>
+
+<p>In a few places we already say "Otherwise, the program is ill-formed" in
+<em>Requires</em> paragraphs, which becomes redundant with this proposal.</p>
+
+<p>Several places in the library have the requirement "<code>Alloc</code> shall meet the
+requirements for an Allocator (17.6.3.5)." Although the allocator requirements
+are largely specified in terms of valid syntax, it's a very large interface to
+check for and there are also semantic requirement which cannot be verified
+statically. I propose that all such requirements should become <em>Preconditions</em>.</p>
+
+<p>Some <em>Requires</em> paragraphs contain a mix of requirements and preconditions, so
+need to be split into two paragraphs.</p>
+
+<h3>A problem</h3>
+
+<p>Some <em>Requires</em> paragraphs currently state requirements in terms of concepts
+such as <code>CopyConstructible</code>, which has syntactic requirements but also semantic
+ones such as "the value of <code>v</code> is unchanged and is equivalent to <code>u</code>".  The
+meaning of that phrase is not well-defined, and certainly can't be enforced at
+compile-time to produce a diagnostic.</p>
+
+<p>It might make sense for some of those requirements to use a related trait such
+as <code>is_copy_constructible</code> instead.  That trait only depends on properties that
+can be checked by the compiler, and so corresponds to the expressions that are
+actually evaluated and need to compile. However stating requirements only in
+terms of that trait would remove any semantic requirement on "same-ness" that
+might actually be important in some functions. It would be possible to add
+some weasel words so that only violations of syntactic parts of <em>Requires</em>
+paragraphs makes a program ill-formed, and violating semantic parts still
+results in undefined behaviour, but that might not actually improve on the
+status quo.</p>
+
+<p>The current proposal does not attempt to resolve this problem, but it needs
+further thought.</p>
+
+<p>Requirements stated in terms of <code>CopyConstructible</code> etc. have been left as
+<em>Requires</em> meaning they now require a diagnostic. Requirements in Clause 30
+for <code>Lockable</code>, <code>TimedLockable</code> etc. have been changed to <em>Preconditions</em>
+because there are significant semantic aspects to those concepts.</p>
+
+<h2>Proposed Wording</h2>
+
+<p>Changes are relative to N4595.</p>
+
+<p>Adjust 17.5.1.4 [structure.specifications]:</p>
+
+<blockquote><p>-3-  Descriptions of function semantics contain the following elements (as appropriate):<br/>
+<ins> — <em>Requires:</em> the requirements on types and valid expressions imposed by the function </ins><br/>
+— <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> the preconditions for calling the function<br/>
+— <em>Effects:</em> the actions performed by the function</p>
+
+<p>[...]</p>
+
+<p>-4-
+ Whenever the <em>Effects:</em> element specifies that the semantics of some function <code>F</code> are <em>Equivalent to</em> some code
+sequence, then the various elements are interpreted as follows. If <code>F</code>’s semantics specifies a <em>Requires:</em> element <ins>or a <em>Preconditions:</em> element</ins>,
+then <del>that requirement is</del> <ins>those requirements are</ins> logically imposed prior to the equivalent-to semantics. Next, the semantics of the
+code sequence are determined by the <em>Requires:</em>, <ins><em>Preconditions:</em>,</ins> <em>Effects:</em>, <em>Synchronization:</em>, <em>Postconditions:</em>, <em>Returns:</em>, <em>Throws:</em>,
+<em>Complexity:</em>, <em>Remarks:</em>, <em>Error conditions:</em>, and <em>Notes:</em> specified for the function invocations contained in
+the code sequence. The value returned from <code>F</code> is specified by <code>F</code>’s <em>Returns:</em> element, or if <code>F</code> has no <em>Returns:</em>
+element, a non-<code>void</code> return from <code>F</code> is specified by the <em>Returns:</em> elements in the code sequence. If <code>F</code>’s semantics
+contains a <em>Throws:</em>, <em>Postconditions:</em>, or <em>Complexity:</em> element, then that supersedes any occurrences of that
+element in the code sequence.</p></blockquote>
+
+<p>Change Requires to Preconditions in the example in 17.6.3.2 [sappable.requirements]:</p>
+
+<blockquote><p><em>//</em> <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <em><code>std::forward&lt;T&gt;(t)</code> shall be swappable with <code>std::forward&lt;U&gt;(u)</code>.</em></p>
+
+<p>[...]</p>
+
+<p><em>//</em> <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <em>lvalues of <code>T</code> shall be swappable.</em></p></blockquote>
+
+<p>Adjust [res.on.required]:</p>
+
+<blockquote><p><strong>17.6.4.11 Requires paragraph [res.on.required]</strong></p>
+
+<p><ins>A program is ill-formed if it violates the requirements specified in a
+function's <em>Requires:</em> paragraph.</ins></p>
+
+<p><strong><ins>17.6.4.12 Preconditions paragraph [res.on.preconditions]</ins></strong></p>
+
+<p>Violation of the preconditions specified in a function's
+<del><em>Requires:</em></del><ins><em>Preconditions:</em></ins>
+paragraph results in undefined behavior unless the function's <em>Throws:</em>
+paragraph specifies throwing an exception when the precondition is violated.</p></blockquote>
+
+<p>Change Requires to Preconditions in 18.6.2.1 [new.delete.single]:</p>
+
+<pre><code>        void operator delete(void* ptr) noexcept;
+        void operator delete(void* ptr, std::size_t size) noexcept;
+</code></pre>
+
+<blockquote><p>-10- <em>Effects:</em> [...]</p>
+
+<p>-11- <em>Replaceable:</em> [...]</p>
+
+<p>-12- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <em>ptr</em> shall be a null pointer or
+its value shall be a value returned by an earlier call to [...]</p>
+
+<p>-13- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> If an implementation has strict pointer safety (3.7.4.3) then <code>ptr</code> shall be a safely-derived pointer.</p>
+
+<p>-14- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> If present, the <code>std::size_t size</code> argument shall equal the size argument passed to the allocation function that returned <code>ptr</code>.</p>
+
+<p>-15- <em>Required behavior:</em> [...]</p>
+
+<p>-16- <em>Default behavior:</em> [...]</p>
+
+<p>-17- <em>Default behavior:</em> [...]</p>
+
+<p>-18- <em>Remarks:</em> [...]</p></blockquote>
+
+<pre><code>        void operator delete(void* ptr, const std::nothrow_t&amp;) noexcept;
+</code></pre>
+
+<blockquote><p>-19- <em>Effects:</em> [...]</p>
+
+<p>-20- <em>Replaceable:</em> [...]</p>
+
+<p>-21- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> If an implementation has strict pointer safety (3.7.4.3) then <code>ptr</code> shall be a safely-derived pointer.</p>
+
+<p>-22- <em>Default behavior:</em> [...]</p></blockquote>
+
+<p>Change Requires to Preconditions in 18.6.2.2 [new.delete.array]:</p>
+
+<pre><code>        void operator delete[](void* ptr) noexcept;
+        void operator delete[](void* ptr, std::size_t size) noexcept;
+</code></pre>
+
+<blockquote><p>-9- <em>Effects:</em> [...]</p>
+
+<p>-10- <em>Replaceable:</em> [...]</p>
+
+<p>-11- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <em>ptr</em> shall be a null pointer or
+its value shall be the value returned by an earlier call to [...]</p>
+
+<p>-12- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> If present, the <code>std::size_t size</code> argument shall equal the size argument passed to the allocation function that returned <code>ptr</code>.</p>
+
+<p>-13- <em>Required behavior:</em> [...]</p>
+
+<p>-14- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> If an implementation has strict pointer safety (3.7.4.3) then <code>ptr</code> shall be a safely-derived pointer.</p>
+
+<p>-15- <em>Default behavior:</em> [...]</p></blockquote>
+
+<pre><code>        void operator delete[](void* ptr, const std::nothrow_t&amp;) noexcept;
+</code></pre>
+
+<blockquote><p>-16- <em>Effects:</em> [...]</p>
+
+<p>-17- <em>Replaceable:</em> [...]</p>
+
+<p>-18- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> If an implementation has strict pointer safety (3.7.4.3) then <code>ptr</code> shall be a safely-derived pointer.</p>
+
+<p>-19- <em>Default behavior:</em> [...]</p></blockquote>
+
+<p>Change Requires to Preconditions in 18.6.2.3 [new.delete.placement]:</p>
+
+<pre><code>        void operator delete(void* ptr, void*) noexcept;
+</code></pre>
+
+<blockquote><p>-7- <em>Effects:</em> [...]</p>
+
+<p>-8- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> If an implementation has strict pointer safety (3.7.4.3) then <code>ptr</code> shall be a safely-derived pointer.</p>
+
+<p>-9- <em>Remarks:</em> [...]</p></blockquote>
+
+<pre><code>        void operator delete[](void* ptr, void*) noexcept;
+</code></pre>
+
+<blockquote><p>-10- <em>Effects:</em> [...]</p>
+
+<p>-11- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> If an implementation has strict pointer safety (3.7.4.3) then <code>ptr</code> shall be a safely-derived pointer.</p>
+
+<p>-12- <em>Remarks:</em> [...]</p></blockquote>
+
+<p>Change Requires to Preconditions in 18.8.6 [propagation]</p>
+
+<pre><code>        [[noreturn]] void rethrow_exception(exception_ptr p);
+</code></pre>
+
+<blockquote><p>-9- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>p</code> shall not be a null pointer.</p>
+
+<p>-10- <em>Throws:</em> the exception object to which <code>p</code> refers.</p></blockquote>
+
+<p>Change Requires to Preconditions in 20.2.2 [utility.swap]:</p>
+
+<pre><code>        template &lt;class T, size_t N&gt;
+          void swap(T (&amp;a)[N], T (&amp;b)[N]) noexcept(is_nothrow_swappable_v&lt;T&gt;);
+</code></pre>
+
+<blockquote><p>-4- <em>Remarks:</em> This function shall not participate in overload resolution unless <code>is_swappable_v&lt;T&gt;</code> is <code>true</code>.</p>
+
+<p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>a[i]</code> shall be swappable with
+(17.6.3.2) <code>b[i]</code> for all <code>i</code> in the range <code>[0, N)</code>.</p>
+
+<p>-6- <em>Effects:</em> As if by <code>swap_ranges(a, a + N, b)</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions for <code>pair::swap</code> in 20.4.2 [pairs.pair]:</p>
+
+<pre><code>        void swap(pair&amp; p) noexcept(see below );
+</code></pre>
+
+<blockquote><p>-28- <em>Remarks:</em> The expression inside <code>noexcept</code> is equivalent to: [...]</p>
+
+<p>-29- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>first</code> shall be swappable with (17.6.3.2) <code>p.first</code> and <code>second</code> shall be swappable with <code>p.second</code>.</p>
+
+<p>-30- <em>Effects:</em> Swaps <code>first</code> with <code>p.first</code> and <code>second</code> with <code>p.second</code>.</p></blockquote>
+
+<p>Edit "ill-formed" sentences in 20.4.4 [pair.astuple]:</p>
+
+<blockquote><p><ins>-?- <em>Requires:</em> <code>I &lt; 2</code>.</ins></p>
+
+<p>-3- <em>Returns:</em> If <code>I == 0</code> returns a reference to <code>p.first</code>; if <code>I == 1</code> returns a reference to <code>p.second</code><del>; otherwise the program is ill-formed</del>.</p>
+
+<p>[...]</p>
+
+<p>-4- <em>Requires:</em> <code>T</code> and <code>U</code> are distinct types. <del>Otherwise, the program is ill-formed.</del></p>
+
+<p>[...]</p>
+
+<p>-6- <em>Requires:</em> <code>T</code> and <code>U</code> are distinct types. <del>Otherwise, the program is ill-formed.</del></p></blockquote>
+
+<p>Change Requires to Preconditions for last set of constructors in 20.5.2.1 [tuple.cnstr]:</p>
+
+<blockquote><p>-27- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>Alloc</code> shall meet the requirements for an Allocator (17.6.3.5).</p></blockquote>
+
+<p>Change Requires to Preconditions in 20.5.2.3 [tuple.swap]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> Each element in <code>*this</code> shall be swappable with (17.6.3.2) the corresponding element in <code>rhs</code>.</p></blockquote>
+
+<p>Remove redundant sentence in 20.5.2.6 [tuple.helper]:</p>
+
+<blockquote><p>-2- <em>Requires:</em> <code>I &lt; sizeof...(Types)</code>. <del>The program is ill-formed if <code>I</code> is out of bounds.</del></p></blockquote>
+
+<p>Remove redundant sentences in 20.5.2.7 [tuple.elem]:</p>
+
+<blockquote><p>-1- <em>Requires:</em> <code>I &lt; sizeof...(Types)</code>. <del>The program is ill-formed if <code>I</code> is out of bounds.</del></p>
+
+<p>[...]</p>
+
+<p>-5- <em>Requires:</em> The type <code>T</code> occurs exactly once in <code>Types</code>. <del>Otherwise, the program is ill-formed.</del></p></blockquote>
+
+<p>Change Requires to Preconditions in 20.5.2.9 [tuple.traits]:</p>
+
+<blockquote><p>-?- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>Alloc</code> shall be an Allocator (17.6.3.5).</p></blockquote>
+
+<p>Move part of Requires to Preconditions in 20.6.3.4 [optional.object.swap]:</p>
+
+<blockquote><p>-1- <em>Requires:</em> <del>Lvalues of type <code>T</code> shall be swappable and</del> <code>is_move_constructible_v&lt;T&gt;</code> is <code>true</code>.</p>
+
+<p><ins> -?- <em>Preconditions:</em> Lvalues of type <code>T</code> shall be swappable.</ins></p></blockquote>
+
+<p>Change Requires to Preconditions in 20.6.3.5 [optional.object.observe]:</p>
+
+<blockquote><p>-1- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>*this</code> contains a value.</p>
+
+<p>[...]</p>
+
+<p>-5- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>*this</code> contains a value.</p>
+
+<p>[...]</p>
+
+<p>-9- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>*this</code> contains a value.</p></blockquote>
+
+<p>Change Requires to Preconditions in 20.6.11 [optional.hash]:</p>
+
+<blockquote><p>-1- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The template specialization <code>hash&lt;T&gt;</code> shall meet the requirements of class template <code>hash</code> (20.13.14).</p></blockquote>
+
+<div class="note"><p>Drafting note:
+The <code>any</code> specification was changed by P0032R3 in Oulu, and the
+CopyConstructible requirements are now missing. The following edits will
+need to be updated.</p></div>
+
+<p>Edit the Requires in 20.7.3.1 [any.cons]:</p>
+
+<pre><code>        template&lt;class ValueType&gt;
+        any(ValueType&amp;&amp; value);
+</code></pre>
+
+<blockquote><p>-6- Let <code>T</code> be equal to <code>decay_t&lt;ValueType&gt;</code>.</p>
+
+<p>-7- <em>Requires:</em> <del><code>T</code> shall satisfy the <code>CopyConstructible</code> requirements. If</del> <code>is_copy_constructible_v&lt;T&gt;</code> is <ins><code>true</code></ins>
+<del>false, the program is ill-formed</del>.</p>
+
+<p>-8- <em>Effects:</em> [...]</p></blockquote>
+
+<p>Edit the Requires in 20.7.3.2 [any.assign]:</p>
+
+<pre><code>        template&lt;class ValueType&gt;
+        any&amp; operator=(ValueType&amp;&amp; value);
+</code></pre>
+
+<blockquote><p>-7- Let <code>T</code> be equal to <code>decay_t&lt;ValueType&gt;</code>.</p>
+
+<p>-8- <em>Requires:</em> <del><code>T</code> shall satisfy the <code>CopyConstructible</code> requirements. If</del> <code>is_copy_constructible_v&lt;T&gt;</code> is <ins><code>true</code></ins>
+<del>false, the program is ill-formed</del>.</p>
+
+<p>-9- <em>Effects:</em> [...]</p></blockquote>
+
+<p>Remove redundant sentence in 20.7.4 [any.nonmembers]:</p>
+
+<pre><code>        template&lt;class ValueType&gt;
+          ValueType any_cast(const any&amp; operand);
+        template&lt;class ValueType&gt;
+          ValueType any_cast(any&amp; operand);
+        template&lt;class ValueType&gt;
+          ValueType any_cast(any&amp;&amp; operand);
+</code></pre>
+
+<blockquote><p>-2- <em>Requires:</em> <code>is_reference_v&lt;ValueType&gt;</code> is true or <code>is_copy_constructible_v&lt;ValueType&gt;</code> is true. <del>Otherwise the program is ill-formed.</del></p>
+
+<p>-3- <em>Effects:</em> [...]</p></blockquote>
+
+<p>Change Requires to Preconditions in 20.8.2 [bitset.members]:</p>
+
+<pre><code>        constexpr bool operator[](size_t pos) const;
+</code></pre>
+
+<blockquote><p>-45- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>pos</code> shall be valid.</p>
+
+<p>-46- <em>Returns:</em> <code>true</code> if the bit at position <code>pos</code> in <code>*this</code> has the value one, otherwise <code>false</code>.</p>
+
+<p>-47- <em>Throws:</em> Nothing.</p></blockquote>
+
+<pre><code>        bitset&lt;N&gt;::reference operator[](size_t pos);
+</code></pre>
+
+<blockquote><p>-48- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>pos</code> shall be valid.</p>
+
+<p>-49- <em>Returns:</em> An object of type <code>bitset&lt;N&gt;::reference</code> such that
+<code>(*this)[pos] == this-&gt;test(pos)</code>, and such that <code>(*this)[pos] = val</code> is
+equivalent to <code>this-&gt;set(pos, val)</code>.</p>
+
+<p>-50- <em>Throws:</em> Nothing.</p></blockquote>
+
+<p>Change Requires to Preconditions in 20.9.4 [util.dynamic.safety]:</p>
+
+<pre><code>        void declare_reachable(void* p);
+</code></pre>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>p</code> shall be a safely-derived pointer (3.7.4.3) or a null pointer value.</p>
+
+<p>-3- <em>Effects:</em> if <code>p</code> is not null, the complete object [...]</p>
+
+<p>-4- <em>Throws:</em> May throw <code>bad_alloc</code> if [...]</p></blockquote>
+
+<pre><code>        template &lt;class T&gt; T* undeclare_reachable(T* p);
+</code></pre>
+
+<blockquote><p>-5- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> If <code>p</code> is not null, the complete
+object referenced by <code>p</code> shall have been previously declared
+reachable, and shall be live (3.8) from the time of the call until the last
+<code>undeclare_reachable(p)</code> call on the object.</p>
+
+<p>-6- <em>Returns:</em> A safely-derived copy of <code>p</code> which shall compare equal to <code>p</code>.</p>
+
+<p>-7- <em>Throws:</em> Nothing.</p>
+
+<p>-8- [<em>Note:</em> It is expected that [...] <em>--end note</em>]</p></blockquote>
+
+<pre><code>        void declare_no_pointers(char* p, size_t n);
+</code></pre>
+
+<blockquote><p>-9- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> No bytes in the specified range are currently registered with <code>declare_no_pointers()</code>. [...]</p>
+
+<p>-10- <em>Effects:</em> The <code>n</code> bytes starting at <code>p</code> no longer contain [...]</p>
+
+<p>-11- <em>Throws:</em> Nothing.</p>
+
+<p>-12- [<em>Note:</em> Under some conditions [...] <em>--end note</em>]</p></blockquote>
+
+<pre><code>        void declare_no_pointers(char* p, size_t n);
+</code></pre>
+
+<blockquote><p>-13- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The same range must previously have been passed to <code>declare_no_pointers()</code>.</p>
+
+<p>-14- <em>Effects:</em> Unregisters a range [...]</p>
+
+<p>-15- <em>Throws:</em> Nothing.</p></blockquote>
+
+<p>Change Requires to Preconditions in 20.9.5 [ptr.align]:</p>
+
+<pre><code>        void* align(size_t alignment, size_t size, void*&amp; ptr, size_t&amp; space);
+</code></pre>
+
+<blockquote><p>-1- <em>Effects:</em> If it is possible [...]</p>
+
+<p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins></p>
+
+<p>(2.1) --- <code>alignment</code> shall be a power of two</p>
+
+<p>(2.2) --- <code>ptr</code> shall point to contiguous storage of at least <code>space</code> bytes.</p>
+
+<p>-3- <em>Returns:</em> [...]</p></blockquote>
+
+<p>Change Requires to Preconditions in 20.9.9.1 [allocator.members]:</p>
+
+<pre><code>        void deallocate(pointer p, size_type n);
+</code></pre>
+
+<blockquote><p>-8- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>p</code> shall be a pointer value
+obtained from <code>allocate()</code>. <code>n</code> shall equal the value passed as the
+first argument to the invocation of allocate which returned <code>p</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 20.9.11 [temporary.buffer]:</p>
+
+<pre><code>        template &lt;class T&gt; void return_temporary_buffer(T* p);
+</code></pre>
+
+<blockquote><p>-4- <em>Effects:</em> Deallocates the storage referenced by <code>p</code>.</p>
+
+<p>-5- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>p</code> shall be a pointer value returned by an earlier call to <code>get_temporary_buffer</code> that has not been invalidated by an intervening call to <code>return_temporary_buffer(T*)</code>.</p>
+
+<p>-6- <em>Throws:</em> Nothing.</p></blockquote>
+
+<p>Split Requires in 20.10.1.2.1 [unique.ptr.single.ctor]:</p>
+
+<pre><code>        constexpr unique_ptr() noexcept;
+</code></pre>
+
+<blockquote><p>-1- <em>Requires:</em> <del><code>D</code> shall satisfy the requirements of <code>DefaultConstructible</code>
+(Table 19), and that construction shall not throw an
+exception.</del><ins><code>is_pointer_v&lt;D&gt;</code> is <code>false</code> and <code>is_reference_v&lt;D&gt;</code> is
+<code>false</code> and <code>is_default_constructible_v&lt;D&gt;</code> is <code>true</code>.</p>
+
+<p><ins> -?- <em>Preconditions:</em> Initializing the stored deleter shall not throw an
+exception.</ins></p>
+
+<p>-2- <em>Effects:</em> Constructs a <code>unique_ptr</code> object that owns nothing, [...]</p>
+
+<p>-3- <em>Postconditions:</em> <code>get == nullptr</code>. [...]</p>
+
+<p><del>-4- <em>Remarks:</em> If this constructor is instantiated with a pointer or
+reference type for the template argument <code>D</code>, the program is ill-formed.</del></p></blockquote>
+
+<pre><code>        explicit unique_ptr(pointer p) noexcept;
+</code></pre>
+
+<blockquote><p>-1- <em>Requires:</em> <del><code>D</code> shall satisfy the requirements of <code>DefaultConstructible</code>
+(Table 19), and that construction shall not throw an
+exception.</del><ins><code>is_pointer_v&lt;D&gt;</code> is <code>false</code> and <code>is_reference_v&lt;D&gt;</code> is
+<code>false</code> and <code>is_default_constructible_v&lt;D&gt;</code> is <code>true</code>.</p>
+
+<p><ins> -?- <em>Preconditions:</em> Initializing the stored deleter shall not throw an
+exception.</ins></p>
+
+<p>-2- <em>Effects:</em> Constructs a <code>unique_ptr</code> object which owns <code>p</code>, [...]</p>
+
+<p>-3- <em>Postconditions:</em> <code>get == nullptr</code>. [...]</p>
+
+<p><del>-4- <em>Remarks:</em> If this constructor is instantiated with a pointer or
+reference type for the template argument <code>D</code>, the program is ill-formed.</del></p>
+
+<p>[...]</p>
+
+<p>-12- <em>Requires:</em></p>
+
+<p>(12.1) -- If <code>D</code> is not a lvalue reference type then</p>
+
+<p>(12.1.1) --- If <code>d</code> is an lvalue or const rvalue then the first constructor
+of this pair will be selected.  <del><code>D</code> shall satisfy the requirements of
+<code>CopyConstructible</code> (Table 21), and the copy constructor of <code>D</code> shall not
+throw an exception.</del> <ins><code>is_copy_constructible_v&lt;D&gt;</code> shall be <code>true</code>.</ins>
+This <code>unique_ptr</code> will hold a copy of <code>d</code>.</p>
+
+<p>(12.1.2) --- Otherwise, <code>d</code> is a non-const rvalue and the second constructor
+of this pair will be selected.  <del><code>D</code> shall satisfy the requirements of
+<code>MoveConstructible</code> (Table 20), and the move constructor of <code>D</code> shall not
+throw an exception.</del> <ins><code>is_copy_constructible_v&lt;D&gt;</code> shall be <code>true</code>.</ins>
+This <code>unique_ptr</code> will hold a value move constructed from <code>d</code>.</p>
+
+<p>(12.2) -- Otherwise <code>D</code> is an lvalue reference type. [...]</p>
+
+<p><ins>-?- <em>Preconditions:</em> If <code>D</code> is not an lvalue reference type then
+construction of the stored deleter shall not throw an exception.</ins></p>
+
+<p>-13- <em>Effects:</em> Constructs a <code>unique_ptr</code> object [...]</p>
+
+<p>-14- <em>Postconditions:</em> <code>get() == p</code>. [...]</p>
+
+<p>[<em>Example:</em></p>
+
+<p>[...]</p>
+
+<p><em>--end example</em>]</p></blockquote>
+
+<pre><code>        unique_ptr(unique_ptr&amp;&amp; u) noexcept;
+</code></pre>
+
+<blockquote><p>-15- <em>Requires:</em> If <code>D</code> is not a reference type, <ins><code>is_move_constructible_v&lt;D&gt;</code> is <code>true</code></ins> <del><code>D</code> shall satisfy the requirements of MoveConstructible (Table 20).
+Construction of the deleter from an rvalue of type D shall not throw an exception.</del></p>
+
+<p><ins> -?- <em>Preconditions:</em> Construction of the deleter from an rvalue of type D shall not throw an exception.</ins></p>
+
+<p>-16- <em>Effects</em> Constructs a <code>unique_ptr</code> by transferring ownership [...]</p>
+
+<p>-17- <em>Postconditions:</em> <code>get()</code> yields the value <code>u.get()</code> yielded [...]</p></blockquote>
+
+<pre><code>      template &lt;class U, class E&gt; unique_ptr(unique_ptr&lt;U, E&gt;&amp;&amp; u) noexcept;
+</code></pre>
+
+<blockquote><p>-18- <em>Requires:</em> If <code>E</code> is not a reference type,
+<ins><code>is_constructible_v&lt;D, E&gt;</code> is <code>true</code></ins>
+<del>construction of the deleter from an rvalue of type <code>E</code> shall be
+well formed and shall not throw an exception</del>.
+Otherwise, <code>E</code> is a reference type and
+<ins><code>is_constructible_v&lt;D, E&amp;&gt;</code> is <code>true</code></ins>
+<del>construction of the deleter from an lvalue of type <code>E</code> shall be well formed and shall not throw an exception</del>.</p>
+
+<p><ins> -?- <em>Preconditions:</em> Construction of the deleter shall not throw an exception.</ins></p>
+
+<p>-19- <em>Remarks:</em> This constructor shall not participate in overload resolution unless: [...]</p></blockquote>
+
+<p>Split 20.10.1.2.2 [unique.ptr.single.dtor]:</p>
+
+<pre><code>        ~unique_ptr();
+</code></pre>
+
+<blockquote><p>-1- <em>Requires:</em> The expression <code>get_deleter()(get())</code> shall be well formed<del>, shall have well-defined behavior,
+and shall not throw exceptions</del>. [<em>Note:</em> The use of <code>default_delete</code> requires <code>T</code> to be a complete type. <em>--end note</em>]</p>
+
+<p><ins> -?- <em>Preconditions:</em> The expression <code>get_deleter()(get())</code> shall have well-defined behavior, and shall not throw exceptions.  </ins></p>
+
+<p>-2- <em>Effects:</em> If <code>get() == nullptr</code> there are no effects. Otherwise <code>get_deleter()(get())</code>.</p></blockquote>
+
+<p>Split 20.10.1.2.3 [unique.ptr.single.asgn]:</p>
+
+<pre><code>        unique_ptr&amp; operator=(unique_ptr&amp;&amp; u) noexcept;
+</code></pre>
+
+<blockquote><p>-1- <em>Requires:</em> If <code>D</code> is not a reference type,
+<ins><code>is_move_assignable_v&lt;D&gt;</code> is <code>true</code></ins>
+<del><code>D</code> shall satisfy the requirements of <code>MoveAssignable</code> (Table 22) and assignment of the deleter from an rvalue of type <code>D</code> shall not throw an exception</del>.
+Otherwise, <code>D</code> is a reference type;
+<ins><code>is_copy_assignable_v&lt;remove_reference_t&lt;D&gt;&gt;</code> is <code>true</code>.</ins>
+<del><code>remove_reference_t&lt;D&gt;</code> shall satisfy the <code>CopyAssignable</code> requirements and assignment of the deleter from an lvalue of type <code>D</code> shall not throw an exception.</del></p>
+
+<p><ins>-?- <em>Preconditions:</em> If <code>D</code> is not a reference type, assignment of the deleter from an rvalue of type <code>D</code> shall not throw an exception. Otherwise, <code>D</code> is a reference type; assignment of the deleter from an lvalue of type <code>D</code> shall not throw an exception.</ins></p>
+
+<p>-2- <em>Effects:</em> Transfers ownership from <code>u</code> to <code>*this</code> as if by calling <code>reset(u.release())</code> followed by <code>get_deleter() = std::forward&lt;D&gt;(u.get_deleter())</code>.</p>
+
+<p>-3- <em>Returns:</em> <code>*this</code>.</p></blockquote>
+
+<pre><code>        template &lt;class U, class E&gt; unique_ptr&amp; operator=(unique_ptr&lt;U, E&gt;&amp;&amp; u) noexcept;
+</code></pre>
+
+<blockquote><p>-4- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> If <code>E</code> is not a reference type,
+assignment of the deleter from an rvalue of type <code>E</code>
+<del>shall be well-formed and</del> shall not throw an exception.
+Otherwise, <code>E</code> is a reference type and assignment of the deleter from an lvalue of type <code>E</code>
+<del>shall be well-formed and</del> shall not throw an exception.</p>
+
+<p>-5- <em>Remarks:</em> This operator shall not participate in overload resolution unless:</p>
+
+<p>(5.1) -- <code>unique_ptr&lt;U, E&gt;::pointer</code> is implicitly convertible to <code>pointer</code>, and</p>
+
+<p>(5.2) -- <code>U</code> is not an array type, and</p>
+
+<p>(5.3) -- <code>is_assignable&lt;D&amp;, E&amp;&amp;&gt;::value</code> is <code>true</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 20.10.1.2.4 [unique.ptr.single.observers]:</p>
+
+<pre><code>        add_lvalue_reference_t&lt;T&gt; operator*() const;
+</code></pre>
+
+<blockquote><p>-1- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>get() != nullptr</code>.</p>
+
+<p>-2- <em>Returns:</em> <code>*get()</code>.</p></blockquote>
+
+<pre><code>        pointer operator-&gt;() const noexcept;
+</code></pre>
+
+<blockquote><p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>get() != nullptr</code>.</p>
+
+<p>-4- <em>Returns:</em> <code>get()</code>.</p>
+
+<p>-5- <em>Note:</em> use typically requires that <code>T</code> be a complete type.</p></blockquote>
+
+<p>Change Requires to Preconditions in 20.10.1.2.5 [unique.ptr.single.modifiers]:</p>
+
+<pre><code>        void reset(pointer p = pointer()) noexcept;
+</code></pre>
+
+<blockquote><p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The expression <code>get_deleter()(get())</code> <del>shall be well formed,</del> shall have well-defined behavior, and shall not throw exceptions.</p>
+
+<p>-4- <em>Effects:</em> Assigns <code>p</code> to the stored pointer, and then [...]</p>
+
+<p>-5- <em>Postcondition:</em> <code>get() == p</code>. [...]</p></blockquote>
+
+<pre><code>        void swap(unique_ptr&amp; u) noexcept;
+</code></pre>
+
+<blockquote><p>-6- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>get_deleter()</code> shall be swappable (17.6.3.2) and shall not throw an exception under <code>swap</code>.</p>
+
+<p>-7- <em>Effects:</em> Invokes <code>swap</code> on the stored pointers and on the stored deleters of <code>*this</code> and <code>u</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 20.10.1.3.3 [unique.ptr.runtime.observers]:</p>
+
+<pre><code>        T&amp; operator[](size_t i) const;
+</code></pre>
+
+<blockquote><p>-1- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>i &lt;</code> the number of elements in the array to which the stored pointer points.</p>
+
+<p>-2- <em>Returns:</em> <code>get()[i]</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 20.10.1.5 [unique.ptr.special]:</p>
+
+<pre><code>        template &lt;class T1, class D1, class T2, class D2&gt;
+          bool operator&lt;(const unique_ptr&lt;T1, D1&gt;&amp; x, const unique_ptr&lt;T2, D2&gt;&amp; y);
+</code></pre>
+
+<blockquote><p>-5- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> Let <code>CT</code> denote <code>common_type_t&lt;typename unique_ptr&lt;T1, D1&gt;::pointer, typename unique_ptr&lt;T2, D2&gt;::pointer&gt;</code>. Then the specialization <code>less&lt;CT&gt;</code> shall be a function object type (20.12)
+that induces a strict weak ordering (25.5) on the pointer values.</p>
+
+<p>-6- <em>Returns:</em> <code>less&lt;CT&gt;()(x.get(), y.get())</code>.</p>
+
+<p>[...]</p></blockquote>
+
+<pre><code>        template &lt;class T, class D&gt;
+          bool operator&lt;(const unique_ptr&lt;T, D&gt;&amp; x, nullptr_t);
+        template &lt;class T, class D&gt;
+          bool operator&lt;(nullptr_t, const unique_ptr&lt;T, D&gt;&amp; x);
+</code></pre>
+
+<blockquote><p>-13- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The specialization <code>less&lt;unique_ptr&lt;T, D&gt;::pointer&gt;</code> shall be a function object type (20.12)
+that induces a strict weak ordering (25.5) on the pointer values.</p>
+
+<p>-14- <em>Returns:</em> The first function template returns [...]</p></blockquote>
+
+<p>Split Requires in 20.10.2.2.1 [util.smartptr.shared.const]:</p>
+
+<pre><code>        template&lt;class Y&gt; explicit shared_ptr(Y* p);
+</code></pre>
+
+<blockquote><p>-4- <em>Requires:</em> <code>p</code> shall be convertible to <code>T*</code>. <code>Y</code> shall be a complete type.
+The expression <code>delete p</code> shall be well formed<del>, shall have well defined behavior, and shall not throw exceptions</del>.</p>
+
+<p><ins>-?- <em>Preconditions:</em> The expression <code>delete p</code> shall have well defined behavior, and shall not throw exceptions.</ins></p>
+
+<p>-5- <em>Effects:</em> Constructs a <code>shared_ptr</code> object that owns the pointer <code>p</code>. Enables <code>shared_from_this</code> with <code>p</code>. If an exception is thrown, <code>delete p</code> is called.</p>
+
+<p>[...]</p></blockquote>
+
+<pre><code>        template&lt;class Y, class D&gt; shared_ptr(Y* p, D d);
+        template&lt;class Y, class D, class A&gt; shared_ptr(Y* p, D d, A a);
+        template &lt;class D&gt; shared_ptr(nullptr_t p, D d);
+        template &lt;class D, class A&gt; shared_ptr(nullptr_t p, D d, A a);
+</code></pre>
+
+<blockquote><p><ins>-?- <em>Requires:</em> <code>p</code> shall be convertible to <code>T*</code>. <code>is_copy_constructible_v&lt;D&gt;</code> shall be <code>true</code>. The expression <code>d(p)</code> shall be well formed.</ins></p>
+
+<p>-8- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <del><code>p</code> shall be convertible to <code>T*</code>. <code>D</code> shall be <code>CopyConstructible</code>.</del> The copy constructor and destructor of <code>D</code> shall not throw exceptions.</del> The expression <code>d(p)</code> <del>shall be well formed,</del> shall have well defined behavior, and shall not throw exceptions. <code>A</code> shall be an allocator (17.6.3.5). The copy constructor and destructor of <code>A</code> shall not throw exceptions.</p>
+
+<p>-9- <em>Effects:</em> Constructs a <code>shared_ptr</code> object that owns the object <code>p</code> and the deleter <code>d</code>. The first and second constructors enable <code>shared_from_this</code> with <code>p</code>. The second and fourth constructors shall use a copy of <code>a</code> to allocate memory for internal use. If an exception is thrown, <code>d(p)</code> is called.</p></blockquote>
+
+<p>Change Requires to Preconditions in 20.10.2.2.5 [util.smartptr.shared.obs]:</p>
+
+<pre><code>        T&amp; operator*() const noexcept;
+</code></pre>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>get() != 0</code>.</p>
+
+<p>-3- <em>Returns:</em> <code>*get()</code>.</p>
+
+<p>-4- <em>Remarks:</em> When <code>T</code> is (possibly cv-qualified) <code>void</code>, it is unspecified whether this member function is declared. If it is declared, it is unspecified what its return type is, except that the declaration (although not necessarily the definition) of the function shall be well formed.</p></blockquote>
+
+<pre><code>        T* operator-&gt;() const noexcept;
+</code></pre>
+
+<blockquote><p>-5- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>get() != 0</code>.</p>
+
+<p>-6- <em>Returns:</em> <code>get()</code>.</p></blockquote>
+
+<p>Split Requires in 20.10.2.2.6 [util.smartptr.shared.create]:</p>
+
+<pre><code>        template&lt;class T, class... Args&gt; shared_ptr&lt;T&gt; make_shared(Args&amp;&amp;... args);
+        template&lt;class T, class A, class... Args&gt;
+          shared_ptr&lt;T&gt; allocate_shared(const A&amp; a, Args&amp;&amp;... args);
+</code></pre>
+
+<blockquote><p>-1- <em>Requires:</em> The expression <code>::new (pv) T(std::forward&lt;Args&gt;(args)...)</code>, where <code>pv</code> has type <code>void*</code> and points to storage suitable to hold an object of type <code>T</code>, shall be well formed.
+<del><code>A</code> shall be an allocator (17.6.3.5). The copy constructor and destructor of <code>A</code> shall not throw exceptions.</del></p>
+
+<p><ins>-?- <em>Preconditions:</em> <code>A</code> shall be an allocator (17.6.3.5). The copy constructor and destructor of <code>A</code> shall not throw exceptions.</ins></p>
+
+<p>-2- <em>Effects:</em> Allocates memory [...]</p></blockquote>
+
+<p>Split Requires in 20.10.2.2.9 [util.smartptr.shared.cast]:</p>
+
+<pre><code>        template&lt;class T, class U&gt; shared_ptr&lt;T&gt; dynamic_pointer_cast(const shared_ptr&lt;U&gt;&amp; r) noexcept;
+</code></pre>
+
+<blockquote><p>-5- <em>Requires:</em> The expression <code>dynamic_cast&lt;T*&gt;(r.get())</code> shall be well formed<del> and shall have well defined behavior</del>.</p>
+
+<p><ins>-?- <em>Preconditions:</em> The expression <code>dynamic_cast&lt;T*&gt;(r.get())</code> shall have well defined behavior.</ins></p></blockquote>
+
+<p>Change Requires to Preconditions in 20.10.2.6 [util.smartptr.shared.atomic]:</p>
+
+<pre><code>        template&lt;class T&gt;
+        bool atomic_is_lock_free(const shared_ptr&lt;T&gt;* p);
+</code></pre>
+
+<blockquote><p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>p</code> shall not be null.</p>
+
+<p>-4- <em>Returns:</em> <code>true</code> if atomic access to <code>*p</code> is lock-free, <code>false</code> otherwise.</p>
+
+<p>-5- <em>Throws:</em> Nothing.</p></blockquote>
+
+<pre><code>        template&lt;class T&gt;
+        shared_ptr&lt;T&gt; atomic_load(const shared_ptr&lt;T&gt;* p);
+</code></pre>
+
+<blockquote><p>-6- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>p</code> shall not be null.</p>
+
+<p>-7- <em>Returns:</em> <code>atomic_load_explicit(p, memory_order_seq_cst)</code>.</p>
+
+<p>-8- <em>Throws:</em> Nothing.</p></blockquote>
+
+<pre><code>        template&lt;class T&gt;
+        shared_ptr&lt;T&gt; atomic_load_explicit(const shared_ptr&lt;T&gt;* p, memory_order mo);
+</code></pre>
+
+<blockquote><p>-9- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>p</code> shall not be null.</p>
+
+<p>-10- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>mo</code> shall not be <code>memory_order_release</code> or <code>memory_order_acq_rel</code>.</p>
+
+<p>-11- <em>Returns:</em> <code>*p</code>.</p>
+
+<p>-12- <em>Throws:</em> Nothing.</p></blockquote>
+
+<pre><code>        template&lt;class T&gt;
+        void atomic_store(shared_ptr&lt;T&gt;* p, shared_ptr&lt;T&gt; r);
+</code></pre>
+
+<blockquote><p>-13- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>p</code> shall not be null.</p>
+
+<p>-14- <em>Effects:</em> As if by <code>atomic_store_explicit(p, r, memory_order_seq_cst)</code>.</p>
+
+<p>-15- <em>Throws:</em> Nothing.</p></blockquote>
+
+<pre><code>        template&lt;class T&gt;
+        void atomic_store_explicit(shared_ptr&lt;T&gt;* p, shared_ptr&lt;T&gt; r, memory_order mo);
+</code></pre>
+
+<blockquote><p>-16- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>p</code> shall not be null.</p>
+
+<p>-17- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>mo</code> shall not be <code>memory_order_acquire</code> or <code>memory_order_acq_rel</code>.</p>
+
+<p>-18- <em>Effects:</em> As if by <code>p-&gt;swap(r)</code>.</p>
+
+<p>-19- <em>Throws:</em> Nothing.</p></blockquote>
+
+<pre><code>        template&lt;class T&gt;
+        shared_ptr&lt;T&gt; atomic_exchange(shared_ptr&lt;T&gt;* p, shared_ptr&lt;T&gt; r);
+</code></pre>
+
+<blockquote><p>-20- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>p</code> shall not be null.</p>
+
+<p>-21- <em>Returns:</em> <code>atomic_exchange_explicit(p, r, memory_order_seq_cst)</code>.</p>
+
+<p>-22- <em>Throws:</em> Nothing.</p></blockquote>
+
+<pre><code>        template&lt;class T&gt;
+          shared_ptr&lt;T&gt; atomic_exchange_explicit(shared_ptr&lt;T&gt;* p, shared_ptr&lt;T&gt; r,
+                                                 memory_order mo);
+</code></pre>
+
+<blockquote><p>-23- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>p</code> shall not be null.</p>
+
+<p>-24- <em>Effects:</em> As if by <code>p-&gt;swap(r)</code>.</p>
+
+<p>-25- <em>Returns:</em> The previous value of <code>*p</code>.</p>
+
+<p>-26- <em>Throws:</em> Nothing.</p></blockquote>
+
+<pre><code>        template&lt;class T&gt;
+          bool atomic_compare_exchange_weak(
+            shared_ptr&lt;T&gt;* p, shared_ptr&lt;T&gt;* v, shared_ptr&lt;T&gt; w);
+</code></pre>
+
+<blockquote><p>-27- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>p</code> shall not be null and <code>v</code> shall not be null.</p>
+
+<p>-28- <em>Returns:</em> <code>atomic_compare_exchange_weak_explicit(p, v, w, memory_order_seq_cst, memory_order_seq_cst)</code>.</p>
+
+<p>-29- <em>Throws:</em> Nothing.</p></blockquote>
+
+<pre><code>        template&lt;class T&gt;
+          bool atomic_compare_exchange_strong(
+            shared_ptr&lt;T&gt;* p, shared_ptr&lt;T&gt;* v, shared_ptr&lt;T&gt; w);
+</code></pre>
+
+<blockquote><p>-30- <em>Returns:</em> <code>atomic_compare_exchange_strong_explicit(p, v, w, memory_order_seq_cst, memory_order_seq_cst)</code>.</p></blockquote>
+
+<pre><code>        template&lt;class T&gt;
+          bool atomic_compare_exchange_weak_explicit(
+            shared_ptr&lt;T&gt;* p, shared_ptr&lt;T&gt;* v, shared_ptr&lt;T&gt; w,
+            memory_order success, memory_order failure);
+        template&lt;class T&gt;
+          bool atomic_compare_exchange_strong_explicit(
+            shared_ptr&lt;T&gt;* p, shared_ptr&lt;T&gt;* v, shared_ptr&lt;T&gt; w,
+            memory_order success, memory_order failure);
+</code></pre>
+
+<blockquote><p>-31- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>p</code> shall not be null and <code>v</code> shall not be null.</p>
+
+<p>-32- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>failure</code> shall not be <code>memory_order_release</code>, <code>memory_order_acq_rel</code>, or stronger than <code>success</code>.</p>
+
+<p>-33- <em>Effects:</em> If <code>*p</code> is equivalent to <code>*v</code>, assigns <code>w</code> to <code>*p</code> and has synchronization semantics corresponding to the value of <code>success</code>, otherwise assigns <code>*p</code> to <code>*v</code> and has synchronization semantics corresponding to the value of <code>failure</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 20.10.2.7 [util.smartptr.hash]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The specialization <code>hash&lt;typename UP::pointer&gt;</code> shall be well-formed and well-defined, and shall meet the requirements of class template <code>hash</code> (20.12.14).</p></blockquote>
+
+<p>Change Requires to Preconditions in 20.11.2.2 [memory.resource.prot]:</p>
+
+<pre><code>        virtual void* do_allocate(size_t bytes, size_t alignment) = 0;
+</code></pre>
+
+<blockquote><p>-1- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> Alignment shall be a power of two.</p>
+
+<p>[...]</p></blockquote>
+
+<pre><code>        virtual void do_deallocate(void* p, size_t bytes, size_t alignment) = 0;
+</code></pre>
+
+<blockquote><p>-4- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>p</code> shall have been returned from a prior call to <code>allocate(bytes, alignment)</code> on a memory resource equal to <code>*this</code>, and the storage at <code>p</code> shall not yet have been deallocated.</p></blockquote>
+
+<p>Change Requires to Preconditions in 20.11.3.1 [memory.polymorphic.allocator.ctor]:</p>
+
+<pre><code>        polymorphic_allocator(memory_resource* r);
+</code></pre>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>r</code> is non-null.</p>
+
+<p>-3- <em>Effects:</em> Sets <code>memory_rsrc</code> to <code>r</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 20.11.3.2 [memory.polymorphic.allocator.mem]:</p>
+
+<pre><code>        void deallocate(Tp* p, size_t n);
+</code></pre>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>p</code> was allocated from a memory resource <code>x</code>, equal to <code>*memory_rsrc</code>, using <code>x.allocate(n * sizeof(Tp), alignof(Tp))</code>.</p>
+
+<p>-3- <em>Effects:</em> Equivalent to <code>memory_rsrc-&gt;deallocate(p, n * sizeof(Tp), alignof(Tp))</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 20.11.5.3 [memory.resource.pool.ctor]:</p>
+
+<pre><code>        synchronized_pool_resource(const pool_options&amp; opts, memory_resource* upstream);
+        unsynchronized_pool_resource(const pool_options&amp; opts, memory_resource* upstream);
+</code></pre>
+
+<blockquote><p>-1- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>upstream</code> is the address of a valid memory resource.</p>
+
+<p>-2- <em>Effects:</em> [...]</p></blockquote>
+
+<p>Change Requires to Preconditions in 20.11.6.1 [memory.resource.monotonic.buffer.ctor]:</p>
+
+<pre><code>        explicit monotonic_buffer_resource(memory_resource* upstream);
+        monotonic_buffer_resource(size_t initial_size, memory_resource* upstream);
+</code></pre>
+
+<blockquote><p>-1- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>upstream</code> shall be the address of a valid memory resource. <code>initial_size</code>, if specified, shall be greater than zero.</p>
+
+<p>-2- <em>Effects:</em> Sets <code>upstream_rsrc</code> to <code>upstream</code> and <code>current_buffer</code> to <code>nullptr</code>. If <code>initial_size</code> is specified, sets <code>next_buffer_size</code> to at least <code>initial_size</code>; otherwise sets <code>next_buffer_size</code> to an implementation-defined size.</p></blockquote>
+
+<pre><code>        monotonic_buffer_resource(void* buffer, size_t buffer_size, memory_resource* upstream);
+</code></pre>
+
+<blockquote><p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>upstream</code> shall be the address of a valid memory resource. <code>buffer_size</code> shall be no larger than the number of bytes in <code>buffer</code>.</p>
+
+<p>-4- <em>Effects</em>: Sets <code>upstream_rsrc</code> to <code>upstream</code> and [...]</p></blockquote>
+
+<div class="note"><p>Drafting note:
+The specification for <code>not_fn</code> was changed in Oulu, this wording will need
+updating.</p></div>
+
+<p>Split Requires in 20.12.9 [func.not_fn]:</p>
+
+<blockquote><p>-2- <em>Requires:</em> <code>is_constructible&lt;FD, F&gt;::value</code> shall be <code>true</code>. <del><code>fd</code> shall be a callable object (20.12.1).</del></p>
+
+<p><ins>-?- <em>Preconditions:</em>  <code>fd</code> shall be a callable object (20.12.1).</ins></p></blockquote>
+
+<p>Split Requires in 20.12.10.3 [func.bind.bind]:</p>
+
+<pre><code>        template&lt;classF, class... BoundArgs&gt;
+          unspecified bind(F&amp;&amp; f, BoundArgs&amp;&amp;... bound_args);
+</code></pre>
+
+<blockquote><p>-2- <em>Requires:</em> <code>is_constructible&lt;FD, F&gt;::value</code> shall be <code>true</code>. For each <code>Ti</code> in <code>BoundArgs</code>, <code>is_constructible&lt;TiD, Ti&gt;::value</code> shall be <code>true</code>. <del><code>INVOKE(fd, w1, w2, ..., wN)</code> (20.12.2) shall be a valid expression for some values <em>w1</em>, <em>w2</em>, <em>...</em>, <em>wN</em>, where <code>N == sizeof...(bound_args)</code>. The cv-qualifiers
+<em>cv</em> of the call wrapper <code>g</code>, as specified below, shall be neither <code>volatile</code> nor <code>const volatile</code>.</del></p>
+
+<p><ins>-?- <em>Preconditions:</em> <code>INVOKE(fd, w1, w2, ..., wN)</code> (20.12.2) shall be a valid expression for some values <em>w1</em>, <em>w2</em>, <em>...</em>, <em>wN</em>, where <code>N == sizeof...(bound_args)</code>. The cv-qualifiers
+<em>cv</em> of the call wrapper <code>g</code>, as specified below, shall be neither <code>volatile</code> nor <code>const volatile</code>. </ins></p>
+
+<p>[...]</p></blockquote>
+
+<pre><code>        template&lt;class R, class F, class... BoundArgs&gt;
+          unspecified bind(F&amp;&amp; f, BoundArgs&amp;&amp;... bound_args);
+</code></pre>
+
+<blockquote><p>-6- <em>Requires:</em> <code>is_constructible&lt;FD, F&gt;::value</code> shall be <code>true</code>. For each <code>Ti</code> in <code>BoundArgs</code>, <code>is_constructible&lt;TiD, Ti&gt;::value</code> shall be <code>true</code>. <del><code>INVOKE(fd, w1, w2, ..., wN)</code> (20.12.2) shall be a valid expression for some values <em>w1</em>, <em>w2</em>, <em>...</em>, <em>wN</em>, where <code>N == sizeof...(bound_args)</code>. The cv-qualifiers
+<em>cv</em> of the call wrapper <code>g</code>, as specified below, shall be neither <code>volatile</code> nor <code>const volatile</code>.</del></p>
+
+<p><ins>-?- <em>Preconditions:</em> <code>INVOKE(fd, w1, w2, ..., wN)</code> (20.12.2) shall be a valid expression for some values <em>w1</em>, <em>w2</em>, <em>...</em>, <em>wN</em>, where <code>N == sizeof...(bound_args)</code>. The cv-qualifiers
+<em>cv</em> of the call wrapper <code>g</code>, as specified below, shall be neither <code>volatile</code> nor <code>const volatile</code>. </ins></p></blockquote>
+
+<p>Change one Requires to Preconditions in 20.12.13.2 [func.searchers.boyer_moore]:</p>
+
+<blockquote><p>-1- <em>Requires:</em> The value type of <code>RandomAccessIterator1</code> shall meet the <code>DefaultConstructible</code> requirements, the <code>CopyConstructible</code> requirements, and the <code>CopyAssignable</code> requirements.</p>
+
+<p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> For any two values <code>A</code> and <code>B</code> of the type <code>iterator_traits&lt;RandomAccessIterator1&gt;::value_type</code>, if <code>pred(A,B)==true</code>, then <code>hf(A)==hf(B)</code> shall be <code>true</code>.</p>
+
+<p>-3- <em>Effects:</em> Constructs a [...]</p></blockquote>
+
+<p>Change one Requires to Preconditions in 20.12.13.3 [func.searchers.boyer_moore_horspool]:</p>
+
+<blockquote><p>-1- <em>Requires:</em> The value type of <code>RandomAccessIterator1</code> shall meet the <code>DefaultConstructible</code> requirements, the <code>CopyConstructible</code> requirements, and the <code>CopyAssignable</code> requirements.</p>
+
+<p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> For any two values <code>A</code> and <code>B</code> of the type <code>iterator_traits&lt;RandomAccessIterator1&gt;::value_type</code>, if <code>pred(A,B)==true</code>, then <code>hf(A)==hf(B)</code> shall be <code>true</code>.</p>
+
+<p>-3- <em>Effects:</em> Constructs a [...]</p></blockquote>
+
+<div class="question"><p>Should the following Remarks for <code>duration</code> be changed to Requires?</p></div>
+
+<p>Change one Requires to Preconditions in 20.15.5 [time.duration]:</p>
+
+<blockquote><p>-2- <em>Requires:</em> <code>Rep</code> shall be an arithmetic type or a class emulating an arithmetic type.</p>
+
+<p>-3- <em>Remarks:</em> If <code>duration</code> is instantiated with a <code>duration</code> type for the template argument <code>Rep</code>, the program is ill-formed.</p>
+
+<p>-4- <em>Remarks:</em> If <code>Period</code> is not a specialization of <code>ratio</code>, the program is ill-formed.</p>
+
+<p>-5- <em>Remarks:</em> If <code>Period::num</code> is not positive, the program is ill-formed.</p>
+
+<p>-6- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> Members of <code>duration</code> shall not throw exceptions other than those thrown by the indicated operations on their representations.</p></blockquote>
+
+<div class="note"><p>The following requirement on <code>system_clock::rep</code> isn't a requirement on
+users but on implementations, so should not use Requires or Preconditions.</p></div>
+
+<p>Change Requires to Remarks in 20.15.7.1 [time.clock.system]:</p>
+
+<pre><code>        typedef unspecified system_clock::rep;
+</code></pre>
+
+<blockquote><p>-1- <del><em>Requires:</em></del><ins><em>Remarks:</em></ins> <code>system_clock::duration::min() &lt; system_clock::duration::zero()</code> shall be <code>true</code>. [<em>Note:</em> This implies that <code>rep</code> is a signed type. <em>--end note</em>]</p></blockquote>
+
+<div class="question"><p>It's not clear to me whether Preconditions is right for the next items.
+Are these requirements on program-defined specializations of <code>char_traits</code>
+or on the predefined ones?
+If the former, we don't want implementations to have to diagnose invalid
+program-defined specializations.
+If the latter, maybe all three <em>Requires</em> below should use <em>Remarks</em>.</p></div>
+
+<p>Change Requires to Preconditions in 21.2.2 [char.traits.typedefs]:</p>
+
+<pre><code>        typedef INT_T int_type;
+</code></pre>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> For a certain character container type <code>char_type</code>, a related container type <code>INT_T</code> shall be a type or class which can represent all of the valid characters converted from the corresponding <code>char_type</code> values, as well as an end-of-file value, <code>eof()</code>. The type <code>int_type</code> represents a character container type which can hold end-of-file to be used as a return type of the iostream class member functions.</p></blockquote>
+
+<pre><code>        typedef implementation-defined off_type;
+        typedef implementation-defined pos_type;
+</code></pre>
+
+<blockquote><p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> Requirements for <code>off_type</code> and <code>pos_type</code> are described in 27.2.2 and 27.3.</p></blockquote>
+
+<pre><code>        typedef STATE_T state_type;
+</code></pre>
+
+<blockquote><p>-4- Requires: <code>state_type</code> shall meet the requirements of <code>CopyAssignable</code> (Table 23), <code>CopyConstructible</code> (Table 21), and <code>DefaultConstructible</code> (Table 19) types.</p></blockquote>
+
+<p>Change all Requires to Preconditions in 21.3.1.2 [string.cons]:</p>
+
+<pre><code>        basic_string(const charT* s, size_type n,
+                     const Allocator&amp; a = Allocator());
+</code></pre>
+
+<blockquote><p>-7- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>s</code> points to an array of at least <code>n</code> elements of <code>charT</code>.</p>
+
+<p>-8- <em>Effects:</em> Constructs an object [...]</p></blockquote>
+
+<pre><code>        basic_string(const charT* s, const Allocator&amp; a = Allocator());
+</code></pre>
+
+<blockquote><p>-9- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>s</code> points to an array of at least <code>traits::length(s) + 1</code> elements of <code>charT</code>.</p>
+
+<p>-10- <em>Effects:</em> Constructs an object [...]</p>
+
+<p>-11- <em>Remarks:</em> Uses <code>traits::length()</code>.</p></blockquote>
+
+<pre><code>        basic_string(size_type n, charT c, const Allocator&amp; a = Allocator());
+</code></pre>
+
+<blockquote><p>-12- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>n &lt; npos</code>.</p>
+
+<p>-13- <em>Effects:</em> Constructs an object [...]</p></blockquote>
+
+<p>Change all Requires to Preconditions in 21.3.1.5 [string.access]:</p>
+
+<pre><code>        const_reference operator[](size_type pos) const;
+        reference       operator[](size_type pos);
+</code></pre>
+
+<blockquote><p>-1- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>pos &lt;= size()</code>.</p>
+
+<p>-2- <em>Returns:</em> <code>*(begin() + pos)</code> if <code>pos &lt; size()</code>. Otherwise, returns a reference to an object of type <code>charT</code> with value <code>charT()</code>, where modifying the object leads to undefined behavior.</p>
+
+<p>-3- <em>Throws:</em> Nothing.</p>
+
+<p> -4- <em>Complexity:</em> Constant time.</p></blockquote>
+
+<pre><code>        const_reference at(size_type pos) const;
+        reference       at(size_type pos);
+</code></pre>
+
+<blockquote><p>-5- <em>Throws:</em> <code>out_of_range</code> if <code>pos &gt;= size()</code>.</p>
+
+<p>-6- <em>Returns:</em> <code>operator[](pos)</code>.</p></blockquote>
+
+<pre><code>        const charT&amp; front() const;
+        charT&amp; front();
+</code></pre>
+
+<blockquote><p>-7- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>!empty()</code>.</p>
+
+<p>-8- <em>Effects:</em> Equivalent to <code>operator[](0)</code>.</p></blockquote>
+
+<pre><code>        const charT&amp; back() const;
+        charT&amp; back();
+</code></pre>
+
+<blockquote><p>-9- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>!empty()</code>.</p>
+
+<p>-10- <em>Effects:</em> Equivalent to <code>operator[](size() - 1)</code>.</p></blockquote>
+
+<p>Change all Requires to Preconditions in 21.3.1.6.2 [string::append]:</p>
+
+<pre><code>        basic_string&amp;
+          append(const charT* s, size_type n);
+</code></pre>
+
+<blockquote><p>-6- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>s</code> points to an array of at least <code>n</code> elements of <code>charT</code>.</p>
+
+<p>-7- <em>Throws:</em> <code>length_error</code> if <code>size() + n &gt; max_size()</code>.</p>
+
+<p>-8- <em>Effects:</em> The function replaces the string controlled by <code>*this</code> with a string of length <code>size() + n</code> whose first <code>size()</code> elements are a copy of the original string controlled by <code>*this</code> and whose remaining elements are a copy of the initial <code>n</code> elements of <code>s</code>.</p>
+
+<p>-9- <em>Returns:</em> <code>*this</code>.</p></blockquote>
+
+<pre><code>        basic_string&amp; append(const charT* s);
+</code></pre>
+
+<blockquote><p>-10- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>s</code> points to an array of at least <code>traits::length(s) + 1</code> elements of <code>charT</code>.</p>
+
+<p>-11- <em>Effects:</em> Calls <code>append(s, traits::length(s))</code>.</p>
+
+<p>-12- <em>Returns:</em> *this.</p></blockquote>
+
+<pre><code>        basic_string&amp; append(size_type n, charT c);
+</code></pre>
+
+<blockquote><p>-13- <em>Effects:</em> Equivalent to <code>append(basic_string(n, c))</code>.</p>
+
+<p>-14- <em>Returns:</em> *this.</p></blockquote>
+
+<pre><code>        template&lt;class InputIterator&gt;
+          basic_string&amp; append(InputIterator first, InputIterator last);
+</code></pre>
+
+<blockquote><p>-15- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>[first, last)</code> is a valid range.</p>
+
+<p>-16- <em>Effects:</em> Equivalent to <code>append(basic_string(first, last))</code>.</p>
+
+<p>-17- <em>Returns:</em> <code>*this</code>.</p></blockquote>
+
+<p>Change all Requires to Preconditions in 21.3.1.6.3 [string::assign]:</p>
+
+<pre><code>        basic_string&amp; assign(const charT* s, size_type n);
+</code></pre>
+
+<blockquote><p>-8- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>s</code> points to an array of at least <code>n</code> elements of <code>charT</code>.</p>
+
+<p>-9- <em>Throws:</em> <code>length_error</code> if <code>n &gt; max_size()</code>.</p>
+
+<p>-10- <em>Effects:</em> Replaces the string controlled by <code>*this</code> with a string of length <code>n</code> whose elements are a copy of those pointed to by <code>s</code>.</p>
+
+<p>-11- <em>Returns:</em> <code>*this</code>.</p></blockquote>
+
+<pre><code>        basic_string&amp; assign(const charT* s);
+</code></pre>
+
+<blockquote><p>-12- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>s</code> points to an array of at least <code>traits::length(s) + 1</code> elements of <code>charT</code>.</p>
+
+<p>-13- <em>Effects:</em> Calls <code>assign(s, traits::length(s))</code>.</p>
+
+<p>-14- <em>Returns:</em> <code>*this</code>.</p></blockquote>
+
+<p>Change all Requires to Preconditions in 21.3.1.6.4 [string::insert]:</p>
+
+<pre><code>        basic_string&amp;
+        insert(size_type pos, const charT* s, size_type n);
+</code></pre>
+
+<blockquote><p>-5- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>s</code> points to an array of at least <code>n</code> elements of <code>charT</code>.</p>
+
+<p>-6- <em>Throws:</em> <code>out_of_range</code> if <code>pos &gt; size()</code> or <code>length_error</code> if <code>size() + n &gt; max_size()</code>.</p>
+
+<p>-7- <em>Effects:</em> Replaces the string controlled by <code>*this</code> with a string of length <code>size() + n</code> whose first <code>pos</code> elements are a copy of the initial elements of the original string controlled by <code>*this</code> and whose next <code>n</code> elements are a copy of the elements in <code>s</code> and whose remaining elements are a copy of the remaining elements of the original string controlled by <code>*this</code>.</p>
+
+<p>-8- <em>Returns:</em> <code>*this</code>.</p></blockquote>
+
+<pre><code>        basic_string&amp;
+        insert(size_type pos, const charT* s);
+</code></pre>
+
+<blockquote><p>-9- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>s</code> points to an array of at least <code>traits::length(s) + 1</code> elements of <code>charT</code>.</p>
+
+<p>-10- <em>Effects:</em> Equivalent to: <code>return insert(pos, s, traits::length(s));</code></p></blockquote>
+
+<pre><code>        basic_string&amp;
+        insert(size_type pos, size_type n, charT c);
+</code></pre>
+
+<blockquote><p>-11- <em>Effects:</em> Equivalent to <code>insert(pos, basic_string(n, c))</code>.</p>
+
+<p>-12- <em>Returns:</em> <code>*this</code>.</p></blockquote>
+
+<pre><code>        iterator insert(const_iterator p, charT c);
+</code></pre>
+
+<blockquote><p>-13- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>p</code> is a valid iterator on <code>*this</code>.</p>
+
+<p>-14- <em>Effects:</em> Inserts a copy of <code>c</code> before the character referred to by <code>p</code>.</p>
+
+<p>-15- <em>Returns:</em> An iterator which refers to the copy of the inserted character.</p></blockquote>
+
+<pre><code>        iterator insert(const_iterator p, size_type n, charT c);
+</code></pre>
+
+<blockquote><p>-16- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>p</code> is a valid iterator on <code>*this</code>.</p>
+
+<p>-17- <em>Effects:</em> Inserts <code>n</code> copies of <code>c</code> before the character referred to by <code>p</code>.</p>
+
+<p>-18- <em>Returns:</em> An iterator which refers to the copy of the first inserted character, or <code>p</code> if <code>n == 0</code>.</p></blockquote>
+
+<pre><code>        template&lt;class InputIterator&gt;
+        iterator insert(const_iterator p, InputIterator first, InputIterator last);
+</code></pre>
+
+<blockquote><p>-19- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>p</code> is a valid iterator on <code>*this</code>. <code>[first,last)</code> is a valid range.</p>
+
+<p>-20- <em>Effects:</em> Equivalent to <code>insert(p - begin(), basic_string(first, last))</code>.</p>
+
+<p>-21- <em>Returns:</em> An iterator which refers to the copy of the first inserted character, or <code>p</code> if <code>first == last</code>.</p></blockquote>
+
+<p>Change all Requires to Preconditions in 21.3.1.6.5 [string::erase]:</p>
+
+<pre><code>        iterator erase(const_iterator first, const_iterator last);
+</code></pre>
+
+<blockquote><p>-8- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>first</code> and <code>last</code> are valid iterators on <code>*this</code>, defining a range <code>[first,last)</code>.</p>
+
+<p>-9- <em>Throws:</em> Nothing.</p>
+
+<p>-10- <em>Effects:</em> Removes the characters in the range <code>[first,last)</code>.</p>
+
+<p>-11- <em>Returns:</em> An iterator which points to the element pointed to by last prior to the other elements being erased. If no such element exists, <code>end()</code> is returned.</p></blockquote>
+
+<pre><code>        void pop_back();
+</code></pre>
+
+<blockquote><p>-12- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>!empty()</code>.</p>
+
+<p>-13- <em>Throws:</em> Nothing.</p>
+
+<p>-14- <em>Effects:</em> Equivalent to <code>erase(size() - 1, 1)</code>.</p>
+
+<p><em>Note:</em> Send help, I'm trapped in a WG21 proposal factory.</p></blockquote>
+
+<p>Change all Requires to Preconditions in 21.3.1.6.6 [string::replace]:</p>
+
+<blockquote><p>-5- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>s</code> points to an array of at least <code>n2</code> elements of <code>charT</code>.</p>
+
+<p>[...]</p>
+
+<p>-9- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>s</code> points to an array of at least <code>traits::length(s) + 1</code> elements of <code>charT</code>.</p>
+
+<p>[...]</p>
+
+<p>-13-  <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>[begin(), i1)</code> and <code>[i1, i2)</code> are valid ranges.</p>
+
+<p>[...]</p>
+
+<p>-16- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>[begin(), i1)</code> and <code>[i1, i2)</code> are valid ranges and <code>s</code> points to an array of at least <code>n</code> elements of <code>charT</code>.</p>
+
+<p>[...]</p>
+
+<p>-19- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>[begin(), i1)</code> and <code>[i1, i2)</code> are valid ranges and <code>s</code> points to an array of at least <code>traits::length(s) + 1</code> elements of <code>charT</code>.</p>
+
+<p>[...]</p>
+
+<p>-22- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>[begin(), i1)</code> and <code>[i1, i2)</code> are valid ranges.</p>
+
+<p>[...]</p>
+
+<p>-25- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>[begin(), i1)</code>, <code>[i1, i2)</code> and <code>[j1, j2)</code> are valid ranges.</p>
+
+<p>[...]</p>
+
+<p>-25- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>[begin(), i1)</code> and <code>[i1, i2)</code> are valid ranges.</p></blockquote>
+
+<p>Change all Requires to Preconditions in 21.3.1.7.1 [string.accessors]:</p>
+
+<pre><code>        const charT* c_str() const noexcept;
+        const charT* data() const noexcept;
+</code></pre>
+
+<blockquote><p>-1- <em>Returns:</em> A pointer <code>p</code> such that <code>p + i == &amp;operator[](i)</code> for each <code>i</code> in <code>[0, size()]</code>.</p>
+
+<p>-2- <em>Complexity:</em> Constant time.</p>
+
+<p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The program shall not alter any of the values stored in the character array.</p></blockquote>
+
+<pre><code>        charT* data() noexcept;
+</code></pre>
+
+<blockquote><p>-4- <em>Returns:</em> A pointer <code>p</code> such that <code>p + i == &amp;operator[](i)</code> for each <code>i</code> in <code>[0, size()]</code>.</p>
+
+<p>-5- <em>Complexity:</em> Constant time.</p>
+
+<p>-6- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The program shall not alter the value stored at <code>p + size()</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 21.3.1.7.2 [string::find]:</p>
+
+<pre><code>        size_type find(const charT* s, size_type pos = 0) const;
+</code></pre>
+
+<blockquote><p>-5- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>s</code> points to an array of at least <code>traits::length(s) + 1</code> elements of <code>charT</code>.</p>
+
+<p>-6- <em>Returns:</em> <code>find(basic_string(s), pos)</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 21.3.1.7.3 [string::rfind]:</p>
+
+<pre><code>        size_type rfind(const charT* s, size_type pos = npos) const;
+</code></pre>
+
+<blockquote><p>-5- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>s</code> points to an array of at least <code>traits::length(s) + 1</code> elements of <code>charT</code>.</p>
+
+<p>-6- <em>Returns:</em> <code>rfind(basic_string(s), pos)</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 21.3.1.7.4 [string::find.first.of]:</p>
+
+<pre><code>        size_type find_first_of(const charT* s, size_type pos = 0) const;
+</code></pre>
+
+<blockquote><p>-5- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>s</code> points to an array of at least <code>traits::length(s) + 1</code> elements of <code>charT</code>.</p>
+
+<p>-6- <em>Returns:</em> <code>find_first_of(basic_string(s), pos)</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 21.3.1.7.5 [string::find.last.of]:</p>
+
+<pre><code>        size_type find_last_of(const charT* s, size_type pos = npos) const;
+</code></pre>
+
+<blockquote><p>-5- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>s</code> points to an array of at least <code>traits::length(s) + 1</code> elements of <code>charT</code>.</p>
+
+<p>-6- <em>Returns:</em> <code>find_last_of(basic_string(s), pos)</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 21.3.1.7.6 [string::find.first.not.of]:</p>
+
+<pre><code>        size_type find_first_not_of(const charT* s, size_type pos = 0) const;
+</code></pre>
+
+<blockquote><p>-5- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>s</code> points to an array of at least <code>traits::length(s) + 1</code> elements of <code>charT</code>.</p>
+
+<p>-6- <em>Returns:</em> <code>find_first_not_of(basic_string(s), pos)</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 21.3.1.7.7 [string::find.last.not.of]:</p>
+
+<pre><code>        size_type find_last_not_of(const charT* s, size_type pos = npos) const;
+</code></pre>
+
+<blockquote><p>-5- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>s</code> points to an array of at least <code>traits::length(s) + 1</code> elements of <code>charT</code>.</p>
+
+<p>-6- <em>Returns:</em> <code>find_last_not_of(basic_string(s), pos)</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 21.3.2.2 [string::operator==]:</p>
+
+<pre><code>        template&lt;class charT, class traits, class Allocator&gt;
+          bool operator==(const basic_string&lt;charT,traits,Allocator&gt;&amp; lhs,
+                          const charT* rhs);
+</code></pre>
+
+<blockquote><p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>rhs</code> points to an array of at least <code>traits::length(rhs) + 1</code> elements of <code>charT</code>.</p>
+
+<p>-4- <em>Returns:</em> <code>lhs.compare(rhs) == 0</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 21.3.2.3 [string::operator!=]:</p>
+
+<pre><code>        template&lt;class charT, class traits, class Allocator&gt;
+          bool operator!=(const basic_string&lt;charT,traits,Allocator&gt;&amp; lhs,
+                          const charT* rhs);
+</code></pre>
+
+<blockquote><p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>rhs</code> points to an array of at least <code>traits::length(rhs) + 1</code> elements of <code>charT</code>.</p>
+
+<p>-4- <em>Returns:</em> <code>lhs.compare(rhs) != 0</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 21.4.2.1 [string.view.cons]:</p>
+
+<pre><code>        constexpr basic_string_view(const charT* str);
+</code></pre>
+
+<blockquote><p>-4-  <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>[str, str + traits::length(str))</code> is a valid range.</p></blockquote>
+
+<pre><code>        constexpr basic_string_view(const charT* str, size_type len);
+</code></pre>
+
+<blockquote><p>-7- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>[str, str + len)</code> is a valid range.</p></blockquote>
+
+<p>Change all Requires to Preconditions in 21.4.2.4 [string.view.capacity]:</p>
+
+<pre><code>        constexpr const_reference operator[](size_type pos) const;
+</code></pre>
+
+<blockquote><p>-1- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>pos &lt;= size()</code>.</p>
+
+<p>[...]</p></blockquote>
+
+<pre><code>        constexpr const_reference front() const;
+</code></pre>
+
+<blockquote><p>-7- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>!empty()</code>.</p>
+
+<p>[...]</p></blockquote>
+
+<pre><code>        constexpr const_reference back() const;
+</code></pre>
+
+<blockquote><p>-10- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>!empty()</code>.</p>
+
+<p>[...]</p></blockquote>
+
+<p>Change all Requires to Preconditions in 21.4.2.5 [string.view.modifiers]:</p>
+
+<pre><code>        constexpr void remove_prefix(size_type n);
+</code></pre>
+
+<blockquote><p>-1-  <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>n &lt;= size()</code>.</p>
+
+<p>-2- <em>Effects:</em> Equivalent to: <code>data_ += n; size_ -= n;</code></p></blockquote>
+
+<pre><code>        constexpr void remove_suffix(size_type n);
+</code></pre>
+
+<blockquote><p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>n &lt;= size()</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 21.4.2.6 [string.view.ops]:</p>
+
+<blockquote><p>-8- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>[s, s + rlen)</code> is a valid range.</p></blockquote>
+
+<p>Change Requires to Preconditions in 22.3.3.2.2 [conversions.string]:</p>
+
+<blockquote><p>-16- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> For the first and second constructors, <code>pcvt != nullptr</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 22.3.3.2.3 [conversions.buffer]:</p>
+
+<blockquote><p>-10-  <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>pcvt != nullptr</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 22.4.1.3.2 [facet.ctype.char.members]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>tbl</code> either 0 or an array of at least <code>table_size</code> elements.</p></blockquote>
+
+<p>Change all Requires to Preconditions in 22.4.1.4.2 [locale.codecvt.virtuals]:</p>
+
+<blockquote><p>-1- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>(from&lt;=from_end &amp;&amp; to&lt;=to_end)</code> well-defined and <code>true</code>; <code>state</code> initialized, if at the beginning of a sequence, or else equal to the result of converting the preceding characters in the sequence.</p>
+
+<p>[...]</p>
+
+<p>-6- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>(to &lt;= to_end)</code> well defined and <code>true</code>; <code>state</code> initialized, if at the beginning of a sequence, or else equal to the result of converting the preceding characters in the sequence.</p>
+
+<p>[...]</p>
+
+<p>-11- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>(from &lt;= from_end)</code> well defined and <code>true</code>; <code>state</code> initialized, if at the beginning of a sequence, or else equal to the result of converting the preceding characters in the sequence.</p></blockquote>
+
+<p>Change Requires to Preconditions in 22.4.5.1.1 [locale.time.get.members]:</p>
+
+<blockquote><p>-7- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>[fmt, fmtend)</code> shall be a valid range.</p></blockquote>
+
+<p>Change Requires to Preconditions in 22.4.5.1.2 [locale.time.get.virtuals]:</p>
+
+<blockquote><p>-11- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>t</code> shall point to an object.</p></blockquote>
+
+<p>Change Requires to Preconditions in 22.4.7.1.2 [locale.messages.virtuals]:</p>
+
+<blockquote><p>-4- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>cat</code> shall be a catalog obtained from <code>open()</code> and not yet closed.</p>
+
+<p>[...]</p>
+
+<p>-6- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>cat</code> shall be a catalog obtained from <code>open()</code> and not yet closed.</p></blockquote>
+
+<div class="question"><p>I propose making the first row use Preconditions, to allow the conforming
+extension of allowing an allocator with a different <code>value_type</code>, and
+rebinding it. Is this desirable? Should the extension only be allowed
+in non-strict modes? (e.g -std=gnu++17 vs -std=c++17).</p></div>
+
+<p>Change Requires to Preconditions in Table 106, Allocator-aware container requirements:</p>
+
+<table>
+<thead>
+<tr>
+<th>Expression </th>
+<th> Return Type </th>
+<th> Assertion/note/pre-/post-condition</th>
+<th>Complexity</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>allocator_type</code></td>
+<td>A</td>
+<td> <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>allocator_type::value_type</code> is the same as <code>X::value_type</code>.</td>
+<td> compile-time</td>
+</tr>
+<tr>
+<td>...</td>
+<td>...</td>
+<td>...</td>
+<td>...</td>
+</tr>
+<tr>
+<td><code>X(rv) X u(rv)</code></td>
+<td> </td>
+<td> <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> move construction of <code>A</code> shall not exit via an exception.</td>
+<td> constant</td>
+</tr>
+</tbody>
+</table>
+
+
+<p>Change Requires to Preconditions in Table 108, Optional sequence container operations:</p>
+
+<table>
+<thead>
+<tr>
+<th>Expression </th>
+<th> Return Type </th>
+<th> Operational semantics   </th>
+<th>Container</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>a.pop_front()</code> </td>
+<td> <code>void</code> </td>
+<td> Destroys the first element. <del><em>Requires:</em></del><ins><em>pre:</em></ins> <code>a.empty()</code> shall be <code>false</code>. </td>
+<td> <code>deque</code>, <code>forward_list</code>, <code>list</code></td>
+</tr>
+<tr>
+<td><code>a.pop_back()</code> </td>
+<td> <code>void</code> </td>
+<td> Destroys the last element. <del><em>Requires:</em></del><ins><em>pre:</em></ins> <code>a.empty()</code> shall be <code>false</code>. </td>
+<td> <code>basic_string</code>, <code>deque</code>, <code>list</code>, <code>vector</code></td>
+</tr>
+</tbody>
+</table>
+
+
+<p>Remove redundant sentence in 23.3.7.9 [array.tuple]:</p>
+
+<blockquote><p>-1- <em>Requires:</em> <code>I &lt; N</code>. <del>The program is ill-formed if I is out of bounds.%-}</p>
+
+<p>[...]</p>
+
+<p>-3- <em>Requires:</em> <code>I &lt; N</code>. <del>The program is ill-formed if I is out of bounds.%-}</p></blockquote>
+
+<p>Change Requires to Preconditions in 23.3.9.5 [forwardlist.modifiers]:</p>
+
+<blockquote><p>-5- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>position</code> is <code>before_begin()</code> or is a dereferenceable iterator in the range <code>[begin(), end())</code>.</p>
+
+<p>[...]</p>
+
+<p>-8- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>position</code> is <code>before_begin()</code> or is a dereferenceable iterator in the range <code>[begin(), end())</code>.</p>
+
+<p>[...]</p>
+
+<p>-11- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>position</code> is <code>before_begin()</code> or is a dereferenceable iterator in the range <code>[begin(), end())</code>. <code>first</code> and <code>last</code> are not iterators in <code>*this</code>.</p>
+
+<p>[...]</p>
+
+<p>-16- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>position</code> is <code>before_begin()</code> or is a dereferenceable iterator in the range <code>[begin(), end())</code>.</p>
+
+<p>[...]</p>
+
+<p>-19- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The iterator following <code>position</code> is dereferenceable.</p>
+
+<p>[...]</p>
+
+<p>-23- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> All iterators in the range <code>(position, last)</code> are dereferenceable.</p></blockquote>
+
+<p>Change Requires to Preconditions in 23.3.9.6 [forwardlist.ops]:</p>
+
+<blockquote><p>-1- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>position</code> is <code>before_begin()</code> or is a dereferenceable iterator in the range <code>[begin(), end())</code>. <code>get_allocator() == x.get_allocator()</code>. <code>&amp;x != this</code>.</p>
+
+<p>[...]</p>
+
+<p>-5- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>position</code> is <code>before_begin()</code> or is a dereferenceable iterator in the range <code>[begin(), end())</code>. The iterator following <code>i</code> is a dereferenceable iterator in <code>x</code>. <code>get_allocator() == x.get_allocator()</code>.</p>
+
+<p>[...]</p>
+
+<p>-9- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>position</code> is <code>before_begin()</code> or is a dereferenceable iterator in the range <code>[begin(), end())</code>. <code>(first, last)</code> is a valid range in <code>x</code>, and all iterators in the range <code>(first, last)</code> are dereferenceable. <code>position</code> is not an iterator in the range <code>(first, last)</code>. <code>get_allocator() == x.get_allocator()</code>.</p>
+
+<p>[...]</p>
+
+<p>-19- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>comp</code> defines a strict weak ordering (25.5), and <code>*this</code> and <code>x</code> are both sorted according to this ordering. <code>get_allocator() == x.get_allocator()</code>.</p>
+
+<p>[...]</p>
+
+<p>-23- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>operator&lt;</code> (for the version with no arguments) or <code>comp</code> (for the version with a comparison argument) defines a strict weak ordering (25.5).</p></blockquote>
+
+<p>Change Requires to Preconditions in 23.3.10.5 [list.ops]:</p>
+
+<blockquote><p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>&amp;x != this</code>.</p>
+
+<p>[...]</p>
+
+<p>-8-  <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>i</code> is a valid dereferenceable iterator of <code>x</code>.</p>
+
+<p>[...]</p>
+
+<p>-12- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>[first, last)</code> is a valid range in <code>x</code>. The result is undefined if <code>position</code> is an iterator in the range <code>[first, last)</code>. Pointers and references to the moved elements of <code>x</code> now refer to those same elements but as members of <code>*this</code>. Iterators referring to the moved elements will continue to refer to their elements, but they now behave as iterators into <code>*this</code>, not into <code>x</code>.</p>
+
+<p>[...]</p>
+
+<p>-22- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>comp</code> shall define a strict weak ordering (25.5), and both the list and the argument list shall be sorted according to this ordering.</p>
+
+<p>[...]</p>
+
+<p>-28- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>operator&lt;</code> (for the first version) or <code>comp</code> (for the second version) shall define a strict weak ordering (25.5).</p></blockquote>
+
+<p>Change Requires to Preconditions in 23.6.5.1 [priqueue.cons]:</p>
+
+<blockquote><p>-1- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>x</code> shall define a strict weak ordering (25.5).</p>
+
+<p>[...]</p>
+
+<p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>x</code> shall define a strict weak ordering (25.5).</p></blockquote>
+
+<p>Change Requires to Preconditions in 24.4.4 [iterator.operations]:</p>
+
+<p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>n</code> shall be negative only for bidirectional and random access iterators.</p>
+
+<blockquote><p>[...]</p>
+
+<p>-5- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> If <code>InputIterator</code> meets the requirements of random access iterator, <code>last</code> shall be reachable from <code>first</code> or <code>first</code> shall be reachable from <code>last</code>; otherwise, <code>last</code> shall be reachable from <code>first</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 24.6.1.2 [istream.iterator.ops]:</p>
+
+<blockquote><p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>in_stream != 0</code>.</p>
+
+<p>[...]</p>
+
+<p>-6- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>in_stream != 0</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 24.6.4.1 [ostreambuf.iter.cons]:</p>
+
+<blockquote><p>-1- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>s.rdbuf()</code> shall not be a null pointer.</p>
+
+<p>[...]</p>
+
+<p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>s</code> shall not be a null pointer.</p></blockquote>
+
+<p>Change Requires to Preconditions in 25.3.4 [alg.foreach]:</p>
+
+<blockquote><p>-12- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>n &gt;= 0</code>.</p>
+
+<p>[...]</p>
+
+<p>-17- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>n &gt;= 0</code>.</p></blockquote>
+
+<p>Split Requires in 25.3.12 [alg.is_permutation]:</p>
+
+<blockquote><p>-1- <em>Requires:</em> <code>ForwardIterator1</code> and <code>ForwardIterator2</code> shall have the same value type. <del>The comparison function shall be an equivalence relation.</del></p>
+
+<p><ins> -?- <em>Preconditions:</em> The comparison function shall be an equivalence relation.</ins></p></blockquote>
+
+<p>Change Requires to Preconditions in 25.4.1 [alg.copy]:</p>
+
+<blockquote><p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>result</code> shall not be in the range <code>[first, last)</code>.</p>
+
+<p>[...]</p>
+
+<p>-8- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The ranges <code>[first, last)</code> and <code>[result, result + (last - first))</code> shall not overlap.</p>
+
+<p>[...]</p>
+
+<p>-14- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>result</code> shall not be in the range <code>(first, last]</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 25.4.2 [alg.move]:</p>
+
+<blockquote><p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>result</code> shall not be in the range <code>[first, last)</code>.</p>
+
+<p>[...]</p>
+
+<p>-6- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The ranges <code>[first, last)</code> and <code>[result, result + (last - first))</code> shall not overlap.</p></blockquote>
+
+<p>Change Requires to Preconditions in 25.4.3 [alg.swap]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The two ranges <code>[first1, last1)</code> and <code>[first2, first2 + (last1 - first1))</code> shall not overlap. <code>*(first1 + n)</code> shall be swappable with (17.6.3.2) <code>*(first2 + n)</code>.</p>
+
+<p>[...]</p>
+
+<p>-6- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>a</code> and <code>b</code> shall be dereferenceable. <code>*a</code> shall be swappable with (17.6.3.2) <code>*b</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 25.4.4 [alg.transform]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>op</code> and <code>binary_op</code> shall not invalidate iterators or subranges, or modify elements in the ranges</p>
+
+<p>[...]</p></blockquote>
+
+<p>Split Requires in 25.4.5 [alg.replace]:</p>
+
+<blockquote><p>-4- Requires: The results of the expressions <code>*first</code> and <code>new_value</code> shall be writable (24.2.1) to the <code>result</code> output iterator. <del>The ranges <code>[first, last)</code> and <code>[result, result + (last - first))</code> shall not overlap.</del></p>
+
+<p><ins> -?- <em>Preconditions:</em> The ranges <code>[first, last)</code> and <code>[result, result + (last - first))</code> shall not overlap. </ins></p></blockquote>
+
+<p>Split Requires in 25.4.8 [alg.remove]:</p>
+
+<blockquote><p>-7- Requires: <del>The ranges <code>[first, last)</code> and <code>[result, result + (last - first))</code> shall not overlap.</del>
+The expression <code>*result = *first</code> shall be valid.</p>
+
+<p><ins> -?- <em>Preconditions:</em> The ranges <code>[first, last)</code> and <code>[result, result + (last - first))</code> shall not overlap.</ins></p></blockquote>
+
+<p>Split Requires in 25.4.9 [alg.unique]:</p>
+
+<blockquote><p>-2- Requires: <del>The comparison function shall be an equivalence relation.</del> The type of <code>*first</code> shall satisfy the <code>MoveAssignable</code> requirements (Table 22).</p>
+
+<p><ins> -?- <em>Preconditions:</em> The comparison function shall be an equivalence relation.</ins></p>
+
+<p>[...]</p>
+
+<p>-5- Requires: <del>The comparison function shall be an equivalence relation. The ranges <code>[first, last)</code> and <code>[result, result+(last-first))</code> shall not overlap.</del> The expression <code>*result = *first</code> shall be valid.
+Let <code>T</code> be the value type of <code>InputIterator</code>. If <code>InputIterator</code> meets the forward iterator requirements, then there are no additional requirements for <code>T</code>. Otherwise, if <code>OutputIterator</code> meets the forward iterator requirements and its value type is the same as <code>T</code>, then <code>T</code> shall be <code>CopyAssignable</code> (Table 23).
+Otherwise, <code>T</code> shall be both <code>CopyConstructible</code> (Table 21) and <code>CopyAssignable</code>.</p>
+
+<p><ins> -?- <em>Preconditions:</em> The comparison function shall be an equivalence relation. The ranges <code>[first, last)</code> and <code>[result, result+(last-first))</code> shall not overlap. </ins></p></blockquote>
+
+<p>Change Requires to Preconditions in 25.4.10 [alg.reverse]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>*first</code> shall be swappable (17.6.3.2).</p>
+
+<p>[...]</p>
+
+<p>-5- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The ranges <code>[first, last)</code> and <code>[result, result+(last-first))</code> shall not overlap.</p></blockquote>
+
+<p>Split Requires in 25.4.11 [alg.rotate]:</p>
+
+<blockquote><p>-4- <em>Requires:</em> <del> <code>[first, middle)</code> and <code>[middle, last)</code> shall be valid ranges. <code>ForwardIterator</code> shall satisfy the requirements of <code>ValueSwappable</code> (17.6.3.2). </del> The type of <code>*first</code> shall satisfy the requirements of <code>MoveConstructible</code> (Table 20) and the requirements of <code>MoveAssignable</code> (Table 22).</p>
+
+<p><ins> -?- <em>Preconditions:</em> <code>[first, middle)</code> and <code>[middle, last)</code> shall be valid ranges. <code>ForwardIterator</code> shall satisfy the requirements of <code>ValueSwappable</code> (17.6.3.2). </ins></p>
+
+<p>[...]</p>
+
+<p>-8- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The ranges <code>[first, last)</code> and <code>[result, result + (last - first))</code> shall not overlap.</p></blockquote>
+
+<p>Split Requires in 25.4.12 [alg.random.sample]:</p>
+
+<blockquote><p>-1- <em>Requires:</em><br/>
+-- PopulationIterator shall satisfy the requirements of an input iterator (24.2.3).<br/>
+-- SampleIterator shall satisfy the requirements of an output iterator (24.2.4).<br/>
+-- SampleIterator shall satisfy the additional requirements of a random access iterator (24.2.7).
+unless PopulationIterator satisfies the additional requirements of a forward iterator (24.2.5).<br/>
+-- PopulationIterator's value type shall be writable (24.2.1) to out.<br/>
+-- Distance shall be an integer type.</p>
+
+<p><ins> -?- <em>Preconditions:</em> </ins></p>
+
+<p>-- UniformRandomNumberGenerator shall meet the requirements of a uniform random number generator type (26.6.1.3) whose return type is convertible to Distance.<br/>
+-- out shall not be in the range [first, last).</p></blockquote>
+
+<p>Change Requires to Preconditions in 25.4.13 [alg.random.shuffle]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>RandomAccessIterator</code> shall satisfy the requirements of <code>ValueSwappable</code> (17.6.3.2). The type <code>UniformRandomNumberGenerator</code> shall meet the requirements of a uniform random number generator (26.6.1.3) type whose return type is convertible to <code>iterator_traits&lt;RandomAccessIterator&gt;::difference_type</code>.</p></blockquote>
+
+<p>Change/split Requires to Preconditions in 25.4.14 [alg.partitions]:</p>
+
+<blockquote><p>-6- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>ForwardIterator</code> shall satisfy the requirements of <code>ValueSwappable</code> (17.6.3.2).</p>
+
+<p>[...]</p>
+
+<p>-10- Requires: <del><code>BidirectionalIterator</code> shall satisfy the requirements of <code>ValueSwappable</code> (17.6.3.2).</del> The type of <code>*first</code> shall satisfy the requirements of <code>MoveConstructible</code> (Table 20) and of <code>MoveAssignable</code> (Table 22).</p>
+
+<p><ins> -?- <em>Preconditions:</em> <code>BidirectionalIterator</code> shall satisfy the requirements of <code>ValueSwappable</code> (17.6.3.2). </ins></p>
+
+<p>[...]</p>
+
+<p>-12- Requires: <code>InputIterator</code>'s value type shall be <code>CopyAssignable</code>, and shall be writable (24.2.1) to the <code>out_true</code> and <code>out_false</code> <code>OutputIterator</code>s, and shall be convertible to <code>Predicate</code>'s argument type.
+<del>The input range shall not overlap with either of the output ranges.</del></p>
+
+<p><ins> -?- <em>Preconditions:</em> The input range shall not overlap with either of the output ranges.</ins></p>
+
+<p>[...]</p>
+
+<p>-16- Requires: <code>ForwardIterator</code>'s value type shall be convertible to <code>Predicate</code>'s argument type. <del> <code>[first, last)</code> shall be partitioned by <code>pred</code>, i.e. all elements that satisfy <code>pred</code> shall appear before those that do not. </del></p>
+
+<p><ins> -?- <em>Preconditions:</em> <code>[first, last)</code> shall be partitioned by <code>pred</code>, i.e. all elements that satisfy <code>pred</code> shall appear before those that do not. </ins></p></blockquote>
+
+<p>Split Requires in 25.5.1.1 [sort]:</p>
+
+<blockquote><p>-2- <em>Requires:</em> <del><code>RandomAccessIterator</code> shall satisfy the requirements of <code>ValueSwappable</code> (17.6.3.2).</del> The type of <code>*first</code> shall satisfy the requirements of <code>MoveConstructible</code> (Table 20) and of <code>MoveAssignable</code> (Table 22).</p>
+
+<p><ins> -?- <em>Preconditions:</em> <code>RandomAccessIterator</code> shall satisfy the requirements of <code>ValueSwappable</code> (17.6.3.2). </ins></p></blockquote>
+
+<p>Split Requires in 25.5.1.2 [stable.sort]:</p>
+
+<blockquote><p>-2- <em>Requires:</em> <del> <code>RandomAccessIterator</code> shall satisfy the requirements of <code>ValueSwappable</code> (17.6.3.2). </del> The type of <code>*first</code> shall satisfy the requirements of <code>MoveConstructible</code> (Table 20) and of <code>MoveAssignable</code> (Table 22).</p>
+
+<p><ins> -?- <em>Preconditions:</em> <code>RandomAccessIterator</code> shall satisfy the requirements of <code>ValueSwappable</code> (17.6.3.2). </ins></p></blockquote>
+
+<p>Split Requires in 25.5.1.3 [partial.sort]:</p>
+
+<blockquote><p>-2- <em>Requires:</em> <del> <code>RandomAccessIterator</code> shall satisfy the requirements of <code>ValueSwappable</code> (17.6.3.2). </del> The type of <code>*first</code> shall satisfy the requirements of <code>MoveConstructible</code> (Table 20) and of <code>MoveAssignable</code> (Table 22).</p>
+
+<p><ins> -?- <em>Preconditions:</em> <code>RandomAccessIterator</code> shall satisfy the requirements of <code>ValueSwappable</code> (17.6.3.2). </ins></p></blockquote>
+
+<p>Split Requires in 25.5.1.4 [partial.sort.copy]:</p>
+
+<blockquote><p>-3- <em>Requires:</em> <del> <code>RandomAccessIterator</code> shall satisfy the requirements of <code>ValueSwappable</code> (17.6.3.2). </del> The type of <code>*result_first</code> shall satisfy the requirements of <code>MoveConstructible</code> (Table 20) and of <code>MoveAssignable</code> (Table 22).</p>
+
+<p><ins> -?- <em>Preconditions:</em> <code>RandomAccessIterator</code> shall satisfy the requirements of <code>ValueSwappable</code> (17.6.3.2). </ins></p></blockquote>
+
+<p>Split Requires in 25.5.2 [alg.nth.element]:</p>
+
+<blockquote><p>-2- <em>Requires:</em> <del> <code>RandomAccessIterator</code> shall satisfy the requirements of <code>ValueSwappable</code> (17.6.3.2). </del> The type of <code>*first</code> shall satisfy the requirements of <code>MoveConstructible</code> (Table 20) and of <code>MoveAssignable</code> (Table 22).</p>
+
+<p><ins> -?- <em>Preconditions:</em> <code>RandomAccessIterator</code> shall satisfy the requirements of <code>ValueSwappable</code> (17.6.3.2). </ins></p></blockquote>
+
+<p>Change Requires to Preconditions in 25.5.3.1 [lower.bound]:</p>
+
+<blockquote><p>-1- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The elements <code>e</code> of <code>[first, last)</code> shall be partitioned with respect to the expression <code>e &lt; value</code> or <code>comp(e, value)</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 25.5.3.2 [upper.bound]:</p>
+
+<blockquote><p>-1- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The elements <code>e</code> of <code>[first, last)</code> shall be partitioned with respect to the expression <code>!(value &lt; e)</code> or <code>!comp(value, e)</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 25.5.3.3 [equal.range]:</p>
+
+<blockquote><p>-1- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The elements <code>e</code> of <code>[first, last)</code> shall be partitioned with respect to the expressions <code>e &lt; value</code> and <code>!(value &lt; e)</code> or <code>comp(e, value)</code> and <code>!comp(value, e)</code>. Also, for all elements <code>e</code> of <code>[first, last)</code>, <code>e &lt; value</code> shall imply <code>!(value &lt; e)</code> or <code>comp(e, value)</code> shall imply <code>!comp(value, e)</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 25.5.3.4 [binary.search]:</p>
+
+<blockquote><p>-1- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The elements <code>e</code> of <code>[first, last)</code> are partitioned with respect to the expressions <code>e &lt; value</code> and <code>!(value &lt; e)</code> or <code>comp(e, value)</code> and <code>!comp(value, e)</code>. Also, for all elements <code>e</code> of <code>[first, last)</code>, <code>e &lt; value</code> implies <code>!(value &lt; e)</code> or <code>comp(e, value)</code> implies <code>!comp(value, e)</code>.</p></blockquote>
+
+<p>Change/split Requires to Preconditions in 25.5.4 [alg.merge]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The ranges <code>[first1, last1)</code> and <code>[first2, last2)</code> shall be sorted with respect to <code>operator&lt;</code> or <code>comp</code>. The resulting range shall not overlap with either of the original ranges.</p>
+
+<p>[...]</p>
+
+<p>-7- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <del> The ranges <code>[first, middle)</code> and <code>[middle, last)</code> shall be sorted with respect to <code>operator&lt;</code> or <code>comp</code>. </del> <code>BidirectionalIterator</code> shall satisfy the requirements of <code>ValueSwappable</code> (17.6.3.2). The type of <code>*first</code> shall satisfy the requirements of <code>MoveConstructible</code> (Table 20) and of <code>MoveAssignable</code> (Table 22).</p>
+
+<p><ins> -?- <em>Preconditions:</em>  The ranges <code>[first, middle)</code> and <code>[middle, last)</code> shall be sorted with respect to <code>operator&lt;</code> or <code>comp</code>. </ins></p></blockquote>
+
+<p>Change Requires to Preconditions in 25.5.5.2 [set.union]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The resulting range shall not overlap with either of the original ranges.</p></blockquote>
+
+<p>Change Requires to Preconditions in 25.5.5.3 [set.intersection]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The resulting range shall not overlap with either of the original ranges.</p></blockquote>
+
+<p>Change Requires to Preconditions in 25.5.5.4 [set.difference]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The resulting range shall not overlap with either of the original ranges.</p></blockquote>
+
+<p>Change Requires to Preconditions in 25.5.5.5 [set.symmetric.difference]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The resulting range shall not overlap with either of the original ranges.</p></blockquote>
+
+<p>Split Requires in 25.5.6.1 [push.heap]:</p>
+
+<blockquote><p>-2- <em>Requires:</em> <del> The range <code>[first, last - 1)</code> shall be a valid heap. </del> The type of <code>*first</code> shall satisfy the <code>MoveConstructible</code> requirements (Table 20) and the <code>MoveAssignable</code> requirements (Table 22).</p>
+
+<p><ins> -?- <em>Preconditions:</em>  The range <code>[first, last - 1)</code> shall be a valid heap. </ins></p></blockquote>
+
+<p>Split Requires in 25.5.6.2 [pop.heap]:</p>
+
+<blockquote><p>-1- <em>Requires:</em> <del> The range <code>[first, last)</code> shall be a valid non-empty heap. <code>RandomAccessIterator</code> shall satisfy the requirements of <code>ValueSwappable</code> (17.6.3.2). </del>
+The type of <code>*first</code> shall satisfy the requirements of <code>MoveConstructible</code> (Table 20) and of <code>MoveAssignable</code> (Table 22).</p>
+
+<p><ins> -?- <em>Preconditions:</em>  The range <code>[first, last)</code> shall be a valid non-empty heap. <code>RandomAccessIterator</code> shall satisfy the requirements of <code>ValueSwappable</code> (17.6.3.2). </ins></p></blockquote>
+
+<p>Split Requires in 25.5.6.4 [sort.heap]:</p>
+
+<blockquote><p>-2- <em>Requires:</em> <del> The range <code>[first, last)</code> shall be a valid heap. <code>RandomAccessIterator</code> shall satisfy the requirements of <code>ValueSwappable</code> (17.6.3.2). </del>
+The type of <code>*first</code> shall satisfy the requirements of <code>MoveConstructible</code> (Table 20) and of <code>MoveAssignable</code> (Table 22).</p>
+
+<p><ins> -?- <em>Preconditions:</em> The range <code>[first, last)</code> shall be a valid heap. <code>RandomAccessIterator</code> shall satisfy the requirements of <code>ValueSwappable</code> (17.6.3.2).  </ins></p></blockquote>
+
+<p>Split Requires in 25.5.7 [alg.min.max]:</p>
+
+<blockquote><p>-5- <em>Requires:</em> <code>T</code> shall be <code>CopyConstructible</code> <del>and <code>t.size() &gt; 0</code></del>. For the first form, type <code>T</code> shall be <code>LessThanComparable</code>.</p>
+
+<p><ins> -?- <em>Preconditions:</em>  <code>t.size() &gt; 0</code> </ins></p>
+
+<p>[...]</p>
+
+<p>-13- <em>Requires:</em> <code>T</code> shall be <code>CopyConstructible</code> <del>and <code>t.size() &gt; 0</code></del>. For the first form, type <code>T</code> shall be <code>LessThanComparable</code>.</p>
+
+<p><ins> -?- <em>Preconditions:</em>  <code>t.size() &gt; 0</code> </ins></p>
+
+<p>[...]</p>
+
+<p>-21- <em>Requires:</em> <code>T</code> shall be <code>CopyConstructible</code> <del>and <code>t.size() &gt; 0</code></del>. For the first form, type <code>T</code> shall be <code>LessThanComparable</code>.</p>
+
+<p><ins> -?- <em>Preconditions:</em>  <code>t.size() &gt; 0</code> </ins></p></blockquote>
+
+<p>Change Requires to Preconditions in 25.5.10 [alg.permutation.generators]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>BidirectionalIterator</code> shall satisfy the requirements of <code>ValueSwappable</code> (17.6.3.2).</p>
+
+<p>[...]</p>
+
+<p>-6- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>BidirectionalIterator</code> shall satisfy the requirements of <code>ValueSwappable</code> (17.6.3.2).</p></blockquote>
+
+<p>Change Requires to Preconditions in 26.5.7 [complex.value.ops]:</p>
+
+<blockquote><p>-9- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>rho</code> shall be non-negative and non-NaN. <code>theta</code> shall be finite.</p></blockquote>
+
+<p>Change Requires to Preconditions in 26.6.8.2.1 [rand.dist.uni.int]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>a ≤ b</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 26.6.8.2.2 [rand.dist.uni.real]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>a ≤ b</code> and <code>b − a ≤ numeric_limits&lt;RealType&gt;::max()</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 26.6.8.3.1 [rand.dist.bern.bernoulli]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>0 ≤ p ≤ 1</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 26.6.8.3.2 [rand.dist.bern.bin]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>0 ≤ p ≤ 1</code> and <code>0 ≤ t</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 26.6.8.3.3 [rand.dist.bern.geo]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>0 &lt; p &lt; 1</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 26.6.8.3.4 [rand.dist.bern.negbin]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>0 &lt; p ≤ 1</code> and <code>0 &lt; k</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 26.6.8.4.1 [rand.dist.pois.poisson]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>0 &lt; mean</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 26.6.8.4.2 [rand.dist.pois.exp]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>0 &lt; lambda</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 26.6.8.4.3 [rand.dist.pois.gamma]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>0 &lt; alpha</code> and <code>0 &lt; beta</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 26.6.8.4.4 [rand.dist.pois.weibull]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>0 &lt; a</code> and <code>0 &lt; b</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 26.6.8.4.5 [rand.dist.pois.extreme]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>0 &lt; b</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 26.6.8.5.1 [rand.dist.norm.normal]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>0 &lt; stddev</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 26.6.8.5.2 [rand.dist.norm.lognormal]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>0 &lt; s</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 26.6.8.5.3 [rand.dist.norm.chisq]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>0 &lt; n</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 26.6.8.5.4 [rand.dist.norm.cauchy]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>0 &lt; b</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 26.6.8.5.5 [rand.dist.norm.fisher]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>0 &lt; m</code> and <code>0 &lt; n</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 26.6.8.5.6 [rand.dist.norm.t]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>0 &lt; n</code>.</p></blockquote>
+
+<p>Split Requires in 26.6.8.6.1 [rand.dist.samp.discrete]:</p>
+
+<blockquote><p>-4- <em>Requires:</em> <code>InputIterator</code> shall satisfy the requirements of an input iterator (Table 114) type.
+Moreover, <code>iterator_traits&lt;InputIterator&gt;::value_type</code> shall denote  a type that  is convertible to <code>double</code>.
+<del> If <code>firstW == lastW</code>, let <em>n</em> = 1 and <em>w0</em> = 1. Otherwise, <code>[firstW, lastW)</code> shall form a sequence <em>w</em> of length <em>n</em> > 0. </del></p>
+
+<p><ins> -?- <em>Preconditions:</em>  If <code>firstW == lastW</code>, let <em>n</em> = 1 and <em>w0</em> = 1. Otherwise, <code>[firstW, lastW)</code> shall form a sequence <em>w</em> of length <em>n</em> > 0. </ins></p>
+
+<p>[...]</p>
+
+<p>-7- <em>Requires:</em> Each instance of type <code>UnaryOperation</code> shall be a function object (20.12) whose return type shall be convertible to <code>double</code>.
+Moreover, <code>double</code> shall be convertible to the type of <code>UnaryOperation</code>'s sole parameter.
+<del> If <code>nw</code> = 0, let <em>n</em> = 1, otherwise let <em>n</em> = <code>nw</code>. The relation 0 &lt; δ = (<code>xmax</code> − <code>xmin</code>)/<em>n</em> shall hold. </del></p>
+
+<p><ins> -?- <em>Preconditions:</em>  If <code>nw</code> = 0, let <em>n</em> = 1, otherwise let <em>n</em> = <code>nw</code>. The relation 0 &lt; δ = (<code>xmax</code> − <code>xmin</code>)/<em>n</em> shall hold. </ins></p></blockquote>
+
+<p>Split Requires in 26.6.8.6.2 [rand.dist.samp.pconst]:</p>
+
+<blockquote><p>-4- <em>Requires:</em> <code>InputIteratorB</code> and <code>InputIteratorW</code> shall each satisfy the requirements of an input iterator (Table 114) type.
+Moreover, <code>iterator_traits&lt;InputIteratorB&gt;::value_type</code> and <code>iterator_traits&lt;InputIteratorW&gt;::value_type</code> shall each denote a type that is convertible to <code>double</code>.
+<del>  If <code>firstB == lastB</code> or <code>++firstB == lastB</code>, let <em>n</em> = 1, <em>w0</em> = 1, <em>b0</em> = 0, and <em>b1</em> = 1. Otherwise, <code>[firstB, lastB)</code>  shall form a sequence <em>b</em> of length <em>n</em> + 1, the length of the sequence <em>w</em> starting from <code>firstW</code> shall be at least <em>n</em>, and any <em>wk</em> for <em>k</em> ≥ <em>n</em> shall be ignored by the distribution. </del></p>
+
+<p><ins> -?- <em>Preconditions:</em> If <code>firstB == lastB</code> or <code>++firstB == lastB</code>, let <em>n</em> = 1, <em>w0</em> = 1, <em>b0</em> = 0, and <em>b1</em> = 1. Otherwise, <code>[firstB, lastB)</code>  shall form a sequence <em>b</em> of length <em>n</em> + 1, the length of the sequence <em>w</em> starting from <code>firstW</code> shall be at least <em>n</em>, and any <em>wk</em> for <em>k</em> ≥ <em>n</em> shall be ignored by the distribution.  </ins></p>
+
+<p>[...]</p>
+
+<p>-9- <em>Requires:</em> Each instance of type <code>UnaryOperation</code> shall be a function object (20.12) whose return type shall be convertible to <code>double</code>. Moreover, <code>double</code> shall be convertible to the type of <code>UnaryOperation</code>'s sole parameter.
+<del> If <code>nw</code> = 0, let <em>n</em> = 1, otherwise let <em>n</em> = <code>nw</code>. The relation 0 &lt; δ = (<code>xmax</code> − <code>xmin</code>)/<em>n</em> shall hold. </del></p>
+
+<p><ins> -?- <em>Preconditions:</em>  If <code>nw</code> = 0, let <em>n</em> = 1, otherwise let <em>n</em> = <code>nw</code>. The relation 0 &lt; δ = (<code>xmax</code> − <code>xmin</code>)/<em>n</em> shall hold. </ins></p></blockquote>
+
+<p>Split Requires in 26.6.8.6.3 [rand.dist.samp.plinear]:</p>
+
+<blockquote><p>-4- <em>Requires:</em> <code>InputIteratorB</code> and <code>InputIteratorW</code> shall each satisfy the requirements of an input iterator (Table 114) type.
+Moreover, <code>iterator_traits&lt;InputIteratorB&gt;::value_type</code> and <code>iterator_traits&lt;InputIteratorW&gt;::value_type</code> shall each denote a type that is convertible to <code>double</code>.
+<del> If <code>firstB == lastB</code> or <code>++firstB == lastB</code>, let <em>n</em> = 1, ρ0 = ρ1 = 1, <em>b0</em> = 0, and <em>b1</em> = 1. Otherwise, [firstB, lastB) shall form a sequence <em>b</em> of length <em>n</em> + 1, the length of the sequence <em>w</em> starting from <code>firstW</code> shall be at least <em>n</em> + 1, and any <em>wk</em> for <em>k</em> ≥ <em>n</em> + 1 shall be ignored by the distribution. </del></p>
+
+<p><ins> -?- <em>Preconditions:</em>  If <code>firstB == lastB</code> or <code>++firstB == lastB</code>, let <em>n</em> = 1, ρ0 = ρ1 = 1, <em>b0</em> = 0, and <em>b1</em> = 1. Otherwise, [firstB, lastB) shall form a sequence <em>b</em> of length <em>n</em> + 1, the length of the sequence <em>w</em> starting from <code>firstW</code> shall be at least <em>n</em> + 1, and any <em>wk</em> for <em>k</em> ≥ <em>n</em> + 1 shall be ignored by the distribution. </ins></p>
+
+<p>[...]</p>
+
+<p>-9- <em>Requires:</em> Each instance of type <code>UnaryOperation</code> shall be a function object (20.12) whose return type shall be convertible to <code>double</code>.
+Moreover, <code>double</code> shall be convertible to the type of <code>UnaryOperation</code>'s sole parameter.
+<del> If <code>nw</code> = 0, let <em>n</em> = 1, otherwise let <em>n</em> = <code>nw</code>. The relation 0 &lt; δ = (<code>xmax</code> − <code>xmin</code>)/<em>n</em> shall hold. </del></p>
+
+<p><ins> -?- <em>Preconditions:</em>  If <code>nw</code> = 0, let <em>n</em> = 1, otherwise let <em>n</em> = <code>nw</code>. The relation 0 &lt; δ = (<code>xmax</code> − <code>xmin</code>)/<em>n</em> shall hold. </ins></p></blockquote>
+
+<p>Change Requires to Preconditions in 26.7.2.3 [valarray.assign]:</p>
+
+<blockquote><p>-8- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The length of the array to which the argument refers equals <code>size()</code>.</p></blockquote>
+
+<p>Split Requires in 26.8.2 [accumulate]:</p>
+
+<blockquote><p>-2- <em>Requires:</em> <code>T</code> shall meet the requirements of <code>CopyConstructible</code> (Table 21) and <code>CopyAssignable</code> (Table 23) types.
+<del> In the range <code>[first, last]</code>, <code>binary_op</code> shall neither modify elements nor invalidate iterators or subranges. </del></p>
+
+<p><ins> -?- <em>Preconditions:</em>  In the range <code>[first, last]</code>, <code>binary_op</code> shall neither modify elements nor invalidate iterators or subranges. </ins></p></blockquote>
+
+<p>Change Requires to Preconditions in 26.8.3 [reduce]:</p>
+
+<blockquote><p>-4- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> In the range <code>[first, last]</code>, <code>binary_op</code> shall neither modify elements nor invalidate iterators or subranges.</p></blockquote>
+
+<p>Change Requires to Preconditions in 26.8.4 [transform.reduce]:</p>
+
+<blockquote><p>-2-  <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> Neither <code>unary_op</code> nor <code>binary_op</code> shall invalidate subranges, or modify elements in the range <code>[first, last)</code>.</p></blockquote>
+
+<p>Split Requires in 26.8.5 [inner.product]:</p>
+
+<blockquote><p>-2- <em>Requires:</em> <code>T</code> shall meet the requirements of <code>CopyConstructible</code> (Table 21) and <code>CopyAssignable</code> (Table 23) types.
+<del> In the ranges <code>[first1, last1]</code> and <code>[first2, first2 + (last1 - first1)]</code> <code>binary_op1</code> and <code>binary_op2</code> shall neither modify elements nor invalidate iterators or subranges. </del></p>
+
+<p><ins> -?- <em>Preconditions:</em>  In the ranges <code>[first1, last1]</code> and <code>[first2, first2 + (last1 - first1)]</code> <code>binary_op1</code> and <code>binary_op2</code> shall neither modify elements nor invalidate iterators or subranges. </ins></p></blockquote>
+
+<p>Split Requires in 26.8.6 [partial.sum]:</p>
+
+<blockquote><p>-4- <em>Requires:</em> <code>InputIterator</code>'s value type shall be constructible from the type of <code>*first</code>. The result of the expression <code>acc + *i</code> or <code>binary_op(acc, *i)</code> shall be implicitly convertible to <code>InputIterator</code>'s value type. <code>acc</code> shall be writable (24.2.1) to the result output iterator.
+<del> In the ranges <code>[first, last]</code> and <code>[result, result + (last - first)]</code> <code>binary_op</code> shall neither modify elements nor invalidate iterators or subranges. </del></p>
+
+<p><ins> -?- <em>Preconditions:</em>  In the ranges <code>[first, last]</code> and <code>[result, result + (last - first)]</code> <code>binary_op</code> shall neither modify elements nor invalidate iterators or subranges. </ins></p></blockquote>
+
+<p>Change Requires to Preconditions in 26.8.7 [exclusive.scan]:</p>
+
+<blockquote><p>-4- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>binary_op</code> shall neither invalidate iterators or subranges, nor modify elements in the ranges <code>[first, last)</code> or <code>[result, result + (last - first))</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 26.8.8 [inclusive.scan]:</p>
+
+<blockquote><p>-4- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>binary_op</code> shall not invalidate iterators or subranges, nor modify elements in the ranges <code>[first, last)</code> or <code>[result, result + (last - first))</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 26.8.9 [transform.exclusive.scan]:</p>
+
+<blockquote><p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> Neither <code>unary_op</code> nor <code>binary_op</code> shall invalidate iterators or subranges, or modify elements in the ranges <code>[first, last)</code> or <code>[result, result + (last - first))</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 26.8.10 [transform.inclusive.scan]:</p>
+
+<blockquote><p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> Neither <code>unary_op</code> nor <code>binary_op</code> shall invalidate iterators or subranges, or modify elements in the ranges <code>[first, last)</code> or <code>[result, result + (last - first))</code>.</p></blockquote>
+
+<p>Split Requires in 26.8.11 [adjacent.difference]:</p>
+
+<blockquote><p>-2- <em>Requires:</em> <code>InputIterator</code>'s value type shall be <code>MoveAssignable</code> (Table 22) and shall be constructible from the type of <code>*first</code>. <code>acc</code> shall be writable (24.2.1) to the result output iterator. The result of the expression <code>val - acc</code> or <code>binary_op(val, acc)</code> shall be writable to the result output iterator.
+<del> In the ranges [first, last] and [result, result + (last - first)], binary_op shall neither modify elements nor invalidate iterators or subranges. </del></p>
+
+<p><ins> -?- <em>Preconditions:</em>  In the ranges [first, last] and [result, result + (last - first)], binary_op shall neither modify elements nor invalidate iterators or subranges. </ins></p></blockquote>
+
+<p>Change Requires to Preconditions in 27.5.3.6 [ios.base.callbacks]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The function <code>fn</code> shall not throw exceptions.</p></blockquote>
+
+<p>Change Requires to Preconditions in 27.5.5.3 [basic.ios.members]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> If <code>tiestr</code> is not null, <code>tiestr</code> must not be reachable by traversing the linked list of tied stream objects starting from <code>tiestr-&gt;tie()</code>.</p>
+
+<p>[...]</p>
+
+<p>-22- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>sb != nullptr</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 27.6.3.4.3 [streambuf.virt.get]:</p>
+
+<blockquote><p>-15- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The constraints are the same as for <code>underflow()</code>, except that the result character shall be transferred from the pending sequence to the backup sequence, and the pending sequence shall not be
+empty before the transfer.</p></blockquote>
+
+<p>Change Requires to Preconditions in 27.6.3.4.5 [streambuf.virt.put]:</p>
+
+<blockquote><p>-5- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> Every overriding definition of this virtual function shall obey the following constraints:</p></blockquote>
+
+<p>Change Requires to Preconditions in 27.6.3.4.5 [streambuf.virt.put]:</p>
+
+<blockquote><p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>s</code> shall not be a null pointer.</p></blockquote>
+
+<p>Change Requires to Preconditions in 27.7.5 [ext.manip]:</p>
+
+<blockquote><p>-7- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The argument <code>tmb</code> shall be a valid pointer to an object of type <code>struct tm</code>, and the argument <code>fmt</code> shall be a valid pointer to an array of objects of type <code>charT</code> with <code>char_traits&lt;charT&gt;::length(fmt)</code> elements.</p>
+
+<p>[...]</p>
+
+<p>-9- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The argument <code>tmb</code> shall be a valid pointer to an object of type <code>struct tm</code>, and the argument <code>fmt</code> shall be a valid pointer to an array of objects of type <code>charT</code> with <code>char_traits&lt;charT&gt;::length(fmt)</code> elements.</p></blockquote>
+
+<p>Change Requires to Preconditions in 27.9.2.4 [filebuf.virtuals]:</p>
+
+<blockquote><p>-20- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> If the file is not positioned at its beginning and the encoding of the current locale as determined by <code>a_codecvt.encoding()</code> is state-dependent (22.4.1.4.2) then that facet is the same as the corresponding facet of <code>loc</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 27.10.2.3 [fs.race.behavior]:</p>
+
+<blockquote><p>-2- If the possibility of a file system race would make it unreliable for a program to test for a precondition before
+calling a function described herein, <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> is not specified for the function. [<em>Note:</em> As a design practice,
+preconditions are not specified when it is unreasonable for a program to detect them prior to calling the
+function. <em>--end note</em>]</p></blockquote>
+
+<p>Split Requires in 27.10.8.6.2 [path.factory]:</p>
+
+<blockquote><p>-1- <em>Requires:</em> <del> The <code>source</code> and <code>[first, last)</code> sequences are UTF-8 encoded. </del>
+The value type of <code>Source</code> and <code>InputIterator</code> is <code>char</code>.</p>
+
+<p><ins> -?- <em>Preconditions:</em>  The <code>source</code> and <code>[first, last)</code> sequences are UTF-8 encoded. </ins></p></blockquote>
+
+<div class="note"><p>The preconditions on the following <code>recursive_directory_iterator</code> member
+functions changed in Oulu, but should still become
+<em>Preconditions:</em> instead of <em>Requires:</em></p></div>
+
+<p>Change Requires to Preconditions in 27.10.14.1 [rec.dir.itr.members]:</p>
+
+<blockquote><p>-17- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>*this != recursive_directory_iterator()</code>.</p>
+
+<p>[...]</p>
+
+<p>-20- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>*this != recursive_directory_iterator()</code>.</p>
+
+<p>[...]</p>
+
+<p>-23- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>*this != recursive_directory_iterator()</code>.</p>
+
+<p>[...]</p>
+
+<p>-26- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>*this != recursive_directory_iterator()</code>.</p>
+
+<p>[...]</p>
+
+<p>-30- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>*this != recursive_directory_iterator()</code>.</p>
+
+<p>[...]</p>
+
+<p>-32- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>*this != recursive_directory_iterator()</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 27.10.15.3 [fs.op.copy]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> At most one constant from each option group (27.10.10.2) is present in <code>options</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 27.10.15.4 [fs.op.copy_file]:</p>
+
+<blockquote><p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> At most one constant from each <code>copy_options</code> option group (27.10.10.2) is present in <code>options</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 27.10.15.26 [fs.op.permission]:</p>
+
+<blockquote><p>-1-  <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>!((prms &amp; perms::add_perms) != perms::none &amp;&amp; (prms &amp; perms::remove_perms) != perms::none)</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 28.7 [re.traits]:</p>
+
+<blockquote><p>-13- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The value of <em>radix</em> shall be 8, 10, or 16.</p></blockquote>
+
+<p>Change Requires to Preconditions in 28.8.2 [re.regex.construct]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <em>p</em> shall not be a null pointer.</p>
+
+<p>[...]</p>
+
+<p>-6- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <em>p</em> shall not be a null pointer.</p></blockquote>
+
+<p>Change Requires to Preconditions in 28.8.3 [re.regex.assign]:</p>
+
+<blockquote><p>-5- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>ptr</code> shall not be a null pointer.</p></blockquote>
+
+<p>Change Requires to Preconditions in 28.10.4 [re.results.acc]:</p>
+
+<blockquote><p>-1- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>ready() == true</code>.</p>
+
+<p>[...]</p>
+
+<p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>ready() == true</code>.</p>
+
+<p>[...]</p>
+
+<p>-5- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>ready() == true</code>.</p>
+
+<p>[...]</p>
+
+<p>-7- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>ready() == true</code>.</p>
+
+<p>[...]</p>
+
+<p>-9- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>ready() == true</code>.</p>
+
+<p>[...]</p>
+
+<p>-11- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>ready() == true</code>.</p></blockquote>
+
+<p>Change/split Requires in 28.10.5 [re.results.form]:</p>
+
+<blockquote><p>-1- <em>Requires:</em> <del>ready() == true and</del> <code>OutputIter</code> shall satisfy the requirements for an Output Iterator (24.2.4).</p>
+
+<p><ins> -?- <em>Preconditions:</em> <code>ready() == true</code>. </ins></p>
+
+<p>[...]</p>
+
+<p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>ready() == true</code>.</p>
+
+<p>[...]</p>
+
+<p>-8- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>ready() == true</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 28.11.3 [re.alg.search]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> Each of the initialization values of <code>submatches</code> shall be <code>&gt;= -1</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 29.6.5 [atomics.types.operations.req]:</p>
+
+<blockquote><p>-10- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The order argument shall not be <code>memory_order_consume</code>, <code>memory_order_acquire</code>, nor <code>memory_order_acq_rel</code>.</p>
+
+<p>[...]</p>
+
+<p>-14- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The order argument shall not be <code>memory_order_release</code> nor <code>memory_order_acq_rel</code>.</p>
+
+<p>[...]</p>
+
+<p>-21- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The failure argument shall not be <code>memory_order_release</code> nor <code>memory_order_acq_rel</code>.
+The <code>failure</code> argument shall be no stronger than the <code>success</code> argument.</p></blockquote>
+
+<p>Change Requires to Preconditions in 29.7 [atomics.flag]:</p>
+
+<blockquote><p>-7- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The order argument shall not be <code>memory_order_consume</code>, <code>memory_order_acquire</code>, nor <code>memory_order_acq_rel</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 30.2.5.2 [thread.req.lockable.basic]:</p>
+
+<blockquote><p>-3-  <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The current execution agent shall hold a lock on <code>m</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 30.4.1.2 [thread.mutex.requirements.mutex]:</p>
+
+<blockquote><p>-7- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> If <code>m</code> is of type <code>std::mutex</code>, <code>std::timed_mutex</code>, <code>std::shared_mutex</code>, or <code>std::shared_timed_mutex</code>, the calling thread does not own the mutex.</p>
+
+<p>[...]</p>
+
+<p>-15- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> If <code>m</code> is of type <code>std::mutex</code>, <code>std::timed_mutex</code>, <code>std::shared_mutex</code>, or <code>std::shared_timed_mutex</code>, the calling thread does not own the mutex.</p>
+
+<p>[...]</p>
+
+<p>-22- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The calling thread shall own the mutex.</p></blockquote>
+
+<p>Change Requires to Preconditions in 30.4.1.3 [thread.timedmutex.requirements]:</p>
+
+<blockquote><p>-4- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> If <code>m</code> is of type <code>std::timed_mutex</code> or <code>std::shared_timed_mutex</code>, the calling thread does not own the mutex.</p>
+
+<p>[...]</p>
+
+<p>-11- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> If <code>m</code> is of type <code>std::timed_mutex</code> or <code>std::shared_timed_mutex</code>, the calling thread does not own the mutex.
+Change Requires to Preconditions in 30.4.1.3 [thread.timedmutex.requirements]:</p></blockquote>
+
+<p>Change Requires to Preconditions in 30.4.1.4 [thread.sharedmutex.requirements]:</p>
+
+<blockquote><p>-4- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The calling thread has no ownership of the mutex.</p>
+
+<p>[...]</p>
+
+<p>-12- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The calling thread shall hold a shared lock on the mutex.</p>
+
+<p>[...]</p>
+
+<p>-17- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The calling thread has no ownership of the mutex.</p></blockquote>
+
+<p>Change Requires to Preconditions in 30.4.1.5 [thread.sharedtimedmutex.requirements]:</p>
+
+<blockquote><p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The calling thread has no ownership of the mutex.</p>
+
+<p>[...]</p>
+
+<p>-10- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The calling thread has no ownership of the mutex.</p></blockquote>
+
+<p>Change Requires to Preconditions in 30.4.2.1 [thread.lock.guard]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> If a <code>MutexTypes</code> type is not a recursive mutex, the calling thread does not own the corresponding mutex element of <code>m</code>.</p>
+
+<p>[...]</p>
+
+<p>-4- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The calling thread owns all the mutexes in <code>m</code>.</p></blockquote>
+
+<p>Change Requires to Preconditions in 30.4.2.2.1 [thread.lock.unique.cons]:</p>
+
+<blockquote><p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> If <code>mutex_type</code> is not a recursive mutex the calling thread does not own the mutex.</p>
+
+<p>[...]</p>
+
+<p>-8- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The supplied <code>Mutex</code> type shall meet the <code>Lockable</code> requirements (30.2.5.3). If <code>mutex_type</code> is not a recursive mutex the calling thread does not own the mutex.</p>
+
+<p>[...]</p>
+
+<p>-11- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The calling thread owns the mutex.</p>
+
+<p>[...]</p>
+
+<p>-15- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> If <code>mutex_type</code> is not a recursive mutex the calling thread does not own the mutex. The supplied <code>Mutex</code> type shall meet the <code>TimedLockable</code> requirements (30.2.5.4).</p>
+
+<p>[...]</p>
+
+<p>-18- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> If <code>mutex_type</code> is not a recursive mutex the calling thread does not own the mutex. The supplied <code>Mutex</code> type shall meet the <code>TimedLockable</code> requirements (30.2.5.4).</p></blockquote>
+
+<p>Change Requires to Preconditions in 30.4.2.2.2 [thread.lock.unique.locking]:</p>
+
+<blockquote><p>-4- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The supplied <code>Mutex</code> type shall meet the <code>Lockable</code> requirements (30.2.5.3).</p>
+
+<p>[...]</p>
+
+<p>-9- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The supplied <code>Mutex</code> type shall meet the <code>TimedLockable</code> requirements (30.2.5.4).</p>
+
+<p>[...]</p>
+
+<p>-14- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The supplied <code>Mutex</code> type shall meet the <code>TimedLockable</code> requirements (30.2.5.4).</p></blockquote>
+
+<p>Change Requires to Preconditions in 30.4.2.3.1 [thread.lock.shared.cons]:</p>
+
+<blockquote><p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The calling thread does not own the mutex for any ownership mode.</p>
+
+<p>[...]</p>
+
+<p>-8- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The calling thread does not own the mutex for any ownership mode.</p>
+
+<p>[...]</p>
+
+<p>-11- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The calling thread has shared ownership of the mutex.</p>
+
+<p>[...]</p>
+
+<p>-14- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The calling thread does not own the mutex for any ownership mode.</p>
+
+<p>[...]</p>
+
+<p>-17- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> The calling thread does not own the mutex for any ownership mode.</p></blockquote>
+
+<p>Change Requires to Preconditions in 30.4.3 [thread.lock.algorithm]:</p>
+
+<blockquote><p>-1- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> Each template parameter type shall meet the <code>Lockable</code> requirements.
+[<em>Note:</em> The <code>unique_lock</code> class template meets these requirements when suitably instantiated. <em>--end note</em>]</p>
+
+<p>[...]</p>
+
+<p>-4- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> Each template parameter type shall meet the <code>Lockable</code> requirements.
+[<em>Note:</em> The <code>unique_lock</code> class template meets these requirements when suitably instantiated. <em>--end note</em>]</p></blockquote>
+
+<p>Change Requires to Preconditions in 30.5 [thread.condition]:</p>
+
+<blockquote><p>-6- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>lk</code> is locked by the calling thread and either<br/>
+— no other thread is waiting on <code>cond</code>, or<br/>
+— <code>lk.mutex()</code> returns the same value for each of the lock arguments supplied by all concurrently waiting (via <code>wait</code>, <code>wait_for</code>, or <code>wait_until</code>) threads.</p></blockquote>
+
+<p>Change Requires to Preconditions in 30.5.1 [thread.condition.condvar]:</p>
+
+<blockquote><p>-5- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> There shall be no thread blocked on <code>*this.</code>
+[<em>Note:</em> That is, all threads shall have been notified; they may subsequently block on the lock specified in the wait. This relaxes the usual rules,
+which would have required all wait calls to happen before destruction. Only the notification to unblock
+the wait must happen before destruction. The user must take care to ensure that no threads wait on
+<code>*this</code> once the destructor has been started, especially when the waiting threads are calling the wait
+functions in a loop or using the overloads of <code>wait</code>, <code>wait_for</code>, or <code>wait_until</code> that take a predicate.
+<em>--end note</em>]</p>
+
+<p>[...]</p>
+
+<p>-9- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>lock.owns_lock()</code> is <code>true</code> and <code>lock.mutex()</code> is locked by the calling thread, and either<br/>
+— no other thread is waiting on this <code>condition_variable</code> object or<br/>
+— <code>lock.mutex()</code> returns the same value for each of the <code>lock</code> arguments supplied by all concurrently waiting (via <code>wait</code>, <code>wait_for</code>, or <code>wait_until</code>) threads.</p>
+
+<p>[...]</p>
+
+<p>-14- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>lock.owns_lock()</code> is <code>true</code> and <code>lock.mutex()</code> is locked by the calling thread, and either<br/>
+— no other thread is waiting on this <code>condition_variable</code> object or<br/>
+— <code>lock.mutex()</code> returns the same value for each of the <code>lock</code> arguments supplied by all concurrently waiting (via <code>wait</code>, <code>wait_for</code>, or <code>wait_until</code>) threads.</p>
+
+<p>[...]</p>
+
+<p>-19- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>lock.owns_lock()</code> is <code>true</code> and <code>lock.mutex()</code> is locked by the calling thread, and either<br/>
+— no other thread is waiting on this <code>condition_variable</code> object or<br/>
+— <code>lock.mutex()</code> returns the same value for each of the <code>lock</code> arguments supplied by all concurrently waiting (via <code>wait</code>, <code>wait_for</code>, or <code>wait_until</code>) threads.</p>
+
+<p>[...]</p>
+
+<p>-25- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>lock.owns_lock()</code> is <code>true</code> and <code>lock.mutex()</code> is locked by the calling thread, and either<br/>
+— no other thread is waiting on this <code>condition_variable</code> object or<br/>
+— <code>lock.mutex()</code> returns the same value for each of the <code>lock</code> arguments supplied by all concurrently waiting (via <code>wait</code>, <code>wait_for</code>, or <code>wait_until</code>) threads.</p>
+
+<p>[...]</p>
+
+<p>-31- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>lock.owns_lock()</code> is <code>true</code> and <code>lock.mutex()</code> is locked by the calling thread, and either<br/>
+— no other thread is waiting on this <code>condition_variable</code> object or<br/>
+— <code>lock.mutex()</code> returns the same value for each of the <code>lock</code> arguments supplied by all concurrently waiting (via <code>wait</code>, <code>wait_for</code>, or <code>wait_until</code>) threads.</p>
+
+<p>[...]</p>
+
+<p>-37- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>lock.owns_lock()</code> is <code>true</code> and <code>lock.mutex()</code> is locked by the calling thread, and either<br/>
+— no other thread is waiting on this <code>condition_variable</code> object or<br/>
+— <code>lock.mutex()</code> returns the same value for each of the <code>lock</code> arguments supplied by all concurrently waiting (via <code>wait</code>, <code>wait_for</code>, or <code>wait_until</code>) threads.</p></blockquote>
+
+<p>Change Requires to Preconditions in 30.5.2 [thread.condition.condvarany]:</p>
+
+<blockquote><p>-5- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> There shall be no thread blocked on <code>*this.</code>
+[<em>Note:</em> That is, all threads shall have been notified; they may subsequently block on the lock specified in the wait. This relaxes the usual rules,
+which would have required all wait calls to happen before destruction. Only the notification to unblock
+the wait must happen before destruction. The user must take care to ensure that no threads wait on
+<code>*this</code> once the destructor has been started, especially when the waiting threads are calling the wait
+functions in a loop or using the overloads of <code>wait</code>, <code>wait_for</code>, or <code>wait_until</code> that take a predicate.
+<em>--end note</em>]</p></blockquote>
+
+<p>Change Requires to Preconditions in 30.6.5 [futures.promise]:</p>
+
+<blockquote><p>-3- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>Alloc</code> shall be an Allocator (17.6.3.5).</p>
+
+<p>[...]</p>
+
+<p>-18- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>p</code> is not null.</p>
+
+<p>[...]</p>
+
+<p>-25- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>p</code> is not null.</p></blockquote>
+
+<p>Split Requires in 30.6.9.1 [futures.task.members]:</p>
+
+<blockquote><p>-2- Requires: <em>INVOKE</em><code>(f, t1, t2, ..., tN, R)</code>, where <code>t1</code>, <code>t2</code>, <code>...</code>, <code>tN</code> are values of the corresponding types in <code>ArgTypes...</code>, shall be a valid expression.
+<del> Invoking a copy of <code>f</code> shall behave the same as invoking <code>f</code>. </del></p>
+
+<p><ins> -?- <em>Preconditions:</em> Invoking a copy of <code>f</code> shall behave the same as invoking <code>f</code>. </ins></p></blockquote>
+
+<p>Change Requires to Preconditions in 30.6.9.2 [futures.task.nonmembers]:</p>
+
+<blockquote><p>-2- <del><em>Requires:</em></del><ins><em>Preconditions:</em></ins> <code>Alloc</code> shall be an Allocator (17.6.3.5).</p></blockquote>
+</body></html>

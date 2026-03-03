@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC
+    "-//W3C//DTD XHTML 1.1 plus MathML 2.0 plus SVG 1.1//EN"
+    "http://www.w3.org/2002/04/xhtml-math-svg/xhtml-math-svg.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:svg="http://www.w3.org/2000/svg" xml:lang="en">
+<head><meta http-equiv="Content-type" content="application/xhtml+xml;charset=utf-8" /><title>Fixing operator>>(basic_istream&, CharT*) (LWG 2499)</title></head>
+<body><!-- maruku -o lwg2499.html lwg2499.md --><style type='text/css'>
+pre { margin: 0; }
+pre code { display: block; margin-left: 2em; }
+div { display: block; margin-left: 2em; }
+ins { text-decoration: none; font-weight: bold; background-color: #A0FFA0 }
+del { text-decoration: line-through; background-color: #FFA0A0 }
+</style><table><tbody>
+<tr><th>Doc. no.:</th>	<td>P0487R0</td></tr>
+<tr><th>Date:</th>	<td>2016-10-17</td></tr>
+<tr><th>Audience:</th>	<td>Library Working Group</td></tr>
+<tr><th>Reply-to:</th>	<td>Zhihao Yuan &lt;zy at miator dot net&gt;</td></tr>
+</tbody></table>
+<h1 id="fixing_operatorbasic_istream_chart_lwg_2499">Fixing operator&gt;&gt;(basic_istream&amp;, CharT*) (LWG 2499)</h1>
+
+<h2 id="background">Background</h2>
+
+<p>The <a href="http://cplusplus.github.io/LWG/lwg-active.html#2499">issue</a> was submitted with the following rationale: the most obvious use of this overload</p>
+
+<pre><code>std::cin &gt;&gt; buffer;</code></pre>
+
+<p>does not protect against buffer overflow, thus shares the same problem of stdio’s <code>gets()</code>, which has been removed from both C11 and C++. So maybe we should remove this overload as well.</p>
+
+<p>However, comparing it to <code>gets()</code> brings in some distortion here. More precisely, <code>scanf</code>‘s <code>&quot;%s&quot;</code> is where this overload copies from. Both deal with formatted input, read “words”, and naive uses of them suffer from buffer overflow, plus both have ways to prevent this issue. For <code>scanf</code>, you can limit the field widths,</p>
+
+<pre><code>scanf(&quot;%20s %20s&quot;, a, b);</code></pre>
+
+<p>and the iostreams’ version improved this practice by allowing programmatically passing the width:</p>
+
+<pre><code>cin &gt;&gt; setw(20) &gt;&gt; a;</code></pre>
+
+<p>The idea is as same as the <code>&quot;%.*s&quot;</code> conversion specification in <code>printf</code>, while <code>scanf</code> doesn’t support the asterisk ( <code>&#39;*&#39;</code> ) arguments.</p>
+
+<h2 id="discussion">Discussion</h2>
+
+<p>What should we do to this library issue? People have raised the voices to deprecate or remove this overload. However, I want to mention that:</p>
+
+<ol>
+<li>C is not deprecating or removing either <code>&quot;%s&quot;</code> or <code>&quot;%</code><em><code>N</code></em><code>s&quot;</code> from <code>scanf</code>;</li>
+
+<li>There are more than one existing legitimate uses of this overload. The users can pass the <code>.width()</code> argument to read unknown inputs, or read from streams with known contents and customized streams.</li>
+</ol>
+
+<p>As shown as the proposed resolution to this issue, rather than deprecating or removing the whole overload, I try to:</p>
+
+<ol>
+<li>Preserve some legitimate uses;</li>
+
+<li>Protect the users against the bad uses.</li>
+</ol>
+
+<p>More specifically, we can safely claim that when a width is not specified ( <code>.width() == 0</code> ), the user’s intention is to read as if the length of the buffer is being passed. To an array type, the length is known at compile-time so that we can “fix” this for the user. However, due to implementability, unless we want to place additional preconditions on this function such as “Requires: <code>width() &gt; 0</code> if the argument is of type <code>charT*</code>”, all uses of passing a pointer to characters will have to be deprecated or removed.</p>
+
+<p>In the following sections I provided two wordings, both adding the functionalities of taking array references, but one for deprecating the pointer arguments and one for removing. The deprecation option is nontrivial in certain ways.</p>
+
+<p>The removal option may also be nontrivial to implement though, if an implementation wants to keep the ABI compatibility. The implementations are encouraged to use ABI tags or to guard the code to produce the old explicit specializations in the library binaries.</p>
+
+<h2 id="wording_for_removal">Wording for removal</h2>
+
+<p>This wording is relative to N4606.</p>
+
+<p>Modify 27.7.2.2.3 [istream::extractors] as indicated:</p>
+<div><tt style='white-space: pre'>
+template&lt;class charT, class traits<ins>, size_t N</ins>&gt;
+  basic_istream&lt;charT, traits&gt;&amp; operator&gt;&gt;(basic_istream&lt;charT, traits&gt;&amp; in,
+					   <del>charT* s</del><ins>charT (&amp;s)[N]</ins>);
+template&lt;class traits<ins>, size_t N</ins>&gt;
+  basic_istream&lt;char, traits&gt;&amp; operator&gt;&gt;(basic_istream&lt;char, traits&gt;&amp; in,
+					  <del>unsigned char* s</del><ins>unsigned char (&amp;s)[N]</ins>);
+template&lt;class traits<ins>, size_t N</ins>&gt;
+  basic_istream&lt;char, traits&gt;&amp; operator&gt;&gt;(basic_istream&lt;char, traits&gt;&amp; in,
+					  <del>signed char* s</del><ins>signed char (&amp;s)[N]</ins>);
+</tt></div>
+<blockquote>
+<p><em>Effects:</em> Behaves like a formatted input member (as described in 27.7.2.2.1 [istream.formatted.reqmts]) of <code>in</code>. After a <code>sentry</code> object is constructed, <code>operator&gt;&gt;</code> extracts characters and stores them into <del>successive locations of an array whose first element is designated by</del> <code>s</code>. If <code>width()</code> is greater than zero, <code>n</code> is <del><code>width()</code></del><ins><code>min(size_t(width()), N)</code></ins>. Otherwise <code>n</code> is <del>the number of elements of the largest array of <code>char_type</code> that can store a terminating <code>charT()</code></del><ins><code>N</code></ins>. <code>n</code> is the maximum number of characters stored.</p>
+</blockquote>
+
+<p>Add a new compatibility item to C.4 [diff.cpp14]:</p>
+
+<blockquote>
+<p>Clause 27: input/output library [diff.cpp14.input.output]</p>
+</blockquote>
+
+<blockquote>
+<p><strong>Change:</strong> Character array extraction only takes array types.</p>
+
+<p><strong>Rationale:</strong> Increase safety via preventing buffer overflow at compile time.</p>
+
+<p><strong>Effect on original feature:</strong> Valid C++ 2014 code may fail to compile in this International Standard:</p>
+</blockquote>
+
+<pre><code>auto p = new char[100];
+std::cin &gt;&gt; std::setw(20) &gt;&gt; p;</code></pre>
+
+<h2 id="wording_for_deprecation">Wording for deprecation</h2>
+
+<p>This wording is relative to N4606.</p>
+
+<p>Modify 27.7.2.2.3 [istream::extractors] as indicated:</p>
+<div><tt style='white-space: pre'>
+template&lt;class charT, class traits<ins>, class arrayT</ins>&gt;
+  basic_istream&lt;charT, traits&gt;&amp; operator&gt;&gt;(basic_istream&lt;charT, traits&gt;&amp; in,
+					   <del>charT*</del><ins>arrayT&amp;&amp;</ins> s);
+template&lt;class traits<ins>, class arrayT</ins>&gt;
+  basic_istream&lt;char, traits&gt;&amp; operator&gt;&gt;(basic_istream&lt;char, traits&gt;&amp; in,
+					  <del>unsigned char*</del><ins>arrayT&amp;&amp;</ins> s);
+<del>template&lt;class traits&gt;
+  basic_istream&lt;char, traits&gt;&amp; operator&gt;&gt;(basic_istream&lt;char, traits&gt;&amp; in,
+					  signed char* s);</del>
+</tt></div>
+<blockquote>
+<p><ins>Let <em><code>AT</code></em> denote <tt>remove_reference_t&lt;arrayT&gt;</tt>.</ins></p>
+</blockquote>
+
+<blockquote>
+<p><ins><em>Remarks:</em> The first form shall not participate in overload resolution unless<tt>
+decay_t&lt;arrayT&gt; </tt>is <code>charT*</code>. The second form shall not participate in overload resolution unless<tt> decay_t&lt;arrayT&gt; </tt>
+is <code>unsigned char*</code> or <code> signed char*</code>. </ins></p>
+</blockquote>
+
+<blockquote>
+<p><em>Effects:</em> Behaves like a formatted input member (as described in 27.7.2.2.1 [istream.formatted.reqmts]) of <code>in</code>. After a <code>sentry</code> object is constructed, <code>operator&gt;&gt;</code> extracts <ins>at most <em>K</em></ins> characters and stores them into successive locations of an array whose first element is designated by <code>s</code>. <ins>If <em><code>AT</code></em> is an array type in the form of <em><code>T</code></em><code>[</code><em><code>N</code></em><code>]</code>, <em>K =</em> <code>min(size_t(width()), </code><em><code>N</code></em><code>)</code> if<tt>
+width() &gt; 0</tt>, otherwise <em>K = <code>N</code></em>. If <em><code>AT</code></em> is a pointer type, <em>K =</em> <code>width()</code> if<tt> width() &gt; 0</tt>, otherwise <em>K</em></ins><del>If <code>width()</code> is greater than zero, <code>n</code> is <code>width()</code>. Otherwise <code>n</code></del> is the number of elements of the largest array of <code>char_type</code> that can store a terminating <code>charT()</code>. <ins>The latter case is deprecated.</ins> <del><code>n</code> is the maximum number of characters stored.</del></p>
+</blockquote>
+
+<blockquote>
+<p><em>[Drafting note:</em> Considering not putting nonexistent signatures in Annex D. <em>]</em></p>
+</blockquote>
+</body></html>

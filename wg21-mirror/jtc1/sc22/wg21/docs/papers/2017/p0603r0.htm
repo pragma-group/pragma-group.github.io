@@ -1,0 +1,255 @@
+<html>
+<head>
+<TITLE>
+ISO/IEC JTC1/SC22/WG21
+p0603r0
+</TITLE>
+</head>
+<body>
+<h1>
+<img align=top src="/pics/iso44.gif" alt="ISO/">
+<img align=top src="/pics/iec44.gif" alt="IEC">
+JTC1/SC22/WG21
+p0603r0
+</h1>
+<pre>
+Document Number: P0603R0
+Date: 2017-03-17
+Reply to: Andrew Hunter &lt;ahh@google.com>
+Audience: Concurrency Study Group
+
+# safe memcpy: A simpler implementation primitive for seqlock and friends
+
+## the problem
+
+A _seqlock_ is a simple synchronization primitive for read-often, write-rarely
+data. Many variants exist, but the key concept relies on writers announcing
+modifications beginning and ending through changes to a sequence number:
+
+std::atomic&lt;size_t> seq{0};
+int protected;
+
+void Write(int x) {
+  seq.fetch_add(1);
+  protected = x;
+  seq.fetch_add(1);
+}
+
+int Read() {
+  while (true) {
+    size_t s0 = seq.load();
+    if (s0 & 1) continue;
+    int x = protected;
+    size_t s1 = seq.load();
+    if (s1 == s0) return x;
+  }
+}
+
+
+Intuitively: if a reader succeeds, then it saw completely-written data (since
+s0 was even) and no new writer arrived during the read and raced with it (since
+s1 didn't grow.) (A much more detailed discussion of the algorithm, which in
+particular eliminates various unnecessary barriers in the above, can
+be found in [1].)
+
+
+However, the above code is still invalid C++: on any execution where Read()
+will see s1 != s0 and retry, the load from protected will obviously race with
+the concurrent call to write, and any data race is invalid C++.  We must
+replace protected with a std::atomic&lt;int>, which we load with relaxed atomics.
+This gets particularly cumbersome with multiple protected fields which must be
+viewed consistently with each other (the entire point of a seqlock!):
+
+struct Data  { int num; std::array&lt;char, 7> arr; double d; };
+
+std::atomic&lt;size_t> seq{0};
+std::atomic&lt;int> protected_num;
+std::atomic&lt;std::array&lt;char, 7>> protected_arr;
+std::atomic&lt;double> protected_d;
+
+Data Read() {
+  Data ret;
+  while (true) {
+   size_t s0 = seq.load();
+   if (s0 & 1) continue;
+   ret.num = protected_num.load();
+   ret.arr = protected_arr.load();
+   ret.d = protected_d.load();
+   size_t s1 = seq.load();
+   if (s1 == s0) return ret;
+  }
+}
+
+This is ugly to read and write, and can have performance issues (we
+really don't care about the atomicity of individual fields, since the
+seqlock will eliminate any inconsistencies.)  It also has
+interoperability concerns: consider a seqlocked data structure in
+shared memory (this is used in the wild, for instance in the Linux
+kernel VDSO). Any non-C++ code which wishes to read (or write) this
+data now needs to know, and match the implementation detail of the
+in-memory layout of std::atomic&lt;> for **every protected type** (not
+just the sequence number!)
+
+What's more, it is--as far as I know--impossible to write the above
+algorithm templated on the type of the protected data.  The above
+approach would require an automatic transformation from T to a struct
+of std::atomic&lt;> of T's members.  This is damning for usability;
+seqlocks are complicated and should not be written ad hoc by many
+users, but once by a trusted expert.
+
+Suppose we could instead use memcpy:
+
+Data Read() {
+  Data ret;
+  while (true) {
+   size_t s0 = seq.load();
+   if (s0 & 1) continue;
+   memcpy(&ret, &protected, sizeof(Data));
+   size_t s1 = seq.load();
+   if (s1 == s0) return ret;
+ }
+}
+
+This is readable, writable, generic, and interopable (with anything
+that understands standard layout structs, at least.) But it is still
+data racy, thus illegal. This seems unnecessary: even if we get
+garbage results, we're not using them (since the seqlock will notice.)
+
+**Sidebar**: Several colleagues and I have wondered if the C++11 memory model
+  should have defined the result of data races as indeterminate values, not
+  undefined behavior. Since the use of such values is still UB, nearly all
+  programs are correct/incorrect in both models...but seqlocks become much
+  nicer. We generally come to the conlusion that in full generality this would
+  lead to a much more complicated spec, and in particular tools like TSAN would
+  be basically impossible to implement.  Moreover, it is well and truly too
+  late to change now.)
+
+There is one other important problem with memcpy: an efficient seqlock
+makes careful use of memory barriers.
+
+void Write(const Data &d) {
+  seq.fetch_add(1);
+  std::atomic_thread_fence(std::memory_order_release);
+  protected = d;
+  seq.fetch_add(1);
+}
+
+
+Data Read() {
+  Data ret;
+  while (true) {
+   size_t s0 = seq.load(std::memory_order_acquire);
+   if (s0 & 1) continue;
+   memcpy(&ret, &protected, sizeof(Data));
+   std::atomic_thread_fence(std::memory_order_acquire);
+   size_t s1 = seq.load(std::memory_order_relaxed);
+   if (s1 == s0) return ret;
+ }
+}
+
+On x86, the read side requires no fence instructions, and even on
+weaker architectures this is more efficient than the previous version
+using seq_cst.  However, for this to work, on racy executions, the two
+fences must synchronize with one another; for this to happen, the
+current definition of the model requires both the read and the write
+of `protected` to be atomic operations (of any order.) (See page 16 of
+[1] for a more detailed discussion of the memory orderings.)
+
+Finally, consider the trivial solution using std::atomic&lt;Data>:
+
+std::atomic&lt;Data> protected;
+std::atomic&lt;size_t> seq{0};
+
+void Write(const Data &d) {
+  seq.fetch_add(1);
+  std::atomic_thread_fence(std::memory_order_release);
+  protected.store(d, std::memory_order_relaxed);
+  seq.fetch_add(1);
+}
+
+
+Data Read() {
+  Data ret;
+  while (true) {
+   size_t s0 = seq.load(std::memory_order_acquire);
+   if (s0 & 1) continue;
+   ret = protected.load(std::memory_order_relaxed);
+   std::atomic_thread_fence(std::memory_order_acquire);
+   size_t s1 = seq.load(std::memory_order_relaxed);
+   if (s1 == s0) return ret;
+ }
+}
+
+This is valid C++ (no data races, and will behave as intended).  But
+on practical architecutures we will take some sort of lock (or perhaps
+incur transactional memory overhead) to implement load() and
+store()--this will not perform as desired.  What's more, those locks
+(or other overhead) are unneeded and unwanted--they guarantee, to be
+fair, we see a consistent view of `protected`, but so does the
+_seqlock itself_.
+
+The simplest solution is to avoid the locking: allow us to specify a
+load (or store) from a std::atomic&lt;T> that does not bother with
+consistency in the face of racing changes, but only avoids data races
+and provides sufficient synchronization for memory barriers.
+
+## the solution
+
+This proposal defines two new member functions for std::atomic (specified
+relative to <a hRef="../2016/n4606.pdf">N4606</a>):
+
+C A::nonatomic_load(memory_order order = memory_order_seq_cst) const noexcept;
+
+_Effects_: equivalent to load(order), but if there exists a potentially concurrent
+conflicting action X (i.e. a modification to A) which neither happens
+before nor happens after this call, this call returns an indeterminate
+value.  If this occurs, this call is considered to "read the value
+written by X" as described in [atomics.fences].
+
+_Remarks_: Lock free, irregardless of the value of is_lock_free().
+
+void A::nonatomic_store(C desired, memory_order order = memory_order_seq_cst)
+  const noexcept;
+
+_Requires_: The `order` argument shall not be `memory_order_consume`,
+`memory_order_acquire`, nor `memory_order_acq_rel`.
+
+_Effects_: Replaces (non-atomically) the value of `this` with the value of
+`desired`, affecting memory according to the value of `order`. If there exists a
+potentially concurrent conflicting action X, which neither happens before nor
+happens after this call, then:
+ - if X is a write, the value pointed to by this is indeterminate.
+ - if X is a read, then X returns an indeterminate value. X is considered to
+ "read the value written by" this call as described in [atomics.fences].
+
+_Remarks_: Lock free, irregardless of the value of is_lock_free().
+
+With these two functions, writing a correct seqlock (parameterized on
+any trivially copyable type) is straightforward.  It is our intention that (on
+nearly any reasonable architecture) that memcpy() (plus an appropriate fence
+instruction) is a correct implementation.
+
+The biggest disadvantage with this proposal is that we are adding atomic
+operations that are not, well, atomic: they can both observe others' partially
+complete results, and be observed as partially complete (though "indeterminate"
+hides the exact value of that partially complete result...)  Nevertheless, this
+is by far the simplest way to well-specify the needed effect; memcpy based
+approaches require substantial extenstions to the memory model, as would
+allowing reads or writes of plain pointers in these contexts.  Leveraging
+atomic_view or array_view proposals is another option, but couples two features
+unnecessarily, and makes it difficult to make these operations non-conditionals
+(array_view can fail on some types or values.)
+
+## acknowledgements
+
+Thanks to Mike Burrows, Hans Boehm, Dmitry Vyukov, Geoffrey Romer, and Phil
+Miller for considerable assistance deciding precisely what the problem we had was.
+
+
+## citations
+
+[1] <a href="http://dl.acm.org/citation.cfm?doid=2247684.2247688
+">http://dl.acm.org/citation.cfm?doid=2247684.2247688</a>
+</pre>
+</body>
+</html>

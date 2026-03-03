@@ -1,0 +1,464 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC
+    "-//W3C//DTD XHTML 1.1 plus MathML 2.0 plus SVG 1.1//EN"
+    "http://www.w3.org/2002/04/xhtml-math-svg/xhtml-math-svg.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:svg="http://www.w3.org/2000/svg" xml:lang="en">
+<head><meta http-equiv="Content-type" content="application/xhtml+xml;charset=utf-8" /><title>Message Digest Library for C++</title></head>
+<body><!-- maruku -o hashlib.html hashlib.md --><style type='text/css'>
+pre code { display: block; margin-left: 2em; }
+div { display: block; margin-left: 2em; }
+ins { text-decoration: none; font-weight: bold; background-color: #A0FFA0 }
+del { text-decoration: line-through; background-color: #FFA0A0 }
+table.std { border: 1pt solid black; border-collapse: collapse; width: 70%; }
+table.std td { border-top: 1pt solid black; vertical-align: text-top; }
+</style><table><tbody>
+<tr><th>Doc. no.:</th>	<td>N4449</td></tr>
+<tr><th>Date:</th>	<td>2015-04-09</td></tr>
+<tr><th>Project:</th>	<td>Programming Language C++, Library Evolution Working Group</td></tr>
+<tr><th>Reply-to:</th>	<td>Zhihao Yuan &lt;zhihao.yuan at rackspace dot com&gt;</td></tr>
+</tbody></table>
+<h1 id="message_digest_library_for_c">Message Digest Library for C++</h1>
+
+<h2 id="motivation">Motivation</h2>
+
+<p>Cryptographic hash functions hold irreplaceable roles in a large variety of applications, since security and data integrity are topics that cannot be dismissed to the applications involving data exchanging. Being compared to the ordinary hash functions being used with the unordered containers, the cryptographic functions are significantly different in purposes and design, which result in different properties on interface, implementation, and performance. In order to satisfy such demands in C++, these functions should be standardized as a part of the C++ standard library.</p>
+
+<h2 id="scope">Scope</h2>
+
+<p>This paper focuses on exposing the core functionalities of the cryptographic hash functions in an easy-to-use and efficient way; some use cases that can be provided in a higher level abstraction are not covered, including but not limited to Base64 digest, fingerprinting user-defined types, and key derivation.</p>
+
+<p>This paper does not discuss <code>std::hash</code>, because to co-work with the unordered containers is not a main purpose of cryptographic hash functions.</p>
+
+<p>This paper has no direct relationship with <a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2014/n3980.html">N3980</a>, but some functionalities described here can serve as the underlying implementation of a <code>HashAlgorithm</code>. More details can be found in <a href="#design_decisions">Design Decisions</a>.</p>
+
+<h2 id="examples">Examples</h2>
+
+<pre><code>namespace hashlib = std::hashlib;
+
+hashlib::sha1 h;
+
+assert(h.hexdigest() == &quot;da39a3ee5e6b4b0d3255bfef95601890afd80709&quot;);
+
+h.update(&quot;C-string&quot;);
+h.update(std::string());
+
+auto h2 = h;
+
+assert(h2 == h);                    // hasher is equationally complete
+assert(h2.digest() == h.digest());  // semantics same as above
+
+h.update(buf, sizeof(buf));         // sized input
+
+assert(h.digest() == h.digest());   // can get result multiple times
+
+using rmd160 = hashlib::hasher&lt;rmd160_provider&gt;;  // user-defined</code></pre>
+
+<h2 id="design_decisions">Design Decisions</h2>
+
+<h3 id="interface">Interface</h3>
+
+<p>The design is unashamedly stolen from Python’s <code>hashlib</code> module<code>[1]</code>. The details are as follows:</p>
+
+<ul>
+<li>
+<p>Provide both incremental hashing interface and one-shot hashing interface. They accept the same types of input.</p>
+</li>
+
+<li>
+<p>No <code>Callable</code> interface. There are two conflicting options here:</p>
+
+<ol>
+<li>
+<p><code>operator()</code> performs one-shot hashing and returns the digest. This matches the mathematical definition of a hash function, but the input has to be stored contiguously in memory.</p>
+</li>
+
+<li>
+<p><code>operator()</code> performs incremental hashing, as an unnamed <code>update</code>. But different from a <code>HashAlgorithm</code> in N3980<code>[2]</code>, the users of a cryptographic hash function are often end-users instead of library authors, where a named method is more clear.</p>
+</li>
+</ol>
+
+<p>Considering the widest audiences, neither use is more important than the other, and both can be easily solved with lambdas:</p>
+</li>
+</ul>
+<div><div><pre>
+[](auto&amp;&amp;... ts) { return hashlib::sha1(ts...).digest(); }
+[&amp;](auto&amp;&amp;... ts) { h.update(ts...); }
+</pre></div></div>
+<ul>
+<li>
+<p>Support returning the result in hexadecimal. Returning <code>std::string</code> is not the most efficient interface to serialize the digest, but it’s very convenient to many users.</p>
+</li>
+
+<li>
+<p>The result can be retrived multiple times. This is a highly desirable feature to cryptographic hash functions. Because</p>
+
+<ol>
+<li>
+<p>it makes hasher types more <em>Regular</em> by enabling <code>EqualityComparable</code> with the desired behavior – comparing the digest. Other options are not so satisfactory to me, including defining no <code>operator==</code>, which makes <code>sha1(a) == sha1(b)</code> not compilable, or providing a modifying <code>operator==</code>, which is a non-option since <code>h != h</code>, or comparing the underlying hash contexts, which is technically viable but logically hard to explain and hard to verify.</p>
+</li>
+
+<li>
+<p>it simplifies some specific use cases. For example,</p>
+</li>
+</ol>
+</li>
+</ul>
+<div><div><div><pre>
+log(h);                   // user can insert a log line without making
+v.push_back(h.digest());  // the rest of the code UB
+                          // and the log line does not need to be log(sha1(h))
+</pre></div></div></div>
+<blockquote>
+<blockquote>
+<p>Or, if one has a hash value of a file block with a known starting point in a file, and we want to know the size of the block, we can retrieve and compare the digest for each byte we consumed.</p>
+</blockquote>
+</blockquote>
+
+<blockquote>
+<p>This goal is achieved by finalizing the hash on a copy of the underlying hash context. The state sizes of the cryptographic hash functions are constrained<code>[3]</code> (actual context sizes: 96 for SHA1, 208 or 216 for SHA512) – even hashing 1 byte is more costly than copying the context. Considering the aforementioned benefits, I claim that the “overhead” is worthy.</p>
+</blockquote>
+
+<h3 id="extensibility">Extensibility</h3>
+
+<p>The rich interface introduced above is featured by the class template <code>hashlib::hasher&lt;HashProvider&gt;</code>. A user can add a new hasher by instantiating the template with a struct satisfying the <code>HashProvider</code> requirements by describing the implementation of the hash function in terms of a <code>context_type</code> and some core operations involving such a type.</p>
+
+<p>The details are discussed in <a href="#technical_specifications">Technical Specifications</a>.</p>
+
+<h3 id="choice_of_algorithms">Choice of algorithms</h3>
+
+<p>I propose to require the following message digest algorithms in the standard:</p>
+
+<ul>
+<li>MD5</li>
+
+<li>SHA1</li>
+
+<li>SHA256</li>
+
+<li>SHA512</li>
+</ul>
+
+<p>Standard library implementations need to make all the required algorithms available. If an implementation can achieve this by shipping a header and rely on the base system libraries, we can save an enormous effort to implement and to maintain those algorithms. The design of the message digest library in this proposal made this approach easier, and the choice of algorithms also took the algorithm availability on major platforms into consideration (the last 3 are for reference):</p>
+<table><thead><tr><th> </th><th>GNU(*)</th><th>FreeBSD</th><th>Apple</th><th>Windows</th><th>Android</th><th>Java</th><th>.Net</th><th>Python</th></tr></thead><tbody><tr><td style="text-align: left;"> </td><td style="text-align: left;">libc</td><td style="text-align: left;">libmd</td><td style="text-align: left;">CommonCrypto</td><td style="text-align: left;">CryptoAPI</td><td style="text-align: left;">OpenSSL</td><td style="text-align: left;"></td><td style="text-align: left;"></td><td style="text-align: left;"> </td></tr>
+<tr><td style="text-align: left;">MD5</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td></tr>
+<tr><td style="text-align: left;">SHA1</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td></tr>
+<tr><td style="text-align: left;">SHA224</td><td style="text-align: left;"></td><td style="text-align: left;"></td><td style="text-align: left;">✓</td><td style="text-align: left;"></td><td style="text-align: left;">✓</td><td style="text-align: left;"></td><td style="text-align: left;"></td><td style="text-align: left;">✓</td></tr>
+<tr><td style="text-align: left;">SHA256</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td></tr>
+<tr><td style="text-align: left;">SHA384</td><td style="text-align: left;"></td><td style="text-align: left;"></td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td><td style="text-align: left;"></td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td></tr>
+<tr><td style="text-align: left;">SHA512</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td><td style="text-align: left;"></td><td style="text-align: left;">✓</td><td style="text-align: left;">✓</td></tr>
+<tr><td style="text-align: left;">RMD160</td><td style="text-align: left;"></td><td style="text-align: left;">✓</td><td style="text-align: left;"></td><td style="text-align: left;"></td><td style="text-align: left;"></td><td style="text-align: left;"></td><td style="text-align: left;">✓</td><td style="text-align: left;"></td></tr>
+</tbody></table>
+<p>* These functions are private to <code>crypt(3)</code>.</p>
+
+<p>MD5 is included for supporting existing services; any algorithms weaker than that are excluded.</p>
+
+<p>Based on the research done so far, I believe that the aforementioned 4 algorithms are the most important ones which should be required to support, and possible to support (without duplicated work) on the major platforms.</p>
+
+<h2 id="technical_specifications">Technical Specifications</h2>
+
+<p>This section gives the layout of a wording.</p>
+
+<blockquote>
+<h2 id="message_digests">Message digests</h2>
+</blockquote>
+
+<blockquote>
+<p>This subclause defines a class template <code>hasher</code> as a common interface to the cryptographic hash and message digest algorithms, and the typedefs <code>sha1</code>, <code>sha256</code>, <code>sha512</code>, and <code>md5</code> for the unspecified specializations of <code>hasher</code> to implement, respectively, the FIPS secure hash algorithms SHA1, SHA256, and SHA512 [FIPS 180-2] as well as RSA’s MD5 algorithm [RFC 1321].</p>
+</blockquote>
+
+<blockquote>
+<p>Through out this subclause, to specialize a template with a template type parameter named <code>HashProvider</code>, the corresponding template argument shall meet the <code>HashProvider</code> requirements.</p>
+</blockquote>
+
+<blockquote>
+<h3 id="_requirements"><code>HashProvider</code> requirements</h3>
+</blockquote>
+
+<blockquote>
+<p>A class <code>H</code> meets the <code>HashProvider</code> requirements if the expressions shown in the Table below are valid and have the indicated semantics. In that Table and throughout this section:</p>
+</blockquote>
+
+<blockquote>
+<blockquote>
+<p>a) <code>C</code> is a trivially copyable type to hold the state of the message digest algorithm;</p>
+
+<p>b) <code>c</code> is an lvalue of <code>C</code>;</p>
+
+<p>c) <code>p</code> is a value of type <code>const char*</code>;</p>
+
+<p>d) <code>n</code> is a value of <code>size_t</code>;</p>
+
+<p>e) <code>md</code> is a value of type <code>unsigned char*</code>.</p>
+</blockquote>
+</blockquote>
+<div>
+<table class='std'>
+<thead>
+<tr>
+<th style='width: 20%'>
+Expression
+</th>
+<th style='width: 20%'>
+Return type
+</th>
+<th style='width: 40%'>
+Assertion/note<br />
+Pre/post-condition
+</th>
+</tr>
+</thead>
+<tbody>
+
+<tr>
+<td><tt>
+H::context_type
+</tt></td>
+<td><tt>
+C
+</tt></td>
+<td>
+<tt>C</tt> is <tt>CopyConstructible</tt> and <tt>Destructible</tt>.
+</td>
+</tr>
+
+<tr>
+<td><tt>
+H::digest_size
+</tt></td>
+<td><tt>
+size_t
+</tt></td>
+<td>
+</td>
+</tr>
+
+<tr>
+<td><tt>
+H::block_size
+</tt></td>
+<td><tt>
+size_t
+</tt></td>
+<td>
+</td>
+</tr>
+
+<tr>
+<td><tt>
+H::init(&amp;c)
+</tt></td>
+<td><tt>
+</tt></td>
+<td>
+post: <tt>c</tt> is ready to accept data input.
+</td>
+</tr>
+
+<tr>
+<td><tt>
+H::update(&amp;c, p, n)
+</tt></td>
+<td><tt>
+</tt></td>
+<td>
+<i>Requires:</i> <tt>p</tt> points to at least <tt>n</tt>
+contiguous bytes of input.<br />
+<i>Effects:</i> Hashes the <tt>n</tt> bytes whose the first byte
+is designated by <tt>p</tt>.<br />
+pre: <tt>c</tt> is ready to accept data input.
+</td>
+</tr>
+
+<tr>
+<td><tt>
+H::final(md, &amp;c)
+</tt></td>
+<td><tt>
+</tt></td>
+<td>
+<i>Requires:</i> <tt>md</tt> points to an object having
+contiguous space for <tt>digest_size</tt> bytes of output.<br />
+<i>Effects:</i> Places the message digest in <tt>md</tt>.<br />
+pre: <tt>c</tt> is ready to accept data input.<br />
+post: <tt>c</tt> is not ready to accept data input.<br />
+</td>
+</tr>
+
+</tbody>
+</table>
+</div>
+<blockquote>
+<h3 id="header__synopsis">Header <code>&lt;hashlib&gt;</code> synopsis</h3>
+</blockquote>
+
+<pre><code>namespace std::hashlib {  // N4026
+
+  template &lt;typename HashProvider&gt;
+  struct hasher
+  {
+    static constexpr auto digest_size = HashProvider::digest_size;
+    static constexpr auto block_size  = HashProvider::block_size;
+
+    typedef typename HashProvider::context_type      context_type;
+    typedef std::array&lt;unsigned char, digest_size&gt;   digest_type;
+
+    hasher() noexcept;
+
+    explicit hasher(char const* s);
+    explicit hasher(char const* s, size_t n);
+
+    template &lt;typename StringLike&gt;
+      explicit hasher(StringLike const&amp; bytes) noexcept;
+
+    void update(char const* s);
+    void update(char const* s, size_t n);
+
+    template &lt;typename StringLike&gt;
+      void update(StringLike const&amp; bytes) noexcept;
+
+    digest_type digest() const noexcept;
+
+    template &lt;typename CharT = char,
+              typename Traits = char_traits&lt;CharT&gt;,
+              typename Allocator = allocator&lt;CharT&gt;&gt;
+      basic_string&lt;CharT, Traits, Allocator&gt;
+        hexdigest() const;
+
+  private:
+    context_type ctx_;  // exposition only
+  };
+
+  template &lt;typename HashProvider&gt;
+  bool operator==(hasher&lt;HashProvider&gt; const&amp; a,
+                  hasher&lt;HashProvider&gt; const&amp; b) noexcept;
+
+  template &lt;typename HashProvider&gt;
+  bool operator!=(hasher&lt;HashProvider&gt; const&amp; a,
+                  hasher&lt;HashProvider&gt; const&amp; b) noexcept;
+
+  template &lt;typename CharT, typename Traits,
+            typename HashProvider&gt;
+    basic_ostream&lt;CharT, Traits&gt;&amp;
+      operator&lt;&lt;(basic_ostream&lt;CharT, Traits&gt;&amp; os,
+                 hasher&lt;HashProvider&gt; const&amp; h);
+
+  typedef hasher&lt;unspecified&gt;   md5;
+  typedef hasher&lt;unspecified&gt;   sha1;
+  typedef hasher&lt;unspecified&gt;   sha256;
+  typedef hasher&lt;unspecified&gt;   sha512;
+
+}</code></pre>
+
+<blockquote>
+<h3 id="class_template_">Class template <code>hasher</code></h3>
+</blockquote>
+
+<pre><code>hasher() noexcept;</code></pre>
+
+<blockquote>
+<p><em>Effects:</em> Constructs an object of <code>hasher</code> by calling <code>HashProvider::init(&amp;ctx_)</code>.</p>
+</blockquote>
+
+<pre><code>explicit hasher(char const* s);</code></pre>
+
+<blockquote>
+<p><em>Effects:</em> Equivalent to calling <code>update(s)</code> on a default initialized <code>*this</code>.</p>
+</blockquote>
+
+<pre><code>explicit hasher(char const* s, size_t n);</code></pre>
+
+<blockquote>
+<p><em>Effects:</em> Equivalent to calling <code>update(s, n)</code> on a default initialized <code>*this</code>.</p>
+</blockquote>
+
+<pre><code>template &lt;typename StringLike&gt;
+  explicit hasher(StringLike const&amp; bytes) noexcept;</code></pre>
+
+<blockquote>
+<p><em>Effects:</em> Equivalent to calling <code>update(bytes)</code> on a default initialized <code>*this</code>.</p>
+</blockquote>
+
+<pre><code>void update(char const* s);</code></pre>
+
+<blockquote>
+<p><em>Effects:</em> Equivalent to <code>update(s, strlen(s))</code>.</p>
+</blockquote>
+
+<pre><code>void update(char const* s, size_t n);</code></pre>
+
+<blockquote>
+<p><em>Effects:</em> Equivalent to <code>HashProvider::update(&amp;ctx_, s, n)</code>.</p>
+</blockquote>
+
+<pre><code>template &lt;typename StringLike&gt;
+  void update(StringLike const&amp; bytes) noexcept;</code></pre>
+
+<blockquote>
+<p><em>Effects:</em> Equivalent to <code>update(bytes.data(), bytes.size())</code>.</p>
+</blockquote>
+
+<pre><code>digest_type digest() const noexcept;</code></pre>
+
+<blockquote>
+<p>Let <code>md</code> be a default constructed object of <code>digest_type</code>.</p>
+</blockquote>
+
+<blockquote>
+<p><em>Effects:</em> Equivalent to</p>
+</blockquote>
+
+<pre><code>    auto tmp_ctx = ctx_;
+    HashProvider::final(md.data(), &amp;tmp_ctx);</code></pre>
+
+<blockquote>
+<p><em>Returns:</em> <code>md</code>.</p>
+</blockquote>
+
+<pre><code>template &lt;typename CharT = char,
+          typename Traits = char_traits&lt;CharT&gt;,
+          typename Allocator = allocator&lt;CharT&gt;&gt;
+  basic_string&lt;CharT, Traits, Allocator&gt;
+    hexdigest() const;</code></pre>
+
+<blockquote>
+<p>TBD</p>
+</blockquote>
+
+<pre><code>template &lt;typename HashProvider&gt;
+bool operator==(hasher&lt;HashProvider&gt; const&amp; a,
+                hasher&lt;HashProvider&gt; const&amp; b) noexcept;</code></pre>
+
+<blockquote>
+<p><em>Returns:</em> <code>a.digest() == b.digest()</code>.</p>
+</blockquote>
+
+<pre><code>template &lt;typename HashProvider&gt;
+bool operator!=(hasher&lt;HashProvider&gt; const&amp; a,
+                hasher&lt;HashProvider&gt; const&amp; b) noexcept;</code></pre>
+
+<blockquote>
+<p><em>Returns:</em> <code>!(a == b)</code>.</p>
+</blockquote>
+
+<pre><code>template &lt;typename CharT, typename Traits,
+          typename HashProvider&gt;
+  basic_ostream&lt;CharT, Traits&gt;&amp;
+    operator&lt;&lt;(basic_ostream&lt;CharT, Traits&gt;&amp; os,
+               hasher&lt;HashProvider&gt; const&amp; h);</code></pre>
+
+<blockquote>
+<p><em>Effects:</em> Equivalent to <code>os &lt;&lt; h.template hexdigest&lt;CharT, Traits&gt;()</code>.</p>
+</blockquote>
+
+<h2 id="implementation">Implementation</h2>
+
+<p>A prototype is available at <a href="https://github.com/lichray/cpp-deuceclient/blob/master/include/deuceclient/hashlib.h">https://github.com/lichray/cpp-deuceclient/blob/master/include/deuceclient/hashlib.h</a>.</p>
+
+<h2 id="references">References</h2>
+
+<p><code>[1]</code> “<code>hashlib</code> – Secure hashes and message digests.” <em>The Python Standard Library</em>. <a href="https://docs.python.org/2/library/hashlib.html">https://docs.python.org/2/library/hashlib.html</a></p>
+
+<p><code>[2]</code> Hinnant, Howard E., Vinnie Falco, and John Bytheway. “Proposed Wording.” <em>Types Don’t Know #</em>. <a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2014/n3980.html#wording">http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2014/n3980.html#wording</a></p>
+
+<p><code>[3]</code> “SHA-1.” <em>Wikipedia: The Free Encyclopedia</em>. <a href="http://en.wikipedia.org/wiki/SHA-1#Comparison_of_SHA_functions">http://en.wikipedia.org/wiki/SHA-1#Comparison_of_SHA_functions</a></p>
+</body></html>

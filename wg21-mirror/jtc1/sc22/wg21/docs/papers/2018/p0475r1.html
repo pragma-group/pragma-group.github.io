@@ -1,0 +1,161 @@
+<html><head><meta charset="UTF-8">
+<title>LWG 2511: guaranteed copy elision for piecewise construction (rev. 1)</title>
+  <style type='text/css'>
+  body {font-variant-ligatures: none;}
+  p {text-align:justify}
+  li {text-align:justify}
+  blockquote.note, div.note
+  {
+          background-color:#E0E0E0;
+          padding-left: 15px;
+          padding-right: 15px;
+          padding-top: 1px;
+          padding-bottom: 1px;
+  }
+  p code {color:navy}
+  ins p code {color:#00A000}
+  p ins code {color:#00A000}
+  p del code {color:#A00000}
+  ins {color:#00A000}
+  del {color:#A00000}
+  table#boilerplate { border:0 }
+  table#boilerplate td { padding-left: 2em }
+  table.bordered, table.bordered th, table.bordered td {
+    border: 1px solid;
+    text-align: center;
+  }
+  ins.block {color:#00A000; text-decoration: none}
+  del.block {color:#A00000; text-decoration: none}
+  #hidedel:checked ~ * del, #hidedel:checked ~ * del * { display:none; visibility:hidden }
+  </style>
+</head><body>
+<table id="boilerplate">
+<tr><td>Document number</td><td>P0475R1</td></tr>
+<tr><td>Date</td><td>2018-06-05</td></tr>
+<tr><td>Project</td><td>Programming Language C++, Library Working Group</td></tr>
+<tr><td>Reply-to</td><td>Jonathan Wakely &lt;cxx&#x40;kayari.org&gt;</td></tr>
+</table><hr>
+<h1>LWG 2511: guaranteed copy elision for piecewise construction (rev. 1)</h1>
+<h2>Revision History</h2>
+
+<p>Changes since P0475R0:</p>
+
+<ul>
+<li>Replace <em><code>UNPACK</code></em> pseudo-function with conversion to tuple of references.</li>
+</ul>
+
+
+<h2>Discussion</h2>
+
+<p>The <a href="http://wg21.link/lwg2511">2511</a> issue ("<code>scoped_allocator_adaptor</code> piecewise construction
+does not require <code>CopyConstructible</code>") suggests removing the
+<code>CopyConstructible</code> requirement from <code>scoped_allocator_adaptor</code>'s piecewise
+construction function. I don't think I forgot to remove that requirement in my
+resolution for <a href="http://wg21.link/lwg2203">2203</a>, because the new post-2203 wording still
+requires copies (or moves) in some cases.  However, I'm now convinced that
+removing the copyable requirement is important, and know how to do it.</p>
+
+<p>Consider:</p>
+
+<pre><code>struct do_not_copy {
+  do_not_copy() = default;
+  do_not_copy(const do_not_copy&amp;) { throw 1; }
+};
+
+struct X {
+  using allocator_type = std::allocator&lt;int&gt;;
+  X(do_not_copy&amp;&amp;, const allocator_type&amp;) { }
+};
+
+using pair = std::pair&lt;X, int&gt;;
+</code></pre>
+
+<p>We can do this:</p>
+
+<pre><code>pair p{ std::piecewise_construct,
+  std::tuple&lt;do_not_copy, std::allocator&lt;int&gt;&gt;{},
+  std::tuple&lt;int&gt;{} };
+</code></pre>
+
+<p>In C++17 guaranteed copy elision means this will not copy the <code>do_not_copy</code> in
+the first tuple. The <code>X</code> constructor takes it by reference, so there is no copy
+there either. (We could actually delete the <code>do_not_copy</code> copy constructor, but
+the throwing definition above allows this to work for implementations that
+don't support guaranteed copy elision yet).</p>
+
+<p>If we try to do that with a <code>scoped_allocator_adaptor</code> it blows up <em>unless</em> it
+guarantees not to copy any of the tuple elements:</p>
+
+<pre><code>std::scoped_allocator_adaptor&lt;std::allocator&lt;pair&gt;&gt; a;
+auto ptr = a.allocate(1);
+a.construct(ptr, std::piecewise_construct,
+  std::tuple&lt;do_not_copy&gt;{},
+  std::make_tuple(1));
+</code></pre>
+
+<p>With guaranteed copy elision we can initialize the function arguments without
+making a copy, but if <code>scoped_allocator_adaptor</code> makes a copy internally by
+transforming the <code>tuple&lt;do_not_copy&gt;</code> into <code>tuple&lt;do_not_copy,
+allocator&lt;pair&gt;&gt;</code> then we make a copy of the <code>do_not_copy</code> and explode.</p>
+
+<p>So without fixing LWG 2511 this doesn't work. We should fix it both for
+efficiency, and for consistency with guaranteed copy elision that will now
+happen in more places in C++17.</p>
+
+<p>Simply removing the <code>CopyConstructible</code> requirement isn't sufficient though,
+because the <code>tuple_cat</code> operations will make copies. What's needed is to
+transform <code>tuple&lt;Args1...&gt;</code> into <code>tuple&lt;Args1&amp;&amp;...&gt;</code>
+or <code>tuple&lt;Args1&amp;&amp;..., inner_allocator_type&amp;&gt;</code>
+or <code>tuple&lt;allocator_arg_t, innert_allocator_type&amp;, Args1&amp;&amp;...&gt;</code>
+as dictated by the <code>uses_allocator_v</code> logic.
+i.e. even if the incoming tuples are not tuples of references, the ones that
+get passed to <code>pair::pair(piecewise_construct_t, ...)</code> should be tuples of
+references.</p>
+
+<h2>Alternative solution</h2>
+
+<p>Another way to ensure no copies are made would be to replace the
+<code>CopyConstructible</code> requirement with a requirement that
+<code>conjunction_v&lt;is_reference_v&lt;Args1&gt;..., is_reference_v&lt;Args2&gt;...&gt;</code> is true. If
+the incoming tuples are already tuples of references then nothing will be
+copied. This has the potential to break some code, whereas the proposal below
+doesn't.</p>
+
+<h2>Proposed resolution</h2>
+
+<p>Changes are relative to N4750.</p>
+
+<p>In [allocator.adaptor.members]</p>
+
+<p>Strike paragraph 10:</p>
+
+<blockquote><p><del><em>Requires:</em> all of the types in <code>Args1</code> and <code>Args2</code> shall be <code>CopyConstructible</code> (Table 22).</del></p></blockquote>
+
+<p>Modify paragraph 11:</p>
+
+<blockquote><p><em>Effects:</em> Constructs a <code>tuple</code> object <code>xprime</code> from <code>x</code> by the following rules:</p>
+
+<p>— If <code>uses_allocator_v&lt;T1, inner_allocator_type&gt;</code> is <code>false</code> and <code>is_constructible_v&lt;T1, Args1...&gt;</code>
+is <code>true</code>, then <code>xprime</code> is <del><code>x</code></del><ins><code>tuple&lt;Args1&amp;&amp;...&gt;(std::move(x))</code></ins>.</p>
+
+<p>— Otherwise, if <code>uses_allocator_v&lt;T1, inner_allocator_type&gt;</code> is <code>true</code> and <code>is_constructible_v&lt;T1, allocator_arg_t, inner_allocator_type&amp;, Args1...&gt;</code> is <code>true</code>, then <code>xprime</code> is <code>tuple_cat(tuple&lt;allocator_arg_t, inner_allocator_type&amp;&gt;( allocator_arg, inner_allocator()), <ins>tuple&lt;Args1&amp;&amp;...&gt;(</ins>std::move(x)<ins>)</ins>)</code>.</p>
+
+<p>— Otherwise, if <code>uses_allocator_v&lt;T1, inner_allocator_type&gt;</code> is <code>true</code> and <code>is_constructible_v&lt;T1, Args1..., inner_allocator_type&amp;&gt;</code> is <code>true</code>, then <code>xprime</code> is <code>tuple_cat(<ins>tuple&lt;Args1&amp;&amp;...&gt;(</ins>std::move(x)<ins>)</ins>, tuple&lt;inner_allocator_type&amp;&gt;(inner_allocator()))</code>.</p>
+
+<p>— Otherwise, the program is ill-formed.</p>
+
+<p>and constructs a <code>tuple</code> object <code>yprime</code> from <code>y</code> by the following rules:</p>
+
+<p>— If <code>uses_allocator_v&lt;T2, inner_allocator_type&gt;</code> is <code>false</code> and <code>is_constructible_v&lt;T2, Args2...&gt;</code>
+is <code>true</code>, then <code>yprime</code> is <del><code>y</code></del><ins><code>tuple&lt;Args2&amp;&amp;...&gt;(std::move(y))</code></ins>.</p>
+
+<p>— Otherwise, if <code>uses_allocator_v&lt;T2, inner_allocator_type&gt;</code> is <code>true</code> and <code>is_constructible_v&lt;T2, allocator_arg_t, inner_allocator_type&amp;, Args2...&gt;</code> is <code>true</code>, then <code>yprime</code> is <code>tuple_cat(tuple&lt;allocator_arg_t, inner_allocator_type&amp;&gt;( allocator_arg, inner_allocator()), <ins>tuple&lt;Args2&amp;&amp;...&gt;(</ins>std::move(y)<ins>)</ins>)</code>.</p>
+
+<p>— Otherwise, if <code>uses_allocator_v&lt;T2, inner_allocator_type&gt;</code> is <code>true</code> and <code>is_constructible_v&lt;T2, Args2..., inner_allocator_type&amp;&gt;</code> is <code>true</code>, then <code>yprime</code> is <code>tuple_cat(<ins>tuple&lt;Args2&amp;&amp;...&gt;(</ins>std::move(y)<ins>)</ins>, tuple&lt;inner_allocator_type&amp;&gt;(inner_allocator()))</code>.</p>
+
+<p>— Otherwise, the program is ill-formed.</p></blockquote>
+
+<h2>Acknowledgements</h2>
+
+<p>Thanks to Tim Song for suggesting the simplified specification in the R1 revision.</p>
+</body></html>

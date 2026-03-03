@@ -1,0 +1,260 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+ "http://www.w3.org/TR/html4/strict.dtd">
+<html><head>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8">
+<title>P0387R1: Memory Model Issues for Concurrent Data Structures</title>
+</head>
+<body>
+<table>
+	<tr>
+                <th>Doc. No.:</th>
+                <td>WG21/P0387R1</td>
+        </tr>
+        <tr>
+                <th>Date:</th>
+                <td>2018-11-25</td>
+        </tr>
+        <tr>
+                <th>Author:</th>
+                <td>Hans-J. Boehm</td>
+        </tr>
+        <tr>
+                <th>Email:</th>
+                <td><a href="mailto:hboehm@google.com">hboehm@google.com</a></td>
+        </tr>
+        <tr>
+                <th>Target audience:</th>
+                <td>SG1 (Concurrency)</td>
+        </tr>
+</table>
+	
+<h1>P0387R1: Memory Model Issues for Concurrent Data Structures</h1>
+<p>
+Prior discussions of both
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0260r0.html">
+concurrent queue</a> and
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0261r0.html">
+distributed counter</a> proposals raised the issue that we do not have a
+clear consensus about what memory model guarantees should be provided by
+concurrent data structure libraries.  This is an attempt to
+frame that discussion. The ideal outcome would be a set of principles to be
+followed by later proposals.
+<p>
+This builds on an earlier email discussion with JF Bastien, Lawrence Crowl,
+Doug Lea, and Paul McKenney. Lawrence Crowl's paper <a href="http://wg21.link/p0495">P0495</a>
+is closely related.
+<h2>Revision history</h2>
+<p>
+R0 was briefly discussed at the 2016 Issaquah meeting, without definitive conclusions.
+It was and remains unclear that definitive conclusions are possible;
+a one-size-fits-all approach seems unlikely to work here.
+<p>
+R1 simplifies the queue/logging exmaple to two threads, and adds more discussion of
+lock-based implementations, an issue that caused confusion both at the San Diego
+meeting and in WG14 mailing list discussions. It also revises the policy proposal
+section to reflect recent work.
+
+<h2>The existing memory model compromise</h2>
+<p>
+When WG21 first started discussing memory model issues, we compromised on a
+"sequential consistency by default with control where needed" policy.
+A programmer who is not an expert
+in memory models can program to a model in which thread execution
+was simply interleaved: At each time step one of the available threads performs
+its next operation.  This requires only that data races are avoided, and that
+no operations on atomics explicitly specify a <code>memory_order</code>.
+<p>
+Over the years, I believe we have intentionally relaxed this in only two ways:
+<ul>
+<li> We've relaxed it in cases in which no reasonable code can tell the difference.
+For example <code>set_new_handler()</code>, <code>get_new_handler()</code>,
+and similar functions are not sequentially consistent.  This means that if someone
+tries to implement Dekker's Algorithm by calling
+<code>set_new_handler(foo1); x = get_terminate_handler()</code> in one thread
+and calling <code>set_terminate_handler(foo2); y = get_new_handler()</code> in
+another, and entering the critical section if x != foo1 or y != foo2 respectively,
+in fact both threads may see the original values, and hence both enter the critical
+section at the same time. The general feeling was that this doesn't matter, because
+this code is ridiculous enough that we don't need to support it.
+<li> We have in a few cases disguised non-sequentially-consistent behavior as
+non-determinism. The <code>try_lock()</code> call is defined so that it can be
+treated as non-deterministically failing without reason, to hide the fact that
+<code>lock()</code> and <code>try_lock()</code> are not sequentially consistent,
+and it would be expensive and typically useless to change that.
+</ul>
+<p>
+We have not yet really had to address the issue for higher-level libraries.
+<h2>Existing practice for concurrent data structure libraries</h2>
+<p>
+As far as I can tell, interfaces for existing concurrent data structure
+libraries are often unclear what they promise.  Academic papers often
+consider only operations on a single data structure, and ignore the effect
+of those data structure operations on other objects.  (In large part
+because they often assume sequential consistency, in which case
+the issue does not arise.)
+<p>
+In practice, at least some ordering properties are clearly crucial: 
+If I initialize object in Thread 1, and pass it through a
+concurrent queue to Thread 2, those initializing stores in Thread 1 had better be
+visible to Thread 2. That means queue insertion and removal must at
+least establish a "synchronizes with" relationship between the insertion
+and removal of the corresponding item.
+<p>
+The specification of java.util.concurrent components is not entirely clear,
+but based on a conversation with Doug Lea, the intent is to provide just these
+semantics: An operation that visibly modifies a concurrent data structure
+synchronizes with an operation that observes the result of this modification.
+This basically corresponds to acquire-release semantics.
+<p>
+Although this has worked out reasonably well in practice, it is prone to
+some programmer surprises that do not fall into either of the exception
+categories from the previous section.  Consider the following, where both
+<code>q</code> and <code>log</code> are concurrent queues:
+<blockquote>
+<table border = "1">
+<tr>
+	<th>Thread 1</th>
+	<th>Thread 2</th>
+</tr>
+<tr>
+<td rowspan="2">
+	<code>q.push(1);</code> <br>
+	<code>log.push("pushed 1");</code>
+</td>
+<td rowspan="2">
+	<code>log.push("pushed 2");</code> <br>
+	<code>q.push(2);</code>
+</td>
+</tr>
+</table>
+</blockquote>
+<p>
+With only this kind of acquire/release ordering, there is nothing to prevent the
+log from containing
+<blockquote>
+<pre>
+pushed 1
+pushed 2
+</pre>
+</blockquote>
+<p>
+at completion of both threads while <code>q</code> contains 2 followed by 1.
+Thus the log indicates the opposite of the enqueuing order that actually occurred.
+<p>
+There is nothing to force the orders of the elements in the two queues
+to be inconsistent. Neither thread observes an update from the other thread.
+Hence there are no synchronizes-with relationships among the two threads,
+and thus no ordering is guaranteed.
+This is clearly not beginner-friendly, and pretty clearly does not qualify under
+either of the existing relaxations of the original compromise.
+<p>
+Also note that this is largely distinct from the occasionally proposed relaxations
+of e.g. FIFO ordering requirements for a single queue.
+Here both <code>q</code> and <code>log</code>
+individually obey full FIFO ordering requirements. It's just that the
+combined behavior cannot be explained in terms of a simple thread interleaving.
+
+<h2>Lock-based data structures</h2>
+<p>
+It is important to keep in mind that if a data structure is implemented correctly
+using locks, we implicitly guarantee sequential consistency "for free".
+The fact that <code>lock()</code>/<code>unlock()</code> themselves
+provide only acquire/release ordering does not change this; that weaker
+ordering only becomes visible if locks are combined with racing accesses
+to weakly-ordered atomics, or if the implementation relies on the absence
+of spurious <code>try_lock()</code> failures, something we don't allow
+for standard mutexes.
+<p>
+Very informally, we can see that this has to be the case as follows:
+By protecting each access of a variable <code>x</code> with the same lock,
+we ensure that the coherence order associated with <code>x</code>, i.e.
+the order in which those accesses appear to take place, becomes part
+of the happens-before order; each access synchronizes with the next one,
+since the lock release associated with the first one synchronizes
+with the lock acquisition of the second access. Thus all of these orders
+must be consistent with the remainder of the happens-before relation,
+as well as the sequential-consistency ordering.
+<p>
+This argument was made more thoroughly in <a href="http://wg21.link/n2392">N2392</a>, and more
+carefully with a more complete picture of the memory model in Mark Batty's
+thesis. We rely on it heavily when we implement non-lock-free atomics with locks.
+
+<h2>Implementation costs</h2>
+<p>
+I do not believe we currently have a good understanding of the implementation cost
+of stronger memory ordering semantics.
+<p>
+As we argued in the last section, any otherwise correct implementation that internally
+uses only locks and sequentially consistent atomics will itself be sequentially
+consistent. For more complex data structures, and if lock-freedom is not
+semantically required,
+lock-based implementations are often very competitive, since implementations
+often involve fewer memory fences than lock-free alternatives.  This is
+especially true on weakly-ordered architectures like ARM.
+<p>
+Conversely, it is often very difficult to implement an API that requires
+sequential consistency (i.e. data structure operations participate in the
+total order S of sequentially consistent operations from 29.3p3[atomics.order])
+using non-sequentially consistent atomics. (This issue is studied in some
+recent academic papers.  A good starting point may be Batty, Dodds, and
+Gotsman. "Library Abstraction for C/C++ Concurrency", POPL 2013)
+
+<h2>Policy options</h2>
+<p>
+It seems to me that in cases in which we expect implementations to
+use locks, there is no reason to complicate the programming model by
+providing anything other than sequential consistency.
+<p>
+At the other extreme,
+for some very low-level expert-only facilities, which are expected to be used in very
+specific contexts this does not seem viable. Hazard pointers are a prime example. We have started
+specifying some of these with very specific and weak memory ordering constraints, which the user
+must be aware of. The goal here should be to make it clear to
+non-expert users that these facilities don't follow our normal conventions.
+<p>
+In other cases,
+I propose that we adhere to existing policy and ensure that any visible sequential
+consistency violations are either 
+<ul>
+<li>explicitly flagged with <code>memory_order</code> arguments,
+<li>unobservable by reasonable code,
+<li>or disguised as non-determinism in the
+specification.
+</ul>
+<p>
+This raises the question of how explicitly weaker ordering should be flagged.
+There are two obvious options:
+<ol>
+<li>As we do now, by passing a <code>memory_order</code> argument to member functions.
+<li>By providing different variants of the data structure as a whole,
+e.g. by templatizing a concurrent container class on a <code>memory_order</code>
+argument.
+</ol>
+<p>
+In the latter case, we might use <code>memory_order_relaxed</code> to indicate
+that the library guarantees no synchronizes-with relationships,
+<code>memory_order_acq_rel</code> if it guarantees that when B observes
+the effects of A, then A synchronizes with B, and
+<code>memory_order_seq_cst</code> to indicate that interleaving semantics are
+preserved.
+<code>memory_order_acquire</code> and <code>memory_order_release</code> would
+not be useful in this context. (Potential <code>memory_order_consume</code>
+support is deferred to a future discussion.)
+<p>
+Clearly the former is better for a low-level library like <code>&lt;atomic&gt;</code>.
+But we also have some evidence that memory ordering for different operations is
+not always cleanly separable for higher-level operations. For example,
+when implementing locks, normally
+<code>lock</code> and <code>unlock</code> operations
+preserve sequential consistency even if implemented
+as acquire-release operations. But the addition of an always-accurate
+<code>try_lock</code> changes that. (See Boehm, "Reordering Constraints for
+Pthread-Style Locks", PPoPP 2007.)
+In Posix, the addition of <code>sem_getvalue()</code>
+similarly potentially wreaks havoc with the implementation of the other semaphore operations.
+<p>
+I propose that we allow the second model for higher-level data structures like queues,
+and use the Technical Specification model to experiment with the trade-offs for
+particular library components.
+</body>
+</html>

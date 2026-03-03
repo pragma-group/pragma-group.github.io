@@ -1,0 +1,196 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+ "http://www.w3.org/TR/html4/strict.dtd">
+<html><head>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8">
+<title>N4013: Atomic operations on non-atomic data</title>
+</head>
+<body>
+<table summary="Identifying information for this document.">
+	<tr>
+                <th>Doc. No.:</th>
+                <td>WG21/N4013</td>
+        </tr>
+	<tr>
+		<th>Revision of:</th>
+		<td>WG21/N4013</td>
+        <tr>
+                <th>Date:</th>
+                <td>2014-05-26</td>
+        </tr>
+        <tr>
+                <th>Reply to:</th>
+                <td>Hans-J. Boehm</td>
+        </tr>
+        <tr>
+                <th>Email:</th>
+                <td><a href="mailto:hboehm@google.com">hboehm@google.com</a></td>
+        </tr>
+</table>
+	
+<h1>N4013: Atomic operations on non-atomic data</h1>
+
+<p>
+C++11 atomic operations are designed to only apply to atomic types;
+We cannot use an atomic operation on a plain integer.  There are great
+reasons for that:
+<ol>
+<li> Without a separate type, it is easy to forget to identify especially
+atomic loads of concurrently modified data.  This often results in subtle
+"word-tearing" or memory ordering issues, which are nearly impossible to debug.
+Since it also violates the compilers assumptions about when variables
+change, it can also result in even more subtle "mis"compilation.
+<li> There is no reasonable way to completely portably apply atomic
+operations to data not declared as atomic.  On a machine on which an "int"
+is a 32-bit quantity, aligned on a 16-bit boundary, an int may straddle
+a cache line.  This usually prevents hardware supported atomic accesses,
+and would force the use of a lock for 32-bit atomic operations, largely
+defeating the point of the construct.
+</ol>
+<p>
+Nonetheless, such access is possible on the vast majority of interesting
+cases, in which <code>T</code> and <code>atomic&lt;T&gt;</code>
+have bitwise identical representations
+and identical alignment constraints.  For example, the Linux kernel
+assumes that atomic operations on int and similar types are supported.
+<p>
+When we designed the C++11 atomics, I was under the misimpression that
+it would be possible to semi-portably apply atomic operations to
+data not declared to be atomic, using code such as
+
+<blockquote>
+<p>
+<code>
+int x;
+
+reinterpret_cast&lt;atomic&lt;int&gt;&amp;&gt;(x).fetch_add(1);
+</code>
+</blockquote>
+<p>
+This would clearly fail if the representations of <code>atomic&lt;int&gt;</code>
+and <code>int</code> differ, or if their alignments differ.  But I know
+that this is not an issue on platforms I care about.  And, in practice,
+I can easily test for a problem by checking at compile time that sizes
+and alignments match.
+<p>
+However this is not guaranteed to be reliable,
+even on platforms on which
+one might expect it to work, since it may confuse type-based alias analysis
+in the compiler.  A compiler may assume that an <code>int</code> is
+not also accessed as an <code>atomic&lt;int&gt;</code>.  (See 3.10, [Basic.lval],
+last paragraph.)
+<p>
+Here we address the question of whether there should be some mechanism for
+applying atomic operations to non-atomic data.  As pointed out in
+the next section, we address a somewhat different set of problems
+from prior discussion of non-atomic operations on atomic data
+(c.f. the last part of
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2013/n3710.html">
+N3710</a> or the
+<a href="http://wiki.edg.com/twiki/bin/view/Wg21issaquah/ThursdayMorningMinutes">Issaquah discussion</a>.
+
+<h2>Why do we need atomic operations on plain data?</h2>
+<p>
+There is a strong argument that without any legacy considerations, all
+data that must be accessed atomically should be declared appropriately
+as <code>atomic&lt;T&gt;</code>.  And we want to strongly encourage that
+practice.
+<p>
+But we do have large legacy code bases,
+many of which have declared &ldquo;atomic&rdquo; variables as e.g.
+<code>volatile int</code> instead of <code>atomic&lt;int&gt;</code>.
+Such code typically uses various platform-dependent atomics libraries,
+or uses vendor-specific extensions (such as the gcc <code>__sync</code>
+primitives or the Microsoft <code>Interlocked</code> primitives).
+There are great reasons for such code to switch to the C++11
+primitives: Well-defined semantics, better control over memory ordering,
+better portability, better expected support by future compilers.
+Replacing the legacy primitives with the corresponding C++11 primitives
+would be an easy gain.
+But it is often difficult to update all data structure declarations and
+function prototypes to reflect the fact that some data must occasionally
+be accessed atomically.  Such changes tend to be viral and affect
+much of the code base, even pieces that don't deal with atomic operations.
+<p>
+A good example of that is an interpreter for a language <I>L</i> that itself
+supports atomic access, possibly on a per-access basis.  To express this
+correctly in C++11, every memory location that might conceivably be updated
+atomically should be declared as an atomic object.  That would
+require non-atomic operations on atomics to implement the remaining
+operations.  (One could instead declare memory as a byte array or union,
+But I don't believe that can be
+made fully correct, if object initialization in <i>L</i> is non-atomic,
+as it is in C++11.) 
+This is likely to require pervasive changes to the interpreter for <I>L</i>.
+(Not to mention requiring non-atomic accesses to atomics, which we
+don't yet have.)
+<p>
+Another good example of a legacy code base that currently uses
+per-access atomicity is the Linux kernel.  And Linus Torvalds has in
+the past expressed concerns about moving to the C11 model because
+it requires atomically updateable objects to be identified in their
+declaration.
+<h2>Strawman proposal</h2>
+<p>
+In order to solve this problem, we need two facilities: One to test
+whether the platform supports conversion between <code>T</code> and
+<code>atomic&lt;T&gt;</code>, and a facility to actually perform the conversion.
+<p>
+Depending on whether there is WG14 interest, the convertibility test
+could use macros, and/or
+could use a type trait to test whether an implementation
+supports interpreting a <code>T&amp;</code> as an <code>atomic&lt;T&gt;&amp;</code>:
+<blockquote>
+<p>
+	<code>template&lt;class T&gt; class convertible_to_atomic&lt;T&gt;</code>
+</blockquote>
+<p>
+An instance has a <code>true value</code> member if and only if the conversion
+function below has
+well-defined behavior and results in a reference to an atomic.
+(Open issue: How should this behave if <code>T</code> is not a valid
+argument to <code>atomic</code>?)
+Unlike <code>is_lock_free()</code>, the result should always be
+determinable at compile time.
+<p>
+The function to perform the conversion would be a template in C++,
+and possibly again a type-generic macro in C:
+<blockquote>
+<p>
+	<code>template&lt;class T&gt; atomic&lt;T&gt;* as_atomic(volatile T*);</code>
+</blockquote>
+<p>
+If <code>convertible_to_atomic&lt;T&gt;</code> holds,
+the result of <code>as_atomic</code> can be used to update the
+reference passed to it; such updates are atomic, while accesses directly
+to the argument are not.  The conversion function should probably traffic
+in pointers, rather than references, for C compatibility.
+<p>
+(Open issue: Paul McKenney points out that the treatment of <code>volatile</code>
+arguments requires some care and choices.  There is an argument for preserving
+volatility of the argument, yielding a <code>volatile atomic&lt;T&gt;</code>
+if the argument is <code>volatile</code>.  However there are also many cases
+in which this is undesirable, because the original code uses
+<code>volatile</code> as a replacement for <code>atomic</code>.  Two variants
+may be required to handle this, or we could require programmers to address
+the issue with an explicit <code>const_cast</code>.)
+<h2>Implementation</h2>
+<p>
+For most implementations <code>as_atomic</code> is an identity function,
+and <code>convertible_to_atomic&lt;T&gt;</code> returns true for all types
+<code>T</code>, or at least those that can be used as an argument to
+<code>atomic&lt;&gt;</code>.  Even lock-based implementations should be fine, so long
+as an external lock table is used.
+<p>
+The presence of these functions would imply that if
+<code>convertible_to_atomic&lt;T&gt;</code> holds for <code>T</code>, then
+the compiler has to view <code>T&amp;</code> and <code>atomic&lt;T&gt;&amp;</code>
+as potential aliases.  We suspect that for most implementations this is
+already true, since the implementation of <code>atomic&lt;T&gt;</code>
+contains a <code>T</code> field under the covers.  But this requires
+further investigation.
+<h2>Thanks</h2>
+<p>
+Clark Nelson, Paul McKenney, and Lawrence Crowl provided helpful comments.
+
+</body>
+</html>

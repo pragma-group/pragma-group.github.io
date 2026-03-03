@@ -1,0 +1,270 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head>
+    <meta http-equiv="content-type" content="text/html; charset=UTF-8">
+
+    <title>P0290R1: apply() for synchronized_value&lt;T&gt;</title>
+    <style type="text/css">
+      p {text-align:justify}
+      li {text-align:justify}
+      blockquote.note
+      {
+      background-color:#E0E0E0;
+      padding-left: 15px;
+      padding-right: 15px;
+      padding-top: 1px;
+      padding-bottom: 1px;
+      }
+      ins, .inserted
+      {
+      color: black;
+      background: #a0ffa0;
+      text-decoration: underline;
+      }
+      del
+      {
+      color: black;
+      background: #ffa0a0;
+      text-decoration: line-through;
+      }
+    </style>
+  </head><body>
+    <table>
+      <tr><td>Document Number:</td><td>P0290!R1</td></tr>
+      <tr><td>Date:</td><td>2016-06-23</td></tr>
+      <tr><td>Author:</td><td><a href="mailto:anthony@justsoftwaresolutions.co.uk">Anthony
+            Williams</a><br>Just Software Solutions Ltd</td></tr>
+      <tr><td>Audience:</td><td>SG1</td></tr>
+    </table>
+    <h1>P0290R1: <code>apply()</code> for <code>synchronized_value&lt;T&gt;</code></h1>
+
+    <h2>Introduction</h2>
+
+    <p>This paper is a followup to <a href="http://wg21.link/n4033">N4033</a>, based on feedback
+      from the Rapperswil 2014 meeting.</p>
+
+    <p>The basic idea is that <code>synchronized_value&lt;T&gt;</code> stores a value of
+      type<code>T</code> and a mutex.The <code>apply()</code> function then provides a means of
+      accessing the stored value with the mutex locked, automatically unlocking the mutex
+      afterwards.</p>
+
+    <p>The <code>apply()</code> function is variadic, so you can operate on a set
+      of <code>synchronized_value&lt;T&gt;</code> objects. All the mutexes are locked prior to
+      invoking the supplied callable object, and then they are all released afterwards.</p>
+
+    <p>This provides an easy way for developers to ensure that all accesses to a given object are
+      done with the relevant mutex locked, whilst also allowing for operations that require locks on
+      multiple objects.</p>
+
+    <p>In order to avoid simple mistakes when using the <code>synchronized_value&lt;T&gt;</code>
+      objects, there are no public member functions or operations other than construction.</p>
+
+    <p>The actual implementation may use an alternative synchronization mechanism instead of a
+    mutex, provided that the synchronization requirements are met.</p>
+
+    <h2>Examples</h2>
+
+    <h3>1: Simple accesses</h3>
+    <p>Simple accesses can be done with simple lambdas:</p>
+
+    <pre>
+synchronized_value&lt;std::string&gt; s;
+
+std::string read_value(){
+    return apply([](auto&amp; x){return x;},s);
+}
+
+void set_value(std::string const& new_val){
+    apply([&amp;](auto&amp; x){x=new_val;},s);
+}
+    </pre>
+
+    <h3>2: More complex processing</h3>
+    
+    <p>More complex processing can be done with a more complex lambda, or a separate function or
+      callable object:</p>
+
+    <pre>
+synchronized_value&lt;std::queue&lt;message_type&gt;&gt; queue;
+      
+void process_message(){
+    std::optional&lt;message_type&gt; local_message;
+    apply([&amp;](std::queue&lt;message_type&gt;&amp; q){
+        if(!q.empty()){
+            local_message.emplace(std::move(q.front()));
+            q.pop_front();
+        }
+    },queue);
+    if(local_message)
+        do_processing(local_message.value());
+}
+    </pre>
+
+    <h3>3: Multi-value processing</h3>
+
+    <p>The variadic nature of <code>apply()</code> means that writing code that accesses
+      multiple <code>synchronized_value&lt;T&gt;</code> objects is straightforward. It uses the same
+      mechanism as <code>std::lock()</code> to ensure that the requisite mutexes are locked without
+      deadlock.</p>
+
+    <p>The ubiquitous example of transferring money between accounts can then be simply written as a
+      follows:</p>
+
+    <pre>
+void transfer_money(
+    synchronized_value&lt;account&gt;&amp; from_,
+    synchronized_value&lt;account&gt;&amp; to_,
+    money_value amount){
+    apply([=](auto&amp; from,auto&amp; to){
+        from.withdraw(amount);
+        to.deposit(amount);
+    },from_,to_);
+}
+    </pre>
+
+    <h2>Proposed wording</h2>
+
+<p>Add a new section to chapter 30 as follows.</p>
+
+<blockquote class="inserted">
+  <h3>30.x Synchronized Values</h3>
+  <p>This section describes a class template to provided locked access to a value in order to
+    facilitate the construction of race-free programs.</p>
+
+  <h4>Header &lt;synchronized_value&gt; synopsis</h4>
+
+<pre>
+namespace std {
+    template&lt;typename T&gt;
+    class synchronized_value;
+
+    template&lt;typename F,typename ... ValueTypes&gt;
+    decltype(std::declval<F>()(std::declval<ValueTypes&amp;>()...)) apply(
+        F&amp;&amp; f,synchronized_value&lt;ValueTypes&gt;&amp;... values);
+}
+</pre>
+
+<h4>30.x.1 Class template <code>synchronized_value</code></h4>
+
+<pre>
+namespace std
+{
+    template&lt;typename T&gt;
+    class synchronized_value
+    {
+    public:
+        synchronized_value(synchronized_value const&amp;) = delete;
+        synchronized_value&amp; operator=(synchronized_value const&amp;) = delete;
+
+        template&lt;typename ... Args&gt;
+        synchronized_value(Args&amp;&amp; ... args);
+        ~synchronized_value();
+    };
+}
+</pre>
+
+  <p>An object of type <code>synchronized_value&lt;T&gt;</code> wraps an object of
+    type <code>T</code>. The wrapped object can be accessed by passing a callable object or function
+    to <code>apply</code>. All such accesses are done with a lock held to ensure that only one
+    thread may be accessing the wrapped object for a given <code>synchronized_value</code> at a
+    time.</p>
+
+<h5><pre>
+template&lt;typename ... Args&gt;
+synchronized_value(Args&amp;&amp; ... args);
+</pre></h5>
+
+<dl>
+  <dt>Requires:</dt>
+  <dd><code>T</code> is constructible from <code>args</code></dd>
+  <dt>Effects:</dt>
+  <dd>Constructs a <code>std::synchronized_value</code> instance
+  containing an object constructed
+  with <code>T(std::forward&lt;Args&gt;(args)...)</code>. If no
+  arguments are supplied then the wrapped object is
+  default-constructed. </dd>
+
+  <dt>Throws:</dt>
+  <dd>Any exceptions thrown by the construction of the wrapped
+    object.<br>
+    <code>std::system_error</code> if any necessary resources cannot be acquired.
+  </dd>
+</dl>
+
+<h5><pre>
+~synchronized_value();
+</pre></h5>
+
+<dl>
+  <dt>Effects:</dt>
+  <dd>Destroys the contained object of type <code>T</code> and <code>*this</code>.</dd>
+</dl>
+
+<h4>30.x.2 <code>apply</code> function</h4>
+<h5><pre>
+template&lt;typename F,typename ... ValueTypes&gt;
+decltype(std::declval<F>()(std::declval<ValueTypes&amp;>()...)) apply(
+    F&amp;&amp; f,synchronized_value&lt;ValueTypes&gt;&amp;... values);
+</pre></h5>
+
+<dl>
+  <dt>Effects:</dt>
+  <dd>Acquires the lock for each <i>V<sub>i</sub></i> in <code>values</code> using the algorithm
+    from [thread.lock.algorithm] to ensure that deadlock does not occur when <code>apply</code> is
+    called from multiple threads of execution. Then invokes <code>func(data...)</code>, where
+    each <code>data<sub>i</sub></code> is the wrapped object of
+    type <code>ValueType<sub>i</sub></code> stored in <i>V<sub>i</sub></i>, and returns the result
+    to the caller. When the invocation of <code>func</code> returns or exits via exception, then any
+    internal locks that were acquired for this call to <code>apply</code> are released prior to
+    control leaving
+    <code>apply</code>.</dd>
+
+  <dt>Returns:</dt>
+  <dd>The return value of the call to <code>func</code>.</dd>
+
+  <dt>Throws:</dt>
+  <dd><code>std::system_error</code> if any of the locks could not be acquired. Any exceptions
+    thrown by the invocation of <code>func(data...)</code>. Note: the locks are released after the
+    call, even if <code>apply</code> exits with an exception.</dd>
+
+  <dt>Synchronization:</dt>
+  <dd>Multiple threads may call <code>apply()</code> concurrently without
+    external synchronization. If multiple threads call <code>apply()</code>
+    concurrently passing the same instance(s)
+    of <code>synchronized_value</code> then the behaviour is as-if they each
+    made their call in some unspecified order. The completion of the full
+    expression associated with one access synchronizes-with a subsequent
+    access to the same object.
+    <dt>Requires:</dt>
+    <dd>
+    A single instance of <code>synchronized_value</code> shall not be passed more than once to the
+    same invocation of <code>apply</code>. [Example:
+    <pre>
+      synchronized_value<int> sv;
+      void f(int,int);
+      apply(f,sv,sv); // undefined behaviour, sv passed more than once to same call
+</pre>
+    &mdash;End Example]<br>
+    The function or callable object <code>f</code> shall not call <code>apply</code> directly or
+    indirectly passing any of the <code>synchronized_value</code> objects in <code>values</code>.
+    
+  </dd>
+</dl>
+</blockquote>
+
+<h2>Changes since P0290R0</h2>
+
+  <p>Following discussion in SG1 in Oulu, the following changes have been made:</p>
+
+  <ol>
+    <li>The wording has been changed to allow alternative synchronization mechanisms instead of
+      mutexes;</li>
+    <li>Calling <code>apply</code> with the same <code>synchronized_value</code> more than once in
+      the same argument list is explicitly disallowed;</li>
+    <li>Recursively calling <code>apply</code> with an overlapping set
+      of <code>synchronized_value</code> objects is explicitly disallowed; and</li>
+    <li>Constructing a <code>synchronized_value</code> may throw <code>std::system_error</code>.</li>
+  </ol>
+
+    </body></html>
+    
+    

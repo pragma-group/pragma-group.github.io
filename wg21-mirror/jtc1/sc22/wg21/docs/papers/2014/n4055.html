@@ -1,0 +1,283 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+
+<meta http-equiv="Content-Type" content="text/html;charset=UTF-8">
+
+<style type="text/css">
+
+body { color: #000000; background-color: #FFFFFF; }
+del { text-decoration: line-through; color: #8B0040; }
+ins { text-decoration: underline; color: #005100; }
+
+p.example { margin-left: 2em; }
+pre.example { margin-left: 2em; }
+div.example { margin-left: 2em; }
+
+code.extract { background-color: #F5F6A2; }
+pre.extract { margin-left: 2em; background-color: #F5F6A2;
+  border: 1px solid #E1E28E; }
+
+p.function { }
+.attribute { margin-left: 2em; }
+.attribute dt { float: left; font-style: italic;
+  padding-right: 1ex; }
+.attribute dd { margin-left: 0em; }
+
+blockquote.std { color: #000000; background-color: #F1F1F1;
+  border: 1px solid #D1D1D1;
+  padding-left: 0.5em; padding-right: 0.5em; }
+blockquote.stddel { text-decoration: line-through;
+  color: #000000; background-color: #FFEBFF;
+  border: 1px solid #ECD7EC;
+  padding-left: 0.5empadding-right: 0.5em; ; }
+
+blockquote.stdins { text-decoration: underline;
+  color: #000000; background-color: #C8FFC8;
+  border: 1px solid #B3EBB3; padding: 0.5em; }
+
+table { border: 1px solid black; border-spacing: 0px;
+  margin-left: auto; margin-right: auto; }
+th { text-align: left; vertical-align: top;
+  padding-left: 0.8em; border: none; }
+td { text-align: left; vertical-align: top;
+  padding-left: 0.8em; border: none; }
+
+</style>
+
+<title>Ruminations on (node-based) containers and noexcept</title>
+</head>
+<body>
+<h1>Ruminations on (node-based) containers and noexcept</h1>
+
+<p>
+ISO/IEC JTC1 SC22 WG21 N4055 - 2014-07-02
+</p>
+
+<address>
+Ville Voutilainen, ville.voutilainen@gmail.com
+</address>
+
+<h2><a name="Abstract">Abstract</a></h2>
+<p>
+There are quite many standard containers that do not have noexcept
+move constructors required by their synopsis. Implementations 
+can strengthen such a noexcept-specification as per [res.on.exception.handling]/1:<p>
+<blockquote>
+"Any of the functions defined in the C ++ standard library can report a failure by throwing an exception of
+a type described in its Throws: paragraph. An implementation may strengthen the exception-specification
+for a non-virtual function by adding a non-throwing noexcept-specification.
+"
+</blockquote>
+<p>
+The issue is that this means that the performance of operations such
+as vector&lt;T>::push_back becomes dependent on the noexcept-specification
+of the move constructor of T, and if T has a container member, the 
+noexcept-specification of that container influences the noexcept-specification
+of the move constructor of T in implementation-specific ways.
+</p>
+<p>This paper explores the reasons of why container move constructors
+are not noexcept on some implementations. A very good explanation is written  <a href="#Sentinel">below</a>.
+<p>This paper also makes some moderate suggestions on what the solution(s)
+should be.</p>
+<p>Nicolai Josuttis proposes some of those moderate suggestions in
+his paper <a href="http://open-std.org/JTC1/SC22/WG21/docs/papers/2014/n4002.pdf">N4002</a>.</p>
+
+<h2><a name="Howard">Howard's benchmark</a></h2>
+
+<p>
+Howard Hinnant posted a benchmark in [c++std-lib-35890]. The benchmark
+shows the difference between a vector element that has a noexcept move
+constructor and a vector element that doesn't, especially in the case
+where the element itself has a container as a member. In the benchmark,
+the vector element contains a list, and the performance of vector's emplace_back
+is measured. Hinnant finds a 84x difference between a noexcept move
+constructor for list and a throwing move constructor for list.
+</p>
+
+<h2><a name="Vector">Herb's notes on vector and noexcept</a></h2>
+<p>Herb Sutter wrote the following:</p>
+<p>I stumbled (faceplant) across this over the winter when trying to update GotW #8 on exception safety, and trying to add the example of "simply implementing Stack&lt;T> with a vector under the covers." Quoting myself from a private email in early January:</p>
+<blockquote>
+<p>Stack's move operations should be noexcept. I darned well am going to
+*make* them noexcept as part of teaching how to write exception-safe
+code in C++11 (IMO the alternative is to say the combination of noexcept
+and move is broken, which I don't believe is true).
+</p>
+<p>If I write Stack using a naked new'd array, this is easy.</p>
+<p>But this is C++11, and we should be using the standard library rather than
+using raw pointers/new/delete, and in every other way the code is
+incredibly simpler, easier, and default-safer when implementing Stack in
+terms of std::vector... except for noexcept move. Achieving noexcept
+move with a std::vector implementation, today I have to do a strange,
+complex, and rather borderline-iffy termination-flirty dance, as Howard
+confirmed.
+I continue to view this as pure badness.
+</p>
+</blockquote>
+
+<p>Then I stopped writing the updated GotW #8 because I didn't want to teach the status quo -- that there is currently a tension between making your move noexcept (a good thing you should do!) and implementing your state reusing standard containers, notably std::vector,  instead of raw arrays and pointers (a good thing you should do!) -- and that it's either-or and the workarounds are quite unsatisfactory (e.g., one is to lie, and just make Stack&lt;T> move be noexcept anyway; or to resort to try/catch(...)-ing and then what; ...). It's not just a performance issue... think about what you have to do in order to make Stack&lt;T> move be noexcept and still implement reusing std::vector today, the options I know of range from rank to merely odious.</p>
+
+<p>To add to the motivation, here's another email I wrote at that time:</p>
+
+<blockquote>
+<p>
+I'm more and more interested in nonthrowing code in general -- for
+vector (SIMD) code execution, for writing nofail operations (which rely
+on things like dtors/swap/deallocation and hopefully move to be nofail),
+so I was surprised by vector move operations not being nothrow => not nofail.
+</p>
+
+<p>I'm also more and more interested in promoting vector&lt;T> in particular
+as a major performance and efficiency advantage over managed code,
+mainly because it's contiguous, but also because it's razor-thin... and then
+when I see things I don't expect, like move looking like it might throw, it
+makes me question (a) whether I understand vector and (b) how thin it is
+and what secret mechanics are going on down there that I wasn't expecting.
+C++ is great at surfacing essential details; I would have expected this kind of
+"secretly we're doing stuff for you under the covers" surprise from a C# or
+Java container.
+</p>
+</blockquote>
+
+<h2><a name="Sentinel">Why do some implementations have non-noexcept moves for (node-based) containers?</a></h2>
+
+<p>In [c++std-lib-35945], Stephan T. Lavavej explains:</p>
+
+<p>Here's why I prefer dynamically allocated sentinel nodes for list.</p>
+
+<p>Compare vector's qualities against list's qualities. vector has many desirable properties, making it the best container to use by default:</p>
+<ul>
+<li>It provides the strongest possible iterators, random-access.</li>
+<li>It's contiguous, so it can be used with pointer-based APIs.</li>
+<li>And because it's contiguous, iteration is blazingly fast (processors love incrementing pointers).</li>
+<li>It's very space-efficient. Large, exact-capacity vectors are nearly zero overhead, and this happens more frequently than you might expect (vector is very good about sensing when it's being constructed from a known-length range). Even when periodically reallocating, vector's overhead is quite reasonable: an average of 20% for VC's 1.5x growth, or 33% for 2x growth.</li>
+<li>Moves and swaps physically preserve all iterator ranges, including ranges that involve the end iterator.</li>
+</ul>
+<p>Of course, vector has downsides:</p>
+<ul>
+<li>Reallocation invalidates iterators. (reserve() can be used to avoid this in specific situations.)</li>
+<li>Only push_back() is fast - mid-insertion and front-insertion are slow. (In theory an application could complain about *amortized* constant push_back, but in practice it is virtually never a problem. Still, a potential downside.)</li>
+<li>Additionally, mid-insertion and front-insertion invalidate following iterators.</li>
+</ul>
+<p>Now compare list. Basically everything that's awesome about vector is worse with list:</p>
+<ul>
+<li>Bidi iterators are significantly less useful than random-access iterators.</li>
+<li>Non-contiguity means that it can't talk to pointer-based APIs, and processors hate node-hopping iteration.</li>
+<li>It has two pointers of overhead per element, plus potential allocator overhead. For many (if not most) objects, this is significant.</li>
+</ul>
+<p>So why would anyone use list? Well, it's strong where vector isn't:</p>
+<ul>
+<li>It provides strong invalidation guarantees for insertion and erasure. This is extremely useful when maintaining persistent iterators (or pointers) to elements.</li>
+<li>push_back() and push_front() are fast. Mid-insertion is fast too, if you have an iterator to the position, which isn't too common, but possible.</li>
+</ul>
+<p>So, what about the sentinel node? Every list needs one (end iterators must be decrementable), so you can either allocate it like a normal node (without an element), or you can store it within the list object itself. The latter is tempting, but it has a cost:</p>
+
+<p><b>Container-internal sentinel nodes force moves/swaps to invalidate ranges involving end iterators.</b></p>
+
+<p>I view this as a highly undesirable consequence. The primary reason to use a list is because it offers excellent invalidation guarantees. Container-internal sentinel nodes not only weaken those guarantees, they're weakened beyond what all vectors provide. And in exchange for compromising the major reason to use lists, some performance is gained - yet list is already undesirable for performance. Saving one dynamic memory allocation per list doesn't mean much when every element performs an allocation.</p>
+
+<p>That said, it is certainly inconvenient that moved-from objects are forbidden from being emptier-than-empty, and it is also inconvenient that vector::push_back provides the strong guarantee when it is rarely needed by users. But I am not willing to sacrifice range invalidation guarantees in the pursuit of some extra performance for vectors of lists and other things containing node-based containers.</p>
+
+<p>
+What's really sad is that during vector reallocation, we could truly tolerate emptier-than-empty objects, since they are destined to be immediately destroyed.
+</p>
+
+<h2><a name="SwapAndEnd">Wait, where exactly do we allow implementations
+to decide that a swap may or may not invalidate end iterators?</a></h2>
+
+<p>As Lavavej explains, in order to maintain end iterator validity in
+swap operations, a dynamically allocated sentinel node is necessary
+for node-based containers, and the allocation of that node may fail,
+so some implementations do not have noexcept move constructors especially
+for node-based containers. This is allowed by 
+[container.requirements.general]/11, last bullet:
+<p>
+<blockquote>
+<ul>
+<li>no swap() function invalidates any references, pointers, or iterators referring to the elements of the
+containers being swapped. [ Note: The end() iterator does not refer to any element, so it may be
+invalidated. — end note ]</li>
+</ul>
+</blockquote>
+<p>
+The wording says "may", and some implementations don't invalidate the
+end iterator, and the customers of those implementations apparently rely
+on the invalidation not happening. Furthermore, this leeway for implementors
+apparently predates move semantics, so implementors can provide that
+no-invalidation-guarantee as long as their dynamic sentinel nodes are
+allowed, which leads to container move constructors not being mandated
+to be noexcept.
+</p>
+
+<h2><a name="EmptierThanEmpty">What is an "emptier than empty state?"</a></h2>
+<p>
+To put it briefly, such a state would mean that more operations would
+have undefined behavior, like container begin() and end(). This would
+allow implementations that use dynamically-allocated sentinel nodes to
+not keep such a sentinel node for a container that has been moved from.
+</p>
+
+<h2><a name="Conclusions">Conclusions?</a></h2>
+<h3><a name="VectorPerhapsSuffices">Doesn't making vector move constructor noexcept suffice?</a></h3>
+<p>
+In [c++std-lib-35883], Stephan T. Lavavej writes:
+<blockquote>
+I'm OK with the Standard marking vector/basic_string default/move constructors as noexcept.
+</blockquote>
+</p>
+<p>
+This, unfortunately, still doesn't help with vector elements that have
+node-based containers as members and don't explicitly declare a noexcept
+move constructor, since operations like push_back use move_if_noexcept
+and fall back to copying if necessary. An additional snag is that
+such a move constructor cannot be defaulted, because the language
+rules do not allow it. See <a href="http://open-std.org/JTC1/SC22/WG21/docs/cwg_toc.html#1912">Core Issue 1912</a>. That issue is currently on EWG's
+plate, as part of <a href="http://cplusplus.github.io/EWG/ewg-toc.html#79">EWG's Core Extension umbrella issue, 79</a>.
+</p>
+
+<h3><a name="EmptierThanEmptyPerhapsSuffices">What about allowing emptier-than-empty state?</a></h3>
+
+<p>The author of this paper believes that even with the current cases
+of non-portable performance and non-portable end iterator invalidation,
+allowing emptier-than-empty states would be a drastic measure. It seems
+to the author that various users have relied on container begin()/end()
+being a valid but empty range for so long that changing such an assumption
+would be exceedingly dangerous, even for moved-from containers.</p>
+
+<h3><a name="WhatThen">So how DO we solve the problem?</a></h3>
+<p>
+Here's a moderate suggestion:</p>
+<ol>
+<li>Make vector/string move constructors noexcept. Lavavej has agreed
+that this is feasible, although it means that in some cases failed allocation
+will terminate the program.</li>
+<li>Don't make the move constructors of node-based containers noexcept.
+There are implementation vendors whose customers rely on (and have relied
+on before move semantics) end iterators not being invalidated on swap.</li>
+<li>Do NOT adopt emptier-than-empty states.</li>
+<li>Resolve Core Issue 1912, in Evolution first, then in Core. It's not going
+to help people who rely on implicit definitions, but at least it gives
+a relatively easy alternative for users who can accept termination
+on allocation failure inside a move operation. Howard Hinnant points
+out that there are other existing tools that can help people detect
+throwing moves at compile-time and act accordingly, for example 
+static_assert on std::is_nothrow_move_constructible&lt;list&lt;T>>.</li>
+<li><b>And finally, if we ever get to specify a new standard library
+(a potentially conceptified one), make sure to tackle this sort of
+portability issues!</b></li>
+</ol>
+<p>
+Why so moderate? A couple of reasons, mentioned already earlier:</p>
+<p>
+<ul>
+<li>Emptier-than-empty states are an abomination. They WILL have
+consequences that we might not be able to predict, and they WILL
+break expectations that people have had for a very long time.</li>
+<li>Breaking the expectations of the users of existing libraries,
+even if those expectations are not portable, would be rather drastic.</li>
+</ul>
+</p>
+<p><b>In other words, apply the small fixes that we can, and perform
+larger fixes if/when we don't have issues with backwards-compatibility.<b></p>

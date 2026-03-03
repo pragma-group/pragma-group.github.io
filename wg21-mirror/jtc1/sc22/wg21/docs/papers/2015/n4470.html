@@ -1,0 +1,277 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html><head>
+<meta http-equiv="content-type" content="text/html; charset=windows-1252">
+  <style type="text/css">
+
+.comment { color: #999999; font-style: italic; }
+.pre { color: #000099; }
+.string { color: #009900; }
+.char { color: #009900; }
+.float { color: #996600; }
+.int { color: #999900; }
+.bool { color: #000000; font-weight: bold; }
+.type { color: #FF6633; }
+.flow { color: #FF0000; }
+.keyword { color: #990000; }
+.operator { color: #663300; font-weight: bold; }
+.operator { color: #663300; font-weight: bold; }
+pre.code {
+    border: 2px solid #666;
+    background-color: #F4F4F4;
+    padding-left: 10px;
+    padding-top: 0px;
+}
+code {
+    border: 2px solid #d0d0d0;
+    background-color: LightYellow;
+    padding: 2px;
+    padding-left: 10px;
+    display:table;
+    white-space:pre;
+    margin:2px;
+    margin-bottom:10px;
+}
+dt {
+    font-weight: bold;
+}
+.ins {
+    background-color:#A0FFA0;
+}
+.del {
+    background-color:#FFA0A0;
+    text-decoration:line-through
+}    
+</style>
+
+<title>Variadic lock_guard</title>
+</head>
+
+<body>
+<p>N4470<br>
+Mike Spertus, Symantec<br>
+<a href="mailto:mike_spertus@symantec.com">mike_spertus@symantec.com</a><br/>
+2015-04-10
+</p>
+
+<h1>Variadic <tt>lock_guard</tt></h1> 
+<p>The basic idea of this proposal is that <tt>std::lock_guard</tt> would benefit from
+    being variadic to support multiple locks analogously to how <tt>std::lock</tt> does.</p>
+    <p><tt>lock_guard</tt> is a very useful and widely used way to manage the lifetimes
+        of lock ownership.
+<code>std::mutex mtx;
+void f(){
+  std::lock_guard&lt;mutex&gt; lck(mtx); <span class="comment">// Mutex will be unlocked however scope is exited</span>
+&nbsp;&nbsp;<span class="comment">/* ... */</span>
+}
+        </code></p>
+<p>Unfortunately, if more than one lock needs to be required, life gets unnecessarily complicated</p>
+<code>void swap(MyType const &amp;l, MyType const &amp;r)
+{
+    std::lock(l.mtx, r.mtx);
+    std::lock_guard&lt;std::mutex&gt; llck(l.mtx, std::adopt_lock);
+    std::lock_guard&lt;std::mutex&gt; rlck(r.mtx, std::adopt_lock);
+    <span class="comment">/* ... */</span>
+}</code></p>
+<p>This is a lot more advanced and error-prone than the single lock case. For example,
+you often see the deadlock-inviting<code>void swap(MyType const &amp;l, MyType const &amp;r)
+{
+    std::lock_guard&lt;std::mutex&gt; llck(l.mtx);
+    std::lock_guard&lt;std::mutex&gt; rlck(r.mtx);
+    <span class="comment">/* ... */</span>
+}</code> or the exception-unsafe <code>void swap(MyType const &amp;l, MyType const &amp;r)
+{
+    std::lock(l.mtx, r.mtx);
+    <span class="comment">/* ... */</span>
+    l.mtx.unlock();
+    r.mtx.unlock();
+}</code>
+    </p>
+<p>These are exactly the kinds of complexities that are easily avoided by <tt>std::lock_guard</tt>
+    in the single-lock case. Wouldn't it be great if <tt>std::lock_guard</tt> was variadic
+    so it also worked
+    with multiple locks?<code>void swap(MyType const &amp;l, MyType const &amp;r)
+{
+    std::lock_guard&lt;std::mutex, std::mutex&gt; lck(l.mtx, r.mtx);
+    <span class="comment">/* ... */</span>
+}</code> And that is exactly what we are proposing!</p>
+<p>This can work in the presence of shared locking as well (just like <tt>std::lock</tt> does) as 
+shown in the following example shared by Howard Hinnant<code>#include &lt;mutex&gt;
+#include &lt;shared_mutex&gt;
+
+class X
+{
+    using Mutex = std::shared_timed_mutex;
+    using ReadLock = std::shared_lock&lt;Mutex&gt;;
+
+    mutable Mutex mut_;
+    <span class="comment">// more data</span>
+public:
+    <span class="comment">// ...</span>
+    X&amp; operator=(const X&amp; x)
+    {
+        if (this !=&amp;x)
+        {
+            ReadLock  rl(x.mut_, std::defer_lock);
+            std::lock_guard&lt;Mutex, ReadLock&gt; lck(mut_, rl);
+            // assign data ...
+        }
+        return *this;
+    }
+    <span class="comment">// ...</span>
+};
+</code>which improves clarity while eliminating three lines of code</p>
+<p>We do not propose creating a &ldquo;make function&rdquo; because <tt>std::lock_guard</tt>
+    is not movable (which we
+    suspect is the reason <tt>std::lock_guard</tt> didn't have a make function in the first
+    place), because we believe the two-lock case is most important in practice, because we want to keep
+    this proposal simple, and because something along the lines of
+    <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2013/n3602.html">N3602</a>/N4471
+    may offer a more general solution that obviates the entire issue. For now, we think that the
+    already useful <tt>std::lock_guard</tt> class is strictly better when variadic.</p>
+<h2>Wording</h2>
+Modify &sect;30.4.2.1 [thread.lock.guard] as follows
+    <blockquote><pre style="padding:0;margin:0">namespace std {
+<span class="del">  template &lt;class Mutex&gt;</span>
+<span class="ins">  template &lt;typename ...MutexTypes&gt;</span>
+  class lock_guard {
+  public:
+    typedef Mutex mutex_type;  <span class="comment">// If sizeof...(MutexTypes) == 1</span>
+    
+    <span class="del">explicit lock_guard(mutex_type&amp; m);</span>
+    <span class="del">lock_guard(mutex_type&amp; ...m, adopt_lock_t);</span>
+    <span class="ins">explicit lock_guard(MutexTypes&amp;... m);</span>
+    <span class="ins">lock_guard(MutexTypes&amp;... m, adopt_lock_t);</span>
+    ~lock_guard();
+    
+    lock_guard(lock_guard const&amp;) = delete;
+    lock_guard&amp; operator=(lock_guard const&amp;) = delete;
+  private:
+    <span class="del">mutex_type&amp;</span><span class="ins">tuple&lt;MutexTypes*...&gt;</span> pm; <span class="comment">// exposition only</span>
+  };
+}</pre>
+An object of type <tt>lock_guard</tt> controls the ownership of <span class="del">a</span>
+lockable object<span class="ins">s</span> within a scope. A <tt>lock_guard</tt> object
+maintains ownership of <span class="del">a</span>
+lockable object<span class="ins">s</span> throughout the <tt>lock_guard</tt> object's
+lifetime (3.8). The behavior of a program is undefined if the lockable object<span class="ins">s</span>
+reference by <tt>pm</tt> do<span class="del">es</span> not exist for the entire lifetime of
+the <tt>lock_guard</tt> object. The supplied <tt>Mutex<span class="ins">Types</span></tt> 
+<span class="del">type</span> shall meet the <tt>BasicLockable</tt> requirements (30.2.5.2).
+
+        <pre style="padding:0;margin:0">explicit lock_guard(<span class="del">mutex_type&amp;</span><span class="ins">MutexTypes&amp;...</span> m);</pre>
+<blockquote><i>Requires:</i> If <span class="del"><tt>mutex_type</tt></span><span class="ins">a <tt>MutexTypes</tt></span> type is not a recursive mutex,
+    the calling thread does not own <span class="ins">the corresponding</span> mutex
+        <span class="ins">element of</span> <tt>m</tt>.<br/>
+<i>Effects:</i><tt><span class="del">m.lock()</span></tt><span class="ins">For each
+    element <tt>e</tt> of <tt>m</tt>, <tt>e.lock()</tt></span><br/>
+<i>Postcondition:</i> <tt><span class="del">&amp;</span>pm == <span class="del">&amp;m</span><span class="ins">tie(&amp;m...)</span></tt></blockquote>
+<pre style="padding:0;margin:0">
+
+lock_guard(<span class="del">mutex_type&amp;</span><span class="ins">MutexTypes&amp;...</span> m, adopt_lock_t);</pre>
+<blockquote><i>Requires:</i> The calling thread owns <span class="ins">all</span> the mutex<span class="ins">es in</span> <tt>m</tt>.<br/>
+<i>Postcondition:</i> <tt><span class="del">&amp;</span>pm == <span class="del">&amp;m</span><span class="ins">tie(&amp;m...)</span></tt><br/>
+<i>Throws:</i> Nothing.</blockquote>
+<pre style="padding:0;margin:0">
+
+~lock_guard();</pre>
+<blockquote><i>Effects:</i> <span class="del">pm.unlock()</span>
+<span class="ins">For each 0 &le; <tt>i</tt> &lt; <tt>sizeof...(MutexTypes)</tt>, 
+<tt>get&lt;i&gt;(pm)->unlock()</tt></span></blockquote>
+</blockquote>
+<h2>Appendix: Example implementation</h2>
+<h3>We interrupt this proposal for a message from our sponsor (N4064)</h3>
+    This proposal is a great advertisement for how the seemingly technical <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n4064.html">N4064</a> on improving <tt>pair</tt>
+    and <tt>tuple</tt> can make trivial what would otherwise take some tricky metaprogramming.
+    With N4064, the implementation could be
+    as simple as
+    <code>template&lt;typename ...Ts&gt;
+struct lock_guard {
+ explicit lock_guard(Ts&amp;... ts) : mutexes(ts...) {}
+ lock_guard(Ts&amp;... ts, std::adopt_lock_t) : mutexes(ts..., std::adopt_lock_t()) {}
+ tuple&lt;lock_guard&lt;Ts&gt;...&gt; mutexes;
+};
+    
+template&lt;typename T&gt;
+struct lock_guard&lt;T&gt; { /* As in C++14 */ };</code>
+<h3>We now return to our regularly scheduled proposal</h3>
+    Without the fixes in N4064, the best way to implement seems to be to use the
+<tt>for_each_in_tuple</tt> infrastructure <a href="http://stackoverflow.com/questions/16387354/template-tuple-calling-a-function-on-each-element">posted</a> by Andy Prowl on Stack Overflow
+    to lock and unlock all the mutexes in the <tt>tuple</tt>.
+<code>#include&lt;mutex&gt;
+#include&lt;tuple&gt;
+using std::tuple;
+<span class="comment">// Taken from http://stackoverflow.com/questions/16387354/template-tuple-calling-a-function-on-each-element</span>
+namespace detail
+{
+  template&lt;int... Is&gt;
+  struct seq { };
+
+  template&lt;int N, int... Is&gt;
+  struct gen_seq : gen_seq&lt;N - 1, N - 1, Is...&gt; { };
+
+  template&lt;int... Is&gt;
+  struct gen_seq&lt;0, Is...&gt; : seq&lt;Is...&gt;{};
+
+  template&lt;typename T, typename F, int... Is&gt;
+  void for_each(T&amp;&amp; t, F f, seq&lt;Is...&gt;) {
+    auto l = { (f(std::get&lt;Is&gt;(t)), 0)... };
+  }
+}
+
+template&lt;typename... Ts, typename F&gt;
+void for_each_in_tuple(std::tuple&lt;Ts...&gt; const&amp; t, F f) {
+  detail::for_each(t, f, detail::gen_seq&lt;sizeof...(Ts)&gt;());
+}
+<span class="comment">// End of <tt>for_each_in_tuple</tt> implementation</span>
+
+struct locker {
+  template&lt;typename T&gt; void operator()(T &amp;t) { t.lock(); }
+};
+
+struct unlocker {
+  template&lt;typename T&gt; void operator()(T &amp;t) { t.unlock(); }
+};
+
+template&lt;typename ...Ts&gt;
+struct lock_guard {
+public:
+  explicit lock_guard(Ts&amp;... ts) : mutexes(ts...) {
+    for_each_in_tuple(mutexes, locker());
+  }
+
+  lock_guard(Ts&amp;... _Mtx, std::adopt_lock_t) : mutexes(ts...) {}
+
+  ~lock_guard() {
+    for_each_in_tuple(mutexes, unlocker());
+  }
+
+  lock_guard(const lock_guard&amp;) = delete;
+  lock_guard&amp; operator=(const lock_guard&amp;) = delete;
+
+private:
+  tuple&lt;Ts&amp;...&gt; mutexes;
+};
+
+template&lt;typename T&gt;
+struct lock_guard&lt;T&gt; {
+public:
+  typedef T mutex_type;
+
+  explicit lock_guard(T&amp; _Mtx) : mtx(_Mtx) {
+     mtx.lock();
+  }
+
+  lock_guard(T&amp; _Mtx, std::adopt_lock_t) : mtx(_Mtx) {}
+
+  ~lock_guard() { 
+     mtx.unlock();
+  }
+
+  lock_guard(const lock_guard&amp;) = delete;
+  lock_guard&amp; operator=(const lock_guard&amp;) = delete;
+
+private:
+  T&amp; mtx;
+};
+</code>
+</body></html>

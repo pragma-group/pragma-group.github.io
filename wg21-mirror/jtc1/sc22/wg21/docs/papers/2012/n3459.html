@@ -1,0 +1,821 @@
+<html>
+<head><title>Database Access Comparison</title></head>
+<body>
+<table border=0>
+<tr>
+  <td><b>Doc No:</b></td>
+  <td>N3459 = 12-0149</td>
+</tr>
+<tr>
+  <td><b>Date:</b></td>
+  <td>2012-10-13</td>
+</tr>
+<tr>
+  <td><b>Reply to:</b>&nbsp;</td>
+  <td>Bill Seymour &lt;stdbill<tt>.</tt>h<sup>@</sup>pobox<tt>.</tt>com&gt;</td>
+</tr>
+</table>
+<p><hr size=3>
+<center>
+<h2>Comparison of Two Database Access Methodologies</h2>
+<h3>Bill Seymour<br>2012-10-13</h3>
+</center>
+<hr size=3>
+<h3>Abstract:</h3>
+In response to <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3415.html">N3415,
+<i>A Database Access Library</i></a>, Thomas Neumann of the Technische Universit&auml;t M&uuml;nchen
+has prepared an alternate proposal, <i>N3458, Simple Database Integration in C++11</i>,
+which will appear in the post-Portland mailing (and is on the LWG wiki now as D3458).
+This paper compares the two proposed interfaces.
+
+<p>For each of two examples, I show some small bits of code currently running in production
+in a United States Postal Service system (in Oracle&rsquo;s proprietary language, PL/SQL);
+and then I attempt to rewrite them as complete C++ programs using the interface
+proposed in N3415 and the one that Neumann suggests (expanded a bit with some
+additional features that I think are needed).
+
+<p>(I also did rewrites in Java just as reference points, but I decided that
+they don&rsquo;t really matter to WG21.  If anyone wants to see the Java versions,
+they&rsquo;re still in the paper inside HTML comments.)
+
+<p><hr size=3>
+<h3>Executive Summary:</h3>
+After actually trying to use the two interfaces, I think I like Neumann&rsquo;s
+better; although there are probably a few features that
+need to be added to make it usable in a business environment.
+
+<p>Although Neumann&rsquo;s paper is technically too late for Portland,
+I would very much like to see it presented to LWG in Portland,
+if there&rsquo;s time, so that we can both, at least, get encouragement
+to continue.
+
+<p><hr size=3>
+<h3>Disclaimers:</h3>
+&ldquo;Beware of bugs in the [C++ code below].  I have only proved it correct,
+not tried it.&rdquo; &mdash; Donald E. Knuth
+
+<p>&ldquo;If this were my employer&rsquo;s opinion, I wouldn&rsquo;t be allowed
+to post it.&rdquo; &mdash; Norman Diamond
+
+<p><hr size=3>
+<h3>Example 1:</h3>
+The Postal Service occasionally changes its &ldquo;service standards&rdquo;,
+the number of days it should take mail of various classes to get from
+point A to point B.  When this happens, it&rsquo;s important for the new
+service standards to be reflected in all existing dispatches.
+
+<p><hr>
+<pre>
+DECLARE
+    dummy NUMBER(38);  -- not used herein, but it's an IN OUT param
+                       -- in the proc that writes the audit trail
+BEGIN
+    FOR rec IN (SELECT disp.dsptch_id,
+                       disp.svc_std AS current_std,
+                       vdat.mail_srv_std AS desired_std
+                FROM apl_dispatch disp,
+                     ref_atomic_mail_class atmc,
+                     ref_aggregate_mail_class agmc,
+                     apl_tops_3d_volume_data vdat,
+                     ref_facility ofac,
+                     ref_facility dfac
+                WHERE atmc.atomic_mail_class_id = disp.atomic_mail_class_id
+                  AND agmc.aggregate_mail_class_id = atmc.aggregate_mail_class_id
+                  AND vdat.atomic_mail_class_id = agmc.dsptch_dflt_mail_cls_id
+                  AND vdat.mail_srv_std IS NOT NULL
+                  AND ofac.facility_id = disp.orig_facility_id
+                  AND vdat.orig_zip3 = SUBSTR(ofac.zip_4, 1, 3)
+                  AND dfac.facility_id = disp.dest_facility_id
+                  AND vdat.dest_zip3 = SUBSTR(dfac.zip_4, 1, 3))
+    LOOP
+        IF rec.current_std &lt;&gt; rec.desired_std
+        THEN
+            UPDATE apl_dispatch d
+            SET d.svc_std = rec.desired_std,
+                d.last_user_id = 'FixSSD',
+                d.last_updtd_dt = SYSTIMESTAMP
+            WHERE d.dsptch_id = rec.dsptch_id;
+
+            dummy := NULL;
+            pkg_legrep_common.sp_write_disp_header_audit
+                (rec.dsptch_id, 'FixSSD', 'FixSSD', 'C', dummy);
+
+            COMMIT; -- per dispatch actually changed
+        END IF;
+    END LOOP;
+END;
+</pre>
+<!--
+<hr>
+<pre>
+import java.lang.System;
+import java.lang.String;
+
+import java.sql.DriverManager;
+import java.sql.Connection;
+import java.sql.Statement;
+import java.sql.PreparedStatement;
+import java.sql.CallableStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Types;
+
+class FixSSD
+{
+    private static Connection conn;
+
+    private static PreparedStatement upd;
+    private static CallableStatement audit;
+
+    private static void connect() throws SQLException
+    {
+        Class.forName("oracle.jdbc.OracleDriver");
+        conn = DriverManager.getConnection(
+            "jdbc:oracle:thin:@//eagnmnmed4c2.usps.gov:1521/dtops.usps.gov",
+            "user_id",
+            "password");
+        conn.setAutoCommit(false);
+    }
+
+    private static void prepareStatements() throws SQLException
+    {
+        upd = conn.prepareStatement(
+            "UPDATE apl_dispatch " +
+            "SET svc_std = ?, " +
+                "last_user_id = 'FixSSD', " +
+                "last_updtd_dt = SYSTIMESTAMP " +
+            "WHERE dsptch_id = ?");
+
+        audit = conn.prepareCall(
+            "{call pkg_legrep_common.sp_write_disp_header_audit" +
+                "(?, 'FixSSD', 'FixSSD', 'C', ?)}");
+        audit.registerOutParameter(2, Types.INTEGER);
+    }
+
+    private static void perform() throws SQLException
+    {
+        Statement stmt = conn.createStatement();
+        ResultSet rs = stmt.executeQuery(
+            "SELECT disp.dsptch_id, " +
+                   "disp.svc_std AS current_std, " +
+                   "vdat.mail_srv_std AS desired_std " +
+            "FROM apl_dispatch disp, " +
+                 "ref_atomic_mail_class atmc, " +
+                 "ref_aggregate_mail_class agmc, " +
+                 "apl_tops_3d_volume_data vdat, " +
+                 "ref_facility ofac, " +
+                 "ref_facility dfac " +
+            "WHERE atmc.atomic_mail_class_id = disp.atomic_mail_class_id " +
+              "AND agmc.aggregate_mail_class_id = " +
+                  "atmc.aggregate_mail_class_id " +
+              "AND vdat.atomic_mail_class_id = agmc.dsptch_dflt_mail_cls_id " +
+              "AND vdat.mail_srv_std IS NOT NULL " +
+              "AND ofac.facility_id = disp.orig_facility_id " +
+              "AND vdat.orig_zip3 = SUBSTR(ofac.zip_4, 1, 3) " +
+              "AND dfac.facility_id = disp.dest_facility_id " +
+              "AND vdat.dest_zip3 = SUBSTR(dfac.zip_4, 1, 3)");
+
+        while (rs.next())
+        {
+            String std = rs.getString("desired_std");
+            if (!std.equals(rs.getString("current_std")))
+            {
+                String dsp = rs.getString("dsptch_id");
+
+                upd.setString(1, std);
+                upd.setString(2, dsp);
+                upd.execute();
+
+                audit.setString(1, dsp);
+                audit.setNull(2, Types.INTEGER);
+                audit.execute();
+
+                conn.commit();
+            }
+        }
+    }
+
+    public static void main(String[] args) throws SQLException
+    {
+        connect();
+        prepareStatements();
+        perform();
+    }
+}
+</pre>
+-->
+<hr>
+<p>In this first example, I don&rsquo;t worry about exceptions
+escaping from <nobr><tt>main()</tt></nobr>.
+
+<pre>
+#include "dbacc.hpp"
+using dbacc::connection;
+using dbacc::statement;
+using dbacc::call_statement;
+using dbacc::query;
+using dbacc::cursor;
+using dbacc::row;
+using dbacc::column;
+
+#include &lt;string&gt;
+#include &lt;cstdint&gt;
+
+int main()
+{
+    //
+    // Regardless of which interface is chosen, we'll need a way
+    // for a trusted program to get a connection from some kind of
+    // connection pool without passing passwords around in the clear.
+    // This is a security issue.  I don't have that yet either.
+    //
+    connection conn("Oracle Call Interface",
+                    "dtops", // looked up in tnsnames.ora
+                    "user_id",
+                    "password");
+    conn.auto_commit(false);
+
+    statement upd(conn, "UPDATE apl_dispatch "
+                        "SET svc_std = ?, "
+                            "last_user_id = 'FixSSD', "
+                            "last_updtd_dt = SYSTIMESTAMP "
+                        "WHERE dsptch_id = ?");
+
+    call_statement audit(conn,
+                         "{call pkg_legrep_common.sp_write_disp_header_audit"
+                         "(?, 'FixSSD', 'FixSSD', 'C', ?)}");
+
+    query&lt;cursor&gt; qry(conn,
+                      "SELECT disp.dsptch_id, "
+                             "disp.svc_std AS current_std, "
+                             "vdat.mail_srv_std AS desired_std "
+                      "FROM apl_dispatch disp, "
+                           "ref_atomic_mail_class atmc, "
+                           "ref_aggregate_mail_class agmc, "
+                           "apl_tops_3d_volume_data vdat, "
+                           "ref_facility ofac, "
+                           "ref_facility dfac "
+                      "WHERE atmc.atomic_mail_class_id = "
+                            "disp.atomic_mail_class_id "
+                        "AND agmc.aggregate_mail_class_id = "
+                            "atmc.aggregate_mail_class_id "
+                        "AND vdat.atomic_mail_class_id = "
+                            "agmc.dsptch_dflt_mail_cls_id "
+                        "AND vdat.mail_srv_std IS NOT NULL "
+                        "AND ofac.facility_id = disp.orig_facility_id "
+                        "AND vdat.orig_zip3 = SUBSTR(ofac.zip_4, 1, 3) "
+                        "AND dfac.facility_id = disp.dest_facility_id "
+                        "AND vdat.dest_zip3 = SUBSTR(dfac.zip_4, 1, 3)");
+
+    std::string disp_id;
+    int desired_std;
+    std::uintmax_t dummy = 0;
+    statement::indicator indic = statement::null_indicator_value;
+
+    upd.prepare();
+    upd.bind(1, &amp;desired_std);
+    upd.bind(2, &amp;disp_id);
+
+    audit.prepare();
+    audit.bind(1, &amp;disp_id);
+    audit.bind(2, &amp;dummy, &amp;indic);
+
+    qry.execute();
+
+    for (cursor c : qry.results())
+    {
+        const row&amp; r = *c;
+        const column& des = r["desired_std"];
+        if (r["current_std"] != des)
+        {
+            r["dsptch_id"].get(disp_id);
+            des.get(desired_std);
+            indic = statement::null_indicator_value;
+
+            upd.execute();
+            audit.execute();
+            conn.commit();
+        }
+    }
+}
+</pre>
+<hr>
+<pre>
+#include &lt;string&gt;
+#include &lt;cstdint&gt;
+using std::string;
+
+#include "tdb.hpp"
+using namespace tdb;
+
+//
+// I like the nullable template; but that can easily be added to N3415.
+//
+typedef nullable&lt;std::uintmax_t&gt; audit_id;
+
+int main()
+{
+    connection conn("credentials", connection::access_mode::read_write);
+
+    //
+    // Note that Neumann's connection is, among other things,
+    // a statement factory (like a java.sql.Connection).
+    //
+    prepared_statement&lt;int, string&gt; upd = conn.prepare_statement(
+        "UPDATE apl_dispatch d "
+        "SET d.svc_std = ?, "
+            "d.last_user_id = 'FixSSD', "
+            "d.last_updtd_dt = SYSTIMESTAMP "
+        "WHERE d.dsptch_id = ?");
+
+    //
+    // We really need a way to call stored procedures
+    // when using databases that have them.
+    //
+    prepared_call&lt;string, audit_id&gt; audit = conn.prepare_call(
+        "{call pkg_legrep_common.sp_write_disp_header_audit"
+            "(?, 'FixSSD', 'FixSSD', 'C', ?)}");
+
+    prepared_query&lt;&gt; qry = conn.prepare_query(
+        "SELECT disp.dsptch_id, "
+               "disp.svc_std AS current_std, "
+               "vdat.mail_srv_std AS desired_std "
+        "FROM apl_dispatch disp, "
+             "ref_atomic_mail_class atmc, "
+             "ref_aggregate_mail_class agmc, "
+             "apl_tops_3d_volume_data vdat, "
+             "ref_facility ofac, "
+             "ref_facility dfac "
+        "WHERE atmc.atomic_mail_class_id = disp.atomic_mail_class_id "
+          "AND agmc.aggregate_mail_class_id = atmc.aggregate_mail_class_id "
+          "AND vdat.atomic_mail_class_id = agmc.dsptch_dflt_mail_cls_id "
+          "AND vdat.mail_srv_std IS NOT NULL "
+          "AND ofac.facility_id = disp.orig_facility_id "
+          "AND vdat.orig_zip3 = SUBSTR(ofac.zip_4, 1, 3) "
+          "AND dfac.facility_id = disp.dest_facility_id "
+          "AND vdat.dest_zip3 = SUBSTR(dfac.zip_4, 1, 3)");
+
+    string disp_id;
+    int current_std, desired_std;
+    audit_id dummy;
+
+    for (auto row : qry().into(disp_id, current_std, desired_std))
+    {
+        if (current_std != desired_std)
+        {
+            transaction trans(conn);
+
+            //
+            // It would be nice to have a way to "bind"/"describe"
+            // program variables so that they don't always have to be
+            // passed to operator() or into().  Think of INSERTing
+            // into a table with many tens of columns, or a query
+            // with many tens of columns in the SELECT list.
+            //
+            upd(desired_std, disp_id);
+
+            dummy.set(nullptr);
+            audit(disp_id, dummy).into(dummy);
+
+            trans.commit();
+        }
+    }
+}
+</pre>
+<hr size=3>
+<h3>Example 2:</h3>
+Volume projections sent to air carriers can be generated automatically
+by the system or manually by a user.  In the latter case, they need
+to be moved from one table to another, but with the effective and
+discontinue dates changed to match the relevant &ldquo;planning week&rdquo;.
+(Don&rsquo;t ask <nobr>why.&nbsp;<tt>8-)</tt>)</nobr>
+
+<p><hr>
+<pre>
+CREATE OR REPLACE PROCEDURE
+    sp_move_user_projections(job_in IN job_job.job_id%TYPE)
+IS
+    flag       CHAR(1);
+    week_beg   DATE;
+    week_end   DATE;
+    row_cnt    PLS_INTEGER;
+
+BEGIN
+    SELECT outbound_source INTO flag FROM dmd_vol_config;
+    IF flag = 'U' -- else nothing to do
+    THEN
+        SELECT h.start_horizon, h.end_horizon
+        INTO week_beg, week_end
+        FROM ref_plan_horizon h, job_job j, job_calendar c
+        WHERE j.job_id = job_in
+          AND c.calendar_id = j.calendar_id
+          AND h.horizon_id = c.horizon_id;
+
+        pkg_tops_util.sp_logger('INFO', 'sp_move_user_projections',
+                                'Moving user volume projections for week of '
+                                    || TO_CHAR(week_beg, 'YYYY-MM-DD'),
+                                NULL, 'sp_move_user_projections', job_in);
+
+        DELETE FROM dmd_vol_upload_outbound WHERE 1 = 1;  -- rollbackable
+
+        INSERT INTO dmd_vol_upload_outbound
+            (origin, destination, day_of_week,
+             effective_date, discontinue_date, volume)
+            (SELECT origin, destination, day_of_week, 
+                    week_beg, week_end, volume
+             FROM dmd_vol_upload
+             WHERE effective_date &lt;= week_beg
+               AND discontinue_date &gt;= week_end);
+        row_cnt := SQL%ROWCOUNT;
+
+        IF row_cnt &gt; 0
+        THEN
+            COMMIT;
+            pkg_tops_util.sp_logger('INFO', 'sp_move_user_projections',
+                                    'Moved ' || row_cnt || ' rows.',
+                                    NULL, 'sp_move_user_projections', job_in);
+        ELSE
+            ROLLBACK;
+            pkg_tops_util.sp_logger('SEVERE', 'sp_move_user_projections',
+                                    'No data found.',
+                                    NULL, 'sp_move_user_projections', job_in);
+            RAISE_APPLICATION_ERROR(pkg_tops_util.TOPS_EXCEPTION_CODE,
+                                    'No data found in DMD_VOL_UPLOAD');
+        END IF;
+    END IF;
+
+END sp_move_user_projections;
+</pre>
+<!--
+<hr>
+<pre>
+import java.lang.System;
+import java.lang.String;
+import java.lang.StringBuffer;
+import java.lang.Throwable;
+
+import java.text.SimpleDateFormat;
+import java.text.FieldPosition;
+
+import java.sql.DriverManager;
+import java.sql.Connection;
+import java.sql.Statement;
+import java.sql.PreparedStatement;
+import java.sql.CallableStatement;
+import java.sql.ResultSet;
+import java.sql.Date;
+import java.sql.SQLException;
+
+class MoveUserProjections
+{
+    private static final int SUCCESS = 0;
+    private static final int FAILURE = 1;
+
+    public static void main(String[] args)
+    {
+        int completion_code = FAILURE;
+
+        try
+        {
+            Class.forName("oracle.jdbc.OracleDriver");
+            Connection c = DriverManager.getConnection(
+                "jdbc:oracle:thin:@//eagnmnmed4c2.usps.gov:1521/dtops.usps.gov",
+                "user_id",
+                "password");
+            c.setAutoCommit(false);
+
+            Statement s = c.createStatement();
+
+            ResultSet r = s.executeQuery(
+                "SELECT outbound_source FROM dmd_vol_config");
+            r.next(); // always exatcly one row
+            if (r.getString("outbound_source").equals("U"))
+            {
+                String job = args[0];
+
+                java.sql.Date week_beg, week_end;
+
+                r = s.executeQuery(
+                    "SELECT h.start_horizon, h.end_horizon " +
+                    "FROM ref_plan_horizon h, job_job j, job_calendar c " +
+                    "WHERE j.job_id = " + job +
+                     " AND c.calendar_id = j.calendar_id " +
+                      "AND h.horizon_id = c.horizon_id");
+                r.next();
+                week_beg = r.getDate("start_horizon");
+                week_end = r.getDate("end_horizon");
+
+                CallableStatement log = c.prepareCall(
+                    "{call pkg_tops_util.sp_logger(?, " +
+                               "'MoveUserProjections', ?, NULL, " +
+                               "'MoveUserProjections', " + job + ")}");
+
+                StringBuffer msg = new StringBuffer(
+                    "Moving user volume projections for week of ");
+
+                SimpleDateFormat fmt = new SimpleDateFormat("yyyy-MM-dd");
+                fmt.format(week_beg, msg, new FieldPosition());
+
+                log.setString(1, "INFO");
+                log.setString(2, msg.toString());
+                log.execute();
+
+                s.executeUpdate(
+                    "DELETE FROM dmd_vol_upload_outbound WHERE 1 = 1");
+
+                PreparedStatement ins = s.prepareStatement(
+                    "INSERT INTO dmd_vol_upload_outbound " +
+                        "(origin, destination, day_of_week, " +
+                         "effective_date, discontinue_date, volume) " +
+                        "(SELECT origin, destination, day_of_week, " +
+                                "?, ?, volume " +
+                         "FROM dmd_vol_upload " +
+                         "WHERE effective_date &lt;= ? " +
+                           "AND discontinue_date &gt;= ?");
+
+                ins.setDate(1, week_beg);
+                ins.setDate(2, week_end);
+                ins.setDate(3, week_beg);
+                ins.setDate(4, week_end);
+
+                int rows = ins.executeUpdate();
+                if (rows > 0)
+                {
+                    c.commit();
+                    log.setString(1, "INFO");
+                    log.setString(2, "Moved " + rows + " rows.");
+                    log.execute();
+                }
+                else
+                {
+                    c.rollback();
+                    log.setString(1, "SEVERE");
+                    log.setString(2, "No data found.");
+                    log.execute();
+                    throw new Throwable("No data found in DMD_VOL_UPLOAD");
+                }
+            }
+            completion_code = SUCCESS;
+        }
+        catch (SQLException e)
+        {
+            StringBuffer msg("SQL error ");
+            msg.append(e.getErrorCode());
+            msg.append(", SQLSTATE \"");
+            msg.append(e.getSQLState());
+            msg.append("\", \"");
+            msg.append(e.getMessage());
+            msg.append('"');
+            System.err.println(msg.toString());
+        }
+        catch (Throwable t)
+        {
+            System.err.println(t.toString());
+        }
+
+        try { System.exit(completion_code); } catch (Throwable dummy) { }
+    }
+}
+</pre>
+-->
+<hr>
+<p>In this example, I pay more attention to exceptions, although I don&rsquo;t
+bother to check the command-line argument for validity.
+<pre>
+#include "dbase.hpp"
+using dbacc::connection;
+using dbacc::query;
+using dbacc::table;
+using dbacc::row;
+using dbacc::cursor;
+using dbacc::sql_error;
+
+<a name="datetype">//</a>
+// Any reasonable database access library will need to support
+// all SQL types including datetime types.  Assume that we have
+// a date type with a tm() member function that returns a
+// const struct tm&amp;.
+//
+using dbacc::date;
+
+#include &lt;exception&gt;
+#include &lt;iostream&gt;
+#include &lt;sstream&gt;
+#include &lt;string&gt;
+
+#include &lt;cstdlib&gt;  // strtoull, EXIT_SUCCESS, EXIT_FAILURE
+#include &lt;ctime&gt;    // tm, strftime
+
+using namespace std;
+
+int main(int, char** argv)
+{
+    int completion_code = EXIT_FAILURE;
+
+    try
+    {
+        connection conn("Oracle Call Interface", "dtops", "user", "pswd");
+        conn.auto_commit(false);
+
+        query&lt;cursor&gt; qry(conn, "SELECT outbound_source FROM dmd_vol_config");
+        qry.execute();
+        table&lt;cursor&gt; result = qry.results();
+        const row&amp; r = *result.begin();
+        if (r["outbound_source"].get&lt;string&gt;() == "U")
+        {
+            unsigned long long job = strtoull(argv[1], NULL, 0);
+
+            <a href="#datetype">date</a> week_beg, week_end;
+
+            qry.prepare("SELECT h.start_horizon, h.end_horizon "
+                        "FROM ref_plan_horizon h, job_job j, job_calendar c "
+                        "WHERE j.job_id = ? "
+                          "AND c.calendar_id = j.calendar_id "
+                          "AND h.horizon_id = c.horizon_id");
+            qry.set(1, job);
+            qry.execute();
+            result = qry.results();
+            r = *result.begin();
+            r["start_horizon"].get(week_beg);
+            r["end_horizon"].get(week_end);
+
+            statement log(conn, "{call pkg_tops_util.sp_logger(?, "
+                                "'move_user_projections', ?, NULL, "
+                                "'move_user_projections', ?)}");
+            log.prepare();
+
+            string severity("INFO");
+            log.bind(1, &amp;severity);
+            log.bind(3, &amp;job);
+
+            static char start_date[] = "YYYY-MM-DD";
+            strftime(start_date, sizeof start_date, "%Y-%m-%d", &amp;week_beg.<a href="#datetype">tm()</a>);
+
+            string msg("Moving user volume projections for week of ");
+            msg.append(start_date);
+            log.set(2, msg);  // 1 &amp; 3 were bound to program variables
+            log.execute();
+
+            dml_statement dml(conn);
+            dml.execute("DELETE FROM dmd_vol_upload_outbound WHERE 1 = 1");
+
+            dml.prepare("INSERT INTO dmd_vol_upload_outbound "
+                        "(origin, destination, day_of_week, "
+                         "effective_date, discontinue_date, volume) "
+                        "(SELECT origin, destination, day_of_week, "
+                                "?, ?, volume "
+                         "FROM dmd_vol_upload "
+                         "WHERE effective_date &lt;= ? "
+                           "AND discontinue_date &gt;= ?");
+            dml.set(1, week_beg);
+            dml.set(2, week_end);
+            dml.set(3, week_beg);
+            dml.set(4, week_end);
+            dml.execute();
+
+            size_t rows = dml.results();
+            if (rows &gt; 0)
+            {
+                conn.commit();
+
+                ostringstream os;
+                os &lt;&lt; "Moved " &lt;&lt; rows &lt;&lt; " rows.";
+                log.set(2, os.string());
+                log.execute();
+            }
+            else
+            {
+                conn.rollback();
+                severity.assign("SEVERE");  // severity is a bound variable
+                log.set(2, "No data found.");
+                log.execute();
+                throw exception("No data found in DMD_VOL_UPLOAD");
+            }
+        }
+
+        completion_code = EXIT_SUCCESS;
+    }
+    catch (const sql_error&amp; e)
+    {
+        cerr &lt;&lt; "SQL error " &lt;&lt; e.sqlcode() &lt;&lt; ", SQLSTATE \""
+             &lt;&lt; e.sqlstate() &lt;&lt; "\", \"" &lt;&lt; e.errmsg() &lt;&lt; "\"\n";
+    }
+    catch (const exception&amp; e)
+    {
+        cerr &lt;&lt; e.what() &lt;&lt; '\n';
+    }
+    catch (...)
+    {
+        cerr &lt;&lt; "Unrecognized exception thrown.\n";
+    }
+
+    return completion_code;
+}
+</pre>
+<hr>
+<pre>
+#include "tdb.hpp"
+using namespace tdb;
+
+#include &lt;exception&gt;
+#include &lt;iostream&gt;
+#include &lt;sstream&gt;
+#include &lt;string&gt;
+
+#include &lt;cstdlib&gt;
+#include &lt;ctime&gt;
+
+using namespace std;
+
+typedef unsigned long long job_id;
+
+int main(int, char** argv)
+{
+    int completion_code = EXIT_FAILURE;
+
+    try
+    {
+        connection conn("credentials", connection::access_mode::read_write);
+
+        string flag;
+        prepared_query&lt;&gt; source = conn.prepare_query(
+            "SELECT outbound_source FROM dmd_vol_config");
+        source().into(flag);
+        if (flag == "U")
+        {
+            transaction trans(conn);
+
+            job_id job = strtoull(argv[1], NULL, 0);
+
+            prepared_query&lt;job_id&gt; qry = conn.prepare_query(
+                "SELECT h.start_horizon, h.end_horizon "
+                "FROM ref_plan_horizon h, job_job j, job_calendar c "
+                "WHERE j.job_id = ? "
+                  "AND c.calendar_id = j.calendar_id "
+                  "AND h.horizon_id = c.horizon_id");
+
+            <a href="#datetype">date</a> week_beg, week_end;
+            qry(job).into(week_beg, week_end);
+
+            static char start_date[] = "YYYY-MM-DD";
+            strftime(start_date, sizeof start_date, "%Y-%m-%d", &amp;week_beg.<a href="#datetype">tm()</a>);
+
+            string msg("Moving user volume projections for week of ");
+            msg.append(start_date);
+
+            prepared_call&lt;string, string, job_id&gt; log = conn.prepare_call(
+                "{call pkg_tops_util.sp_logger(?, "
+                    "'move_user_projections', ?, NULL, "
+                    "'move_user_projections', ?)}");
+            log("INFO", msg, job);
+
+            prepared_statement&lt;date, date, date, date&gt; dml =
+                conn.prepare_statement(
+                    "INSERT INTO dmd_vol_upload_outbound "
+                    "(origin, destination, day_of_week, "
+                     "effective_date, discontinue_date, volume) "
+                    "(SELECT origin, destination, day_of_week, ?, ?, volume "
+                     "FROM dmd_vol_upload "
+                     "WHERE effective_date &lt;= ? "
+                       "AND discontinue_date &gt;= ?)");
+
+            size_t rows = dml(week_beg, week_end, week_beg, week_end);
+            if (rows &gt; 0)
+            {
+                trans.commit();
+
+                ostringstream os;
+                os &lt;&lt; "Moved " &lt;&lt; rows &lt;&lt; " rows.";
+                log("INFO", os.string(), job);
+            }
+            else
+            {
+                trans.rollback();  // or just let the dtor do it
+                log("SEVERE", "No data found.", job);
+                throw exception("No data found in DMD_VOL_UPLOAD");
+            }
+        }
+
+        completion_code = EXIT_SUCCESS;
+    }
+    //
+    // How about an exception that stores a vendor-specific error code
+    // (SQLCODE) and a SQLSTATE value for databases that support it?
+    //
+    catch (const exception&amp; e)
+    {
+        cerr &lt;&lt; e.what() &lt;&lt; '\n';
+    }
+    catch (...)
+    {
+        cerr &lt; "Unrecognized exception thrown.\n";
+    }
+
+    return completion_code;
+}
+</pre>
+<hr size=3>
+Reply to Bill Seymour &lt;<tt>stdbill.h</tt><sup>@</sup><tt>pobox.com</tt>&gt;
+</body>
+</html>
+ 

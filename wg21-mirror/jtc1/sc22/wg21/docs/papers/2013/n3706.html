@@ -1,0 +1,1178 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN"
+ "http://www.w3.org/TR/html4/strict.dtd">
+<html><head>
+<meta http-equiv="Content-Type" content="text/html; charset=windows-1252">
+
+<style type="text/css">
+
+body {
+  color: #000000;
+  background-color: #FFFFFF;
+}
+
+del {
+  text-decoration: line-through;
+  color: #8B0040;
+}
+ins {
+  text-decoration: underline;
+  color: #005100;
+}
+
+p.example {
+  margin: 2em;
+}
+pre.example {
+  margin: 2em;
+}
+div.example {
+  margin: 2em;
+}
+
+code.extract {
+  background-color: #F5F6A2;
+}
+pre.extract {
+  margin: 2em;
+  background-color: #F5F6A2;
+  border: 1px solid #E1E28E;
+}
+
+p.function {
+}
+
+p.attribute {
+  text-indent: 3em;
+}
+
+blockquote.std {
+  color: #000000;
+  background-color: #F1F1F1;
+  border: 1px solid #D1D1D1;
+  padding: 0.5em;
+}
+
+blockquote.stddel {
+  text-decoration: line-through;
+  color: #000000;
+  background-color: #FFEBFF;
+  border: 1px solid #ECD7EC;
+  padding: 0.5em;
+}
+
+blockquote.stdins {
+  text-decoration: underline;
+  color: #000000;
+  background-color: #C8FFC8;
+  border: 1px solid #B3EBB3;
+  padding: 0.5em;
+}
+
+table {
+  border: 1px solid black;
+  border-spacing: 0px;
+  margin-left: auto;
+  margin-right: auto;
+}
+th {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.2em;
+  border: none;
+}
+td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.2em;
+  border: none;
+}
+
+</style>
+
+<title>C++ Distributed Counters</title>
+</head>
+<body>
+<h1>C++ Distributed Counters</h1>
+
+<p>
+ISO/IEC JTC1 SC22 WG21 N3706 - 2013-09-01
+</p>
+
+<p>
+Lawrence Crowl, Lawrence@Crowl.org
+</p>
+
+<p>
+<a href="#Introduction">Introduction</a><br>
+<a href="#Solution">Solution</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Methods">General Methods</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Simplex">Simplex Counters</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Buffer">Counter Buffers</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Strong">Duplex Counters</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Weak">Weak Duplex Counters</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Buffering">Buffering Brokers</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Arrays">Counter Arrays</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#atomicity">Atomicity</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Guidelines">Guidelines For Use</a><br>
+<a href="#Issues">Open Issues</a><br>
+<a href="#Implementation">Implementation</a><br>
+<a href="#Synopsis">Synopsis</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#counter::atomicity"><code>counter::atomicity</code></a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#counter::bumper"><code>counter::bumper</code></a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#counter::simplex"><code>counter::simplex</code></a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#counter::buffer"><code>counter::buffer</code></a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#counter::strong_duplex"><code>counter::strong_duplex</code></a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#counter::strong_broker"><code>counter::strong_broker</code></a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#counter::weak_duplex"><code>counter::weak_duplex</code></a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#counter::weak_broker"><code>counter::weak_broker</code></a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#counter::bumper_array"><code>counter::bumper_array</code></a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#counter::simplex_array"><code>counter::simplex_array</code></a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#counter::buffer_array"><code>counter::buffer_array</code></a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#counter::strong_duplex_array"><code>counter::strong_duplex_array</code></a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#counter::strong_broker_array"><code>counter::strong_broker_array</code></a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#counter::weak_duplex_array"><code>counter::weak_duplex_array</code></a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#counter::weak_broker_array"><code>counter::weak_broker_array</code></a><br>
+<a href="#revision_history">Revision History</a><br>
+<a href="#references">References</a><br>
+</p>
+
+
+<h2><a name="Introduction">Introduction</a></h2>
+
+<p>
+Long-running multithreaded server programs
+may need to maintain many counters to aid in program diagnosis.
+As these counters are much more commonly incremented than read,
+we desire an implementation of counters that 
+minimizes the cost of incrementing the counter,
+accepting increased costs to obtain the count.
+</p>
+
+<p>
+Cilk adder-reducers are somewhat similar,
+except that the reduction is control-dependent
+and hence not suitable for external inspection of the count.
+</p>
+
+<p>
+This proposal restricts itself to precise counters.
+Statistical counters,
+where the read count may be slightly different
+from the count operations,
+can produce better performance
+<a href="Dice-Lev-Moir-2013">[Dice-Lev-Moir-2013]</a>.
+</p>
+
+
+<h2><a name="Solution">Solution</a></h2>
+
+<p>
+We propose a set of coordinated counter types
+that collectively provide for distributed counting.
+The essential component of the design is a trade-off
+between
+the cost of incrementing the counter,
+the cost of loading (reading) the counter value,
+and the "lag" between an increment and its appearance in a "read" value.
+That is, the read of a counter value may not reflect the most recent increments.
+However, no count will be lost.
+</p>
+
+<p>
+These counters are parameterized by the base integer type
+that maintains the count.
+Avoid situations that overflow the integer,
+as that may have undefined behavior.
+This constraint implies that counters must be sized to their use.
+(For dynamic mitigation, see the <code>exchange</code> operation below.)
+</p>
+
+
+<h3><a name="Methods">General Methods</a></h3>
+
+<p>
+The general counter methods are as follows.
+</p>
+
+<dl>
+<dt><var>constructor</var><code>( <var>integer</var> )</code></dt>
+<dd><p>
+The parameter is the initial counter value.
+</p></dd>
+
+<dt><var>constructor</var><code>()</code></dt>
+<dd><p>
+Equivalent to an initial value of zero.
+</p></dd>
+
+<dt><code>void operator +=( <var>integer</var> )</code></dt>
+<dt><code>void operator -=( <var>integer</var> )</code></dt>
+<dd><p>
+Add/subtract a value to/from the counter.
+There is no default value.
+Note that these operations specifically do not return the count value,
+which would defeat the purpose of optimizing for increments over loads.
+</p></dd>
+
+<dt><code>void operator ++()    // prefix</code></dt>
+<dt><code>void operator ++(int) // postfix</code></dt>
+<dt><code>void operator --()    // prefix</code></dt>
+<dt><code>void operator --(int) // postfix</code></dt>
+<dd><p>
+Increment or decrement the counter.
+</p></dd>
+
+<dt><code><var>integer</var> load()</code></dt>
+<dd><p>
+Returns the value of the counter.
+</p></dd>
+
+<dt><code><var>integer</var> exchange( <var>integer</var> )</code></dt>
+<dd><p>
+Replaces the existing count by the count in the parameter
+and returns the previous count,
+which enables safe concurrent count extraction.
+This operation has particular utility in long-running programs
+in occasionally draining the counter
+to prevent integer overflow.
+</p></dd>
+</dl>
+
+<p>
+There are no copy or assignment operations.
+</p>
+
+
+<h3><a name="Simplex">Simplex Counters</a></h3>
+
+<p>
+The simplex counters provide low-latency counting.
+They implement all the general operations.
+</p>
+
+<pre class="example">
+counter::simplex&lt;int&gt; red_count;
+
+void count_red( Bag bag ) {
+    for ( auto i: bag )
+        if ( i.is_red() )
+            ++red_count;
+}
+</pre>
+
+<p>
+Note that this code may have significant cost
+because of the repeated global atomic increments.
+Using a temporary int to maintain the count within the loop
+runs the risk of loosing some counts in the event of an exception.
+</p>
+
+
+<h3><a name="Buffer">Counter Buffers</a></h3>
+
+<p>
+The cost of incrementing the counter is reduced
+by using a buffer as a proxy for the counter.
+The counter is a reference parameter to the buffer.
+This buffer is typically accessed by a single thread,
+and so its cost can be substantially lower.
+</p>
+
+<pre class="example">
+counter::simplex&lt;int&gt; red_count;
+
+void count_red( Bag bag ) {
+    counter::buffer&lt;int&gt; local_red( red_count );
+    for ( auto i: bag )
+        if ( i.is_red() )
+            ++local_red;
+}
+</pre>
+
+<p>
+The buffer will automatically transfer its count
+to the main counter on destruction.
+If this latency is too great,
+use the push method to transfer the count early.
+</p>
+
+<pre class="example">
+void count_red( Bag bag1, Bag bag2 ) {
+    counter::buffer&lt;int&gt; local_red( red_count );
+    for ( auto i: bag1 )
+        if ( i.is_red() )
+            ++local_red;
+    local_red.push();
+    for ( auto i: bag2 )
+        if ( i.is_red() )
+            ++local_red;
+}
+</pre>
+
+<p>
+Any increments on buffers since the last push
+will not be reflected in the value reported by a load of the counter.
+The destructor does an implicit push.
+The lifetime of the counter must be strictly larger than
+the lifetimes of any buffers attached to it.
+</p>
+
+
+<h3><a name="Strong">Duplex Counters</a></h3>
+
+<p>
+The push model of buffers sometimes yields an unacceptable lag
+in the observed value of the count.
+To avoid this lag,
+there are duplex counters.
+A duplex counter is paired with a broker,
+the counter can query the broker for counts,
+thus maintaining a somewhat current view of the count.
+</p>
+
+<pre class="example">
+counter::strong_duplex&lt;int&gt; red_count;
+
+void count_red( Bag bag )
+    counter::strong_broker broker( red_count );
+    for ( auto i: bag )
+        if ( i.is_red() )
+            ++broker;
+}
+</pre>
+
+<p>
+Another thread may call <code>red_count.load()</code> and get the current count.
+That operation will poll each broker for its count and return the sum.
+Naturally, any increments done to a broker after it is polled will be missed,
+but no counts will be lost.
+</p>
+
+<p>
+The primary use case for duplex counters
+is to enable fast thread-local increments
+while still maintaining a decent global count.
+</p>
+
+<pre class="example">
+weak_duplex&lt;int&gt; red_count;
+thread_local counter::weak_broker&lt;int&gt; thread_red( red_count );
+
+void count_red( Bag bag )
+    for ( auto i: bag )
+        if ( i.is_red() )
+            ++thread_red;
+}
+</pre>
+
+
+<h3><a name="Weak">Weak Duplex Counters</a></h3>
+
+<p>
+The exchange operation works
+by atomically transfering broker counts to the main counter,
+and then exchanging out of the main counter.
+Consequently,
+every count will be extracted by one and only one exchange operation.
+</p>
+
+<p>
+However, that exchange operation can be expensive because
+it and the broker increment operations
+require write atomicity to the same broker object.
+To reduce that concurrency cost,
+the weak duplex counter and its weak broker
+do not provide the exchange operation.
+This difference
+means that the polling is a read-only operation
+and requires less synchronization.
+Use this counter when you do not intend to exchange values.
+</p>
+
+
+<h3><a name="Buffering">Buffering Brokers</a></h3>
+
+<p>
+Thread-local increments, while cheaper than shared global increments,
+are still more expensive than function-local increments.
+To mitigate that cost, buffers work with brokers as well.
+</p>
+
+<pre class="example">
+counter::weak_duplex&lt;int&gt; red_count;
+thread_local counter::weak_broker&lt;int&gt; thread_red( red_count );
+
+void count_red( Bag bag )
+    counter::buffer&lt;int&gt; local_red( thread_red );
+    for ( auto i: bag )
+        if ( i.is_red() )
+            ++local_red;
+}
+</pre>
+
+<p>
+As with buffers in general,
+the count transfers only on destruction a push operation.
+Consequently, <code>red_count.load()</code>
+will not reflect any counts in buffers.
+Those counts will not be lost, though.
+</p>
+
+
+<h3><a name="Arrays">Counter Arrays</a></h3>
+
+<p>
+Counter arrays provide a means to handle many counters with one name.
+The size of the counter arrays is fixed at construction time.
+Counter arrays have the same structure as single-value counters,
+with the following exceptions.
+</p>
+
+<p>
+Increment a counter by indexing into its array
+and then applying one of the operations.
+E.g. <code>++ctr_ary[i]</code>.
+</p>
+
+<p>
+The load and exchange operations take an additional index parameter.
+</p>
+
+
+<h3><a name="atomicity">Atomicity</a></h3>
+
+<p>
+In the course of program evolution, debugging and tuning,
+a counter may desire an implementation with weaker concurrency requirements.
+That is accomplished by explicitly specifing the atomicity.
+For example, suppose it is discovered that a counter
+</p>
+
+<pre class="example">
+counter::simplex&lt;int&gt; red_count;
+</pre>
+
+<p>
+is only ever read and written from a single thread.
+We can avoid the cost of atomic operations by making the counter serial.
+</p>
+
+<pre class="example">
+counter::simplex&lt;int, counter::atomicity::none&gt; red_count;
+</pre>
+
+<p>
+This approach preserves the programming interface.
+</p>
+
+<p>
+There are several flavors of atomicity.
+These are specified as a (usually defaulted) template parameter.
+</p>
+
+<dl>
+
+<dt>none</dt>
+<dd><p>
+Only one thread may access the counter.
+<code>counter::atomicity::semi</code>
+</p></dd>
+
+<dt>semi</dt>
+<dd><p>
+Multiple threads may load (read) the counter,
+but only one thread may adjust the counter.
+There is now also the issue of whether or not
+an adjustment has any memory ordering.
+The three potential orderings are relaxed,
+acquire/release, and sequentially consistent.
+(See 1.10 [intro.multithread] of the standard.)
+Of these, the safe default is sequentially consistent,
+though it has significant performance implications.
+There is some doubt as to whether sequentially consistent is required.
+(Note that acquire/release and sequentially consistent
+cannot apply to statistical counters
+<a href="Dice-Lev-Moir-2013">[Dice-Lev-Moir-2013]</a>
+as they work by avoiding atomic writes.)
+<code>counter::atomicity::semi_relaxed</code>
+<code>counter::atomicity::semi_acq_rel</code>
+<code>counter::atomicity::semi_seq_cst</code>
+</p>
+</dd>
+
+<dt>full</dt>
+<dd><p>
+Multiple threads may both load and adjust the counter.
+The issue of memory ordering also applies.
+Further, there is the issue of contention.
+Under low contention, a simple atomic variable is sufficient.
+Under high contention,
+other implementation will perform better
+<a href="Dice-Lev-Moir-2013">[Dice-Lev-Moir-2013]</a>.
+Adaptive implementations may also be desireable.
+It is unclear which is best as a default,
+but most counters will likely have low contention,
+and hence that is a reasonable strawman default.
+<code>counter::atomicity::full_relaxed_low</code>
+<code>counter::atomicity::full_relaxed_high</code>
+<code>counter::atomicity::full_relaxed_adapt</code>
+<code>counter::atomicity::full_acq_rel_low</code>
+<code>counter::atomicity::full_acq_rel_high</code>
+<code>counter::atomicity::full_acq_rel_adapt</code>
+<code>counter::atomicity::full_seq_cst_low</code>
+<code>counter::atomicity::full_seq_cst_high</code>
+<code>counter::atomicity::full_seq_cst_adapt</code>
+</p></dd>
+
+</dl>
+
+<p>
+Buffers have two template parameters for atomicity,
+one for the atomicity of the counter it is modifying,
+and one for atomicity of the buffer itself.
+By exlicitly specifying this atomicity,
+one can build unusual configurations of buffers for unusual situations.
+For example, suppose increments of red_count
+tend to cluster in tasks with high processor affinity.
+By separating those counts with a global intermediate buffer,
+counting can exploit processor locality
+and avoid substantial inter-processor communication.
+For example,
+</p>
+
+<pre class="example">
+counter::simplex&lt;int&gt; red_count;
+counter::buffer&lt;int, counter::atomicity::full_seq_cst_low,
+                        counter::atomicity::full_seq_cst_low&gt;
+    red_squares( red_count );
+counter::buffer&lt;int, counter::atomicity::full_seq_cst_low,
+                        counter::atomicity::full_seq_cst_low&gt;
+    red_circles( red_count );
+
+void count_red_squares( Bag bag ) {
+    counter::buffer&lt;int&gt; local_red( red_squares );
+    for ( auto i: bag )
+        if ( i.is_red() )
+            ++local_red;
+}
+</pre>
+
+<p>
+The <code>red_squares</code> variable is global,
+and will automatically transfer its count to <code>red_count</code>
+only on global variable destruction
+This transfer is likely to be too late for many purposes.
+One solution is explicit programming to call <code>red_squares.push()</code>
+at appropriate times.
+Another solution is to use duplex counters.
+</p>
+
+
+<h3><a name="Guidelines">Guidelines For Use</a></h3>
+
+<p>
+Use a simplex counter
+when you have a low rate of updates or a high read rate
+or little tolerance for latency.
+Use a strong duplex counter and broker
+when your update rate is significantly higher than the load rate,
+you can tolerate latency in counting,
+and you need the exchange operation.
+Use a weak duplex counter and broker
+when your update rate is significantly higher than the load rate,
+you can tolerate latency in counting,
+but you do not need the exchange operation.
+Use buffers to collect short-term bursts of counts.
+</p>
+
+<p>
+The operations of the counters, brokers, and buffers
+have the following rough costs.
+</p>
+
+<table>
+<tr><th></th>
+<th>simplex &lt;default&gt;</th><th>strong duplex</th><th>weak duplex</th></tr>
+<tr><th>update</th>
+<td>atomic rmw</td><td>atomic rmw</td><td>atomic rmw</td></tr>
+<tr><th>load</th>
+<td>atomic read</td><td>mutex + n * atomic read</td>
+<td>mutex + n * atomic read</td></tr>
+<tr><th>exchange</th>
+<td>atomic rmw</td><td>mutex + n * atomic rmw</td><td>n/a</td></tr>
+<tr><th>construction</th>
+<td>trivial</td><td>std::set</td><td>std::set</td></tr>
+<tr><th>destruction
+</th><td>trivial</td><td>std::mutex + std::set</td>
+<td>std::mutex + std::set</td></tr>
+
+<tr><th></th>
+<th>buffer &lt;default&gt;</th><th>strong broker</th><th>weak broker</th></tr>
+<tbody>
+<tr><th>update</th>
+<td>serial read &amp; write</td><td>atomic rmw</td>
+<td>atomic read &amp; write</td></tr>
+<tr><th>construction</th>
+<td>pointer assign</td><td>mutex + set.insert</td>
+<td>mutex + set.insert</td></tr>
+<tr><th>destruction</th>
+<td>pointer assign</td><td>mutex + set.remove</td>
+<td>mutex + set.remove</td></tr>
+</table>
+
+
+<h2><a name="Issues">Open Issues</a></h2>
+
+<dl>
+
+<dt>Do we want to change the names?</dt>
+<dd>
+<p>
+The meanings of the names are not readily apparent,
+though no concrete alternatives have been proposed.
+</p>
+</dd>
+
+<dt>What set of atomicity combinations are worth supporting?</dt>
+<dd>
+<p>
+It is not clear that the sequentially consistent forms are technically needed.
+It is not clear that the acquire/release forms are practically needed.
+</p>
+</dd>
+
+<dt>Do we want to initialize a counter array with an initializer list?</dt>
+<dt>Do we want to return a dynarray for the load operation?</dt>
+<dt>Do we want to pass and return a dynarray for the exchange operation?</dt>
+<dd>
+There seems no pressing need,
+and adding this facility later should be binary compatible.
+</dd>
+
+</dl>
+
+
+<h2><a name="Implementation">Implementation</a></h2>
+
+<p>
+An implementation is available from the
+Google Concurrency Library
+<a href="http://code.google.com/p/google-concurrency-library/">
+http://code.google.com/p/google-concurrency-library/</a>
+at
+<a href="http://code.google.com/p/google-concurrency-library/source/browse/include/counter.h">
+.../source/browse/include/counter.h</a>.
+At present, it only includes implementations for
+relaxed memory ordering and low contention.
+</p>
+
+<p>
+The lowest implementation layer level of the organization is a bumper.
+Bumpers provide the interface of simplex counter,
+but only the increment and decrement interface is public.
+The rest are protected.
+Buffer constructors require a reference to a bumper.
+Simplex counters, buffers, duplex counters, and buffers
+are all derived from a bumper,
+which enables buffers to connect to all of them.
+</p>
+
+
+<h2><a name="Synopsis">Synopsis</a></h2>
+
+<p>
+The following synopsis also includes some implementation detail.
+The base classes and class member variables
+are listed to provide an indication of implementation organization and cost.
+</p>
+
+<p>
+The following definitions are
+within namespace <code>counter</code>
+within namespace <code>std.</code>.
+</p>
+
+
+<h3><a name="counter::atomicity"><code>counter::atomicity</code></a></h3>
+
+<pre>
+enum class atomicity
+{
+    none,
+    semi_relaxed,
+    semi_acq_rel,
+    semi_seq_cst,
+    full_relaxed_low,
+    full_relaxed_high,
+    full_relaxed_adapt,
+    full_acq_rel_low,
+    full_acq_rel_high,
+    full_acq_rel_adapt,
+    full_seq_cst_low,
+    full_seq_cst_high,
+    full_seq_cst_adapt
+};
+</pre>
+
+
+<h3><a name="counter::bumper"><code>counter::bumper</code></a></h3>
+
+<p>
+The synopsis includes definitions for the <code>bumper</code>,
+which could be considered an implementation detail
+could be considered a visible part of the interface.
+The <code>bumper</code> is implemented as set of partial specializations,
+though this detail is ommitted for clarity in this paper.
+</p>
+
+<pre>
+template&lt; typename Integral, atomicity Atomicity &gt;
+class bumper;
+{
+    bumper( const bumper&amp; );
+    bumper&amp; operator=( const bumper&amp; );
+public:
+    void operator +=( Integral by );
+    void operator -=( Integral by );
+    void operator ++();
+    void operator ++(int);
+    void operator --();
+    void operator --(int);
+protected:
+    constexpr bumper( Integral in );
+    constexpr bumper();
+    Integral load();
+    Integral exchange( Integral to );
+    Integral value_;
+    template&lt; typename, atomicity &gt;
+    friend class bumper_array;
+    template&lt; typename, atomicity, atomicity &gt;
+    friend class buffer_array;
+    friend class std::dynarray&lt; bumper &gt;;
+};
+</pre>
+
+
+<h3><a name="counter::simplex"><code>counter::simplex</code></a></h3>
+
+<pre>
+template&lt; typename Integral,
+          atomicity Atomicity = atomicity::full_seq_cst_low &gt;
+class simplex
+: public bumper&lt; Integral, Atomicity &gt;
+{
+    typedef bumper&lt; Integral, Atomicity &gt; base_type;
+public:
+    constexpr simplex();
+    constexpr simplex( Integral in );
+    simplex( const simplex&amp; );
+    simplex&amp; operator=( const simplex&amp; );
+    Integral load();
+    Integral exchange( Integral to );
+};
+</pre>
+
+
+<h3><a name="counter::buffer"><code>counter::buffer</code></a></h3>
+
+<pre>
+template&lt; typename Integral,
+          atomicity PrimeAtomicity = atomicity::full_seq_cst_low,
+          atomicity BufferAtomicity = atomicity::none &gt;
+class buffer
+: public bumper&lt; Integral, BufferAtomicity &gt;
+{
+    typedef bumper&lt; Integral, PrimeAtomicity &gt; prime_type;
+    typedef bumper&lt; Integral, BufferAtomicity &gt; base_type;
+public:
+    buffer();
+    buffer( prime_type&amp; p );
+    buffer( const buffer&amp; );
+    buffer&amp; operator=( const buffer&amp; );
+    void push();
+    ~buffer();
+private:
+    prime_type&amp; prime_;
+};
+</pre>
+
+
+<h3><a name="counter::strong_duplex"><code>counter::strong_duplex</code></a></h3>
+
+<pre>
+template&lt; typename Integral &gt; class strong_duplex
+: public bumper&lt; Integral, atomicity::full_seq_cst_low &gt;
+{
+    typedef bumper&lt; Integral, atomicity::full_seq_cst_low &gt; base_type;
+    typedef strong_broker&lt; Integral &gt; broker_type;
+    friend class strong_broker&lt; Integral &gt;;
+public:
+    strong_duplex();
+    strong_duplex( Integral in );
+    Integral load();
+    Integral exchange( Integral to );
+    ~strong_duplex();
+private:
+    void insert( broker_type* child );
+    void erase( broker_type* child, Integral by );
+    mutex serializer_;
+    typedef std::unordered_set&lt; broker_type* &gt; set_type;
+    set_type children_;
+};
+</pre>
+
+
+<h3><a name="counter::strong_broker"><code>counter::strong_broker</code></a></h3>
+
+<pre>
+template&lt; typename Integral &gt; class strong_broker
+: public bumper&lt; Integral, atomicity::full_seq_cst_low &gt;
+{
+    typedef bumper&lt; Integral, atomicity::full_seq_cst_low &gt; base_type;
+    typedef strong_duplex&lt; Integral &gt; duplex_type;
+    friend class strong_duplex&lt; Integral &gt;;
+public:
+    strong_broker( duplex_type&amp; p );
+    strong_broker();
+    strong_broker( const strong_broker&amp; );
+    strong_broker&amp; operator=( const strong_broker&amp; );
+    ~strong_broker();
+private:
+    Integral poll();
+    Integral drain();
+    duplex_type&amp; prime_;
+};
+</pre>
+
+
+<h3><a name="counter::weak_duplex"><code>counter::weak_duplex</code></a></h3>
+
+<pre>
+template&lt; typename Integral &gt; class weak_duplex
+: public bumper&lt; Integral, atomicity::full_seq_cst_low &gt;
+{
+    typedef bumper&lt; Integral, atomicity::full_seq_cst_low &gt; base_type;
+    typedef weak_broker&lt; Integral &gt; broker_type;
+    friend class weak_broker&lt; Integral &gt;;
+public:
+    weak_duplex();
+    weak_duplex( Integral in );
+    weak_duplex( const weak_duplex&amp; );
+    weak_duplex&amp; operator=( const weak_duplex&amp; );
+    Integral load();
+    ~weak_duplex();
+private:
+    void insert( broker_type* child );
+    void erase( broker_type* child, Integral by );
+    mutex serializer_;
+    typedef std::unordered_set&lt; broker_type* &gt; set_type;
+    set_type children_;
+};
+</pre>
+
+
+<h3><a name="counter::weak_broker"><code>counter::weak_broker</code></a></h3>
+
+<pre>
+template&lt; typename Integral &gt; class weak_broker
+: public bumper&lt; Integral, atomicity::semi &gt;
+{
+    typedef bumper&lt; Integral, atomicity::semi &gt; base_type;
+    typedef weak_duplex&lt; Integral &gt; duplex_type;
+    friend class weak_duplex&lt; Integral &gt;;
+public:
+    weak_broker( duplex_type&amp; p );
+    weak_broker();
+    weak_broker( const weak_broker&amp; );
+    weak_broker&amp; operator=( const weak_broker&amp; );
+    ~weak_broker();
+private:
+    Integral poll();
+    duplex_type&amp; prime_;
+};
+</pre>
+
+
+<h3><a name="counter::bumper_array"><code>counter::bumper_array</code></a></h3>
+
+<pre>
+template&lt; typename Integral,
+          atomicity Atomicity = atomicity::full_seq_cst_low &gt;
+class bumper_array
+{
+public:
+    typedef bumper&lt; Integral, Atomicity &gt; value_type;
+private:
+    typedef std::dynarray&lt; value_type &gt; storage_type;
+public:
+    typedef typename storage_type::size_type size_type;
+    bumper_array();
+    bumper_array( size_type size );
+    bumper_array( const bumper_array&amp; );
+    bumper_array&amp; operator=( const bumper_array&amp; );
+    value_type&amp; operator[]( size_type idx );
+    size_type size();
+protected:
+    Integral load( size_type idx );
+    Integral exchange( size_type idx, Integral value );
+private:
+    storage_type storage;
+};
+</pre>
+
+
+<h3><a name="counter::simplex_array"><code>counter::simplex_array</code></a></h3>
+
+<pre>
+template&lt; typename Integral,
+          atomicity Atomicity = atomicity::full_seq_cst_low &gt;
+class simplex_array
+: public bumper_array&lt; Integral, Atomicity &gt;
+{
+    typedef bumper_array&lt; Integral, Atomicity &gt; base_type;
+public:
+    typedef typename base_type::value_type value_type;
+    typedef typename base_type::size_type size_type;
+    simplex_array();
+    constexpr simplex_array( size_type size );
+    simplex_array( const simplex_array&amp; );
+    simplex_array&amp; operator=( const simplex_array&amp; );
+    Integral load( size_type idx );
+    Integral exchange( size_type idx, Integral value );
+    value_type&amp; operator[]( int idx );
+    size_type size();
+};
+</pre>
+
+
+<h3><a name="counter::buffer_array"><code>counter::buffer_array</code></a></h3>
+
+<pre>
+template&lt; typename Integral,
+          atomicity PrimeAtomicity = atomicity::full_seq_cst_low,
+          atomicity BufferAtomicity = atomicity::full_seq_cst_low &gt;
+class buffer_array
+: public bumper_array&lt; Integral, BufferAtomicity &gt;
+{
+    typedef bumper_array&lt; Integral, BufferAtomicity &gt; base_type;
+    typedef bumper_array&lt; Integral, PrimeAtomicity &gt; prime_type;
+public:
+    typedef typename base_type::value_type value_type;
+    typedef typename base_type::size_type size_type;
+    buffer_array();
+    buffer_array( prime_type&amp; p );
+    buffer_array( const buffer_array&amp; );
+    buffer_array&amp; operator=( const buffer_array&amp; );
+    void push( size_type idx );
+    void push();
+    size_type size();
+    ~buffer_array();
+private:
+    prime_type&amp; prime_;
+};
+</pre>
+
+
+<h3><a name="counter::strong_duplex_array"><code>counter::strong_duplex_array</code></a></h3>
+
+<pre>
+template&lt; typename Integral &gt; class strong_duplex_array
+: public bumper_array&lt; Integral, atomicity::full_seq_cst_low &gt;
+{
+    typedef bumper_array&lt; Integral, atomicity::full_seq_cst_low &gt; base_type;
+    typedef strong_broker_array&lt; Integral &gt; broker_type;
+    friend class strong_broker_array&lt; Integral &gt;;
+public:
+    typedef typename base_type::value_type value_type;
+    typedef typename base_type::size_type size_type;
+    strong_duplex_array();
+    constexpr strong_duplex_array( size_type size )
+     ;
+    strong_duplex_array( const strong_duplex_array&amp; );
+    strong_duplex_array&amp; operator=( const strong_duplex_array&amp; );
+    value_type&amp; operator[]( int idx );
+    size_type size();
+    ~strong_duplex_array();
+private:
+    void insert( broker_type* child );
+    void erase( broker_type* child, Integral by );
+    mutex serializer_;
+    typedef std::unordered_set&lt; broker_type* &gt; set_type;
+    set_type children_;
+};
+</pre>
+
+
+<h3><a name="counter::strong_broker_array"><code>counter::strong_broker_array</code></a></h3>
+
+<pre>
+template&lt; typename Integral &gt; class strong_broker_array
+: public bumper_array&lt; Integral, atomicity::semi &gt;
+{
+    typedef bumper_array&lt; Integral, atomicity::semi &gt; base_type;
+    typedef strong_duplex_array&lt; Integral &gt; duplex_type;
+    friend class strong_duplex_array&lt; Integral &gt;;
+public:
+    typedef typename base_type::value_type value_type;
+    typedef typename base_type::size_type size_type;
+    strong_broker_array();
+    strong_broker_array( duplex_type&amp; p );
+    strong_broker_array( const strong_broker_array&amp; );
+    strong_broker_array&amp; operator=( const strong_broker_array&amp; );
+    size_type size();
+    ~strong_broker_array();
+private:
+    Integral poll( size_type idx );
+    Integral drain( size_type idx );
+    duplex_type&amp; prime_;
+};
+</pre>
+
+
+<h3><a name="counter::weak_duplex_array"><code>counter::weak_duplex_array</code></a></h3>
+
+<pre>
+template&lt; typename Integral &gt; class weak_duplex_array
+: public bumper_array&lt; Integral, atomicity::full_seq_cst_low &gt;
+{
+    typedef bumper_array&lt; Integral, atomicity::full_seq_cst_low &gt; base_type;
+    typedef weak_broker_array&lt; Integral &gt; broker_type;
+    friend class weak_broker_array&lt; Integral &gt;;
+public:
+    typedef typename base_type::value_type value_type;
+    typedef typename base_type::size_type size_type;
+    weak_duplex_array();
+    constexpr weak_duplex_array( size_type size );
+    weak_duplex_array( const weak_duplex_array&amp; );
+    weak_duplex_array&amp; operator=( const weak_duplex_array&amp; );
+    value_type&amp; operator[]( int idx );
+    size_type size();
+    ~weak_duplex_array();
+private:
+    void insert( broker_type* child );
+    void erase( broker_type* child, Integral by );
+    mutex serializer_;
+    typedef std::unordered_set&lt; broker_type* &gt; set_type;
+    set_type children_;
+};
+</pre>
+
+
+<h3><a name="counter::weak_broker_array"><code>counter::weak_broker_array</code></a></h3>
+
+<pre>
+template&lt; typename Integral &gt; class weak_broker_array
+: public bumper_array&lt; Integral, atomicity::semi &gt;
+{
+    typedef bumper_array&lt; Integral, atomicity::semi &gt; base_type;
+    typedef weak_duplex_array&lt; Integral &gt; duplex_type;
+    friend class weak_duplex_array&lt; Integral &gt;;
+public:
+    typedef typename base_type::value_type value_type;
+    typedef typename base_type::size_type size_type;
+    weak_broker_array();
+    weak_broker_array( duplex_type&amp; p );
+    weak_broker_array( const weak_broker_array&amp; );
+    weak_broker_array&amp; operator=( const weak_broker_array&amp; );
+    size_type size();
+    ~weak_broker_array();
+private:
+    Integral poll( size_type idx );
+    duplex_type&amp; prime_;
+};
+</pre>
+
+
+<h2><a name="revision_history">Revision History</a></h2>
+
+<p>
+This paper revises
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3355.html">
+ISO/IEC JTC1 SC22 WG21 N3355 = 12-0045 - 2012-01-14</a>.
+Its changes are as follows:
+</p>
+
+<ul>
+
+<li><p>
+Add more context to the introduction.
+</p></li>
+
+<li><p>
+Change named <code>inc</code> and <code>dec</code> functions to operators.
+</p></li>
+
+<li><p>
+Place all declarations within namespace <code>counter</code>.
+The namespace serves to avoid redundancy in names.
+</p></li>
+
+<li><p>
+Rename types for increased clarity.
+</p></li>
+
+<li><p>
+Change separate serial and atomic counter types
+with a single type templatized on the atomicity.
+</p></li>
+
+<li><p>
+Add issues of memory order and contention to the atomicity parameter.
+</p></li>
+
+<li><p>
+Add counter arrays.
+</p></li>
+
+<li><p>
+Add open issues section.
+</p></li>
+
+<li><p>
+Add implementation section.
+</p></li>
+
+<li><p>
+Add revision history section.
+</p></li>
+
+<li><p>
+Add references section.
+</p></li>
+
+</ul>
+
+<h2><a name="references">References</a></h2>
+
+<dl>
+
+<dt><a name="Cilk-Reducer">[Cilk-Reducer]</a></dt>
+<dd>
+"Reducers",
+<a href="http://software.intel.com/sites/products/documentation/hpc/composerxe/en-us/2011Update/cpp/lin/cref_cls/common/cilk_bk_reducer_intro.htm">
+http://software.intel.com/sites/products/documentation/hpc/composerxe/en-us/2011Update/cpp/lin/cref_cls/common/cilk_bk_reducer_intro.htm</a>;
+"Intel Cilk Plus",
+<a href="http://software.intel.com/sites/products/documentation/hpc/composerxe/en-us/2011Update/cpp/lin/cref_cls/common/cilk_bk_using_cilk.htm">
+http://software.intel.com/sites/products/documentation/hpc/composerxe/en-us/2011Update/cpp/lin/cref_cls/common/cilk_bk_using_cilk.htm</a>;
+"Intel C++ Compiler XE 12.1 User and Reference Guides",
+<a href="http://software.intel.com/sites/products/documentation/hpc/composerxe/en-us/2011Update/cpp/lin/main/main_cover_title.htm">
+http://software.intel.com/sites/products/documentation/hpc/composerxe/en-us/2011Update/cpp/lin/main/main_cover_title.htm</a>
+</dd>
+
+<dt><a name="Dice-Lev-Moir-2013">[Dice-Lev-Moir-2013]</a></dt>
+<dd>
+"Scalable Statstics Counters";
+Dave Dice, Yossi Lev, Mark Moir;
+SPAA'13, June 23-25, 2013, Montr&egrave;al Qu&egrave;bec, Canada.
+</dd>
+
+<dt><a name="Lev-Moir-2011">[Lev-Moir-2011]</a></dt>
+<dd>
+"Lightweight Parallel Accumulators Using C++ Templates";
+Yossi Lev, Mark Moir;
+ICSE'11, May 21-28, 2011, Waikiki, Honolulu, HI, USA
+</dd>
+
+</dl>
+
+</body></html>

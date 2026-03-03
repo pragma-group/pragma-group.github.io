@@ -1,0 +1,313 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head>
+
+<meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+
+<title>Validity testing issues</title>
+
+<style type="text/css">
+  p {text-align:justify}
+  pre {padding-left: 15px;}
+  ins {background-color:#A0FFA0}
+  ins > ul > li {
+    background-color:#A0FFA0;
+    list-style-type: none;
+    margin-left: -0.5em;
+    padding-left: 0.5em;
+  }
+  ins > ul > li:before {
+    display: inline-block; 
+    content: "—";
+    width: 1em;
+    margin-left: -0.5em;
+    margin-right: 0.5em;
+  }
+  ul > li {
+    list-style-type: none;
+    margin-left: -0.5em;
+    padding-left: 0.5em;
+  }
+  ul > li:before {
+    display: inline-block; 
+    content: "—";
+    width: 1em;
+    margin-left: -0.5em;
+    margin-right: 0.5em;
+  }
+  del {background-color:#FFA0A0}
+  blockquote.note
+  {
+   background-color:#E0E0E0;
+   padding-left: 15px;
+   padding-right: 15px;
+   padding-top: 1px;
+   padding-bottom: 1px;
+  }
+</style>
+</head><body>
+<address style="text-align: left;">
+Project:  ISO JTC1/SC22/WG21: Programming Language C++<br />
+Document number: P0348R0<br/>
+Date: 2016-05-25<br/>
+Reply-to: Andrzej Krzemienski (akrzemi1 &lt;at&gt; gmail &lt;dot&gt; com)<br />
+Audience: Core Language Working Group<br/>
+</address>
+<hr>
+
+<h1 style="text-align: center;">Validity testing issues</h1>
+
+<p>By <q>validity testing</q> we mean SFINAE as well as some predicate type traits, like <code>std::is_convertible</code>, where the validity of certain language constructs can be tested without making the program ill-formed. This paper lists the known cases where the Standard leaves it unclear what a programmer can expect of a conforming implementation when testing the validity of certain constructs. While the problem used to be rather niche in C++, exploited only by seasoned C++ programmers, we expect that it will become more common with the addition of Concepts Lite. The constraint satisfaction mechanism in Concepts Lite exploits the same validity testing mechanism.</p>
+
+<p>Most issues revolve around formalizing the notion of "immediate context", but our socope is a bit broader. We do not propose any solution at this point. Instead, our goal is to seek the Committee's guidance on how the listed issues are inntended to be resolved.</p>
+
+<h2>Issues' description</h2>
+
+<p>The Standard gives us only partially formal description of what what is detectable in validity testing and what constitutes a "hard" error. We only get this text in section 14.8.2 and throughout section 20.13, in slight variations:</p>
+
+<blockquote>Access checking is performed as if in a context unrelated to subexpressions involved. Only the validity of the immediate context
+of the variable initialization is considered. [<i>Note:</i> The evaluation of the initialization can result in side
+effects such as the instantiation of class template specializations and function template specializations, the
+generation of implicitly-defined functions, and so on. Such side effects are not in the &ldquo;immediate context&rdquo;
+and can result in the program being ill-formed. <i>&mdash; end note</i>]</blockquote>
+
+<p>But this leaves a number of cases unclear. For most of the issues listed here, we require an answer to the question, whether validity testing of a given language construct (expression or object initialization) should return false, return true, end in compilation-failure or the outcome be implementation-defined, or, in the worst case, unspecified.</p>
+
+
+<h3>Issue 1 &mdash; using a deleted function is in immediate context?</h3>
+
+<p>The question is: is using a deleted function in the immediate context of the tested expression? Or in other words, when I test expression validity, and this expression uses a deleted function, should validity testing return a negative answer, or should it be a hard error (that makes the entire program ill-formed)?</p>
+
+<p>This question can be stated in yet another way: is the following program correct?</p>
+
+<pre>
+#include &lt;type_traits&gt;
+
+struct Rational
+{
+  int num, den;
+  constexpr Rational(int n, int d = 1) : num(n), den(d) {}
+  constexpr Rational(double n) = delete;
+};
+
+template &lt;typename T&gt;
+  constexpr auto test_rational_convert(T v) -&gt; decltype(Rational{v}, true) { return true; }
+
+constexpr bool test_rational_convert(...) { return false; }
+
+int main()
+{
+  static_assert(std::is_convertible&lt;int, Rational&gt;::value, "1");
+  static_assert(!std::is_convertible&lt;double, Rational&gt;::value, "2");
+  static_assert(test_rational_convert(5), "3");
+  static_assert(!test_rational_convert(5.0), "4");
+}
+</pre>
+
+<p>It tests in two ways (using a type trait and expression-based sfinae) whether certain conversion is disabled (by declaring function as deleted). The Standard is a bit ambiguous. 8.4.3 paragraph 2 says:</p>
+
+<blockquote>A program that refers to a deleted function implicitly or explicitly, other than to declare it, is ill-formed. [<i>Note:</i> This includes calling the function implicitly or explicitly and forming a pointer or pointer-to-member to the function. It applies even for references in expressions that are not potentially-evaluated. If a function is overloaded, it is referenced only if the function is selected by overload resolution. <i>&mdash;end note</i>].</blockquote>
+
+<p>Thus, taken litelarly, our sample program is ill-formed. On the other hand 14.8.2 paragraph 8 says: </p>
+
+<blockquote>An invalid type or expression is one that would be ill-formed, with a diagnostic required, if written using the substituted arguments. [<i>Note:</i> If no diagnostic is required, the program is still ill-formed. Access checking is done as part of the substitution process. <i>&mdash;end note</i>] Only invalid types and expressions in the immediate context of the function type and its template parameter types can result in a deduction failure.</blockquote>
+
+<p>As a side note, we have a general contradiction here: one part of the Standard says that some condition C1 makes a program ill-formed, but another part of the Standard says that C1 does not make a program ill-formed. Which is more important then?</p>
+
+<p><strong>Recomendation:</strong> We strongly feel that validity testing should detect the usage of deleted functions, and give a negative answer. This is really useful in unit-testing whether we have correctly disabled a dangerous usage of our class. GCC (6.1) and Clang (3.8) already do it. On MSVC (2015) assertion 2 fails: type trait <code>std::is_convertible&lt;double, Rational&gt;::value</code> returns true, as though it treated the marking of the function as deleted in non-immediate context.</p>
+
+
+<h3>Issue 2 &mdash; invalid constructs in variable templates</h3>
+<p>Is an error in initialization of a variable template detected in validation testing? Is it an "immediate context"? In other words, is the following supposed to be a well-formed program?</p>
+
+<pre>
+#include &lt;string&gt;
+
+template &lt;typename T&gt;
+const int r = T(1) / 2; <em>// uses division operator</em>
+
+template &lt;typename T&gt;
+auto half(T&amp;&amp;) -&gt; decltype(r&lt;T&gt;)
+{ return r&lt;T&gt;; }
+
+int half(const std::string&amp;)
+{ return 0; }
+
+int main()
+{
+  std::string s;
+  half(s);
+}
+</pre>
+
+<p>Both GCC and CLang treat the program as ill-formed. That is, initializer of a variable template we read is not an immediate context. MSVC (2015) does not support variable templates.</p>
+
+<!--<h3>Issue 3 &mdash; deriving from a scalar type in an immediate context?</h3>
+
+<p>This has already been reported as issue <a href="http://cplusplus.github.io/LWG/lwg-active.html#2496">2496</a>. Is the following program well formed? Instantiating <code>tool_helper&lt;T&gt;</code> would make the program ill-formed, but does the implementation have to instantiate the template here in order to check the convertibility? Or, is the fact of deriving from a base class in an immediate context? </p>
+
+<pre>#include &lt;type_traits&gt;
+
+template &lt;typename T&gt;
+struct tool_helper : T {};
+
+struct tool_x
+{
+  tool_x(long) {};
+ 
+  template &lt;typename T,
+            typename U = tool_helper&lt;T&gt;&gt;
+    tool_x(T, U = {}) {};
+};
+
+static_assert(std::is_convertible&lt;int, tool_x&gt;::value, "");
+
+int main(){};
+</pre>
+-->
+
+<h3>Issue 3 &mdash; expressions in function default arguments are in immediate context?</h3>
+
+<p>Next unanswered question: are errors in initializer expression of default function arguments in the immediate context of the tested expression? In other words, is the following program well-formed?</p>
+
+<pre>template &lt;typename T, typename U = T&gt;
+void fun(T v, U u = U()) {}
+
+void fun(...) {}
+
+struct X
+{
+    X(int) {} // no default ctor
+};
+
+int main() 
+{
+  fun (X(1));
+}</pre>
+
+<p>Similarly, is the following program ill-formed?</p>
+
+<pre>
+template &lt;typename U&gt;
+void fun(U u = U());
+
+struct X
+{
+    X(int) {}
+};
+
+template &lt;class T&gt;
+decltype(fun&lt;T&gt;()) g(int) {  }
+
+template<class> void g(long) { }
+
+int main() { g&lt;X&gt;(0); }
+</pre>
+
+<p>They look similar, but GCC happens to treat the former as ill-formed and the latter as well-formed. Clang and MSVC treat both programs as ill-formed.</p>
+
+
+<h3>Issue 4 &mdash; short circuiting allowed?</h3>
+
+<p>The following code snippet makes the program ill formed, and all compiler seem to accept that:</p>
+
+<pre>template &lt;typename T&gt;
+struct tool_helper : T {}; // invalid if T is int
+ 
+struct tool_x
+{
+  tool_x(long) {};
+ 
+  template &lt;typename T,
+            typename U = typename tool_helper&lt;T&gt;::type&gt; // T is int
+    tool_x(T, U = {}) {};
+};
+
+bool b = std::is_convertible&lt;int, tool_x&gt;::value;
+</pre>
+
+<p>We get "hard" error when instantiating class template <code>tool_helper</code> which would derive from <code>int</code>. However, if we chane the test in the last line to: </p> 
+
+<pre>
+bool b = std::is_convertible&lt;<strong>long</strong> int, tool_x&gt;::value;
+</pre>
+
+<p>Clang and GCC do no longer treat it as a hard error, and return <code>true</code>. I guess, this happens because when seeing the first declaration and only the first argument of the other declaration, they can immediately conclude, that the first one will be the best unambiguous match. So, they save time and just pick the first overload without inspecting the remaining arguments of the second overload, and they have no need to instantiate <code>tool_helper&lt;int&gt;</code>. According to the current wording, such short circuiting is not allowed: obvously the optimization changes an ill-formed program into a well formed one. If a programmer expects the compilation to fail (because he implements a tricky compile-time safety feature), he will be surprised. On the other hand, such optimization appears useful.</p>
+
+<p>It seems, tah there are situation where an implementation may or may not need to instantiate a template in testing expression validity, depending on the quality of the implementation. The question is, should implementations be allowed to perform this kind of optimizations?</p>
+
+<h3>Issue 5 &mdash; checking function bodies allowed?</h3>
+
+<p>Currently, the Standard specifies that (unless you are using return type deduction), validity testing mechanism does not check function template bodies. This probably means that function bodies are not even instantiated. The question is, if a given implementation volunteers to instantiate some of the function template bodies and treat instantiation failures as "soft" errors, detectable by validity testing mecanism, should it be called standards-conforming or not?
+</p> 
+
+<h3>Issue 6 &mdash; hard error outside immediate context are mandatory or optional?</h3>
+
+<p>Similarly, if in order to test the validity of an expression an implementation instantiates a class template, and we get an error during this instantiation, the implementation is <em>allowed</em> to stop the compilation at this point, and conclude that the program is ill-formed. But is it <em>required</em> to?  Can an ultra-fast, ultra-diligent implementation implement a full template instantiation baacktracking if it chooses to? For instance, the following program (taken from issue <a href="http://cplusplus.github.io/LWG/lwg-active.html#2496">2496</a>) is legally ill-formed:
+</p>
+
+<pre>#include &lt;type_traits&gt;
+
+template &lt;typename T&gt; struct B : T { };
+template &lt;typename T&gt; struct A { A&amp; operator=(const B&lt;T&gt;&amp;); };
+
+static_assert(std::is_assignable&lt;A&lt;int&gt;, int&gt;::value, "ERR");
+
+int main() {}
+</pre>
+
+<p>This is because we have to instantiate <code>B&lt;int&gt;</code> to check if it is convertible from <code>int</code>. But because checking this is so simple (the definition of <code>B</code> is so small), an implementation could just inspect the tokens to conclude that specialization <code>B&lt;int&gt;</code> is illegal, and have the type trait return false. Could a standard-conforming implementation do that?</p>
+
+<h3>Issue 7 &mdash; any ill-formedness reason is diagnosable, or only some?</h3>
+
+<p>Is any possible potential error observed in the immediate context of a language construct under test turned into a "false" answer returned from validity testing mechanism, or are there kinds of errors that still render the entire program ill-formed even if observed in the immediate context? E.g., exceeding implementation limits, or perhaps something similar. Should validity testing only detect forming invalid types/expressions/object initializations; or check any error whatsoever?</p>
+
+<h3>Issue 8 &mdash; can implementations detect ill-formedness reason where diagnostic is not required?</h3>
+
+<p>Some invalid constructs can cause the the program to be ill-formed with no diagnostic required (e.g., ODR violation). The validity testing mechanism in overload resolution must not detect those as substitution failure. However, if a given implementation chooses to detect ODR violations, and issue diagnostics, is it also allowed to use this information in validity testing mechanism?</p>
+
+<h3>Issue 9 &mdash; should SFINAE and type traits always give the same result?</h3>
+
+<p>Practically any predicate type-trait, like <code>is_assignable</code> can be equivalently tested using a <code>decltype</code> in function signature:</p>
+
+<pre>template &lt;typename T&gt;
+auto is_copy_assignable_impl(int)
+    -> decltype(((void)(std::declval&lt;T&amp;&gt;() = std::declval&lt;const T&amp;&gt;()), std::true_type{}));
+
+template &lt;typename T&gt;
+auto is_copy_assignable_impl(long)
+    -> std::false_type;
+
+template &lt;typename T&gt;
+struct is_copy_assignable2 : decltype(is_copy_assignable_impl&lt;T&gt;(1)) {};
+</pre>
+
+<p>Meta function <code>is_copy_assignable2</code> defined as above is equivalent to <code>std::is_copy_assignable</code>. But if implementations are given certain freedom in deciding when to give a false positive, or when to prematurely terminate the compilation (rather than returning a true-false answer, it may result in situations where choosing between <code>is_copy_assignable2</code> and <code>std::is_copy_assignable</code> might give different results. The question is, should the Standard require (in the face of other kinds of implementation QOI freedom) that behaviour of SFINAE and corresponding type traits be consistent?</p>
+
+<p>Currently, the Standard requires that only errors with diagnostic required can cause the validity testing in SFINAE return false. That is, if substitution fails due to ODR violation (diagnostic not required) this causes the validity testing mechanism to return true. In contrast, validity testing in type traits is required to return false whenever a tested expression is ill-formed, regardless of if diagnostic is required or not. We suppose this is an oversight.</p>
+
+<p><strong>Recomendation:</strong> We strongly feel that both validity testing context should always be interchangable and give the same effects.</p>
+
+<h2>Summary</h2>
+
+<p>The following summarizes the questions that we would like CWG to give us directions for. This will help come up with the proposed wording changes in the future.</p>
+
+<p><strong>Q1.</strong> Is using a deleted function in the immediate context and a detectable condition? (Recommendation: yes.)<p>
+<p><strong>Q2.</strong> Are invalid constructs in variable template initialization in the immediate context, and a detectable condition?<p>
+<p><strong>Q3.</strong> Are expressions in function default arguments ' initializers in the immediate context and a detectable condition?<p>
+<p><strong>Q4.</strong> Are implementations allowed to skip substitution of some overloads, if they can prove otherwise that these overloads would have never been chosen, or cause ambiguous result?<p>
+<p><strong>Q5.</strong> Can implementations check function bodies in validity testing, if tey want to?<p>
+<p><strong>Q6.</strong> Can implementations check other errors in non-immediate context during validity testing, if they want to?<p>
+<p><strong>Q7.</strong> Are there kinds of ill-formedness reasosns that we want to remain undetectable by validity testing?<p>
+<p><strong>Q8.</strong> Can implementations detect ill-formedness reason where diagnostic is not required in validity testing, if they want to?<p>
+<p><strong>Q9.</strong> Should all forms of validity testing (overload resolution, type traits, concept satisfaction) always have consistent results? (Recommendation: yes).<p>
+
+<p>The recomendation, that we feel strong about is only about the first and the last question. (1). Deleted functions should be detectable in validity testing. This is easily implementable, and allows writing compile-time tests whether certain dangerous conversions have been prevented.  (9). SFINAE and type traits need to be consistent, so that changing the technique for disabling overloads should not affect the program behavior.
+</p>
+
+
+
+<h2>Acknowledgements</h2>
+
+<p>A number of people helped in creating the shape of this paper and in the analisis of the problems. In particular, Daniel Kr&uuml;gler and Tomasz Kami&#324;ski</p>
+
+</body></html>

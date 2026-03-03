@@ -1,0 +1,157 @@
+<html>
+<head>
+</head>
+<body>
+<h1>Networking Primitives: <code>std::experimental::network::htonl</code> Considered Harmful</h1>
+
+<p>ISO/IEC JTC1 SC22 WG21 N4249 - 2014.10.09</p>
+
+<pre><code>James Craig Burley           (james@burleyarch.com)
+ADAM David Alan Martin   (adamartin@FreeBSD.org)
+                        (amartin172@bloomberg.net)
+David Chisnall            (theraven@FreeBSD.org)
+Justin Erenkrantz      (jerenkrantz@apache.org)
+                            (justin@erenkrantz.com
+                       (jerenkrantz@bloomberg.net)
+Justin R. Hibbits         (jhibbits@FreeBSD.org)
+Alisdair Meredith       (ameredith1@bloomberg.net)
+George Neville-Neil            (gnn@FreeBSD.org)
+Alfred Perlstein            (alfred@FreeBSD.org)
+Glenn Strauss             (gstrauss@gluelogic.com)
+                         (gstrauss1@bloomberg.net)
+</code></pre>
+
+<h3>Table of Contents</h3>
+
+<ol>
+<li>Introduction</li>
+<li>The Issue</li>
+<li>Analysis</li>
+<li>Scope of the Problem</li>
+<li>Proposed Solution</li>
+</ol>
+
+<h2>Introduction</h2>
+
+<p>The C++ Library Fundamentals TS, N4023 specifies a set of functions <code>htonl</code> and
+friends, which perform in a similar manner to the ubiquitous <code>htonl</code> and friends
+of the Berkeley Sockets API.  The problem is that many existing deployments of
+this API specify <code>htonl</code> as a macro, on some or all compilation modes.  The
+basic definitions are found in section 10.1 of the paper, titled
+<code>[header.net.synop]</code>.</p>
+
+<h2>The Issue</h2>
+
+<p>The following code examples illustrate the problems which may occur, in
+production, due to the proposed 'htonl' and friends named functions.</p>
+
+<pre><code>--- System Header, such as `sys/network.h` ---
+// ...
+#define htonl( x ) /* Implementation specific way to convert ... */
+// ...
+
+--- End of System Header, such as `network.h` ---
+
+--- Example impl for `experimental/net` ---
+// ...
+
+namespace std {
+namespace experimental {
+inline namespace fundamentals_v1 {
+namespace net {
+    // ...
+    constexpr uint32_t htonl(uint32_t host) noexcept;
+    // ...
+} // net
+} // fundamentals_v1
+} // experimental
+} // std
+--- End of TS impl for `experimental/net` ---
+
+
+--- My program `main.cpp` ---
+#include &lt;sys/network.h&gt;
+#include &lt;experimental/net&gt;   // XXX: Parse error may occur in here
+
+//...
+--- End of My program `main.cpp` ---
+
+
+--- My other program `main2.cpp` ---
+#include &lt;experimental/net&gt;
+#include &lt;sys/network.h&gt;
+
+int
+main()
+{
+    namespace TS= std::experimental;
+    TS::net::htonl(42); // XXX: Syntax error if `htonl` is a macro.
+    using TS::net::htonl; // XXX: Syntax error if `htonl` is a macro.
+    using namespace std::experimental::net; // Okay.
+
+    // XXX: This line will fail to compile if `htonl` is a function -- it's
+    // an ambiguous overload.  This line will succeed if `htonl` is a macro,
+    // but invoke the macro, not the C++-TS implementation.
+    htonl( 42 );
+}
+--- End of My other program `main2.cpp` ---
+</code></pre>
+
+<p>This then would give rise to a mandate that <code>&lt;experimental/net&gt;</code> be included
+<em>before</em> all inclusions of <code>sys/network.h</code>, or some similar rule, but usage of
+<code>std::experimental::net::htonl</code> would cause a syntax error, upon macro expansion
+of the token <code>htonl</code>.</p>
+
+<h2>Analysis</h2>
+
+<p>The conflict with existing Berkeley Sockets API implementations is significantly
+compounded by the hazards of transitive include in large bodies of existing
+code.  Note that the Berkeley Sockets API is the de facto networking standard
+for all C-based languages.  At best, the <code>&lt;experimental/net&gt;</code> implementations of
+<code>htonl</code> and friends become unusable... at worst, there are myriad, subtle parse
+and syntax errors which will arise under different inclusion order (sometimes
+sparked by changes to headers outside of the author's control.)</p>
+
+<p>This TS places a severe burden upon OS vendors (and authors) to change their
+existing practices (often mostly written in C), to accommodate this new C++
+<code>feature</code>.  Such changes may be impossible, or unduly hard in exchange for what
+these vendors and authors might consider a questionable benefit to the users of
+their systems.  This TS introduces further incompatibilities between C and C++
+-- a situation which we should strive to avoid, if we can.</p>
+
+<p>In the C language, many functions are permitted to be defined as macros, at an
+implementation's discretion.  POSIX itself permits an implementation to define
+<code>htonl</code> and friends as macros.  The Linux kernel, the FreeBSD system, and
+several others all conditionally define <code>htonl</code> as a macro, depending upon
+availability of compiler primitives, and system target.  We feel that a mandate
+to forbid <code>htonl</code> from being a macro would be unnecessarily difficult to effect,
+and would be an inappropriate suggestion from the C++ committee at this time.</p>
+
+<p>We feel that it is a mistake to define names in the standard library that might
+conflict with existing popular implementations which define the same names as
+macros.  Doing so will cause otherwise avoidable headache for numerous POSIX
+oriented systems.</p>
+
+<h2>Scope of the Problem</h2>
+
+<p>There are numerous open source projects, implemented wholly, or partially in
+C++, which are mission-critical for numerous organizations, businesses,
+projects, and people.  Examples include Clang, GCC (>=4.8), Firefox, Chromium,
+KDE, QT, JVM, Audacity, DOSBox, and VLC.  As many (or most) of these have some
+form of networking support, a C++ standard (or soon-to-be-standard) header which
+defines these names could potentially jeopardize the future compilation of these
+projects out-of-the-box on many open source operating systems.</p>
+
+<p>The situation is compounded by the existence of numerous libraries in C and C++,
+open source or otherwise which either declare their own or transitively include
+implementations of <code>htonl</code> and friends.  Therefore, mandating that
+<code>&lt;experimental/net&gt;</code> be included either before or after would not be a workable
+solution.</p>
+
+<h2>Proposed Solution</h2>
+
+<p>We strongly encourage the Committee to strike the <code>htonl</code>, <code>ntohl</code>, <code>htons</code>, and
+<code>ntohs</code> functions in the <code>std::experimental::network</code> namespace, in the Library
+Fundamentals TS (N4023).</p>
+</body>
+</html>

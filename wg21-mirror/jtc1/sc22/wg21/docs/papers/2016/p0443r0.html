@@ -1,0 +1,1690 @@
+<table>
+<colgroup>
+<col width="27%" />
+<col width="51%" />
+</colgroup>
+<tbody>
+<tr class="odd">
+<td align="left">Title:</td>
+<td align="left">A Unified Executors Proposal for C++</td>
+</tr>
+<tr class="even">
+<td align="left">Authors:</td>
+<td align="left">Jared Hoberock, jhoberock@nvidia.com</td>
+</tr>
+<tr class="odd">
+<td align="left"></td>
+<td align="left">Michael Garland, mgarland@nvidia.com</td>
+</tr>
+<tr class="even">
+<td align="left"></td>
+<td align="left">Chris Kohlhoff, chris@kohlhoff.com</td>
+</tr>
+<tr class="odd">
+<td align="left"></td>
+<td align="left">Chris Mysen, mysen@google.com</td>
+</tr>
+<tr class="even">
+<td align="left"></td>
+<td align="left">Carter Edwards, hcedwar@sandia.gov</td>
+</tr>
+<tr class="odd">
+<td align="left">Other Contributors:</td>
+<td align="left">Hans Boehm, hboehm@google.com</td>
+</tr>
+<tr class="even">
+<td align="left"></td>
+<td align="left">Gordon Brown, gordon@codeplay.com</td>
+</tr>
+<tr class="odd">
+<td align="left"></td>
+<td align="left">Thomas Heller, thom.heller@gmail.com</td>
+</tr>
+<tr class="even">
+<td align="left"></td>
+<td align="left">Lee Howes, xrikcus@gmail.com</td>
+</tr>
+<tr class="odd">
+<td align="left"></td>
+<td align="left">Hartmut Kaiser, hartmut.kaiser@gmail.com</td>
+</tr>
+<tr class="even">
+<td align="left"></td>
+<td align="left">Bryce Lelbach, brycelelbach@gmail.com</td>
+</tr>
+<tr class="odd">
+<td align="left"></td>
+<td align="left">Gor Nishanov, gorn@microsoft.com</td>
+</tr>
+<tr class="even">
+<td align="left"></td>
+<td align="left">Thomas Rodgers, rodgert@twrodgers.com</td>
+</tr>
+<tr class="odd">
+<td align="left"></td>
+<td align="left">Michael Wong, michael@codeplay.com</td>
+</tr>
+<tr class="even">
+<td align="left">Document Number:</td>
+<td align="left">P0443R0</td>
+</tr>
+<tr class="odd">
+<td align="left">Date:</td>
+<td align="left">2016-10-17</td>
+</tr>
+<tr class="even">
+<td align="left">Reply-to:</td>
+<td align="left">jhoberock@nvidia.com</td>
+</tr>
+<tr class="odd">
+<td align="left">Audience:</td>
+<td align="left">SG1 - Concurrency and Parallelism, SG14 - Low Latency, LEWG</td>
+</tr>
+</tbody>
+</table>
+<h1 id="introduction"><span class="header-section-number">1</span> Introduction</h1>
+<p>This paper describes a programming model for <em>executors</em>, which are modular components for creating execution. Executors decouple control structures from the details of work creation and prevent multiplicative explosion inside control structure implementations. The model proposed by this paper represents what we think is the <em>minimal</em> functionality necessary to compose executors with existing standard control structures such as <code>std::async()</code> and parallel algorithms, as well as near-standards such as the functionality found in various technical specifications, including the Concurrency, Networking, and Parallelism TSes. While this paper's feature set is minimal, it will form the basis for future development of executor features which are out of the scope of a basic proposal.</p>
+<p>Our executor programming model was guided by years of independent design work by various experts. This proposal is the result of harmonizing that work in collaboration with those experts for several months. In particular, our programming model unifies three separate executor design tracks aimed at disparate use cases:</p>
+<ol style="list-style-type: decimal">
+<li>Google's executor model for interfacing with thread pools <a href="http://wg21.link/n4414">N4414</a>,</li>
+<li>Chris Kohlhoff's executor model for the Networking TS <a href="http://wg21.link/n4370">N4370</a>, and</li>
+<li>NVIDIA's executor model for the Parallelism TS <a href="http://wg21.link/p0058">P0058</a>.</li>
+</ol>
+<p>This unified executor proposal serves the use cases of those independent proposals with a single consistent programming model.</p>
+<p><strong>Executor categories.</strong> This proposal categorizes executor types in terms of requirements on those types. An executor type is a member of one or more executor categories if it provides member functions and types with the semantics that those categories require. These categories are used in generic interfaces to communicate the requirements on executors interoperating with them. Such interfaces are already present in the C++ Standard; for example, control structures like <code>std::async()</code>, <code>std::invoke()</code>, and the parallel algorithms library. Other control structures this proposal targets are found in the Concurrency, Networking, and Parallelism TSes.</p>
+<p><strong>Using executors with control structures.</strong> We expect that the primary way that most programmers will interact with executors is by using them as parameters to control structures. When used as a parameter to a control structure, an executor indicates &quot;where&quot; the execution created by the control structure should happen.</p>
+<p>For example, a programmer may create an asynchronous task via <code>async()</code> by providing an executor:</p>
+<pre><code>auto my_task = ...;
+auto my_executor = ...;
+auto fut = async(my_executor, my_task);</code></pre>
+<p>In this example, the executor parameter provides <code>std::async()</code> with explicit requirements concerning how to create the work responsible for executing the task.</p>
+<p>Similarly, a programmer may require that the work created by a parallel algorithm happen &quot;on&quot; an executor:</p>
+<pre><code>auto my_task = ...;
+vector&lt;int&gt; vec = ...;
+auto my_executor = ...;
+for_each(execution::par.on(my_executor), vec.begin(), vec.end(), my_task);</code></pre>
+<p><strong>Executor customization points.</strong> Executor categories require executor types to provide member functions with expected semantics. For example, the executor category <code>OneWayExecutor</code> requires an executor type to provide the member function <code>.execute(f)</code>, which may or may not block its caller pending completion of the function <code>f</code>. As another example, the executor category <code>TwoWayExecutor</code> requires an executor type to provide the member function <code>.async_execute(f)</code>, which returns a future object corresponding to the eventual completion of the function <code>f</code>'s invocation.</p>
+<p>In non-generic contexts, clients of executors may create work by calling the member functions of executors directly:</p>
+<pre><code>template&lt;class Function&gt;
+future&lt;result_of_t&lt;Function()&gt;&gt;
+foo(const simple_two_way_executor&amp; exec, Function f)
+{
+  return exec.async_execute(f);
+}</code></pre>
+<p>However, directly calling executor member functions is impossible in generic contexts where the concrete type of the executor, and therefore the availability of specific member functions, is unknown. To serve these use cases, for each of these special executor member functions, we introduce an executor <a href="http://wg21.link/n4381"><em>customization point</em></a> in namespace <code>execution::</code>. These customization points adapt the given executor in such a way as to guarantee the execution semantics of the customization point even if it is not natively provided by the executor as a member function.</p>
+<p>For example, the customization point <code>execution::async_execute()</code> allows <code>foo()</code> to compose with all executor types:</p>
+<pre><code>template&lt;class Executor, class Function&gt;
+executor_future_t&lt;Executor,result_of_t&lt;Function()&gt;&gt;
+foo(const Executor&amp; exec, Function f)
+{
+  return execution::async_execute(exec, f);
+}</code></pre>
+<p>These customization points allow higher-level control structures and &quot;fancy&quot; executors which adapt the behavior of more primitive executors to manipulate all types of executors uniformly.</p>
+<p><strong>Defining executors.</strong> Programmers may define their own executors by creating a type which satisfies the requirements of one or more executor categories. The following example creates a simple executor fulfilling the requirements of the <code>OneWayExecutor</code> category which logs a message before invoking a function:</p>
+<pre><code>class logging_context
+{
+  public:
+    void log(std::string msg);
+
+    bool operator==(const logging_context&amp; rhs) const noexcept
+    {
+      return this == &amp;rhs;
+    }
+};
+
+class logging_executor
+{
+  public:
+    logging_executor(logging_context&amp; ctx) : context_(ctx) {}
+
+    bool operator==(const logging_executor&amp; rhs) const noexcept
+    {
+      return context() == rhs.context();
+    }
+
+    bool operator!=(const logging_executor&amp; rhs) const noexcept
+    {
+      return !(*this == rhs);
+    }
+
+    const logging_context&amp; context() const noexcept
+    {
+      return context_;
+    }
+
+    template&lt;class Function&gt;
+    void execute(Function&amp;&amp; f) const
+    {
+      context_.log(&quot;executing function&quot;);
+      f();
+    }
+
+  private:
+    mutable logging_context&amp; context_;
+};</code></pre>
+<p>Executors are also useful in insulating non-standard means of creating execution from the surrounding environment. The following example defines an executor fulfilling the requirements of the <code>BulkTwoWayExecutor</code> category which uses OpenMP language extensions to invoke a function a number of times in parallel:</p>
+<pre><code>class omp_executor
+{
+  public:
+    using execution_category = parallel_execution_tag;
+
+    bool operator==(const omp_executor&amp;) const noexcept
+    {
+      return true;
+    }
+
+    bool operator!=(const omp_executor&amp;) const noexcept
+    {
+      return false;
+    }
+
+    const omp_executor&amp; context() const noexcept
+    {
+      return *this;
+    }
+
+    template&lt;class Function, class ResultFactory, class SharedFactory&gt;
+    auto bulk_sync_execute(Function f, size_t n,
+                           ResultFactory result_factory,
+                           SharedFactory shared_factory) const
+    {
+      auto result = result_factory();
+      auto shared_arg = shared_factory();
+
+      #pragma omp parallel for
+      for(size_t i = 0; i &lt; n; ++i)
+      {
+        f(i, result, shared_arg);
+      }
+
+      return result;
+    }
+};</code></pre>
+<h2 id="conceptual-elements"><span class="header-section-number">1.1</span> Conceptual Elements</h2>
+<p><strong>Instruction Stream:</strong> Code to be run in a form appropriate for the target execution architecture.</p>
+<p><strong>Execution Architecture:</strong> Denotes the target architecture for an instruction stream. The instruction stream defined by the <em>main</em> entry point and associated global object initialization instruction streams is the <em>host process</em> execution architecture. Other possible target execution architectures include attached accelerators such as GPU, remote procedure call (RPC), and database management system (DBMS) servers. The execution architecture may impose architecture-specific constraints and provides architecture-specific facilities for an instruction stream.</p>
+<p><strong>Execution Resource:</strong> An instance of an execution architecture that is capable of running an instruction stream targeting that architecture. Examples include a collection of <code>std::thread</code> within the host process that are bound to particular cores, GPU CUDA stream, an RPC server, a DBMS server. Execution resources typically have weak <em>locality</em> properties both with respect to one another and with respect to memory resources. For example, cores within a non-uniform memory access (NUMA) region are <em>more local</em> to each other than cores in different NUMA regions and hyperthreads within a single core are more local to each other than hyperthreads in different cores.</p>
+<p><strong>Execution Agent:</strong> An instruction stream is run by an execution agent on an execution resource. An execution agent may be <em>lightweight</em> in that its existance is only observable while the instruction stream is running. As such a lightweight execution agent may come into existence when the instruction stream starts running and cease to exist when the instruction stream ends.</p>
+<p><strong>Execution Context:</strong> The mapping of execution agents to execution resources.</p>
+<p><strong>Execution Function:</strong> The binding of an instruction stream to one or more execution agents. The instruction stream of a parallel algorithm may be bound to multiple execution agents that can run concurrently on an execution resource. An instruction stream's entry and return interface conforms to a specification defined by an execution function. An execution function targets a specific execution architecture.</p>
+<p><strong>Executor:</strong> Provides execution functions for running instruction streams on an particular, observable execution resource. A particular executor targets a particular execution architecture.</p>
+<h1 id="proposed-wording"><span class="header-section-number">2</span> Proposed Wording</h1>
+<h3 id="header-execution-synopsis"><span class="header-section-number">2.0.1</span> Header <code>&lt;execution&gt;</code> synopsis</h3>
+<pre><code>namespace std {
+namespace experimental {
+inline namespace concurrency_v2 {
+namespace execution {
+
+  // Executor type traits:
+
+  template&lt;class T&gt; struct is_one_way_executor;
+  template&lt;class T&gt; struct is_host_based_one_way_executor;
+  template&lt;class T&gt; struct is_non_blocking_one_way_executor;
+  template&lt;class T&gt; struct is_bulk_one_way_executor;
+  template&lt;class T&gt; struct is_two_way_executor;
+  template&lt;class T&gt; struct is_bulk_two_way_executor;
+
+  template&lt;class T&gt; constexpr bool is_one_way_executor_v = is_one_way_executor&lt;T&gt;::value;
+  template&lt;class T&gt; constexpr bool is_host_based_one_way_executor_v = is_host_based_one_way_executor&lt;T&gt;::value;
+  template&lt;class T&gt; constexpr bool is_non_blocking_one_way_executor_v = is_non_blocking_one_way_executor&lt;T&gt;::value;
+  template&lt;class T&gt; constexpr bool is_bulk_one_way_executor_v = is_bulk_one_way_executor&lt;T&gt;::value;
+  template&lt;class T&gt; constexpr bool is_two_way_executor_v = is_two_way_executor&lt;T&gt;::value;
+  template&lt;class T&gt; constexpr bool is_bulk_two_way_executor_v = is_bulk_two_way_executor&lt;T&gt;::value;
+
+  template&lt;class Executor&gt; struct executor_context;
+
+  template&lt;class Executor&gt;
+    using executor_context_t = typename executor_context&lt;Executor&gt;::type;
+
+  template&lt;class Executor, class T&gt; struct executor_future;
+
+  template&lt;class Executor, class T&gt;
+    using executor_future_t = typename executor_future&lt;Executor, T&gt;::type;
+
+  // Bulk executor traits:
+
+  struct sequenced_execution_tag {};
+  struct parallel_execution_tag {};
+  struct unsequenced_execution_tag {};
+
+  // TODO a future proposal can define this category
+  // struct concurrent_execution_tag {};
+
+  template&lt;class Executor&gt; struct executor_execution_category;
+
+  template&lt;class Executor&gt;
+    using executor_execution_category_t = typename executor_execution_category&lt;Executor&gt;::type;
+
+  template&lt;class Executor&gt; struct executor_shape;
+
+  template&lt;class Executor&gt;
+    using executor_shape_t = typename executor_shape&lt;Executor&gt;::type;
+
+  template&lt;class Executor&gt; struct executor_index;
+
+  template&lt;class Executor&gt;
+    using executor_index_t = typename executor_index&lt;Executor&gt;::type;
+
+  // Executor customization points:
+
+  template&lt;class OneWayExecutor, class Function&gt;
+    void execute(const OneWayExecutor&amp; exec, Function&amp;&amp; f);
+
+  template&lt;class NonBlockingOneWayExecutor, class Function&gt;
+    void post(const NonBlockingOneWayExecutor&amp; exec, Function&amp;&amp; f);
+
+  template&lt;class NonBlockingOneWayExecutor, class Function&gt;
+    void defer(const NonBlockingOneWayExecutor&amp; exec, Function&amp;&amp; f);
+
+  template&lt;class TwoWayExecutor, class Function&gt;
+    result_of_t&lt;decay_t&lt;Function&gt;()&gt;
+      sync_execute(const TwoWayExecutor&amp; exec, Function&amp;&amp; f);
+  template&lt;class OneWayExecutor, class Function&gt;
+    result_of_t&lt;decay_t&lt;Function&gt;()&gt;
+      sync_execute(const OneWayExecutor&amp; exec, Function&amp;&amp; f);
+
+  template&lt;class TwoWayExecutor, class Function&gt;
+    executor_future_t&lt;TwoWayExecutor, result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+      async_execute(const TwoWayExecutor&amp; exec, Function&amp;&amp; f);
+  template&lt;class Executor, class Function&gt;
+    std::future&lt;decay_t&lt;result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+      async_execute(const Executor&amp; exec, Function&amp;&amp; f);
+
+  template&lt;class NonBlockingTwoWayExecutor, class Function&gt;
+    executor_future_t&lt;NonBlockingTwoWayExecutor, result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+      async_post(const NonBlockingTwoWayExecutor&amp; exec, Function&amp;&amp; f);
+  template&lt;class NonBlockingOneWayExecutor, class Function&gt;
+    std::future&lt;decay_t&lt;result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+      async_post(const NonBlockingOneWayExecutor&amp; exec, Function&amp;&amp; f);
+
+  template&lt;class NonBlockingTwoWayExecutor, class Function&gt;
+    executor_future_t&lt;NonBlockingTwoWayExecutor, result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+      async_defer(const NonBlockingTwoWayExecutor&amp; exec, Function&amp;&amp; f);
+  template&lt;class NonBlockingOneWayExecutor, class Function&gt;
+    std::future&lt;decay_t&lt;result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+      async_defer(const NonBlockingOneWayExecutor&amp; exec, Function&amp;&amp; f);
+
+  template&lt;class TwoWayExecutor, class Function, class Future&gt;
+    executor_future_t&lt;TwoWayExecutor, see-below&gt;
+      then_execute(const TwoWayExecutor&amp; exec, Function&amp;&amp; f, Future&amp; predecessor);
+  template&lt;class OneWayExecutor, class Function, class Future&gt;
+    executor_future_t&lt;OneWayExecutor, see-below&gt;
+      then_execute(const OneWayExecutor&amp; exec, Function&amp;&amp; f, Future&amp; predecessor);
+
+  template&lt;class BulkOneWayExecutor, class Function1, class Function2&gt;
+    void bulk_execute(const BulkOneWayExecutor&amp; exec, Function1 f,
+                      executor_shape_t&lt;BulkOneWayExecutor&gt; shape,
+                      Function2 shared_factory);
+  template&lt;class OneWayExecutor, class Function1, class Function2&gt;
+    void bulk_execute(const OneWayExecutor&amp; exec, Function1 f,
+                      executor_shape_t&lt;OneWayExecutor&gt; shape,
+                      Function2 shared_factory);
+
+  template&lt;class BulkTwoWayExecutor, class Function1, class Function2, class Function3&gt;
+    result_of_t&lt;Function2()&gt;
+      bulk_sync_execute(const BulkTwoWayExecutor&amp; exec, Function1 f,
+                        executor_shape_t&lt;BulkTwoWayExecutor&gt; shape,
+                        Function2 result_factory, Function3 shared_factory);
+  template&lt;class OneWayExecutor, class Function1, class Function2, class Function3&gt;
+    result_of_t&lt;Function2()&gt;
+      bulk_sync_execute(const OneWayExecutor&amp; exec, Function1 f,
+                        executor_shape_t&lt;OneWayExecutor&gt; shape,
+                        Function2 result_factory, Function3 shared_factory);
+
+  template&lt;class BulkTwoWayExecutor, class Function1, class Function2, class Function3&gt;
+    executor_future_t&lt;const BulkTwoWayExecutor, result_of_t&lt;Function2()&gt;&gt;
+      bulk_async_execute(const BulkTwoWayExecutor&amp; exec, Function1 f,
+                         executor_shape_t&lt;BulkTwoWayExecutor&gt; shape,
+                         Function2 result_factory, Function3 shared_factory);
+  template&lt;class OneWayExecutor, class Function1, class Function2, class Function3&gt;
+    executor_future_t&lt;const OneWayExecutor, result_of_t&lt;Function2()&gt;&gt;
+      bulk_async_execute(const OneWayExecutor&amp; exec, Function1 f,
+                         executor_shape_t&lt;OneWayExecutor&gt; shape,
+                         Function2 result_factory, Function3 shared_factory);
+
+  template&lt;class BulkTwoWayExecutor, class Function1, class Future, class Function2, class Function3&gt;
+    executor_future_t&lt;Executor, result_of_t&lt;Function2()&gt;&gt;
+      bulk_then_execute(const BulkTwoWayExecutor&amp; exec, Function1 f,
+                        executor_shape_t&lt;BulkTwoWayExecutor&gt; shape,
+                        Future&amp; predecessor,
+                        Function2 result_factory, Function3 shared_factory);
+  template&lt;class OneWayExecutor, class Function1, class Future, class Function2, class Function3&gt;
+    executor_future_t&lt;OneWayExecutor, result_of_t&lt;Function2()&gt;&gt;
+      bulk_then_execute(const OneWayExecutor&amp; exec, Function1 f,
+                        executor_shape_t&lt;OneWayExecutor&gt; shape,
+                        Future&amp; predecessor,
+                        Function2 result_factory, Function3 shared_factory);
+
+  // Executor work guard:
+
+  template &lt;class Executor&gt;
+    class executor_work_guard;
+
+  // Polymorphic executor wrappers:
+
+  class one_way_executor;
+  class host_based_one_way_executor;
+  class non_blocking_one_way_executor;
+  class two_way_executor;
+  class non_blocking_two_way_executor;
+
+} // namespace execution
+} // inline namespace concurrency_v2
+} // namespace experimental
+} // namespace std</code></pre>
+<h2 id="requirements"><span class="header-section-number">2.1</span> Requirements</h2>
+<h3 id="future-requirements"><span class="header-section-number">2.1.1</span> <code>Future</code> requirements</h3>
+<p>A type <code>F</code> meets the future requirements for some value type <code>T</code> if <code>F</code> is... <em>Requirements to be defined. Futures must provide <code>get</code>, <code>wait</code>, <code>then</code>, etc.</em></p>
+<h3 id="protoallocator-requirements"><span class="header-section-number">2.1.2</span> <code>ProtoAllocator</code> requirements</h3>
+<p>A type <code>A</code> meets the proto-allocator requirements if <code>A</code> is <code>CopyConstructible</code> (C++Std [copyconstructible]), <code>Destructible</code> (C++Std [destructible]), and <code>allocator_traits&lt;A&gt;::rebind_alloc&lt;U&gt;</code> meets the allocator requirements (C++Std [allocator.requirements]), where <code>U</code> is an object type. [<em>Note:</em> For example, <code>std::allocator&lt;void&gt;</code> meets the proto-allocator requirements but not the allocator requirements. <em>--end note</em>] No comparison operator, copy operation, move operation, or swap operation on these types shall exit via an exception.</p>
+<h3 id="executioncontext-requirements"><span class="header-section-number">2.1.3</span> <code>ExecutionContext</code> requirements</h3>
+<p>A type meets the <code>ExecutionContext</code> requirements if it satisfies the <code>EqualityComparable</code> requirements (C++Std [equalitycomparable]). No comparison operator on these types shall exit via an exception.</p>
+<h3 id="baseexecutor-requirements"><span class="header-section-number">2.1.4</span> <code>BaseExecutor</code> requirements</h3>
+<p>A type <code>X</code> meets the <code>BaseExecutor</code> requirements if it satisfies the requirements of <code>CopyConstructible</code> (C++Std [copyconstructible]), <code>Destructible</code> (C++Std [destructible]), and <code>EqualityComparable</code> (C++Std [equalitycomparable]), as well as the additional requirements listed below.</p>
+<p>No comparison operator, copy operation, move operation, swap operation, or member function <code>context</code> on these types shall exit via an exception.</p>
+<p>The executor copy constructor, comparison operators, and other member functions defined in these requirements shall not introduce data races as a result of concurrent calls to those functions from different threads.</p>
+<p>The destructor shall not block pending completion of the submitted function objects. [<em>Note:</em> The ability to wait for completion of submitted function objects may be provided by the associated execution context. <em>--end note</em>]</p>
+<p>In the Table  below, <code>x1</code> and <code>x2</code> denote (possibly const) values of type <code>X</code>, <code>mx1</code> denotes an xvalue of type <code>X</code>, and <code>u</code> denotes an identifier.</p>
+<table>
+<caption>(Base executor requirements) </caption>
+<thead>
+<tr class="header">
+<th align="left">Expression</th>
+<th align="left">Type</th>
+<th align="left">Assertion/note/pre-/post-condition</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left"><code>X u(x1);</code></td>
+<td align="left"></td>
+<td align="left">Shall not exit via an exception. <br/><br/><em>Post:</em> <code>u == x1</code> and <code>u.context() == x1.context()</code>.</td>
+</tr>
+<tr class="even">
+<td align="left"><code>X u(mx1);</code></td>
+<td align="left"></td>
+<td align="left">Shall not exit via an exception. <br/><br/><em>Post:</em> <code>u</code> equals the prior value of <code>mx1</code> and <code>u.context()</code> equals the prior value of <code>mx1.context()</code>.</td>
+</tr>
+<tr class="odd">
+<td align="left"><code>x1 == x2</code></td>
+<td align="left"><code>bool</code></td>
+<td align="left">Returns <code>true</code> only if <code>x1</code> and <code>x2</code> can be interchanged with identical effects in any of the expressions defined in these type requirements (TODO and the other executor requirements defined in this Technical Specification). [<em>Note:</em> Returning <code>false</code> does not necessarily imply that the effects are not identical. <em>--end note</em>] <code>operator==</code> shall be reflexive, symmetric, and transitive, and shall not exit via an exception.</td>
+</tr>
+<tr class="even">
+<td align="left"><code>x1 != x2</code></td>
+<td align="left"><code>bool</code></td>
+<td align="left">Same as <code>!(x1 == x2)</code>.</td>
+</tr>
+<tr class="odd">
+<td align="left"><code>x1.context()</code></td>
+<td align="left"><code>E&amp;</code> or <code>const E&amp;</code> where <code>E</code> is a type that satisfies the <code>ExecutionContext</code> requirements.</td>
+<td align="left">Shall not exit via an exception. The comparison operators and member functions defined in these requirements (TODO and the other executor requirements defined in this Technical Specification) shall not alter the reference returned by this function.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="onewayexecutor-requirements"><span class="header-section-number">2.1.5</span> <code>OneWayExecutor</code> requirements</h3>
+<p>The <code>OneWayExecutor</code> requirements form the basis of the one-way executor concept taxonomy. This set of requirements specifies operations for creating execution agents that need not synchronize with the thread which created them.</p>
+<p>A type <code>X</code> satisfies the <code>OneWayExecutor</code> requirements if it satisfies the <code>BaseExecutor</code> requirements, as well as the additional requirements listed below.</p>
+<p>The executor copy constructor, comparison operators, and other member functions defined in these requirements shall not introduce data races as a result of concurrent calls to those functions from different threads.</p>
+<p>In the Table  below, <code>x</code> denotes a (possibly const) value of type <code>X</code>, and <code>f</code> denotes a function object of type <code>F&amp;&amp;</code> callable as <code>DECAY_COPY(std::forward&lt;F&gt;(f))()</code> and where <code>decay_t&lt;F&gt;</code> satisfies the <code>MoveConstructible</code> requirements.</p>
+<table>
+<caption>(One-way executor requirements) </caption>
+<thead>
+<tr class="header">
+<th align="left">Expression</th>
+<th align="left">Return Type</th>
+<th align="left">Operational semantics</th>
+<th align="left">Assertion/note/ pre-/post-condition</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left"><code>x.execute(f)</code></td>
+<td align="left"></td>
+<td align="left">Creates a weakly parallel execution agent which invokes <code>DECAY_COPY( std::forward&lt;F&gt;(f))()</code> at most once, with the call to <code>DECAY_COPY</code> being evaluated in the thread that called <code>execute</code>. <br/><br/>May block forward progress of the caller until <code>DECAY_COPY( std::forward&lt;F&gt;(f))()</code> finishes execution.</td>
+<td align="left"><em>Synchronization:</em> The invocation of <code>execute</code> synchronizes with (C++Std [intro.multithread]) the invocation of <code>f</code>.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="hostbasedonewayexecutor-requirements"><span class="header-section-number">2.1.6</span> <code>HostBasedOneWayExecutor</code> requirements</h3>
+<p>The <code>HostBasedOneWayExecutor</code> requirements form the basis of host-based executors in the one-way executor concept taxonomy. <em>TODO:</em> description of what host-based means, i.e. as if executed in a <code>std::thread</code>, but without the requirement for separate thread-local storage or a unique thread ID.</p>
+<p>A type <code>X</code> satisfies the <code>HostBasedOneWayExecutor</code> requirements if it satisfies the <code>OneWayExecutor</code> requirements, as well as the additional requirements listed below.</p>
+<p>The executor copy constructor, comparison operators, and other member functions defined in these requirements shall not introduce data races as a result of concurrent calls to those functions from different threads.</p>
+<p>In the Table  below, <code>x</code> denotes a (possibly const) value of type <code>X</code>, <code>f</code> denotes a function object of type <code>F&amp;&amp;</code> callable as <code>DECAY_COPY(std::forward&lt;F&gt;(f))()</code> and where <code>decay_t&lt;F&gt;</code> satisfies the <code>MoveConstructible</code> requirements, and <code>a</code> denotes a (possibly const) value of type <code>A</code> satisfying the <code>ProtoAllocator</code> requirements.</p>
+<table>
+<caption>(Host-based one-way executor requirements) </caption>
+<thead>
+<tr class="header">
+<th align="left">Expression</th>
+<th align="left">Return Type</th>
+<th align="left">Operational semantics</th>
+<th align="left">Assertion/note/ pre-/post-condition</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left"><code>x.execute(f)</code> <br/><code>x.execute(f,a)</code></td>
+<td align="left"></td>
+<td align="left">Creates a parallel execution agent which invokes <code>DECAY_COPY( std::forward&lt;F&gt;(f))()</code> at most once, with the call to <code>DECAY_COPY</code> being evaluated in the thread that called <code>execute</code>. <br/><br/>May block forward progress of the caller until <code>DECAY_COPY( std::forward&lt;F&gt;(f))()</code> finishes execution. <br/><br/>Executor implementations should use the supplied allocator (if any) to allocate any memory required to store the function object. Prior to invoking the function object, the executor shall deallocate any memory allocated. [<em>Note:</em> Executors defined in this Technical Specification always use the supplied allocator unless otherwise specified. <em>--end note</em>]</td>
+<td align="left"><em>Synchronization:</em> The invocation of <code>execute</code> synchronizes with (C++Std [intro.multithread]) the invocation of <code>f</code>.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="nonblockingonewayexecutor-requirements"><span class="header-section-number">2.1.7</span> <code>NonBlockingOneWayExecutor</code> requirements</h3>
+<p>The <code>NonBlockingOneWayExecutor</code> requirements add one-way operations that are guaranteed not to block the caller pending completion of submitted function objects.</p>
+<p>A type <code>X</code> satisfies the <code>NonBlockingOneWayExecutor</code> requirements if it satisfies the <code>HostBasedOneWayExecutor</code> requirements, as well as the additional requirements listed below.</p>
+<p>The executor copy constructor, comparison operators, and other member functions defined in these requirements shall not introduce data races as a result of concurrent calls to those functions from different threads.</p>
+<p>In the Table  below, <code>x</code> denotes a (possibly const) value of type <code>X</code>, <code>f</code> denotes a function object of type <code>F&amp;&amp;</code> callable as <code>DECAY_COPY(std::forward&lt;F&gt;(f))()</code> and where <code>decay_t&lt;F&gt;</code> satisfies the <code>MoveConstructible</code> requirements, and <code>a</code> denotes a (possibly const) value of type <code>A</code> satisfying the <code>ProtoAllocator</code> requirements.</p>
+<table>
+<caption>(Non-blocking one-way executor requirements) </caption>
+<thead>
+<tr class="header">
+<th align="left">Expression</th>
+<th align="left">Return Type</th>
+<th align="left">Operational semantics</th>
+<th align="left">Assertion/note/ pre-/post-condition</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left"><code>x.post(f)</code> <br/><code>x.post(f,a)</code> <br/><code>x.defer(f)</code> <br/><code>x.defer(f,a)</code></td>
+<td align="left"></td>
+<td align="left">Creates a parallel execution agent which invokes <code>DECAY_COPY( std::forward&lt;F&gt;(f))()</code> at most once, with the call to <code>DECAY_COPY</code> being evaluated in the thread that called <code>post</code> or <code>defer</code>. <br/><br/>Shall not block forward progress of the caller pending completion of <code>DECAY_COPY( std::forward&lt;F&gt;(f))()</code>. <br/><br/>Executor implementations should use the supplied allocator (if any) to allocate any memory required to store the function object. Prior to invoking the function object, the executor shall deallocate any memory allocated. [<em>Note:</em> Executors defined in this Technical Specification always use the supplied allocator unless otherwise specified. <em>--end note</em>]</td>
+<td align="left"><em>Synchronization:</em> The invocation of <code>post</code> or <code>defer</code> synchronizes with (C++Std [intro.multithread]) the invocation of <code>f</code>. <br/><br/><em>Note:</em> Although the requirements placed on <code>defer</code> are identical to <code>post</code>, the use of <code>post</code> conveys a preference that the caller does not block the first step of <code>f</code>'s progress, whereas <code>defer</code> conveys a preference that the caller does block the first step of <code>f</code>. One use of <code>defer</code> is to convey the intention of the caller that <code>f</code> is a continuation of the current call context. The executor may use this information to optimize or otherwise adjust the way in which <code>f</code> is invoked.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="twowayexecutor-requirements"><span class="header-section-number">2.1.8</span> <code>TwoWayExecutor</code> requirements</h3>
+<p>The <code>TwoWayExecutor</code> requirements form the basis of the two-way executor concept taxonomy; every two-way executor satisfies the <code>TwoWayExecutor</code> requirements. This set of requirements specifies operations for creating execution agents that synchronize with the thread which created them.</p>
+<p>In the Table  below, <code>f</code>, denotes a <code>MoveConstructible</code> function object with zero arguments whose result type is <code>R</code>, and <code>x</code> denotes an object of type <code>X</code>.</p>
+<p>A type <code>X</code> satisfies the <code>TwoWayExecutor</code> requirements if: * <code>X</code> satisfies the <code>BaseExecutor</code> requirements. * For any <code>f</code> and <code>x</code>, the expressions in Table  are valid and have the indicated semantics.</p>
+<table>
+<caption>(Two-Way Executor requirements) </caption>
+<thead>
+<tr class="header">
+<th align="left">Expression</th>
+<th align="left">Return Type</th>
+<th align="left">Operational semantics</th>
+<th align="left">Assertion/note/ pre-/post-condition</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left"><code>x.async_</code>- <code>execute(std::move(f))</code></td>
+<td align="left">A type that satisfies the <code>Future</code> requirements for the value type <code>R</code>.</td>
+<td align="left">Creates an execution agent which invokes <code>f()</code>. <br/>Returns the result of <code>f()</code> via the resulting future object. <br/>Returns any exception thrown by <code>f()</code> via the resulting future object. <br/>May block forward progress of the caller pending completion of <code>f()</code>.</td>
+<td align="left"></td>
+</tr>
+<tr class="even">
+<td align="left"><code>x.sync_</code>- <code>execute(std::move(f))</code></td>
+<td align="left"><code>R</code></td>
+<td align="left">Creates an execution agent which invokes <code>f()</code>. <br/>Returns the result of <code>f()</code>. <br/>Throws any exception thrown by <code>f()</code>.</td>
+<td align="left"></td>
+</tr>
+</tbody>
+</table>
+<h3 id="nonblockingtwowayexecutor-requirements"><span class="header-section-number">2.1.9</span> <code>NonBlockingTwoWayExecutor</code> requirements</h3>
+<p>The <code>NonBlockingOneWayExecutor</code> requirements add two-way operations that are guaranteed not to block the caller pending completion of submitted function objects.</p>
+<p>In the Table  below, <code>f</code>, denotes a <code>MoveConstructible</code> function object with zero arguments whose result type is <code>R</code>, and <code>x</code> denotes an object of type <code>X</code>.</p>
+<p>A type <code>X</code> satisfies the <code>NonBlockingTwoWayExecutor</code> requirements if:</p>
+<ul>
+<li><code>X</code> satisfies the <code>TwoWayExecutor</code> requirements.</li>
+<li>For any <code>f</code> and <code>x</code>, the expressions in Table  are valid and have the indicated semantics.</li>
+</ul>
+<table>
+<caption>(Non-Blocking Two-Way Executor requirements) </caption>
+<thead>
+<tr class="header">
+<th align="left">Expression</th>
+<th align="left">Return Type</th>
+<th align="left">Operational semantics</th>
+<th align="left">Assertion/note/ pre-/post-condition</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left"><code>x.async_</code>- <code>post(std::move(f))</code> <br/><code>x.async_</code>- <code>defer(std::move(f))</code></td>
+<td align="left"><code>executor_</code>- <code>future_t&lt;X,R&gt;</code></td>
+<td align="left">Creates an execution agent which invokes <code>f()</code>. <br/>Returns the result of <code>f()</code> via the resulting future object. <br/>Returns any exception thrown by <code>f()</code> via the resulting future object. <br/>Shall not block forward progress of the caller pending completion of <code>f()</code>.</td>
+<td align="left"></td>
+</tr>
+</tbody>
+</table>
+<h3 id="bulkonewayexecutor-requirements"><span class="header-section-number">2.1.10</span> <code>BulkOneWayExecutor</code> requirements</h3>
+<p>The <code>BulkOneWayExecutor</code> requirements form the basis of the bulk one-way executor concept. This set of requirements specifies operations for creating groups of execution agents in bulk from a single operation which need not synchronize with another thread.</p>
+<p>In the Table  below,</p>
+<ul>
+<li><code>f</code> denotes a <code>CopyConstructible</code> function object with three arguments,</li>
+<li><code>n</code> denotes a shape object whose type is <code>executor_shape_t&lt;X&gt;</code>.</li>
+<li><code>sf</code> denotes a <code>CopyConstructible</code> function object with one argument whose result type is <code>S</code>,</li>
+<li><code>i</code> denotes an object whose type is <code>executor_index_t&lt;X&gt;</code>, and</li>
+<li><code>s</code> denotes an object whose type is <code>S</code>.</li>
+</ul>
+<p>A class <code>X</code> satisfies the requirements of a bulk one-way executor if <code>X</code> satisfies either the <code>OneWayExecutor</code> or <code>TwoWayExecutor</code> requirements and the expressions of Table  are valid and have the indicated semantics.</p>
+<table>
+<caption>(Bulk one-way executor requirements) </caption>
+<thead>
+<tr class="header">
+<th align="left">Expression</th>
+<th align="left">Return Type</th>
+<th align="left">Operational semantics</th>
+<th align="left">Assertion/note/ pre-/post-condition</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left"><code>x.bulk_</code>- <code>execute(f, n, sf)</code></td>
+<td align="left"><code>void</code></td>
+<td align="left">Creates a group of execution agents of shape <code>n</code> which invoke <code>f(i, s)</code>. <br/>This group of execution agents shall fulfill the forward progress requirements of <code>executor_execution_</code>- <code>category_t&lt;X&gt;</code></td>
+<td align="left">Effects: invokes <code>sf(n)</code> on an unspecified execution agent.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="bulktwowayexecutor-requirements"><span class="header-section-number">2.1.11</span> <code>BulkTwoWayExecutor</code> requirements</h3>
+<p>The <code>BulkTwoWayExecutor</code> requirements form the basis of the bulk two-way executor concept. This set of requirements specifies operations for creating groups of execution agents in bulk from a single operation with the ability to synchronize these groups of agents with another thread.</p>
+<p>In the Table  below,</p>
+<ul>
+<li><code>f</code> denotes a <code>CopyConstructible</code> function object with three arguments,</li>
+<li><code>n</code> denotes a shape object whose type is <code>executor_shape_t&lt;X&gt;</code>.</li>
+<li><code>rf</code> denotes a <code>CopyConstructible</code> function object with one argument whose result type is <code>R</code>,</li>
+<li><code>sf</code> denotes a <code>CopyConstructible</code> function object with one argument whose result type is <code>S</code>,</li>
+<li><code>i</code> denotes an object whose type is <code>executor_index_t&lt;X&gt;</code>,</li>
+<li><code>r</code> denotes an object whose type is <code>R</code>,</li>
+<li><code>s</code> denotes an object whose type is <code>S</code>, and</li>
+<li><code>pred</code> denotes a future object whose result is <code>pr</code>.</li>
+</ul>
+<p>A class <code>X</code> satisfies the requirements of a bulk two-way executor if <code>X</code> satisfies either the <code>OneWayExecutor</code> or <code>TwoWayExecutor</code> requirements and the expressions of Table  are valid and have the indicated semantics.</p>
+<table>
+<caption>(Bulk two-way executor requirements) </caption>
+<thead>
+<tr class="header">
+<th align="left">Expression</th>
+<th align="left">Return Type</th>
+<th align="left">Operational semantics</th>
+<th align="left">Assertion/note/ pre-/post-condition</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left"><code>x.bulk_sync_</code>- <code>execute(f, n, rf, sf)</code></td>
+<td align="left"><code>R</code></td>
+<td align="left">Creates a group of execution agents of shape <code>n</code> which invoke <code>f(i, r, s)</code>. <br/>This group of execution agents shall fulfill the forward progress requirements of <code>executor_execution_</code>- <code>category_t&lt;X&gt;</code>. <br/>Returns the result of <code>rf(n)</code>.</td>
+<td align="left">Note: blocks the forward progress of the caller until all invocations of <code>f</code> are finished. <br/>Effects: invokes <code>rf(n)</code> on an unspecified execution agent. <br/>Effects: invokes <code>sf(n)</code> on an unspecified execution agent.</td>
+</tr>
+<tr class="even">
+<td align="left"><code>x.bulk_async_</code>- <code>execute(f, n, rf, sf)</code></td>
+<td align="left"><code>executor_</code>- <code>future_t&lt;X,R&gt;</code></td>
+<td align="left">Creates a group of execution agents of shape <code>n</code> which invoke <code>f(i, r, s)</code>. <br/>This group of execution agents shall fulfill the forward progress requirements of <code>executor_execution_</code>- <code>category_t&lt;X&gt;</code>. </br>Asynchronously returns the result of <code>rf(n)</code> via the resulting future object.</td>
+<td align="left">Effects: invokes <code>rf(n)</code> on an unspecified execution agent. <br/>Effects: invokes <code>sf(n)</code> on an unspecified execution agent.</td>
+</tr>
+<tr class="odd">
+<td align="left"><code>x.bulk_then_</code>- <code>execute(f, n, rf, pred, sf)</code></td>
+<td align="left"><code>executor_</code>- <code>future_t&lt;X,R&gt;</code></td>
+<td align="left">Creates a group of execution agents of shape <code>n</code> which invoke <code>f(i, r, pr, s)</code> after <code>pred</code> becomes ready. <br/>This group of execution agents shall fulfill the forward progress requirements of <code>executor_execution_</code>- <code>category_t&lt;X&gt;</code>. <br/>Asynchronously returns the result of <code>rf(n)</code> via the resulting future.</td>
+<td align="left">Effects: invokes <code>rf(n)</code> on an unspecified execution agent. <br/>Effects: invokes <code>sf(n)</code> on an unspecified execution agent. <br/>If <code>pred</code>'s result type is <code>void</code>, <code>pr</code> is omitted from <code>f</code>'s invocation.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="executorworktracker-requirements"><span class="header-section-number">2.1.12</span> <code>ExecutorWorkTracker</code> requirements</h3>
+<p>The <code>ExecutorWorkTracker</code> requirements defines operations for tracking future work against an executor.</p>
+<p>A type <code>X</code> meets the <code>ExecutorWorkTracker</code> requirements if it satisfies the requirements of <code>CopyConstructible</code> (C++Std [copyconstructible]) and <code>Destructible</code> (C++Std [destructible]), as well as the additional requirements listed below.</p>
+<p>No constructor, comparison operator, copy operation, move operation, swap operation, or member functions <code>on_work_started</code> and <code>on_work_finished</code> on these types shall exit via an exception.</p>
+<p>The executor copy constructor, comparison operators, and other member functions defined in these requirements shall not introduce data races as a result of concurrent calls to those functions from different threads.</p>
+<p>In the Table  below, <code>x</code> denotes an object of type <code>X</code>,</p>
+<table>
+<caption>(Executor Work Tracker requirements) </caption>
+<thead>
+<tr class="header">
+<th align="left">Expression</th>
+<th align="left">Return Type</th>
+<th align="left">Assertion/note/pre-/post-condition</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left"><code>x.on_work_started()</code></td>
+<td align="left"><code>bool</code></td>
+<td align="left">Shall not exit via an exception.</td>
+</tr>
+<tr class="even">
+<td align="left"><code>x.on_work_finished()</code></td>
+<td align="left"></td>
+<td align="left">Shall not exit via an exception. Precondition: A corresponding preceding call to <code>on_work_started</code> that returned <code>true</code>.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="executor-type-traits"><span class="header-section-number">2.2</span> Executor type traits</h2>
+<h3 id="determining-that-an-executor-satisfies-the-executor-requirements"><span class="header-section-number">2.2.1</span> Determining that an executor satisfies the executor requirements</h3>
+<pre><code>template&lt;class T&gt; struct is_one_way_executor;
+template&lt;class T&gt; struct is_host_based_one_way_executor;
+template&lt;class T&gt; struct is_non_blocking_one_way_executor;
+template&lt;class T&gt; struct is_bulk_one_way_executor;
+template&lt;class T&gt; struct is_two_way_executor;
+template&lt;class T&gt; struct is_bulk_two_way_executor;</code></pre>
+<p>This sub-clause contains templates that may be used to query the properties of a type at compile time. Each of these templates is a UnaryTypeTrait (C++Std [meta.rqmts]) with a BaseCharacteristic of <code>true_type</code> if the corresponding condition is true, otherwise <code>false_type</code>.</p>
+<table>
+<thead>
+<tr class="header">
+<th align="left">Template</th>
+<th align="left">Condition</th>
+<th align="left">Preconditions</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left"><code>template&lt;class T&gt;</code> <br/><code>struct is_one_way_executor</code></td>
+<td align="left"><code>T</code> meets the syntactic requirements for <code>OneWayExecutor</code>.</td>
+<td align="left"><code>T</code> is a complete type.</td>
+</tr>
+<tr class="even">
+<td align="left"><code>template&lt;class T&gt;</code> <br/><code>struct is_host_based_one_way_executor</code></td>
+<td align="left"><code>T</code> meets the syntactic requirements for <code>HostBasedOneWayExecutor</code>.</td>
+<td align="left"><code>T</code> is a complete type.</td>
+</tr>
+<tr class="odd">
+<td align="left"><code>template&lt;class T&gt;</code> <br/><code>struct is_non_blocking_one_way_executor</code></td>
+<td align="left"><code>T</code> meets the syntactic requirements for <code>NonBlockingOneWayExecutor</code>.</td>
+<td align="left"><code>T</code> is a complete type.</td>
+</tr>
+<tr class="even">
+<td align="left"><code>template&lt;class T&gt;</code> <br/><code>struct is_bulk_one_way_executor</code></td>
+<td align="left"><code>T</code> meets the syntactic requirements for <code>BulkOneWayExecutor</code>.</td>
+<td align="left"><code>T</code> is a complete type.</td>
+</tr>
+<tr class="odd">
+<td align="left"><code>template&lt;class T&gt;</code> <br/><code>struct is_two_way_executor</code></td>
+<td align="left"><code>T</code> meets the syntactic requirements for <code>TwoWayExecutor</code>.</td>
+<td align="left"><code>T</code> is a complete type.</td>
+</tr>
+<tr class="even">
+<td align="left"><code>template&lt;class T&gt;</code> <br/><code>struct is_non_blocking_two_way_executor</code></td>
+<td align="left"><code>T</code> meets the syntactic requirements for <code>NonBlockingTwoWayExecutor</code>.</td>
+<td align="left"><code>T</code> is a complete type.</td>
+</tr>
+<tr class="odd">
+<td align="left"><code>template&lt;class T&gt;</code> <br/><code>struct is_bulk_two_way_executor</code></td>
+<td align="left"><code>T</code> meets the syntactic requirements for <code>BulkTwoWayExecutor</code>.</td>
+<td align="left"><code>T</code> is a complete type.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="associated-execution-context-type"><span class="header-section-number">2.2.2</span> Associated execution context type</h3>
+<pre><code>template&lt;class Executor&gt;
+struct executor_context
+{
+  using type = std::decay_t&lt;decltype(declval&lt;const Executor&amp;&gt;().context())&gt;; // TODO check this
+};</code></pre>
+<h3 id="associated-future-type"><span class="header-section-number">2.2.3</span> Associated future type</h3>
+<pre><code>template&lt;class Executor, class T&gt;
+struct executor_future
+{
+  using type = see below;
+};</code></pre>
+<p>The type of <code>executor_future&lt;Executor, T&gt;::type</code> is determined as follows:</p>
+<ul>
+<li><p>if <code>is_two_way_executor&lt;Executor&gt;</code> is true, <code>decltype(declval&lt;const Executor&amp;&gt;().async_execute( declval&lt;T(*)()&gt;())</code>;</p></li>
+<li><p>otherwise, if <code>is_one_way_executor&lt;Executor&gt;</code> is true, <code>std::future&lt;T&gt;</code>;</p></li>
+<li><p>otherwise, the program is ill formed.</p></li>
+</ul>
+<p>[<em>Note:</em> The effect of this specification is that all execute functions of an executor that satisfies the <code>TwoWayExecutor</code>, <code>NonBlockingTwoWayExecutor</code>, or <code>BulkTwoWayExecutor</code> requirements must utilize the same future type, and that this future type is determined by <code>async_execute</code>. Programs may specialize this trait for user-defined <code>Executor</code> types. <em>--end note</em>]</p>
+<h2 id="bulk-executor-traits"><span class="header-section-number">2.3</span> Bulk executor traits</h2>
+<h3 id="classifying-forward-progress-guarantees-of-groups-of-execution-agents"><span class="header-section-number">2.3.1</span> Classifying forward progress guarantees of groups of execution agents</h3>
+<pre><code>struct sequenced_execution_tag {};
+struct parallel_execution_tag {};
+struct unsequenced_execution_tag {};
+
+// TODO a future proposal can define this category
+// struct concurrent_execution_tag {};
+
+template&lt;class Executor&gt;
+struct executor_execution_category
+{
+  private:
+    // exposition only
+    template&lt;class T&gt;
+    using helper = typename T::execution_category;
+
+  public:
+    using type = std::experimental::detected_or_t&lt;
+      unsequenced_execution_tag, helper, Executor
+    &gt;;
+};</code></pre>
+<p>Components which create groups of execution agents may use <em>execution categories</em> to communicate the forward progress and ordering guarantees of these execution agents with respect to other agents within the same group.</p>
+<p><em>The meanings and relative &quot;strength&quot; of these categores are to be defined. Most of the wording for <code>sequenced_execution_tag</code>, <code>parallel_execution_tag</code>, and <code>unsequenced_execution_tag</code> can be migrated from S 25.2.3 p2, p3, and p4, respectively.</em></p>
+<h3 id="associated-shape-type"><span class="header-section-number">2.3.2</span> Associated shape type</h3>
+<pre><code>template&lt;class Executor&gt;
+struct executor_shape
+{
+  private:
+    // exposition only
+    template&lt;class T&gt;
+    using helper = typename T::shape_type;
+
+  public:
+    using type = std::experimental::detected_or_t&lt;
+      size_t, helper, Executor
+    &gt;;
+
+    // exposition only
+    static_assert(std::is_integral_v&lt;type&gt;, &quot;shape type must be an integral type&quot;);
+};</code></pre>
+<h3 id="associated-index-type"><span class="header-section-number">2.3.3</span> Associated index type</h3>
+<pre><code>template&lt;class Executor&gt;
+struct executor_index
+{
+  private:
+    // exposition only
+    template&lt;class T&gt;
+    using helper = typename T::index_type;
+
+  public:
+    using type = std::experimental::detected_or_t&lt;
+      executor_shape_t&lt;Executor&gt;, helper, Executor
+    &gt;;
+
+    // exposition only
+    static_assert(std::is_integral_v&lt;type&gt;, &quot;index type must be an integral type&quot;);
+};</code></pre>
+<h2 id="executor-customization-points"><span class="header-section-number">2.4</span> Executor Customization Points</h2>
+<h3 id="in-general"><span class="header-section-number">2.4.1</span> In general</h3>
+<p>The functions described in this clause are <em>executor customization points</em>. Executor customization points provide a uniform interface to all executor types.</p>
+<h3 id="function-template-executionexecute"><span class="header-section-number">2.4.2</span> Function template <code>execution::execute()</code></h3>
+<pre><code>template&lt;class OneWayExecutor, class Function&gt;
+  void execute(const OneWayExecutor&amp; exec, Function&amp;&amp; f);</code></pre>
+<p><em>Effects:</em> calls <code>exec.execute(std::forward&lt;Function&gt;(f))</code>.</p>
+<p><em>Remarks:</em> This function shall not participate in overload resolution unless <code>is_one_way_executor_v&lt;OneWayExecutor&gt;</code> is <code>true</code>.</p>
+<h3 id="function-template-executionpost"><span class="header-section-number">2.4.3</span> Function template <code>execution::post()</code></h3>
+<pre><code>template&lt;class NonBlockingOneWayExecutor, class Function&gt;
+  void post(const NonBlockingOneWayExecutor&amp; exec, Function&amp;&amp; f);</code></pre>
+<p><em>Effects:</em> calls <code>exec.post(std::forward&lt;Function&gt;(f))</code>.</p>
+<p><em>Remarks:</em> This function shall not participate in overload resolution unless <code>is_non_blocking_one_way_executor_v&lt; NonBlockingOneWayExecutor&gt;</code> is <code>true</code>.</p>
+<h3 id="function-template-executiondefer"><span class="header-section-number">2.4.4</span> Function template <code>execution::defer()</code></h3>
+<pre><code>template&lt;class NonBlockingOneWayExecutor, class Function&gt;
+  void defer(const NonBlockingOneWayExecutor&amp; exec, Function&amp;&amp; f);</code></pre>
+<p><em>Effects:</em> calls <code>exec.defer(std::forward&lt;Function&gt;(f))</code>.</p>
+<p><em>Remarks:</em> This function shall not participate in overload resolution unless <code>is_non_blocking_one_way_executor_v&lt; NonBlockingOneWayExecutor&gt;</code> is <code>true</code>.</p>
+<h3 id="function-template-executionsync_execute"><span class="header-section-number">2.4.5</span> Function template <code>execution::sync_execute()</code></h3>
+<pre><code>template&lt;class TwoWayExecutor, class Function&gt;
+  result_of_t&lt;decay_t&lt;Function&gt;()&gt;
+    sync_execute(const TwoWayExecutor&amp; exec, Function&amp;&amp; f);</code></pre>
+<p><em>Returns:</em> <code>exec.sync_execute(std::forward&lt;Function&gt;(f))</code>.</p>
+<p><em>Remarks:</em> This function shall not participate in overload resolution unless <code>is_two_way_executor_v&lt;TwoWayExecutor&gt;</code> is <code>true</code>.</p>
+<pre><code>template&lt;class OneWayExecutor, class Function&gt;
+  result_of_t&lt;decay_t&lt;Function&gt;()&gt;
+    sync_execute(const OneWayExecutor&amp; exec, Function&amp;&amp; f);</code></pre>
+<p><em>Effects:</em> Calls <code>exec.execute(g)</code>, where <code>g</code> is a function object of unspecified type that performs <code>DECAY_COPY(std::forward&lt;Function&gt;(f))()</code> and stores the result in <code>r</code>, with the call to <code>DECAY_COPY()</code> being evaluated in the thread that called <code>sync_execute</code>. Blocks the caller of <code>sync_execute</code> until <code>g</code> completes.</p>
+<p><em>Returns:</em> <code>r</code>.</p>
+<p><em>Synchronization:</em> The invocation of <code>sync_execute</code> synchronizes with (1.10) the invocation of <code>f</code>.</p>
+<p><em>Throws:</em> Any uncaught exception thrown by <code>f</code>.</p>
+<p><em>Remarks:</em> This function shall not participate in overload resolution unless <code>is_two_way_executor_v&lt;TwoWayExecutor&gt;</code> is <code>false</code> and <code>is_one_way_executor_v&lt;OneWayExecutor&gt;</code> is <code>true</code>.</p>
+<h3 id="function-template-executionasync_execute"><span class="header-section-number">2.4.6</span> Function template <code>execution::async_execute()</code></h3>
+<pre><code>template&lt;class TwoWayExecutor, class Function&gt;
+  executor_future_t&lt;TwoWayExecutor, result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+    async_execute(const TwoWayExecutor&amp; exec, Function&amp;&amp; f);</code></pre>
+<p><em>Returns:</em> <code>exec.async_execute(std::forward&lt;Function&gt;(f))</code>.</p>
+<p><em>Remarks:</em> This function shall not participate in overload resolution unless <code>is_two_way_executor_v&lt;TwoWayExecutor&gt;</code> is <code>true</code>.</p>
+<pre><code>template&lt;class OneWayExecutor, class Function&gt;
+  std::future&lt;decay_t&lt;result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+    async_execute(const OneWayExecutor&amp; exec, Function&amp;&amp; f);</code></pre>
+<p><em>Returns:</em> <code>exec.execute(std::forward&lt;Function&gt;(f))</code>.</p>
+<p><em>Effects:</em> Creates an asynchronous provider with an associated shared state (C++Std [futures.state]). Calls <code>exec.execute(g)</code> where <code>g</code> is a function object of unspecified type that performs <code>DECAY_COPY(std::forward&lt;Function&gt;(f))</code>, with the call to <code>DECAY_COPY</code> being performed in the thread that called <code>async_execute</code>. On successful completion of <code>DECAY_COPY(std::forward&lt;Function&gt;(f))</code>, the return value of <code>DECAY_COPY(std::forward&lt;Function&gt;(f))</code> is atomically stored in the shared state and the shared state is made ready. If <code>DECAY_COPY(std::forward&lt;Function&gt;(f))</code> exits via an exception, the exception is atomically stored in the shared state and the shared state is made ready.</p>
+<p><em>Returns:</em> An object of type <code>std::future&lt;result_of_t&lt;decay_t&lt;Function&gt;&gt;()&gt;</code> that refers to the shared state created by <code>async_execute</code>.</p>
+<p><em>Synchronization:</em></p>
+<ul>
+<li>the invocation of <code>async_execute</code> synchronizes with (1.10) the invocation of <code>f</code>.</li>
+<li>the completion of the invocation of <code>f</code> is sequenced before (1.10) the shared state is made ready.</li>
+</ul>
+<p><em>Remarks:</em> This function shall not participate in overload resolution unless <code>is_two_way_executor_v&lt;TwoWayExecutor&gt;</code> is <code>false</code> and <code>is_one_way_executor_v&lt;OneWayExecutor&gt;</code> is <code>true</code>.</p>
+<h3 id="function-template-executionasync_post"><span class="header-section-number">2.4.7</span> Function template <code>execution::async_post()</code></h3>
+<pre><code>template&lt;class NonBlockingTwoWayExecutor, class Function&gt;
+  executor_future_t&lt;NonBlockingTwoWayExecutor, result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+    async_post(const NonBlockingTwoWayExecutor&amp; exec, Function&amp;&amp; f);</code></pre>
+<p><em>Returns:</em> <code>exec.async_post(std::forward&lt;Function&gt;(f))</code>.</p>
+<p><em>Remarks:</em> This function shall not participate in overload resolution unless <code>is_non_blocking_two_way_executor_v&lt; NonBlockingTwoWayExecutor&gt;</code> is <code>true</code>.</p>
+<pre><code>template&lt;class NonBlockingOneWayExecutor, class Function&gt;
+  std::future&lt;decay_t&lt;result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+    async_post(const NonBlockingOneWayExecutor&amp; exec, Function&amp;&amp; f);</code></pre>
+<p><em>Returns:</em> <code>exec.post(std::forward&lt;Function&gt;(f))</code>.</p>
+<p><em>Effects:</em> Creates an asynchronous provider with an associated shared state (C++Std [futures.state]). Calls <code>exec.post(g)</code> where <code>g</code> is a function object of unspecified type that performs <code>DECAY_COPY(std::forward&lt;Function&gt;(f))</code>, with the call to <code>DECAY_COPY</code> being performed in the thread that called <code>async_post</code>. On successful completion of <code>DECAY_COPY(std::forward&lt;Function&gt;(f))</code>, the return value of <code>DECAY_COPY(std::forward&lt;Function&gt;(f))</code> is atomically stored in the shared state and the shared state is made ready. If <code>DECAY_COPY(std::forward&lt;Function&gt;(f))</code> exits via an exception, the exception is atomically stored in the shared state and the shared state is made ready.</p>
+<p><em>Returns:</em> An object of type <code>std::future&lt;result_of_t&lt;decay_t&lt;Function&gt;&gt;()&gt;</code> that refers to the shared state created by <code>async_post</code>.</p>
+<p><em>Synchronization:</em></p>
+<ul>
+<li>the invocation of <code>async_post</code> synchronizes with (1.10) the invocation of <code>f</code>.</li>
+<li>the completion of the invocation of <code>f</code> is sequenced before (1.10) the shared state is made ready.</li>
+</ul>
+<p><em>Remarks:</em> This function shall not participate in overload resolution unless <code>is_non_blocking_two_way_executor_v&lt; NonBlockingTwoWayExecutor&gt;</code> is <code>false</code> and <code>is_non_blocking_one_way_executor_v&lt; NonBlockingOneWayExecutor&gt;</code> is <code>true</code>.</p>
+<h3 id="function-template-executionasync_defer"><span class="header-section-number">2.4.8</span> Function template <code>execution::async_defer()</code></h3>
+<pre><code>template&lt;class NonBlockingTwoWayExecutor, class Function&gt;
+  executor_future_t&lt;NonBlockingTwoWayExecutor, result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+    async_defer(const NonBlockingTwoWayExecutor&amp; exec, Function&amp;&amp; f);</code></pre>
+<p><em>Returns:</em> <code>exec.async_defer(std::forward&lt;Function&gt;(f))</code>.</p>
+<p><em>Remarks:</em> This function shall not participate in overload resolution unless <code>is_non_blocking_two_way_executor_v&lt; NonBlockingTwoWayExecutor&gt;</code> is <code>true</code>.</p>
+<pre><code>template&lt;class NonBlockingOneWayExecutor, class Function&gt;
+  std::future&lt;decay_t&lt;result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+    async_defer(const NonBlockingOneWayExecutor&amp; exec, Function&amp;&amp; f);</code></pre>
+<p><em>Returns:</em> <code>exec.defer(std::forward&lt;Function&gt;(f))</code>.</p>
+<p><em>Effects:</em> Creates an asynchronous provider with an associated shared state (C++Std [futures.state]). Calls <code>exec.defer(g)</code> where <code>g</code> is a function object of unspecified type that performs <code>DECAY_COPY(std::forward&lt;Function&gt;(f))</code>, with the call to <code>DECAY_COPY</code> being performed in the thread that called <code>async_defer</code>. On successful completion of <code>DECAY_COPY(std::forward&lt;Function&gt;(f))</code>, the return value of <code>DECAY_COPY(std::forward&lt;Function&gt;(f))</code> is atomically stored in the shared state and the shared state is made ready. If <code>DECAY_COPY(std::forward&lt;Function&gt;(f))</code> exits via an exception, the exception is atomically stored in the shared state and the shared state is made ready.</p>
+<p><em>Returns:</em> An object of type <code>std::future&lt;result_of_t&lt;decay_t&lt;Function&gt;&gt;()&gt;</code> that refers to the shared state created by <code>async_defer</code>.</p>
+<p><em>Synchronization:</em></p>
+<ul>
+<li>the invocation of <code>async_defer</code> synchronizes with (1.10) the invocation of <code>f</code>.</li>
+<li>the completion of the invocation of <code>f</code> is sequenced before (1.10) the shared state is made ready.</li>
+</ul>
+<p><em>Remarks:</em> This function shall not participate in overload resolution unless <code>is_non_blocking_two_way_executor_v&lt; NonBlockingTwoWayExecutor&gt;</code> is <code>false</code> and <code>is_non_blocking_one_way_executor_v&lt; NonBlockingOneWayExecutor&gt;</code> is <code>true</code>.</p>
+<h3 id="function-template-executionthen_execute"><span class="header-section-number">2.4.9</span> Function template <code>execution::then_execute()</code></h3>
+<pre><code>template&lt;class TwoWayExecutor, class Function, class Future&gt;
+  executor_future_t&lt;TwoWayExecutor, see-below&gt;
+    then_execute(const TwoWayExecutor&amp; exec, Function&amp;&amp; f, Future&amp; predecessor);</code></pre>
+<p><em>Returns:</em> <code>exec.then_execute(std::forward&lt;Function&gt;(f), predecessor)</code>. The return type is <code>executor_future_t&lt;Executor, result_of_t&lt;decay_t&lt;Function&gt;()&gt;</code> when <code>predecessor</code> is a <code>void</code> future. Otherwise, the return type is <code>executor_future_t&lt;Executor, result_of_t&lt;decay_t&lt;Function&gt;(T&amp;)&gt;&gt;</code> where <code>T</code> is the result type of the <code>predecessor</code> future.</p>
+<p><em>Remarks:</em> This function shall not participate in overload resolution unless <code>is_two_way_executor_v&lt; TwoWayExecutor&gt;</code> is <code>true</code>.</p>
+<pre><code>template&lt;class OneWayExecutor, class Function, class Future&gt;
+  executor_future_t&lt;OneWayExecutor, see-below&gt;
+    then_execute(const OneWayExecutor&amp; exec, Function&amp;&amp; f, Future&amp; predecessor);</code></pre>
+<p><em>Returns:</em> <code>predecessor.then(std::forward&lt;Function&gt;(f))</code>. The return type is <code>executor_future_t&lt;Executor, result_of_t&lt;decay_t&lt;Function&gt;()&gt;</code> when <code>predecessor</code> is a <code>void</code> future. Otherwise, the return type is <code>executor_future_t&lt;Executor, result_of_t&lt;decay_t&lt;Function&gt;(T&amp;)&gt;&gt;</code> where <code>T</code> is the result type of the <code>predecessor</code> future.</p>
+<p><em>Synchronization:</em></p>
+<ul>
+<li>the invocation of <code>then_execute</code> synchronizes with (1.10) the invocation of <code>f</code>.</li>
+<li>the completion of the invocation of <code>f</code> is sequenced before (1.10) the shared state is made ready.</li>
+</ul>
+<p><em>Postconditions:</em> If the <code>predecessor</code> future is not a shared future, then <code>predecessor.valid() == false</code>.</p>
+<p><em>Remarks:</em> This function shall not participate in overload resolution unless <code>is_two_way_executor_v&lt; TwoWayExecutor&gt;</code> is <code>false</code> and <code>is_one_way_executor_v&lt; OneWayExecutor&gt;</code> is <code>true</code>.</p>
+<h3 id="function-template-executionbulk_execute"><span class="header-section-number">2.4.10</span> Function template <code>execution::bulk_execute()</code></h3>
+<pre><code>template&lt;class BulkOneWayExecutor, class Function1, class Function2&gt;
+  void bulk_execute(const BulkOneWayExecutor&amp; exec, Function1 f,
+                    executor_shape_t&lt;BulkOneWayExecutor&gt; shape,
+                    Function2 shared_factory);</code></pre>
+<p><em>Returns:</em> <code>exec.bulk_execute(f, shape, shared_factory)</code>.</p>
+<p><em>Remarks:</em> This function shall not participate in overload resolution unless <code>is_bulk_one_way_executor_v&lt; BulkOneWayExecutor&gt;</code> is <code>true</code>.</p>
+<pre><code>template&lt;class OneWayExecutor, class Function1, class Function2&gt;
+  void bulk_execute(const OneWayExecutor&amp; exec, Function1 f,
+                    executor_shape_t&lt;OneWayExecutor&gt; shape,
+                    Function2 shared_factory);</code></pre>
+<p><em>Effects:</em> Performs <code>exec.execute(g)</code> where <code>g</code> is a function object of unspecified type that:</p>
+<ul>
+<li><p>Calls <code>shared_factory()</code> and stores the result of this invocation to some shared state <code>shared</code>.</p></li>
+<li><p>Using <code>exec.execute</code>, submits a new group of function objects of shape <code>shape</code>. Each function object calls <code>f(idx, shared)</code>, where <code>idx</code> is the index of the execution agent, and <code>shared</code> is a reference to the shared state.</p></li>
+<li><p>If any invocation of <code>f</code> exits via an uncaught exception, <code>terminate</code> is called.</p></li>
+</ul>
+<p><em>Synchronization:</em> The completion of the function <code>shared_factory</code> happens before the creation of the group of function objects.</p>
+<p><em>Remarks:</em> This function shall not participate in overload resolution unless <code>is_bulk_one_way_executor_v&lt; BulkOneWayExecutor&gt;</code> is <code>false</code> and <code>is_one_way_executor_v&lt; OneWayExecutor&gt;</code> is <code>true</code>.</p>
+<h3 id="function-template-executionbulk_sync_execute"><span class="header-section-number">2.4.11</span> Function template <code>execution::bulk_sync_execute()</code></h3>
+<pre><code>template&lt;class BulkTwoWayExecutor, class Function1, class Function2, class Function3&gt;
+  result_of_t&lt;Function2()&gt;
+    bulk_sync_execute(const BulkTwoWayExecutor&amp; exec, Function1 f,
+                      executor_shape_t&lt;BulkTwoWayExecutor&gt; shape,
+                      Function2 result_factory, Function3 shared_factory);</code></pre>
+<p><em>Returns:</em> <code>exec.bulk_sync_execute(f, shape, result_factory, shared_factory)</code>.</p>
+<p><em>Remarks:</em> This function shall not participate in overload resolution unless <code>is_bulk_two_way_executor_v&lt; BulkTwoWayExecutor&gt;</code> is <code>true</code>.</p>
+<pre><code>template&lt;class OneWayExecutor, class Function1, class Function2, class Function3&gt;
+  result_of_t&lt;Function2()&gt;
+    bulk_sync_execute(const OneWayExecutor&amp; exec, Function1 f,
+                      executor_shape_t&lt;OneWayExecutor&gt; shape,
+                      Function2 result_factory, Function3 shared_factory);</code></pre>
+<p><em>Effects:</em> Performs <code>exec.execute(g)</code> where <code>g</code> is a function object of unspecified type that:</p>
+<ul>
+<li><p>Calls <code>result_factory()</code> and <code>shared_factory()</code>, and stores the results of these invocations to some shared state <code>result</code> and <code>shared</code> respectively.</p></li>
+<li><p>Using <code>exec.execute</code>, submits a new group of function objects of shape <code>shape</code>. Each function object calls <code>f(idx, result, shared)</code>, where <code>idx</code> is the index of the execution agent, and <code>result</code> and <code>shared</code> are references to the respective shared state. Any return value of <code>f</code> is discarded.</p></li>
+<li><p>If any invocation of <code>f</code> exits via an uncaught exception, <code>terminate</code> is called.</p></li>
+<li><p>Blocks the caller until all invocations of <code>f</code> are complete and the result is ready.</p></li>
+</ul>
+<p><em>Returns:</em> An object of type <code>result_of_t&lt;Function2()&gt;</code> that refers to the result shared state created by this call to <code>bulk_sync_execute</code>.</p>
+<p><em>Synchronization:</em> The completion of the functions <code>result_factory</code> and <code>shared_factory</code> happen before the creation of the group of function objects.</p>
+<p><em>Remarks:</em> This function shall not participate in overload resolution unless <code>is_bulk_two_way_executor_v&lt; BulkTwoWayExecutor&gt;</code> is <code>false</code> and <code>is_one_way_executor_v&lt; OneWayExecutor&gt;</code> is <code>true</code>.</p>
+<h3 id="function-template-executionbulk_async_execute"><span class="header-section-number">2.4.12</span> Function template <code>execution::bulk_async_execute()</code></h3>
+<pre><code>template&lt;class BulkTwoWayExecutor, class Function1, class Function2, class Function3&gt;
+  executor_future_t&lt;const BulkTwoWayExecutor, result_of_t&lt;Function2()&gt;&gt;
+    bulk_async_execute(const BulkTwoWayExecutor&amp; exec, Function1 f,
+                       executor_shape_t&lt;BulkTwoWayExecutor&gt; shape,
+                       Function2 result_factory, Function3 shared_factory);</code></pre>
+<p><em>Returns:</em> <code>exec.bulk_async_execute(f, shape, result_factory, shared_factory)</code>.</p>
+<p><em>Remarks:</em> This function shall not participate in overload resolution unless <code>is_bulk_two_way_executor_v&lt; BulkTwoWayExecutor&gt;</code> is <code>true</code>.</p>
+<pre><code>template&lt;class OneWayExecutor, class Function1, class Function2, class Function3&gt;
+  executor_future_t&lt;const OneWayExecutor, result_of_t&lt;Function2()&gt;&gt;
+    bulk_async_execute(const OneWayExecutor&amp; exec, Function1 f,
+                       executor_shape_t&lt;OneWayExecutor&gt; shape,
+                       Function2 result_factory, Function3 shared_factory);</code></pre>
+<p><em>Effects:</em> Performs <code>exec.execute(g)</code> where <code>g</code> is a function object of unspecified type that:</p>
+<ul>
+<li><p>Calls <code>result_factory()</code> and <code>shared_factory()</code>, and stores the results of these invocations to some shared state <code>result</code> and <code>shared</code> respectively.</p></li>
+<li><p>Using <code>exec.execute</code>, submits a new group of function objects of shape <code>shape</code>. Each function object calls <code>f(idx, result, shared)</code>, where <code>idx</code> is the index of the function object, and <code>result</code> and <code>shared</code> are references to the respective shared state. Any return value of <code>f</code> is discarded.</p></li>
+<li><p>If any invocation of <code>f</code> exits via an uncaught exception, <code>terminate</code> is called.</p></li>
+</ul>
+<p><em>Returns:</em> An object of type <code>executor_future_t&lt;Executor,result_of_t&lt;Function2()&gt;</code> that refers to the shared result state created by this call to <code>bulk_async_execute</code>.</p>
+<p><em>Synchronization:</em></p>
+<ul>
+<li><p>The invocation of <code>bulk_async_execute</code> synchronizes with (1.10) the invocations of <code>f</code>.</p></li>
+<li><p>The completion of the functions <code>result_factory</code> and <code>shared_factory</code> happen before the creation of the group of function objects.</p></li>
+<li><p>The completion of the invocations of <code>f</code> are sequenced before (1.10) the result shared state is made ready.</p></li>
+</ul>
+<p><em>Remarks:</em> This function shall not participate in overload resolution unless <code>is_bulk_two_way_executor_v&lt; BulkTwoWayExecutor&gt;</code> is <code>false</code> and <code>is_one_way_executor_v&lt; OneWayExecutor&gt;</code> is <code>true</code>.</p>
+<h3 id="function-template-executionbulk_then_execute"><span class="header-section-number">2.4.13</span> Function template <code>execution::bulk_then_execute()</code></h3>
+<pre><code>template&lt;class BulkTwoWayExecutor, class Function1, class Future, class Function2, class Function3&gt;
+  executor_future_t&lt;Executor, result_of_t&lt;Function2()&gt;&gt;
+    bulk_then_execute(const BulkTwoWayExecutor&amp; exec, Function1 f,
+                      executor_shape_t&lt;BulkTwoWayExecutor&gt; shape,
+                      Future&amp; predecessor,
+                      Function2 result_factory, Function3 shared_factory);</code></pre>
+<p><em>Returns:</em> <code>exec.bulk_then_execute(f, shape, result_factory, shared_factory)</code>.</p>
+<p><em>Remarks:</em> This function shall not participate in overload resolution unless <code>is_bulk_two_way_executor_v&lt; BulkTwoWayExecutor&gt;</code> is <code>true</code>.</p>
+<pre><code>template&lt;class OneWayExecutor, class Function1, class Future, class Function2, class Function3&gt;
+  executor_future_t&lt;OneWayExecutor, result_of_t&lt;Function2()&gt;&gt;
+    bulk_then_execute(const OneWayExecutor&amp; exec, Function1 f,
+                      executor_shape_t&lt;OneWayExecutor&gt; shape,
+                      Future&amp; predecessor,
+                      Function2 result_factory, Function3 shared_factory);</code></pre>
+<p><em>Effects:</em> Performs <code>exec.execute(g)</code> where <code>g</code> is a function object of unspecified type that:</p>
+<ul>
+<li><p>Calls <code>result_factory()</code> and <code>shared_factory()</code> in an unspecified execution agent. The results of these invocations are stored to shared state.</p></li>
+<li><p>Using <code>exec.execute</code>, submits a new group of function objects of shape <code>shape</code> after <code>predecessor</code> becomes ready. Each execution agent calls <code>f(idx, result, pred, shared)</code>, where <code>idx</code> is the index of the execution agent, <code>result</code> is a reference to the result shared state, <code>pred</code> is a reference to the <code>predecessor</code> state if it is not <code>void</code>. Otherwise, each execution agent calls <code>f(idx, result, shared)</code>. Any return value of <code>f</code> is discarded.</p></li>
+<li><p>If any invocation of <code>f</code> exits via an uncaught exception, <code>terminate</code> is called.</p></li>
+</ul>
+<p><em>Returns:</em> An object of type <code>executor_future_t&lt;Executor,result_of_t&lt;Function2()&gt;</code> that refers to the shared result state created by this call to <code>bulk_then_execute</code>.</p>
+<p><em>Synchronization:</em></p>
+<ul>
+<li><p>the invocation of <code>bulk_then_execute</code> synchronizes with (1.10) the invocations of <code>f</code>.</p></li>
+<li><p>the completion of the functions <code>result_factory</code> and <code>shared_factory</code> happen before the creation of the group of execution agents.</p></li>
+<li><p>the completion of the invocations of <code>f</code> are sequenced before (1.10) the result shared state is made ready.</p></li>
+</ul>
+<p><em>Postconditions:</em> If the <code>predecessor</code> future is not a shared future, then <code>predecessor.valid() == false</code>.</p>
+<p><em>Remarks:</em> This function shall not participate in overload resolution unless <code>is_bulk_two_way_executor_v&lt; BulkTwoWayExecutor&gt;</code> is <code>false</code> and <code>is_one_way_executor_v&lt; OneWayExecutor&gt;</code> is <code>true</code>.</p>
+<h2 id="executor-work-guard"><span class="header-section-number">2.5</span> Executor work guard</h2>
+<pre><code>template&lt;class Executor&gt;
+class executor_work_guard
+{
+public:
+  // types:
+
+  typedef Executor executor_type;
+
+  // construct / copy / destroy:
+
+  explicit executor_work_guard(const executor_type&amp; ex) noexcept;
+  executor_work_guard(const executor_work_guard&amp; other) noexcept;
+  executor_work_guard(executor_work_guard&amp;&amp; other) noexcept;
+
+  executor_work_guard&amp; operator=(const executor_work_guard&amp;) = delete;
+
+  ~executor_work_guard();
+
+  // executor work guard observers:
+
+  executor_type get_executor() const noexcept;
+  bool owns_work() const noexcept;
+
+  // executor work guard modifiers:
+
+  void reset() noexcept;
+
+private:
+  Executor ex_; // exposition only
+  bool owns_; // exposition only
+};</code></pre>
+<h3 id="members"><span class="header-section-number">2.5.1</span> Members</h3>
+<pre><code>explicit executor_work_guard(const executor_type&amp; ex) noexcept;</code></pre>
+<p><em>Effects:</em> Initializes <code>ex_</code> with <code>ex</code>, and <code>owns_</code> with the result of <code>ex_.on_work_started()</code>.</p>
+<p><em>Postconditions:</em> <code>ex_ == ex</code>.</p>
+<pre><code>executor_work_guard(const executor_work_guard&amp; other) noexcept;</code></pre>
+<p><em>Effects:</em> Initializes <code>ex_</code> with <code>other.ex_</code>. If <code>other.owns_ == true</code>, initializes <code>owns_</code> with the result of <code>ex_.on_work_started()</code>; otherwise, sets <code>owns_</code> to false.</p>
+<p><em>Postconditions:</em> <code>ex_ == other.ex_</code>.</p>
+<pre><code>executor_work_guard(executor_work_guard&amp;&amp; other) noexcept;</code></pre>
+<p><em>Effects:</em> Initializes <code>ex_</code> with <code>std::move(other.ex_)</code> and <code>owns_</code> with <code>other.owns_</code>, and sets <code>other.owns_</code> to <code>false</code>.</p>
+<pre><code>~executor_work_guard();</code></pre>
+<p><em>Effects:</em> If <code>owns_</code> is <code>true</code>, performs <code>ex_.on_work_finished()</code>.</p>
+<pre><code>executor_type get_executor() const noexcept;</code></pre>
+<p><em>Returns:</em> <code>ex_</code>.</p>
+<pre><code>bool owns_work() const noexcept;</code></pre>
+<p><em>Returns:</em> <code>owns_</code>.</p>
+<pre><code>void reset() noexcept;</code></pre>
+<p><em>Effects:</em> If <code>owns_</code> is <code>true</code>, performs <code>ex_.on_work_finished()</code>.</p>
+<p><em>Postconditions:</em> <code>owns_ == false</code>.</p>
+<h2 id="polymorphic-executor-wrappers"><span class="header-section-number">2.6</span> Polymorphic executor wrappers</h2>
+<h3 id="general-requirements-on-polymorphic-executor-wrappers"><span class="header-section-number">2.6.1</span> General requirements on polymorphic executor wrappers</h3>
+<p>Polymorphic executors defined in this Technical Specification satisfy the <code>BaseExecutor</code>, <code>DefaultConstructible</code> (C++Std [defaultconstructible]), and <code>CopyAssignable</code> (C++Std [copyassignable]) requirements, and are defined as follows.</p>
+<pre><code>class C
+{
+public:
+  class context_type; // TODO define this
+
+  // construct / copy / destroy:
+
+  C() noexcept;
+  C(nullptr_t) noexcept;
+  C(const executor&amp; e) noexcept;
+  C(executor&amp;&amp; e) noexcept;
+  template&lt;class Executor&gt; C(Executor e);
+  template&lt;class Executor, class ProtoAllocator&gt;
+    C(allocator_arg_t, const ProtoAllocator&amp; a, Executor e);
+
+  C&amp; operator=(const C&amp; e) noexcept;
+  C&amp; operator=(C&amp;&amp; e) noexcept;
+  C&amp; operator=(nullptr_t) noexcept;
+  template&lt;class Executor&gt; C&amp; operator=(Executor e);
+
+  ~C();
+
+  // polymorphic executor modifiers:
+
+  void swap(C&amp; other) noexcept;
+  template&lt;class Executor, class ProtoAllocator&gt;
+    void assign(Executor e, const ProtoAllocator&amp; a);
+
+  // C operations:
+
+  context_type context() const noexcept;
+
+  // polymorphic executor capacity:
+
+  explicit operator bool() const noexcept;
+
+  // polymorphic executor target access:
+
+  const type_info&amp; target_type() const noexcept;
+  template&lt;class Executor&gt; Executor* target() noexcept;
+  template&lt;class Executor&gt; const Executor* target() const noexcept;
+};
+
+// polymorphic executor comparisons:
+
+bool operator==(const C&amp; a, const C&amp; b) noexcept;
+bool operator==(const C&amp; e, nullptr_t) noexcept;
+bool operator==(nullptr_t, const C&amp; e) noexcept;
+bool operator!=(const C&amp; a, const C&amp; b) noexcept;
+bool operator!=(const C&amp; e, nullptr_t) noexcept;
+bool operator!=(nullptr_t, const C&amp; e) noexcept;
+
+// executor specialized algorithms:
+
+void swap(C&amp; a, C&amp; b) noexcept;
+
+// in namespace std:
+
+template&lt;class Allocator&gt;
+  struct uses_allocator&lt;C, Allocator&gt;
+    : true_type {};</code></pre>
+<p>[<em>Note:</em> To meet the <code>noexcept</code> requirements for executor copy constructors and move constructors, implementations may share a target between two or more <code>executor</code> objects. <em>--end note</em>]</p>
+<p>The <em>target</em> is the executor object that is held by the wrapper.</p>
+<h4 id="polymorphic-executor-constructors"><span class="header-section-number">2.6.1.1</span> Polymorphic executor constructors</h4>
+<pre><code>C() noexcept;</code></pre>
+<p><em>Postconditions:</em> <code>!*this</code>.</p>
+<pre><code>C(nullptr_t) noexcept;</code></pre>
+<p><em>Postconditions:</em> <code>!*this</code>.</p>
+<pre><code>C(const C&amp; e) noexcept;</code></pre>
+<p><em>Postconditions:</em> <code>!*this</code> if <code>!e</code>; otherwise, <code>*this</code> targets <code>e.target()</code> or a copy of <code>e.target()</code>.</p>
+<pre><code>C(C&amp;&amp; e) noexcept;</code></pre>
+<p><em>Effects:</em> If <code>!e</code>, <code>*this</code> has no target; otherwise, moves <code>e.target()</code> or move-constructs the target of <code>e</code> into the target of <code>*this</code>, leaving <code>e</code> in a valid state with an unspecified value.</p>
+<pre><code>template&lt;class Executor&gt; C(Executor e);</code></pre>
+<p><em>Effects:</em> <code>*this</code> targets a copy of <code>e</code> initialized with <code>std::move(e)</code>.</p>
+<pre><code>template&lt;class Executor, class ProtoAllocator&gt;
+  C(allocator_arg_t, const ProtoAllocator&amp; a, Executor e);</code></pre>
+<p><em>Effects:</em> <code>*this</code> targets a copy of <code>e</code> initialized with <code>std::move(e)</code>.</p>
+<p>A copy of the allocator argument is used to allocate memory, if necessary, for the internal data structures of the constructed <code>C</code> object.</p>
+<h4 id="polymorphic-executor-assignment"><span class="header-section-number">2.6.1.2</span> Polymorphic executor assignment</h4>
+<pre><code>C&amp; operator=(const C&amp; e) noexcept;</code></pre>
+<p><em>Effects:</em> <code>C(e).swap(*this)</code>.</p>
+<p><em>Returns:</em> <code>*this</code>.</p>
+<pre><code>C&amp; operator=(C&amp;&amp; e) noexcept;</code></pre>
+<p><em>Effects:</em> Replaces the target of <code>*this</code> with the target of <code>e</code>, leaving <code>e</code> in a valid state with an unspecified value.</p>
+<p><em>Returns:</em> <code>*this</code>.</p>
+<pre><code>C&amp; operator=(nullptr_t) noexcept;</code></pre>
+<p><em>Effects:</em> <code>C(nullptr).swap(*this)</code>.</p>
+<p><em>Returns:</em> <code>*this</code>.</p>
+<pre><code>template&lt;class Executor&gt; C&amp; operator=(Executor e);</code></pre>
+<p><em>Effects:</em> <code>C(std::move(e)).swap(*this)</code>.</p>
+<p><em>Returns:</em> <code>*this</code>.</p>
+<h4 id="polymorphic-executor-destructor"><span class="header-section-number">2.6.1.3</span> Polymorphic executor destructor</h4>
+<pre><code>~C();</code></pre>
+<p><em>Effects:</em> If <code>*this != nullptr</code>, releases shared ownership of, or destroys, the target of <code>*this</code>.</p>
+<h4 id="polymorphic-executor-modifiers"><span class="header-section-number">2.6.1.4</span> Polymorphic executor modifiers</h4>
+<pre><code>void swap(C&amp; other) noexcept;</code></pre>
+<p><em>Effects:</em> Interchanges the targets of <code>*this</code> and <code>other</code>.</p>
+<pre><code>template&lt;class Executor, class ProtoAllocator&gt;
+  void assign(Executor e, const ProtoAllocator&amp; a);</code></pre>
+<p><em>Effects:</em> <code>C(allocator_arg, a, std::move(e)).swap(*this)</code>.</p>
+<h4 id="polymorphic-executor-operations"><span class="header-section-number">2.6.1.5</span> Polymorphic executor operations</h4>
+<pre><code>context_type context() const noexcept;</code></pre>
+<p><em>Requires:</em> <code>*this != nullptr</code>.</p>
+<p><em>Returns:</em> A polymorphic wrapper for <code>e.context()</code>, where <code>e</code> is the target object of <code>*this</code>.</p>
+<h4 id="polymorphic-executor-capacity"><span class="header-section-number">2.6.1.6</span> Polymorphic executor capacity</h4>
+<pre><code>explicit operator bool() const noexcept;</code></pre>
+<p><em>Returns:</em> <code>true</code> if <code>*this</code> has a target, otherwise <code>false</code>.</p>
+<h4 id="polymorphic-executor-target-access"><span class="header-section-number">2.6.1.7</span> Polymorphic executor target access</h4>
+<pre><code>const type_info&amp; target_type() const noexcept;</code></pre>
+<p><em>Returns:</em> If <code>*this</code> has a target of type <code>T</code>, <code>typeid(T)</code>; otherwise, <code>typeid(void)</code>.</p>
+<pre><code>template&lt;class Executor&gt; Executor* target() noexcept;
+template&lt;class Executor&gt; const Executor* target() const noexcept;</code></pre>
+<p><em>Returns:</em> If <code>target_type() == typeid(Executor)</code> a pointer to the stored executor target; otherwise a null pointer value.</p>
+<h4 id="polymorphic-executor-comparisons"><span class="header-section-number">2.6.1.8</span> Polymorphic executor comparisons</h4>
+<pre><code>bool operator==(const C&amp; a, const C&amp; b) noexcept;</code></pre>
+<p><em>Returns:</em></p>
+<ul>
+<li><code>true</code> if <code>!a</code> and <code>!b</code>;</li>
+<li><code>true</code> if <code>a</code> and <code>b</code> share a target;</li>
+<li><code>true</code> if <code>e</code> and <code>f</code> are the same type and <code>e == f</code>, where <code>e</code> is the target of <code>a</code> and <code>f</code> is the target of <code>b</code>;</li>
+<li>otherwise <code>false</code>.</li>
+</ul>
+<pre><code>bool operator==(const C&amp; e, nullptr_t) noexcept;
+bool operator==(nullptr_t, const C&amp; e) noexcept;</code></pre>
+<p><em>Returns:</em> <code>!e</code>.</p>
+<pre><code>bool operator!=(const C&amp; a, const C&amp; b) noexcept;</code></pre>
+<p><em>Returns:</em> <code>!(a == b)</code>.</p>
+<pre><code>bool operator!=(const C&amp; e, nullptr_t) noexcept;
+bool operator!=(nullptr_t, const C&amp; e) noexcept;</code></pre>
+<p><em>Returns:</em> <code>(bool) e</code>.</p>
+<h4 id="polymorphic-executor-specialized-algorithms"><span class="header-section-number">2.6.1.9</span> Polymorphic executor specialized algorithms</h4>
+<pre><code>void swap(C&amp; a, C&amp; b) noexcept;</code></pre>
+<p><em>Effects:</em> <code>a.swap(b)</code>.</p>
+<h3 id="class-one_way_executor"><span class="header-section-number">2.6.2</span> Class <code>one_way_executor</code></h3>
+<p>Class <code>one_way_executor</code> satisfies the general requirements on polymorphic executor wrappers, with the additional definitions below.</p>
+<pre><code>class one_way_executor
+{
+public:
+  // execution agent creation
+  template&lt;class Function&gt;
+    void execute(Function&amp;&amp; f) const;
+};</code></pre>
+<p>Class <code>one_way_executor</code> satisfies the <code>OneWayExecutor</code> requirements. The target object shall satisfy the <code>OneWayExecutor</code> requirements.</p>
+<pre><code>template&lt;class Function&gt;
+  void execute(Function&amp;&amp; f) const;</code></pre>
+<p>Let <code>e</code> be the target object of <code>*this</code>. Let <code>fd</code> be the result of <code>DECAY_COPY(std::forward&lt;Function&gt;(f))</code>.</p>
+<p><em>Effects:</em> Performs <code>e.execute(g)</code>, where <code>g</code> is a function object of unspecified type that, when called as <code>g()</code>, performs <code>fd()</code>.</p>
+<h3 id="class-host_based_one_way_executor"><span class="header-section-number">2.6.3</span> Class <code>host_based_one_way_executor</code></h3>
+<p>Class <code>host_based_one_way_executor</code> satisfies the general requirements on polymorphic executor wrappers, with the additional definitions below.</p>
+<pre><code>class host_based_one_way_executor
+{
+public:
+  // execution agent creation
+  template&lt;class Function, class ProtoAllocator = std::allocator&lt;void&gt;&gt;
+    void execute(Function&amp;&amp; f, const ProtoAllocator&amp; a = ProtoAllocator()) const;
+};</code></pre>
+<p>Class <code>host_based_one_way_executor</code> satisfies the <code>HostBasedOneWayExecutor</code> requirements. The target object shall satisfy the <code>HostBasedOneWayExecutor</code> requirements.</p>
+<pre><code>template&lt;class Function, class ProtoAllocator&gt;
+  void execute(Function&amp;&amp; f, const ProtoAllocator&amp; a) const;</code></pre>
+<p>Let <code>e</code> be the target object of <code>*this</code>. Let <code>a1</code> be the allocator that was specified when the target was set. Let <code>fd</code> be the result of <code>DECAY_COPY(std::forward&lt;Function&gt;(f))</code>.</p>
+<p><em>Effects:</em> Performs <code>e.execute(g, a1)</code>, where <code>g</code> is a function object of unspecified type that, when called as <code>g()</code>, performs <code>fd()</code>. The allocator <code>a</code> is used to allocate any memory required to implement <code>g</code>.</p>
+<h3 id="class-non_blocking_one_way_executor"><span class="header-section-number">2.6.4</span> Class <code>non_blocking_one_way_executor</code></h3>
+<p>Class <code>non_blocking_one_way_executor</code> satisfies the general requirements on polymorphic executor wrappers, with the additional definitions below.</p>
+<pre><code>class non_blocking_one_way_executor
+{
+public:
+  // execution agent creation
+  template&lt;class Function, class ProtoAllocator = std::allocator&lt;void&gt;&gt;
+    void execute(Function&amp;&amp; f, const ProtoAllocator&amp; a = ProtoAllocator()) const;
+  template&lt;class Function, class ProtoAllocator = std::allocator&lt;void&gt;&gt;
+    void post(Function&amp;&amp; f, const ProtoAllocator&amp; a = ProtoAllocator()) const;
+  template&lt;class Function, class ProtoAllocator = std::allocator&lt;void&gt;&gt;
+    void defer(Function&amp;&amp; f, const ProtoAllocator&amp; a = ProtoAllocator()) const;
+};</code></pre>
+<p>Class <code>non_blocking_one_way_executor</code> satisfies the <code>NonBlockingOneWayExecutor</code> requirements. The target object shall satisfy the <code>NonBlockingOneWayExecutor</code> requirements.</p>
+<pre><code>template&lt;class Function, class ProtoAllocator&gt;
+  void execute(Function&amp;&amp; f, const ProtoAllocator&amp; a) const;</code></pre>
+<p>Let <code>e</code> be the target object of <code>*this</code>. Let <code>a1</code> be the allocator that was specified when the target was set. Let <code>fd</code> be the result of <code>DECAY_COPY(std::forward&lt;Function&gt;(f))</code>.</p>
+<p><em>Effects:</em> Performs <code>e.execute(g, a1)</code>, where <code>g</code> is a function object of unspecified type that, when called as <code>g()</code>, performs <code>fd()</code>. The allocator <code>a</code> is used to allocate any memory required to implement <code>g</code>.</p>
+<pre><code>template&lt;class Function, class ProtoAllocator&gt;
+  void post(Function&amp;&amp; f, const ProtoAllocator&amp; a) const;</code></pre>
+<p>Let <code>e</code> be the target object of <code>*this</code>. Let <code>a1</code> be the allocator that was specified when the target was set. Let <code>fd</code> be the result of <code>DECAY_COPY(std::forward&lt;Function&gt;(f))</code>.</p>
+<p><em>Effects:</em> Performs <code>e.post(g, a1)</code>, where <code>g</code> is a function object of unspecified type that, when called as <code>g()</code>, performs <code>fd()</code>. The allocator <code>a</code> is used to allocate any memory required to implement <code>g</code>.</p>
+<pre><code>template&lt;class Function, class ProtoAllocator&gt;
+  void defer(Function&amp;&amp; f, const ProtoAllocator&amp; a) const;</code></pre>
+<p>Let <code>e</code> be the target object of <code>*this</code>. Let <code>a1</code> be the allocator that was specified when the target was set. Let <code>fd</code> be the result of <code>DECAY_COPY(std::forward&lt;Function&gt;(f))</code>.</p>
+<p><em>Effects:</em> Performs <code>e.defer(g, a1)</code>, where <code>g</code> is a function object of unspecified type that, when called as <code>g()</code>, performs <code>fd()</code>. The allocator <code>a</code> is used to allocate any memory required to implement <code>g</code>.</p>
+<h3 id="class-two_way_executor"><span class="header-section-number">2.6.5</span> Class <code>two_way_executor</code></h3>
+<p>Class <code>two_way_executor</code> satisfies the general requirements on polymorphic executor wrappers, with the additional definitions below.</p>
+<pre><code>class two_way_executor
+{
+public:
+  // execution agent creation
+  template&lt;class Function&gt;
+    result_of_t&lt;decay_t&lt;Function&gt;()&gt;
+      sync_execute(Function&amp;&amp; f) const;
+  template&lt;class Function&gt;
+    std::future&lt;result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+      async_execute(Function&amp;&amp; f) const;
+};</code></pre>
+<p>Class <code>two_way_executor</code> satisfies the <code>TwoWayExecutor</code> requirements. The target object shall satisfy the <code>TwoWayExecutor</code> requirements.</p>
+<pre><code>template&lt;class Executor, class Function&gt;
+  result_of_t&lt;decay_t&lt;Function&gt;()&gt;
+    sync_execute(Function&amp;&amp; f);</code></pre>
+<p>Let <code>e</code> be the target object of <code>*this</code>. Let <code>fd</code> be the result of <code>DECAY_COPY(std::forward&lt;Function&gt;(f))</code>.</p>
+<p><em>Effects:</em> Performs <code>e.execute(g)</code>, where <code>g</code> is a function object of unspecified type that, when called as <code>g()</code>, performs <code>fd()</code>.</p>
+<p><em>Returns:</em> The return value of <code>fd()</code>.</p>
+<pre><code>template&lt;class Function&gt;
+  std::future&lt;result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+    async_execute(Function&amp;&amp; f) const;</code></pre>
+<p>Let <code>e</code> be the target object of <code>*this</code>. Let <code>fd</code> be the result of <code>DECAY_COPY(std::forward&lt;Function&gt;(f))</code>.</p>
+<p><em>Effects:</em> Performs <code>e.async_execute(g)</code>, where <code>g</code> is a function object of unspecified type that, when called as <code>g()</code>, performs <code>fd()</code>.</p>
+<p><em>Returns:</em> A future with an associated shared state that will contain the result of <code>fd()</code>. [<em>Note:</em> <code>e.async_execute(g)</code> may return any future type that satisfies the Future requirements, and not necessarily <code>std::future</code>. One possible implementation approach is for the polymorphic wrapper to attach a continuation to the inner future via that object's <code>then()</code> member function. When invoked, this continuation stores the result in the outer future's associated shared and makes that shared state ready. <em>--end note</em>]</p>
+<h3 id="class-non_blocking_two_way_executor"><span class="header-section-number">2.6.6</span> Class <code>non_blocking_two_way_executor</code></h3>
+<p>Class <code>non_blocking_two_way_executor</code> satisfies the general requirements on polymorphic executor wrappers, with the additional definitions below.</p>
+<pre><code>class non_blocking_two_way_executor
+{
+public:
+  // execution agent creation
+  template&lt;class Function&gt;
+    result_of_t&lt;decay_t&lt;Function&gt;()&gt;
+      sync_execute(Function&amp;&amp; f) const;
+  template&lt;class Function&gt;
+    std::future&lt;result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+      async_execute(Function&amp;&amp; f) const;
+  template&lt;class Function&gt;
+    std::future&lt;result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+      async_post(Function&amp;&amp; f) const;
+  template&lt;class Function&gt;
+    std::future&lt;result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+      async_defer(Function&amp;&amp; f) const;
+};</code></pre>
+<p>Class <code>non_blocking_two_way_executor</code> satisfies the <code>NonBlockingTwoWayExecutor</code> requirements. The target object shall satisfy the <code>NonBlockingTwoWayExecutor</code> requirements.</p>
+<pre><code>template&lt;class Executor, class Function&gt;
+  result_of_t&lt;decay_t&lt;Function&gt;()&gt;
+    sync_execute(Function&amp;&amp; f);</code></pre>
+<p>Let <code>e</code> be the target object of <code>*this</code>. Let <code>fd</code> be the result of <code>DECAY_COPY(std::forward&lt;Function&gt;(f))</code>.</p>
+<p><em>Effects:</em> Performs <code>e.execute(g)</code>, where <code>g</code> is a function object of unspecified type that, when called as <code>g()</code>, performs <code>fd()</code>.</p>
+<p><em>Returns:</em> The return value of <code>fd()</code>.</p>
+<pre><code>template&lt;class Function&gt;
+  std::future&lt;result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+    async_execute(Function&amp;&amp; f) const;</code></pre>
+<p>Let <code>e</code> be the target object of <code>*this</code>. Let <code>fd</code> be the result of <code>DECAY_COPY(std::forward&lt;Function&gt;(f))</code>.</p>
+<p><em>Effects:</em> Performs <code>e.async_execute(g)</code>, where <code>g</code> is a function object of unspecified type that, when called as <code>g()</code>, performs <code>fd()</code>.</p>
+<p><em>Returns:</em> A future with an associated shared state that will contain the result of <code>fd()</code>.</p>
+<pre><code>template&lt;class Function&gt;
+  std::future&lt;result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+    async_post(Function&amp;&amp; f) const;</code></pre>
+<p>Let <code>e</code> be the target object of <code>*this</code>. Let <code>fd</code> be the result of <code>DECAY_COPY(std::forward&lt;Function&gt;(f))</code>.</p>
+<p><em>Effects:</em> Performs <code>e.async_post(g)</code>, where <code>g</code> is a function object of unspecified type that, when called as <code>g()</code>, performs <code>fd()</code>.</p>
+<p><em>Returns:</em> A future with an associated shared state that will contain the result of <code>fd()</code>.</p>
+<pre><code>template&lt;class Function&gt;
+  std::future&lt;result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+    async_defer(Function&amp;&amp; f) const;</code></pre>
+<p>Let <code>e</code> be the target object of <code>*this</code>. Let <code>fd</code> be the result of <code>DECAY_COPY(std::forward&lt;Function&gt;(f))</code>.</p>
+<p><em>Effects:</em> Performs <code>e.async_defer(g)</code>, where <code>g</code> is a function object of unspecified type that, when called as <code>g()</code>, performs <code>fd()</code>.</p>
+<p><em>Returns:</em> A future with an associated shared state that will contain the result of <code>fd()</code>.</p>
+<h2 id="thread-pool-type"><span class="header-section-number">2.7</span> Thread pool type</h2>
+<p>XXX Consider whether we should include a wording for a concurrent executor which would satisfy the needs of async (thread pool provides parallel execution semantics).</p>
+<h3 id="header-thread_pool-synopsis"><span class="header-section-number">2.7.1</span> Header <code>&lt;thread_pool&gt;</code> synopsis</h3>
+<pre><code>namespace std {
+namespace experimental {
+inline namespace concurrency_v2 {
+
+  class thread_pool;
+
+} // inline namespace concurrency_v2
+} // namespace experimental
+} // namespace std</code></pre>
+<h3 id="class-thread_pool"><span class="header-section-number">2.7.2</span> Class <code>thread_pool</code></h3>
+<p>This class represents a statically sized thread pool as a common/basic resource type. This pool provides an effectively unbounded input queue and as such calls to add tasks to a thread_pool's executor will not block on the input queue.</p>
+<pre><code>class thread_pool
+{
+  public:
+    class executor_type;
+    
+    // construction/destruction
+    thread_pool();
+    explicit thread_pool(std::size_t num_threads);
+    
+    // nocopy
+    thread_pool(const thread_pool&amp;) = delete;
+    thread_pool&amp; operator=(const thread_pool&amp;) = delete;
+
+    // stop accepting incoming work and wait for work to drain
+    ~thread_pool();
+
+    // attach current thread to the thread pools list of worker threads
+    void attach();
+
+    // signal all work to complete
+    void stop();
+
+    // wait for all threads in the thread pool to complete
+    void wait();
+
+    // placeholder for a general approach to getting executors from 
+    // standard contexts.
+    executor_type executor() noexcept;
+};
+
+bool operator==(const thread_pool&amp; a, const thread_pool&amp; b) noexcept;
+bool operator!=(const thread_pool&amp; a, const thread_pool&amp; b) noexcept;</code></pre>
+<p>The class <code>thread_pool</code> satisfies the <code>ExecutionContext</code> requirements.</p>
+<p>For an object of type <code>thread_pool</code>, <em>outstanding work</em> is defined as the sum of:</p>
+<ul>
+<li><p>the total number of calls to the <code>on_work_started</code> function that returned <code>true</code>, less the total number of calls to the <code>on_work_finished</code> function, on any executor associated with the <code>thread_pool</code>.</p></li>
+<li><p>the number of function objects that have been added to the <code>thread_pool</code> via the <code>thread_pool</code> executor, but not yet executed; and</p></li>
+<li><p>the number of function objects that are currently being executed by the <code>thread_pool</code>.</p></li>
+</ul>
+<p>The <code>thread_pool</code> member functions <code>executor</code>, <code>attach</code>, <code>wait</code>, and <code>stop</code>, and the <code>thread_pool::executor_type</code> copy constructors and member functions, do not introduce data races as a result of concurrent calls to those functions from different threads of execution.</p>
+<h4 id="construction-and-destruction"><span class="header-section-number">2.7.2.1</span> Construction and destruction</h4>
+<pre><code>thread_pool();</code></pre>
+<p><em>Effects:</em> Constructs a <code>thread_pool</code> object with an implementation defined number of threads of execution, as if by creating objects of type <code>std::thread</code>.</p>
+<pre><code>thread_pool(std::size_t num_threads);</code></pre>
+<p><em>Effects:</em> Constructs a <code>thread_pool</code> object with <code>num_threads</code> threads of execution, as if by creating objects of type <code>std::thread</code>. (QUESTION: Do we want to allow 0?)</p>
+<pre><code>~thread_pool();</code></pre>
+<p><em>Effects:</em> Destroys an object of class <code>thread_pool</code>. Performs <code>stop()</code> followed by <code>wait()</code>.</p>
+<h4 id="worker-management"><span class="header-section-number">2.7.2.2</span> Worker Management</h4>
+<pre><code>void attach();</code></pre>
+<p><em>Effects:</em> adds the calling thread to the pool of workers. Blocks the calling thread until signalled to complete by <code>stop()</code> or <code>wait()</code>, and then blocks until all the threads created during <code>thread_pool</code> object construction have completed. (Note: The implementation is encouraged, but not required, to use the attached thread to execute submitted function objects. RATIONALE: implementations in terms of the Windows thread pool cannot utilise user-provided threads. --end note) (NAMING: a possible alternate name for this function is <code>join()</code>.)</p>
+<pre><code>void stop();</code></pre>
+<p><em>Effects:</em> Signals the threads in the pool to complete as soon as possible. If a thread is currently executing a function object, the thread will exit only after completion of that function object. The call to <code>stop()</code> returns without waiting for the threads to complete. Subsequent calls to attach complete immediately.</p>
+<pre><code>void wait();</code></pre>
+<p><em>Effects:</em> If not already stopped, signals the threads in the pool to complete once the outstanding work is <code>0</code>. Blocks the calling thread (C++Std [defns.block]) until all threads in the pool have completed, without executing submitted function objects in the calling thread. Subsequent calls to attach complete immediately.</p>
+<p><em>Synchronization:</em> The completion of each thread in the pool synchronizes with (C++Std [intro.multithread]) the corresponding successful <code>wait()</code> return.</p>
+<h4 id="executor-creation"><span class="header-section-number">2.7.2.3</span> Executor Creation</h4>
+<pre><code>executor_type executor() noexcept;</code></pre>
+<p><em>Returns:</em> An executor that may be used to submit function objects to the thread pool.</p>
+<h4 id="comparisons"><span class="header-section-number">2.7.2.4</span> Comparisons</h4>
+<pre><code>bool operator==(const thread_pool&amp; a, const thread_pool&amp; b) noexcept;</code></pre>
+<p><em>Returns:</em> <code>std::addressof(a) == std::addressof(b)</code>.</p>
+<pre><code>bool operator!=(const thread_pool&amp; a, const thread_pool&amp; b) noexcept;</code></pre>
+<p><em>Returns:</em> <code>!(a == b)</code>.</p>
+<h3 id="class-thread_poolexecutor_type"><span class="header-section-number">2.7.3</span> Class <code>thread_pool::executor_type</code></h3>
+<pre><code>class thread_pool::executor_type
+{
+  public:
+    // types:
+
+    typedef parallel_execution_category execution_category;
+    typedef std::size_t shape_type;
+    typedef std::size_t index_type;
+
+    // construct / copy / destroy:
+
+    executor_type(const executor_type&amp; other) noexcept;
+    executor_type(executor_type&amp;&amp; other) noexcept;
+
+    executor_type&amp; operator=(const executor_type&amp; other) noexcept;
+    executor_type&amp; operator=(executor_type&amp;&amp; other) noexcept;
+
+    // executor operations:
+
+    bool running_in_this_thread() const noexcept;
+
+    thread_pool&amp; context() const noexcept;
+
+    bool on_work_started() const noexcept;
+    void on_work_finished() const noexcept;
+
+    template&lt;class Func, class ProtoAllocator = std::allocator&lt;void&gt;&gt;
+      void execute(Func&amp;&amp; f, const ProtoAllocator&amp; a = ProtoAllocator()) const;
+
+    template&lt;class Func, class ProtoAllocator = std::allocator&lt;void&gt;&gt;
+      void post(Func&amp;&amp; f, const ProtoAllocator&amp; a = ProtoAllocator()) const;
+
+    template&lt;class Func, class ProtoAllocator = std::allocator&lt;void&gt;&gt;
+      void defer(Func&amp;&amp; f, const ProtoAllocator&amp; a = ProtoAllocator()) const;
+
+    template&lt;class Function&gt;
+      result_of_t&lt;decay_t&lt;Function&gt;()&gt;
+        sync_execute(Function&amp;&amp; f) const;
+
+    template&lt;class Function&gt;
+      std::future&lt;result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+        async_execute(Function&amp;&amp; f) const;
+
+    template&lt;class Function&gt;
+      std::future&lt;result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+        async_post(Function&amp;&amp; f) const;
+
+    template&lt;class Function&gt;
+      std::future&lt;result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+        async_defer(Function&amp;&amp; f) const;
+
+    template&lt;class Function1, class Function2&gt;
+    void bulk_execute(Function1 f, shape_type shape,
+                      Function2 shared_factory) const;
+
+    template&lt;class Function1, class Function2, class Function3&gt;
+    result_of_t&lt;Function2()&gt;
+    bulk_sync_execute(Function1 f, shape_type shape,
+                      Function2 result_factory,
+                      Function3 shared_factory) const;
+
+    template&lt;class Function1, class Function2, class Function3&gt;
+    std::future&lt;result_of_t&lt;Function2()&gt;&gt;
+    bulk_async_execute(Function1 f, shape_type shape,
+                       Function2 result_factory,
+                       Function3 shared_factory) const;
+};
+
+bool operator==(const thread_pool::executor_type&amp; a,
+                const thread_pool::executor_type&amp; b) noexcept;
+bool operator!=(const thread_pool::executor_type&amp; a,
+                const thread_pool::executor_type&amp; b) noexcept;</code></pre>
+<p><code>thread_pool::executor_type</code> is a type satisfying the <code>NonBlockingOneWayExecutor</code>, <code>NonBlockingTwoWayExecutor</code>, <code>BulkOneWayExecutor</code>, <code>BulkTwoWayExecutor</code>, and <code>ExecutorWorkTracker</code> requirements. Objects of type <code>thread_pool::executor_type</code> are associated with a <code>thread_pool</code>, and function objects submitted using the <code>execute</code>, <code>post</code>, <code>defer</code>, <code>sync_execute</code>, <code>async_execute</code>, <code>async_post</code>, <code>async_defer</code>, <code>bulk_execute</code>, <code>bulk_sync_execute</code>, and <code>bulk_async_execute</code> member functions will be executed by the <code>thread_pool</code>.</p>
+<h4 id="constructors"><span class="header-section-number">2.7.3.1</span> Constructors</h4>
+<pre><code>executor_type(const executor_type&amp; other) noexcept;</code></pre>
+<p><em>Postconditions:</em> <code>*this == other</code>.</p>
+<pre><code>executor_type(executor_type&amp;&amp; other) noexcept;</code></pre>
+<p><em>Postconditions:</em> <code>*this</code> is equal to the prior value of <code>other</code>.</p>
+<h4 id="assignment"><span class="header-section-number">2.7.3.2</span> Assignment</h4>
+<pre><code>executor_type&amp; operator=(const executor_type&amp; other) noexcept;</code></pre>
+<p><em>Postconditions:</em> <code>*this == other</code>.</p>
+<p><em>Returns:</em> <code>*this</code>.</p>
+<pre><code>executor_type&amp; operator=(executor_type&amp;&amp; other) noexcept;</code></pre>
+<p><em>Postconditions:</em> <code>*this</code> is equal to the prior value of <code>other</code>.</p>
+<p><em>Returns:</em> <code>*this</code>.</p>
+<h4 id="operations"><span class="header-section-number">2.7.3.3</span> Operations</h4>
+<pre><code>bool running_in_this_thread() const noexcept;</code></pre>
+<p><em>Returns:</em> <code>true</code> if the current thread of execution is a thread that was created by or attached to the associated <code>thread_pool</code> object.</p>
+<pre><code>thread_pool&amp; context() const noexcept;</code></pre>
+<p><em>Returns:</em> A reference to the associated <code>thread_pool</code> object.</p>
+<pre><code>bool on_work_started() const noexcept;</code></pre>
+<p><em>Effects:</em> Increments the count of outstanding work associated with the <code>thread_pool</code>.</p>
+<pre><code>void on_work_finished() const noexcept;</code></pre>
+<p><em>Effects:</em> Decrements the count of outstanding work associated with the <code>thread_pool</code>.</p>
+<pre><code>template&lt;class Func, class ProtoAllocator = std::allocator&lt;void&gt;&gt;
+  void execute(Func&amp;&amp; f, const ProtoAllocator&amp; a = ProtoAllocator()) const;</code></pre>
+<p><em>Effects:</em> If <code>running_in_this_thread()</code> is <code>true</code>, calls <code>DECAY_COPY(forward&lt;Func&gt;(f))()</code>. <em>[Note:* If <code>f</code> exits via an exception, the exception propagates to the caller of <code>execute</code>. *--end note]</em> Otherwise, calls <code>post(forward&lt;Func&gt;(f), a)</code>.</p>
+<pre><code>template&lt;class Func, class ProtoAllocator = std::allocator&lt;void&gt;&gt;
+  void post(Func&amp;&amp; f, const ProtoAllocator&amp; a = ProtoAllocator()) const;</code></pre>
+<p><em>Effects:</em> Adds <code>f</code> to the <code>thread_pool</code>.</p>
+<pre><code>template&lt;class Func, class ProtoAllocator = std::allocator&lt;void&gt;&gt;
+  void defer(Func&amp;&amp; f, const ProtoAllocator&amp; a = ProtoAllocator()) const;</code></pre>
+<p><em>Effects:</em> Adds <code>f</code> to the <code>thread_pool</code>.</p>
+<pre><code>template&lt;class Function&gt;
+  result_of_t&lt;decay_t&lt;Function&gt;()&gt;
+    sync_execute(Function&amp;&amp; f) const;</code></pre>
+<p><em>Effects:</em> If <code>running_in_this_thread()</code> is <code>true</code>, calls <code>DECAY_COPY(forward&lt;Func&gt;(f))()</code>. Otherwise, adds <code>f</code> to the <code>thread_pool</code> and blocks the caller pending completion of <code>f</code>.</p>
+<p><em>Returns:</em> The return value of <code>f</code>.</p>
+<p><em>Throws:</em> Any uncaught exception thrown by <code>f</code>.</p>
+<pre><code>template&lt;class Function&gt;
+  future&lt;result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+    async_execute(Function&amp;&amp; f) const;
+template&lt;class Function&gt;
+  future&lt;result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+    async_post(Function&amp;&amp; f) const;
+template&lt;class Function&gt;
+  future&lt;result_of_t&lt;decay_t&lt;Function&gt;()&gt;&gt;
+    async_defer(Function&amp;&amp; f) const;</code></pre>
+<p><em>Effects:</em> Creates an asynchronous provider with an associated shared state (C++Std [futures.state]). Adds <code>f</code> to the <code>thread_pool</code>. On successful completion of <code>f</code>, the return value of <code>f</code> is atomically stored in the shared state and the shared state is made ready. If <code>f</code> exits via an exception, the exception is atomically stored in the shared state and the shared state is made ready.</p>
+<p><em>Returns:</em> An object of type <code>future&lt;result_of_t&lt;decay_t&lt;Function&gt;&gt;()&gt;</code> that refers to the shared state created by <code>async_execute</code>.</p>
+<pre><code>template&lt;class Function1, class Function2&gt;
+void bulk_execute(Function1 f, shape_type shape,
+                  Function2 shared_factory) const;</code></pre>
+<p><em>Effects:</em> Submits a function object to the thread pool that:</p>
+<ul>
+<li><p>Calls <code>shared_factory()</code> and stores the result of this invocation to some shared state <code>shared</code>.</p></li>
+<li><p>Submits a new group of function objects of shape <code>shape</code>. Each function object calls <code>f(idx, shared)</code>, where <code>idx</code> is the index of the execution agent, and <code>shared</code> is a reference to the shared state.</p></li>
+<li><p>If any invocation of <code>f</code> exits via an uncaught exception, <code>terminate</code> is called.</p></li>
+</ul>
+<p><em>Synchronization:</em> The completion of the function <code>shared_factory</code> happens before the creation of the group of function objects.</p>
+<pre><code>template&lt;class Function1, class Function2, class Function3&gt;
+result_of_t&lt;Function2()&gt;
+bulk_sync_execute(Function1 f, shape_type shape,
+                  Function2 result_factory,
+                  Function3 shared_factory) const;</code></pre>
+<p><em>Effects:</em> Submits a function object to the thread pool that:</p>
+<ul>
+<li><p>Calls <code>result_factory()</code> and <code>shared_factory()</code>, and stores the results of these invocations to some shared state <code>result</code> and <code>shared</code> respectively.</p></li>
+<li><p>Submits a new group of function objects of shape <code>shape</code>. Each function object calls <code>f(idx, result, shared)</code>, where <code>idx</code> is the index of the execution agent, and <code>result</code> and <code>shared</code> are references to the respective shared state. Any return value of <code>f</code> is discarded.</p></li>
+<li><p>If any invocation of <code>f</code> exits via an uncaught exception, <code>terminate</code> is called.</p></li>
+<li><p>Blocks the caller until all invocations of <code>f</code> are complete and the result is ready.</p></li>
+</ul>
+<p><em>Returns:</em> An object of type <code>result_of_t&lt;Function2()&gt;</code> that refers to the result shared state created by this call to <code>bulk_sync_execute</code>.</p>
+<p><em>Synchronization:</em> The completion of the functions <code>result_factory</code> and <code>shared_factory</code> happen before the creation of the group of function objects.</p>
+<pre><code>template&lt;class Function1, class Function2, class Function3&gt;
+std::future&lt;result_of_t&lt;Function2()&gt;&gt;
+bulk_async_execute(Function1 f, shape_type shape,
+                   Function2 result_factory,
+                   Function3 shared_factory) const;</code></pre>
+<p><em>Effects:</em> Submits a function object to the thread pool that:</p>
+<ul>
+<li><p>Calls <code>result_factory()</code> and <code>shared_factory()</code>, and stores the results of these invocations to some shared state <code>result</code> and <code>shared</code> respectively.</p></li>
+<li><p>Submits a new group of function objects of shape <code>shape</code>. Each function object calls <code>f(idx, result, shared)</code>, where <code>idx</code> is the index of the function object, and <code>result</code> and <code>shared</code> are references to the respective shared state. Any return value of <code>f</code> is discarded.</p></li>
+<li><p>If any invocation of <code>f</code> exits via an uncaught exception, <code>terminate</code> is called.</p></li>
+</ul>
+<p><em>Returns:</em> An object of type <code>std::future&lt;result_of_t&lt;Function2()&gt;&gt;</code> that refers to the shared result state created by this call to <code>bulk_async_execute</code>.</p>
+<p><em>Synchronization:</em></p>
+<ul>
+<li><p>The invocation of <code>bulk_async_execute</code> synchronizes with (1.10) the invocations of <code>f</code>.</p></li>
+<li><p>The completion of the functions <code>result_factory</code> and <code>shared_factory</code> happen before the creation of the group of function objects.</p></li>
+<li><p>The completion of the invocations of <code>f</code> are sequenced before (1.10) the result shared state is made ready.</p></li>
+</ul>
+<h4 id="comparisons-1"><span class="header-section-number">2.7.3.4</span> Comparisons</h4>
+<pre><code>bool operator==(const thread_pool::executor_type&amp; a,
+                const thread_pool::executor_type&amp; b) noexcept;</code></pre>
+<p><em>Returns:</em> <code>a.context() == b.context()</code>.</p>
+<pre><code>bool operator!=(const thread_pool::executor_type&amp; a,
+                const thread_pool::executor_type&amp; b) noexcept;</code></pre>
+<p><em>Returns:</em> <code>!(a == b)</code>.</p>
+<h2 id="interoperation-with-existing-facilities"><span class="header-section-number">2.8</span> Interoperation with existing facilities</h2>
+<h3 id="execution-policy-interoperation"><span class="header-section-number">2.8.1</span> Execution policy interoperation</h3>
+<pre><code>class parallel_execution_policy
+{
+  public:
+    // types:
+    using execution_category = parallel_execution_tag;
+    using executor_type = implementation-defined;
+
+    // executor access
+    const executor_type&amp; executor() const noexcept;
+
+    // execution policy factory
+    template&lt;class Executor&gt;
+    see-below on(Executor&amp;&amp; exec) const;
+};
+
+class sequenced_execution_tag { by-analogy-to-parallel_execution_policy };
+class parallel_unsequenced_execution_tag { by-analogy-to-parallel_execution_policy };</code></pre>
+<h4 id="associated-executor"><span class="header-section-number">2.8.1.1</span> Associated executor</h4>
+<p>Each execution policy is associated with an executor, and this executor is called its <em>associated executor</em>.</p>
+<p>The type of an execution policy's associated executor shall satisfy the requirements of <code>BulkTwoWayExecutor</code>.</p>
+<p>When an execution policy is used as a parameter to a parallel algorithm, the execution agents that invoke element access functions are created by the execution policy's associated executor.</p>
+<p>The type of an execution policy's associated executor is the same as the member type <code>executor_type</code>.</p>
+<h4 id="execution-category"><span class="header-section-number">2.8.1.2</span> Execution category</h4>
+<p>Each execution policy is categorized by an <em>execution category</em>.</p>
+<p>When an execution policy is used as a parameter to a parallel algorithm, the execution agents it creates are guaranteed to make forward progress and execute invocations of element access functions as ordered by its execution category.</p>
+<p>An execution policy's execution category is given by the member type <code>execution_category</code>.</p>
+<p>The execution category of an execution policy's associated executor shall not be weaker than the execution policy's execution category.</p>
+<h4 id="associated-executor-access"><span class="header-section-number">2.8.1.3</span> Associated executor access</h4>
+<pre><code>const executor_type&amp; executor() const noexcept;</code></pre>
+<p><em>Returns:</em> The execution policy's associated executor.</p>
+<h4 id="execution-policy-factory"><span class="header-section-number">2.8.1.4</span> Execution policy factory</h4>
+<pre><code>template&lt;class Executor&gt;
+see-below on(Executor&amp;&amp; exec) const;</code></pre>
+<p>Let <code>T</code> be <code>decay_t&lt;Executor&gt;</code>.</p>
+<p><em>Returns:</em> An execution policy whose execution category is <code>execution_category</code>. If <code>T</code> satisfies the requirements of <code>BulkTwoWayExecutor</code>, the returned execution policy's associated executor is equal to <code>exec</code>. Otherwise, the returned execution policy's associated executor is an adaptation of <code>exec</code>.</p>
+<p>XXX TODO: need to define what adaptation means</p>
+<p><em>Remarks:</em> This member function shall not participate in overload resolution unless <code>is_executor_v&lt;T&gt;</code> is <code>true</code> and <code>executor_execution_category_t&lt;T&gt;</code> is as strong as <code>execution_category</code>.</p>
+<h3 id="control-structure-interoperation"><span class="header-section-number">2.8.2</span> Control structure interoperation</h3>
+<h4 id="function-template-async"><span class="header-section-number">2.8.2.1</span> Function template <code>async</code></h4>
+<p>The function template <code>async</code> provides a mechanism to invoke a function in a new execution agent created by an executor and provides the result of the function in the future object with which it shares a state.</p>
+<pre><code>template&lt;class Executor, class Function, class... Args&gt;
+executor_future_t&lt;Executor, result_of_t&lt;decay_t&lt;Function&gt;(decay_t&lt;Args&gt;...)&gt;&gt;
+async(const Executor&amp; exec, Function&amp;&amp; f, Args&amp;&amp;... args);</code></pre>
+<p><em>Returns:</em> Equivalent to:</p>
+<p><code>return execution::async_post(exec, [=]{ return INVOKE(f, args...); });</code></p>
+<p>XXX This forwarding doesn't look correct to me</p>
+<h4 id="stdfuturethen"><span class="header-section-number">2.8.2.2</span> <code>std::future::then()</code></h4>
+<p>The member function template <code>then</code> provides a mechanism for attaching a <em>continuation</em> to a <code>std::future</code> object, which will be executed on a new execution agent created by an executor.</p>
+<pre><code>template&lt;class T&gt;
+template&lt;class Executor, class Function&gt;
+executor_future_t&lt;Executor, see-below&gt;
+future&lt;T&gt;::then(const Executor&amp; exec, Function&amp;&amp; f);</code></pre>
+<ol start="2" style="list-style-type: decimal">
+<li>TODO: Concrete specification</li>
+</ol>
+<p>The general idea of this overload of <code>.then()</code> is that it accepts a particular type of <code>OneWayExecutor</code> that cannot block in <code>.execute()</code>. <code>.then()</code> stores <code>f</code> as the next continuation in the future state, and when the future is ready, creates an execution agent using a copy of <code>exec</code>.</p>
+<p>One approach is for <code>.then()</code> to require a <code>NonBlockingOneWayExecutor</code>, and to specify that <code>.then()</code> submits the continuation using <code>exec.post()</code> if the future is already ready at the time when <code>.then()</code> is called, and to submit using <code>exec.execute()</code> otherwise.</p>
+<h4 id="stdshared_futurethen"><span class="header-section-number">2.8.2.3</span> <code>std::shared_future::then()</code></h4>
+<p>The member function template <code>then</code> provides a mechanism for attaching a <em>continuation</em> to a <code>std::shared_future</code> object, which will be executed on a new execution agent created by an executor.</p>
+<pre><code>template&lt;class T&gt;
+template&lt;class Executor, class Function&gt;
+executor_future_t&lt;Executor, see-below&gt;
+shared_future&lt;T&gt;::then(const Executor&amp; exec, Function&amp;&amp; f);</code></pre>
+<p>TODO: Concrete specification</p>
+<p>The general idea of this overload of <code>.then()</code> is that it accepts a particular type of <code>OneWayExecutor</code> that cannot block in <code>.execute()</code>. <code>.then()</code> stores <code>f</code> as the next continuation in the underlying future state, and when the underlying future is ready, creates an execution agent using a copy of <code>exec</code>.</p>
+<p>One approach is for <code>.then()</code> to require a <code>NonBlockingOneWayExecutor</code>, and to specify that <code>.then()</code> submits the continuation using <code>exec.post()</code> if the future is already ready at the time when <code>.then()</code> is called, and to submit using <code>exec.execute()</code> otherwise.</p>
+<h4 id="function-template-invoke"><span class="header-section-number">2.8.2.4</span> Function template <code>invoke</code></h4>
+<p>The function template <code>invoke</code> provides a mechanism to invoke a function in a new execution agent created by an executor and return result of the function.</p>
+<pre><code>template&lt;class Executor, class Function, class... Args&gt;
+result_of_t&lt;F&amp;&amp;(Args&amp;&amp;...)&gt;
+invoke(const Executor&amp; exec, Function&amp;&amp; f, Args&amp;&amp;... args);</code></pre>
+<p><em>Returns:</em> Equivalent to:</p>
+<p><code>return execution::sync_execute(exec, [&amp;]{ return INVOKE(f, args...); });</code></p>
+<h4 id="task-block"><span class="header-section-number">2.8.2.5</span> Task block</h4>
+<h5 id="function-template-define_task_block_restore_thread"><span class="header-section-number">2.8.2.5.1</span> Function template <code>define_task_block_restore_thread()</code></h5>
+<pre><code>template&lt;class Executor, class F&gt;
+void define_task_block_restore_thread(const Executor&amp; exec, F&amp;&amp; f);</code></pre>
+<p><em>Requires:</em> Given an lvalue <code>tb</code> of type <code>task_block</code>, the expression <code>f(tb)</code> shall be well-formed.</p>
+<p><em>Effects:</em> Constructs a <code>task_block tb</code>, creates a new execution agent, and calls <code>f(tb)</code> on that execution agent.</p>
+<p><em>Throws:</em> <code>exception_list</code>, as specified in version two of the Paralellism TS.</p>
+<p><em>Postconditions:</em> All tasks spawned from <code>f</code> have finished execution.</p>
+<p><em>Remarks:</em> Unlike <code>define_task_block</code>, <code>define_task_block_restore_thread</code> always returns on the same thread as the one on which it was called.</p>
+<h5 id="task_block-member-function-template-run"><span class="header-section-number">2.8.2.5.2</span> <code>task_block</code> member function template <code>run</code></h5>
+<pre><code>template&lt;class Executor, class F&gt;
+void run(const Executor&amp; exec, F&amp;&amp; f);</code></pre>
+<p><em>Requires:</em> <code>F</code> shall be <code>MoveConstructible</code>. <code>DECAY_COPY(std::forward&lt;F&gt;(f))()</code> shall be a valid expression.</p>
+<p><em>Preconditions:</em> <code>*this</code> shall be an active <code>task_block</code>.</p>
+<p><em>Effects:</em> Evaluates <code>DECAY_COPY(std::forward&lt;F&gt;(f))()</code>, where <code>DECAY_COPY(std::forward&lt;F&gt;(f))</code> is evaluated synchronously within the current thread. The call to the resulting copy of the function object is permitted to run on an execution agent created by <code>exec</code> in an unordered fashion relative to the sequence of operations following the call to <code>run(exec, f)</code> (the continuation), or indeterminately-sequenced within the same thread as the continuation. The call to <code>run</code> synchronizes with the next invocation of <code>wait</code> on the same <code>task_block</code> or completion of the nearest enclosing <code>task_block</code> (i.e., the <code>define_task_block</code> or <code>define_task_block_restore_thread</code> that created this <code>task_block</code>.</p>
+<p><em>Throws:</em> <code>task_cancelled_exception</code>, as described in version 2 of the Parallelism TS.</p>
+<h1 id="relationship-to-other-proposals-and-specifications"><span class="header-section-number">3</span> Relationship to other proposals and specifications</h1>
+<h2 id="networking-ts"><span class="header-section-number">3.1</span> Networking TS</h2>
+<p>Executors in the Networking TS may be defined as refinements of the type requirements in this proposal, as illustrated below. In addition to these requirements, some minor changes would be required to member function names and parameters used in the Networking TS, to conform to the requirements defined in this proposal.</p>
+<h3 id="networkingexecutor-requirements"><span class="header-section-number">3.1.1</span> <code>NetworkingExecutor</code> requirements</h3>
+<p>A type <code>X</code> satisfies the <code>NetworkingExecutor</code> requirements if it satisfies the <code>NonBlockingOneWayExecutor</code> requirements, the <code>ExecutorWorkTracker</code> requirements, and satisfies the additional requirements listed below.</p>
+<p>In the Table  below, <code>x</code> denotes a (possibly const) value of type <code>X</code>.</p>
+<table>
+<thead>
+<tr class="header">
+<th align="left">expression</th>
+<th align="left">return type</th>
+<th align="left">assertion/note pre/post-condition</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left"><code>x.context()</code></td>
+<td align="left"><code>net::execution_context&amp;</code>, or <code>E&amp;</code> where <code>E</code> is a type that satisfies the <code>NetworkingExecutionContext</code> requirements.</td>
+<td align="left"></td>
+</tr>
+</tbody>
+</table>
+<h3 id="networkingexecutioncontext-requirements"><span class="header-section-number">3.1.2</span> <code>NetworkingExecutionContext</code> requirements</h3>
+<p>A type <code>X</code> satisfies the <code>NetworkingExecutionContext</code> requirements if it satisfies the <code>ExecutionContext</code> requirements, is publicly and unambiguously derived from <code>net::execution_context</code>, and satisfies the additional requirements listed below.</p>
+<p>In the Table  below, <code>x</code> denotes a value of type <code>X</code>.</p>
+<table>
+<caption>(NetworkingExecutionContext requirements) </caption>
+<thead>
+<tr class="header">
+<th align="left">expression</th>
+<th align="left">return type</th>
+<th align="left">assertion/note pre/post-condition</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left"><code>X::executor_type</code></td>
+<td align="left">type meeting <code>NetworkingExecutor</code> requirements</td>
+<td align="left"></td>
+</tr>
+<tr class="even">
+<td align="left"><code>x.~X()</code></td>
+<td align="left"></td>
+<td align="left">Destroys all unexecuted function objects that were submitted via an executor object that is associated with the execution context.</td>
+</tr>
+<tr class="odd">
+<td align="left"><code>x.get_executor()</code></td>
+<td align="left"><code>X::executor_type</code></td>
+<td align="left">Returns an executor object that is associated with the execution context.</td>
+</tr>
+</tbody>
+</table>
+<h1 id="future-work"><span class="header-section-number">4</span> Future work</h1>

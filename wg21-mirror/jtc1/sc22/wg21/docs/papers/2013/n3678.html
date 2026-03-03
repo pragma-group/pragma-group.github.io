@@ -1,0 +1,791 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+
+<meta http-equiv="Content-Type" content="text/html;charset=US-ASCII">
+
+<style type="text/css">
+
+body {
+  color: #000000;
+  background-color: #FFFFFF;
+}
+
+del {
+  text-decoration: line-through;
+  color: #8B0040;
+}
+ins {
+  text-decoration: underline;
+  color: #005100;
+}
+
+p.example {
+  margin: 2em;
+}
+pre.example {
+  margin: 2em;
+}
+div.example {
+  margin: 2em;
+}
+
+code.extract {
+  background-color: #F5F6A2;
+}
+pre.extract {
+  margin: 2em;
+  background-color: #F5F6A2;
+  border: 1px solid #E1E28E;
+}
+
+p.function {
+}
+
+p.attribute {
+  text-indent: 3em;
+}
+
+blockquote.std {
+  color: #000000;
+  background-color: #F1F1F1;
+  border: 1px solid #D1D1D1;
+  padding: 0.5em;
+}
+
+blockquote.stddel {
+  text-decoration: line-through;
+  color: #000000;
+  background-color: #FFEBFF;
+  border: 1px solid #ECD7EC;
+  padding: 0.5em;
+}
+
+blockquote.stdins {
+  text-decoration: underline;
+  color: #000000;
+  background-color: #C8FFC8;
+  border: 1px solid #B3EBB3;
+  padding: 0.5em;
+}
+
+table {
+  border: 1px solid black;
+  border-spacing: 0px;
+  margin-left: auto;
+  margin-right: auto;
+}
+th {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.2em;
+  border: none;
+}
+td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.2em;
+  border: none;
+}
+
+</style>
+
+<title>C++ Stream Guards</title>
+</head>
+<body>
+<h1>C++ Stream Guards</h1>
+
+<p>
+ISO/IEC JTC1 SC22 WG21 N3678 - 2013-04-30
+</p>
+
+<p>
+Lawrence Crowl, crowl@google.com, Lawrence@Crowl.org
+</p>
+
+<p>
+<a href="#Introduction">Introduction</a><br>
+<a href="#Solution">Solution</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#stream_guard">Stream Guard</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#guard_stream">Guard Stream</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#expression_locking">Expression Locking</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#block_locking">Block Locking</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#recursive_locking">Recursive Locking</a><br>
+<a href="#wording">Wording</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#stream.guard">27.7.6 Stream Guard [stream.guard]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#stream.guard.class">27.7.6.1 Class template <code>stream_guard</code> [stream.guard.class]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#stream.guard.class.types">27.7.6.1.1 Types [stream.guard.class.types]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#stream.guard.class.class.ctor">27.7.6.1.2 Constructors and destructors [stream.guard.class.ctor]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#stream.guard.class.memfn">27.7.6.1.3 Member functions [stream.guard.class.memfn]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#stream.guard.fnctn">27.7.6.2 Function template <code>guard_stream</code> [stream.guard.fnctn]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#stream.guard.streaming">27.7.6.3 Streaming function templates [stream.guard.streaming]</a><br>
+<a href="#Revision">Revision History</a><br>
+<a href="#References">References</a><br>
+</p>
+
+
+<h2><a name="Introduction">Introduction</a></h2>
+
+<p>
+At present,
+stream output operations guarantee that they will not produce race conditions,
+but do not guarantee that the effect will be sensible.
+Some form of external synchronization is required.
+Unfortunately, without a standard mechanism for synchronizing,
+independently developed software will be unable to synchronize.
+</p>
+
+<p>
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2013/n3535.html">
+N3535 C++ Stream Mutexes</a>
+proposed a standard mechanism for finding and sharing a mutex on streams.
+At the Spring 2013 standards meeting,
+the Concurrency Study Group requested a change
+away from a full mutex definition
+to a definition that also enabled buffering.
+This paper describes such a change.
+</p>
+
+<p>
+A draft of this paper was reviewed in the Library Working Group,
+and found too many open issues on what was reasonably exposed
+to the 'buffering' part.
+In retrospect, I think that if buffering is desired it should be explicit.
+So, this paper is neither as general as a stream mutex
+nor as sure as an explicit <code>string_stream</code> buffer.
+Nevertheless, this paper represents a design point
+that needs documentation and discussion.
+</p>
+
+
+<h2><a name="Solution">Solution</a></h2>
+
+<p>
+First, we propose a <code>stream_guard</code>,
+that serves to batch operations on a stream.
+That batching may be implemented as mutexes, as buffering,
+or some combination of both.
+</p>
+
+
+<h3><a name="stream_guard">Stream Guard</a></h3>
+
+<p>
+A stream guard is declared with a reference to the stream to be locked.
+Each stream to be locked
+may have more than one simultaneous associated stream guard object.
+Two independent threads creating two stream guard objects on the same stream
+will mutually exclude blocks of operations on the stream.
+</p>
+
+<pre class="example">
+<code>std::ostringstream stream;
+stream_guard&lt;std::ostream&gt; gout(std::cout);</code>
+</pre>
+
+
+<h3><a name="guard_stream">Guard Stream</a></h3>
+
+<p>
+To avoid requiring programmers to specify the stream_guard type,
+we provide a template function that
+returns the properly typed object from a reference to the stream.
+</p>
+
+<pre class="example">
+<code>auto gout = guard_stream(std::cout);</code>
+</pre>
+
+
+<h3><a name="expression_locking">Expression Locking</a></h3>
+
+<p>
+Programmers batch operations in a single full expression.
+</p>
+
+<pre class="example">
+<code>guard_stream(std::cout) &lt;&lt; "1" &lt;&lt; "2" &lt;&lt; "3" &lt;&lt; "4" &lt;&lt; "5" &lt;&lt; std::endl;</code>
+</pre>
+
+
+<h3><a name="block_locking">Block Locking</a></h3>
+
+<p>
+Locking across more than one expression is needed,
+and the stream guard serves that purpose as well.
+</p>
+
+<pre class="example">
+<code>{
+auto gout = guard_stream(std::cout);
+gout &lt;&lt; "1";
+gout &lt;&lt; "2";
+gout &lt;&lt; "3";
+gout &lt;&lt; "4";
+gout &lt;&lt; "5";
+gout &lt;&lt; std::endl;
+}</code>
+</pre>
+
+
+<h3><a name="recursive_locking">Recursive Locking</a></h3>
+
+<p>
+Streams may be locked in uncoordinated code,
+and so recursive locking must work in some fashion.
+Because the implementation may use buffering or mutexes,
+the order of output in the recursive case is unspecified
+except that when a <code>stream_guard</code> destruction
+happens before another guarded operation on that stream,
+the operations of the first guard happen before the operations on the second.
+</p>
+
+<pre class="example">
+<code>{
+auto gout = guard_stream(std::cout);
+gout &lt;&lt; "1";
+guard_stream(std::cout) &lt;&lt; "2";
+gout &lt;&lt; "3" &lt;&lt; std::endl;
+}</code>
+</pre>
+
+<p>
+The output could be 123 or 213
+but not 132 (because of the destructor happens-before order)
+and not 231 or (because of the output operations sequence)
+and not 312 or 321 (because of both).
+</p>
+
+
+<h2><a name="wording">Wording</a></h2>
+
+<p>
+This wording is relative to N3485.
+</p>
+
+
+<h3><a name="stream.guard">27.7.6 Stream Guard [stream.guard]</a></h3>
+
+<p>
+Add a new section.
+</p>
+
+<blockquote class=stdins>
+<p>
+The header <code>&lt;stream_guard&gt;</code>
+defines class and function templates
+that synchronize access to streams.
+</p>
+</blockquote>
+
+
+<h3><a name="stream.guard.class">27.7.6.1 Class template <code>stream_guard</code> [stream.guard.class]</a></h3>
+
+<p>
+Add a new section.
+</p>
+
+<blockquote class=stdins>
+<p>
+There are two stream class templates,
+one for input and one for output.
+</p>
+<pre>
+<code>template &lt;typename Stream&gt;
+  class stream_guard;
+
+template &lt;typename charT, typename traits&gt;
+  class stream_guard&lt;std::basic_istream&lt;charT, traits&gt;&gt;
+
+template &lt;typename charT, typename traits&gt;
+  class stream_guard&lt;std::basic_ostream&lt;charT, traits&gt;&gt;
+
+template &lt;typename charT, typename traits&gt;
+  class stream_guard&lt;std::basic_wistream&lt;charT, traits&gt;&gt;
+
+template &lt;typename charT, typename traits&gt;
+  class stream_guard&lt;std::basic_wostream&lt;charT, traits&gt;&gt;</code>
+</pre>
+</blockquote>
+
+
+<h3><a name="stream.guard.class.types">27.7.6.1.1 Types [stream.guard.class.types]</a></h3>
+
+<p>
+Add a new section.
+</p>
+
+<blockquote class=stdins>
+
+<p>
+Both class templates provide the following typedefs
+to the same named types in the constructor parameter types.
+</p>
+
+<blockquote>
+<p>
+<code>
+fmtflags,
+locale,
+iostate,
+char_type,
+traits_type,
+event_callback,
+off_type,
+pos_type
+</code>
+</p>
+</blockquote>
+
+<p>
+The input class template provides the following typedef
+to the same named type in the constructor parameter type.
+</p>
+
+<blockquote>
+<p>
+<code>
+int_type
+</code>
+</p>
+</blockquote>
+
+</blockquote>
+
+
+<h3><a name="stream.guard.class.class.ctor">27.7.6.1.2 Constructors and destructors [stream.guard.class.ctor]</a></h3>
+
+<p>
+Add a new section.
+</p>
+
+<blockquote class=stdins>
+
+<dl>
+
+<dt><code>stream_guard(std::basic_istream&lt;charT, traits&gt;&amp; stm);</code></dt>
+<dt><code>stream_guard(std::basic_ostream&lt;charT, traits&gt;&amp; stm);</code></dt>
+<dt><code>stream_guard(std::basic_wistream&lt;charT, traits&gt;&amp; stm);</code></dt>
+<dt><code>stream_guard(std::basic_wostream&lt;charT, traits&gt;&amp; stm);</code></dt>
+<dd>
+
+<p><i>Effects:</i>
+Constructs a <code>stream_guard</code>
+and initiates a sequence of batched stream operations.
+</p>
+
+<p><i>Synchronization:</i>
+May or may not acquire a mutex
+for arbitrary portions of the lifetime of the object.
+</p>
+
+</dd>
+
+<dt><code>~stream_guard();</code></dt>
+<dd>
+
+<p><i>Effects:</i>
+Finalizes a sequence of batched operations,
+ensuring that all operations are effective on the stream.
+</p>
+<p>
+If construction and destruction of a single guard
+occur on different threads,
+the effects are undefined.
+</p>
+<p>
+For two guards on a given stream:
+<ul>
+<li>
+<p>
+If construction and destruction are on the same thread:
+</p>
+<ul>
+<li><p>
+If the destruction of the first guard
+is sequenced before (1.9) the construction of the second guard,
+the effects on the stream of the first guard
+are sequenced before the effects on the stream of the second guard.
+</p></li>
+<li><p>
+Otherwise,
+if the destruction of the first guard
+is sequenced before (1.9) the destruction of the second guard,
+the effects on the stream of the first guard
+are sequenced before
+the effects on the second stream that are sequenced after
+the first guard's destruction.
+</p></li>
+<li><p>
+Otherwise,
+the effects may or may not be interleaved,
+but shall preserve the sequence on individual guards.
+</p></li>
+</ul>
+</li>
+<li>
+<p>
+Otherwise, the two guards are constructed and destructed on separate threads:
+</p>
+<ul>
+<li><p>
+If the destruction of the first guard
+happens before (1.10) the construction of the second guard,
+the effects on the stream of the first guard
+happen before the construction of the second guard.
+</p></li>
+<li><p>
+Otherwise,
+the effects of one guard happen before the effects of the other guard.
+</p></li>
+</ul>
+</li>
+</ul>
+<p>
+Destroys the holder.
+</p>
+
+<p><i>Synchronization:</i>
+May or may not acquire a mutex
+for arbitrary portions of the lifetime of the object.
+</p>
+
+</dd>
+</dl>
+</blockquote>
+
+<h3><a name="stream.guard.class.memfn">27.7.6.1.3 Member functions [stream.guard.class.memfn]</a></h3>
+
+<p>
+Add a new section.
+</p>
+
+<blockquote class=stdins>
+
+<p>
+Both class templates provides the following functions,
+which have the same effect as the same functions
+on the constructor argument object.
+</p>
+
+<blockquote>
+<pre><code>
+fmtflags flags() const;
+fmtflags flags(fmtflags fmtfl);
+fmtflags setf(fmtflags fmtfl);
+fmtflags setf(fmtflags fmtfl, fmtflags mask);
+void unsetf(fmtflags mask);
+std::streamsize precision() const;
+std::streamsize precision(std::streamsize prec);
+std::streamsize width() const;
+std::streamsize width(std::streamsize wide);
+locale getloc() const;
+long&amp; iword(int index);
+void*&amp; pword(int index);
+void register_callback(event_callback fn, int index);
+explicit operator bool() const;
+iostate rdstate() const;
+void clear(iostate state = goodbit);
+void setstate(iostate state);
+bool good() const;
+bool eof() const;
+bool fail() const;
+bool bad() const;
+iostate exceptions() const;
+void exceptions(iostate except);
+std::basic_ostream&lt;char_type,traits_type&gt;* tie() const;
+std::basic_ostream&lt;char_type,traits_type&gt;*
+  tie(std::basic_ostream&lt;char_type,traits_type&gt;* tiestr);
+std::basic_streambuf&lt;char_type,traits_type&gt;* rdbuf() const;
+std::basic_streambuf&lt;char_type,traits_type&gt;*
+  rdbuf(std::basic_streambuf&lt;char_type,traits_type&gt;* sb);
+std::basic_ios&lt;char_type,traits_type&gt;&amp;
+  copyfmt(const std::basic_ios&lt;char_type,traits_type&gt;&amp; rhs);
+char_type fill() const;
+char_type fill(char_type ch);
+locale imbue(const locale&amp; loc);
+char narrow(char_type c, char dfault) const;
+char_type widen(char c) const;
+</code></pre>
+</blockquote>
+
+<p>
+The input class template provides the following functions,
+which have the same effect as the same functions
+on the constructor argument object.
+</p>
+
+<blockquote>
+<pre>
+std::streamsize gcount() const;
+int_type get();
+std::basic_istream&lt;charT,traits&gt;&amp; get(charT&amp; c);
+std::basic_istream&lt;charT,traits&gt;&amp; get(charT* s, std::streamsize n);
+std::basic_istream&lt;charT,traits&gt;&amp;
+  get(charT* s, std::streamsize n, charT delim);
+std::basic_istream&lt;charT,traits&gt;&amp;
+  get(std::basic_streambuf&lt;charT,traits&gt;&amp; sb);
+std::basic_istream&lt;charT,traits&gt;&amp;
+  get(std::basic_streambuf&lt;charT,traits&gt;&amp; sb, charT delim);
+std::basic_istream&lt;charT,traits&gt;&amp; getline(charT* s, std::streamsize n);
+std::basic_istream&lt;charT,traits&gt;&amp;
+  getline(charT* s, std::streamsize n, charT delim);
+std::basic_istream&lt;charT,traits&gt;&amp;
+  ignore(std::streamsize n = 1, int_type delim = traits::eof());
+int_type peek();
+std::basic_istream&lt;charT,traits&gt;&amp; read(charT* s, std::streamsize n);
+std::streamsize readsome(charT* s, std::streamsize n);
+std::basic_istream&lt;charT,traits&gt;&amp; putback(charT c);
+std::basic_istream&lt;charT,traits&gt;&amp; unget();
+int sync();
+pos_type tellg();
+std::basic_istream&lt;charT,traits&gt;&amp; seekg(pos_type p);
+std::basic_istream&lt;charT,traits&gt;&amp;
+  seekg(off_type o, std::ios_base::seekdir s);
+</pre>
+</blockquote>
+
+<p>
+The output class template provides the following functions,
+which have the same effect as the same functions
+on the constructor argument object.
+</p>
+
+<blockquote>
+<pre>
+std::basic_ostream&lt;charT,traits&gt;&amp; put(charT c);
+std::basic_ostream&lt;charT,traits&gt;&amp; write(const charT* s, std::streamsize n);
+std::basic_ostream&lt;charT,traits&gt;&amp; flush();
+pos_type tellp();
+std::basic_ostream&lt;charT,traits&gt;&amp; seekp(pos_type p);
+std::basic_ostream&lt;charT,traits&gt;&amp;
+  seekp(off_type o, std::ios_base::seekdir s);
+</pre>
+</blockquote>
+
+</blockquote>
+
+
+<h3><a name="stream.guard.fnctn">27.7.6.2 Function template <code>guard_stream</code> [stream.guard.fnctn]</a></h3>
+
+<p>
+Add a new section.
+</p>
+
+<blockquote class=stdins>
+<p>
+There are two stream function templates,
+one for input and one for output,
+that construct <code>stream_guard</code> objects.
+</p>
+
+<dl>
+
+<dt>
+<code>template &lt;typename charT, typename traits&gt;<br>
+&nbsp;&nbsp;stream_guard&lt;std::basic_istream&lt;charT, traits&gt;&gt;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;guard_stream(std::istream&amp; arg);<br>
+
+template &lt;typename charT, typename traits&gt;<br>
+&nbsp;&nbsp;stream_guard&lt;std::basic_ostream&lt;charT, traits&gt;&gt;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;guard_stream(std::ostream&amp; arg);<br>
+
+template &lt;typename charT, typename traits&gt;<br>
+&nbsp;&nbsp;stream_guard&lt;std::basic_wistream&lt;charT, traits&gt;&gt;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;guard_stream(std::istream&amp; arg);<br>
+
+template &lt;typename charT, typename traits&gt;<br>
+&nbsp;&nbsp;stream_guard&lt;std::basic_wostream&lt;charT, traits&gt;&gt;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;guard_stream(std::ostream&amp; arg);</code>
+</dt>
+
+<dd>
+
+<p><i>Effects:</i>
+Constructs and returns a <code>stream_guard</code> object.
+</p>
+
+</dd>
+
+</dl>
+
+</blockquote>
+
+
+<h3><a name="stream.guard.streaming">27.7.6.3 Streaming function templates [stream.guard.streaming]</a></h3>
+
+<p>
+Add a new section.
+</p>
+
+<blockquote class=stdins>
+<p>
+There are two function templates,
+that forward streaming operations to the stream.
+</p>
+
+<dl>
+
+<dt>
+<code>template &lt;typename charT, typename traits, typename T&gt;<br>
+&nbsp;&nbsp;const stream_guard&lt;std::basic_istream&lt;charT, traits&gt;&gt;&amp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;operator&gt;&gt;(const stream_guard&lt;std::basic_istream&lt;charT, traits&gt;&gt;&amp; grd,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;const T&amp;&amp; arg);<br>
+
+template &lt;typename charT, typename traits, typename T&gt;<br>
+&nbsp;&nbsp;const stream_guard&lt;std::basic_ostream&lt;charT, traits&gt;&gt;&amp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;operator&lt;&lt;(const stream_guard&lt;std::basic_ostream&lt;charT, traits&gt;&gt;&amp; grd,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;const T&amp; arg);<br>
+
+template &lt;typename charT, typename traits&gt;<br>
+&nbsp;&nbsp;const stream_guard&lt;std::basic_istream&lt;charT, traits&gt;&gt;&amp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;operator&gt;&gt;(const stream_guard&lt;std::basic_istream&lt;charT, traits&gt;&gt;&amp; grd,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;std::basic_istream&lt;charT, traits&gt;&amp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(*arg)(std::basic_istream&lt;charT, traits&gt;&amp;));<br>
+
+template &lt;typename charT, typename traits&gt;<br>
+&nbsp;&nbsp;const stream_guard&lt;std::basic_ostream&lt;charT, traits&gt;&gt;&amp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;operator&lt;&lt;(const stream_guard&lt;std::basic_ostream&lt;charT, traits&gt;&gt;&amp; grd,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;std::basic_ostream&lt;charT, traits&gt;&amp;<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;(*arg)(std::basic_ostream&lt;charT, traits&gt;&amp;));</code>
+</dt>
+<dd>
+
+<p><i>Effects:</i>
+Apply the effects of the corresponding operations
+on the <code>stream_guard</code> constructor argument object.
+</p>
+
+</dd>
+
+</dl>
+
+</blockquote>
+
+
+<h2><a name="Revision">Revision History</a></h2>
+
+<p>
+This paper presents and alternate approach to N3535 - 2013-04-16.
+</p>
+
+<ul>
+
+<li><p>
+Remove support for the mutex concept
+in order to permit implementation as a buffer
+that is transferred to the stream at the end.
+Remove corresponding document sections.
+</p></li>
+
+<li><p>
+Make full-expression locking explicit.
+Remove the intermediate object and
+do all work on construction on the guard.
+</p></li>
+
+<li><p>
+Create typedefs and forwarding functions
+to the stream equivalents.
+(This change is necessary because
+there is no longer any access to the underlying stream,
+which may be a different buffer stream.)
+</p></li>
+
+<li><p>
+Remove 'Critique and Suggestions' section.
+</p></li>
+
+<li><p>
+Replace 'Synopsis' section with 'Wording' section.
+</p></li>
+
+<li><p>
+Remove 'Implementation' section.
+</p></li>
+
+</ul>
+
+<p>
+N3535 revised N3395 - 2012-09-23 as follows.
+</p>
+
+<ul>
+
+<li><p>
+Choose the approach of maintaining a stream to mutex mapping,
+which allows multiple stream_mutex objects to manage a single stream.
+</p></li>
+
+<li><p>
+Add an elaboration of the consequences of the above decision
+to the 'Critique and Suggestions' section.
+</p></li>
+
+<li><p>
+Add a discussion of replacing streams
+to the 'Critique and Suggestions' section.
+</p></li>
+
+<li><p>
+Add a 'Revision History' section.
+</p></li>
+
+</ul>
+
+<p>
+N3395 revised N3354 = 12-0044 - 2012-01-14 as follows.
+</p>
+
+<ul>
+
+<li><p>
+Clarify usefulness of stream mutexes in debugging, testing, and diagnostics.
+</p></li>
+
+<li><p>
+Apply common subexpression elimination
+on calls to <code>bypass()</code> in the examples.
+</p></li>
+
+<li><p>
+Add a 'Critique and Suggestions' section
+discussing the topics of
+Posix stream locks, internal stream locks, and
+maintaining a stream to mutex mapping.
+</p></li>
+
+<li><p>
+Add an 'Implementation' section.
+</p></li>
+
+<li><p>
+Add a section on 'Predefined Objects'
+corresponding to the standard streams.
+</p></li>
+
+<li><p>
+Add a 'References' section.
+</p></li>
+
+</ul>
+
+
+<h2><a name="References">References</a></h2>
+
+<dl>
+
+<dt><a name="PSL">[PSL]</a></dt>
+<dd>
+<cite>The Open Group Base Specifications Issue 6,
+IEEE Std 1003.1, 2004 Edition</cite>,
+functions, flockfile,
+<a href="http://pubs.opengroup.org/onlinepubs/009695399/functions/flockfile.html">
+http://pubs.opengroup.org/onlinepubs/009695399/functions/flockfile.html</a>
+</dd>
+
+</dl>
+
+</body>
+</html>

@@ -1,0 +1,3478 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"
+        "http://www.w3.org/TR/html4/loose.dtd">
+<html>
+<head>
+	<title>Types Don't Know #</title>
+
+	<style>
+	p {text-align:justify}
+	li {text-align:justify}
+	blockquote.note
+	{
+		background-color:#E0E0E0;
+		padding-left: 15px;
+		padding-right: 15px;
+		padding-top: 1px;
+		padding-bottom: 1px;
+	}
+	ins {color:#00A000}
+	del {color:#A00000}
+	</style>
+</head>
+<body>
+
+<address align=right>
+Document number: N3980
+<br/>
+<br/>
+<a href="mailto:howard.hinnant@gmail.com">Howard E. Hinnant</a><br/>
+<a href="mailto:vinnie.falco@gmail.com">Vinnie Falco</a><br/>
+<a href="mailto:j.bytheway@gmail.com">John Bytheway</a><br/>
+2014-05-24
+</address>
+<hr/>
+<h1 align=center>Types Don't Know #</h1>
+
+<h2>Contents</h2>
+
+<ul>
+<li><a href="#Introduction">Introduction</a></li>
+<li><a href="#Example">The Example</a></li>
+<li><a href="#Solution1">Solution 1: Specialize <code>std::hash&lt;X&gt;</code></a>
+    <ul>
+    <li><a href="#Solution1B">What about implementing it with N3333?</a></li>
+    </ul>
+</li>
+<li><a href="#generalpurpose">How to get X to use a general purpose hashing algorithm</a>
+    <ul>
+    <li><a href="#Universal">Introducing the Universal hash function!</a></li>
+    <li><a href="#hash_append">What is <code>hash_append</code>?</a>
+        <ul>
+        <li><a href="#hash_append_rules">Rules Relating <code>hash_append</code> to <code>operator==</code></a></li>
+        </ul>
+    </li>
+    <li><a href="#hash_append_vector"><code>hash_append</code> for <code>vector&lt;T, A&gt;</code></a></li>
+    <li><a href="#hash_append_pair"><code>hash_append</code> for <code>std::pair&lt;T, U&gt;</code></a></li>
+    <li><a href="#hash_append_int"><code>hash_append</code> for <code>int</code></a></li>
+    <li><a href="#is_contiguously_hashable">An Optimization: <code>is_contiguously_hashable&lt;T&gt;</code>:</a></li>
+    <li><a href="#hash_combine">Wait a minute.  Isn't <code>hash_append</code> the same thing as <code>boost::hash_combine</code>?</a></li>
+    <li><a href="#serialization">Wait a minute.  Isn't <code>hash_append</code> the same thing as serialization?</a></li>
+    <li><a href="#variadic">Is there a variadic version of <code>hash_append</code>?</a></li>
+    <li><a href="#adapt_algorithm">How easily can algorithms other than FNV-1a be used?</a></li>
+    <li><a href="#switch_algorithm">What is involved in switching hashing algorithms?</a></li>
+    <li><a href="#pimpl">How does one <code>hash_append</code> Pimpl designs?</a></li>
+    <li><a href="#seeding">How does one apply random seeding?</a></li>
+    <li><a href="#unordered">What about unordered containers?</a></li>
+    <li><a href="#testing">How does the quality of the resulting hash codes compare to the <code>hash_combine</code> solution?</a></li>
+    </ul>
+</li>
+<li><a href="#Summary">Summary</a>
+    <ul>
+    <li><a href="#proposedinfrastructure">Summary of proposed infrastructure</a></li>
+    </ul>
+</li>
+<li><a href="#type_erased_hasher">Appendix A: <code>type_erased_hasher</code></a></li>
+<li><a href="#bikeshed">Appendix B: B is for Bike Shed</a></li>
+<li><a href="#debugHasher">Appendix C: <code>debugHasher</code></a></li>
+<li><a href="#wording">Appendix D: Proposed Wording</a></li>
+<li><a href="#Acknowledgments">Acknowledgments</a></li>
+</ul>
+
+<a name="Introduction"></a><h2>Introduction</h2>
+
+<p>
+This paper proposes a new hashing infrastructure that completely decouples
+hashing algorithms from individual types that need to be hashed.  This
+decoupling divides the hashing computation among 3 different programmers who
+need not coordinate with each other:
+</p>
+
+<ol>
+<li><p>
+Authors of hashable types (keys of type <code>K</code>) write their hashing
+support just once, using no specific hashing algorithm.  This code resembles
+(and is approximately the same amount of work as) <code>operator==</code> and
+<code>swap</code> for a type.
+</p></li>
+<li><p>
+Authors of hashing algorithms write a functor (e.g. <code>H</code>) that
+operates on a contiguous chunk of generic memory, represented by a <code>void
+const*</code> and a number of bytes.  This code has no concept of a specific key
+type, only of bytes to be hashed.
+</p></li>
+<li><p>
+Clients who want to hash keys of type <code>K</code> using hashing algorithm
+<code>H</code> will form a functor of type <code>std::uhash&lt;H&gt;</code> to
+give to an unordered container.
+</p>
+<blockquote><pre>
+unordered_set&lt;K, uhash&lt;H&gt;&gt; my_set;
+</pre></blockquote>
+<p>
+Naturally, there could be a default hashing algorithm supplied by the std::lib:
+</p>
+<blockquote><pre>
+unordered_set&lt;K, uhash&lt;&gt;&gt; my_set;
+</pre></blockquote>
+</li>
+</ol>
+
+<p>
+To start off with, we emphasize:  there is nothing in this proposal that changes
+the existing <code>std::hash</code>, or the unordered containers.  And there is
+also nothing in this proposal that would prohibit the committee from standardizing
+both this proposal, and either one of
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3333.html">N3333</a>
+or
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n3876.pdf">N3876</a>.
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3333.html">N3333</a>
+and
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n3876.pdf">N3876</a>
+contradict each other, and thus compete with each other.  Both cannot be
+standardized.  This proposal, on the other hand, addresses a problem not addressed
+by 
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3333.html">N3333</a>
+or
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n3876.pdf">N3876</a>.
+Nor does this proposal depend upon anything in 
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3333.html">N3333</a>
+or
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n3876.pdf">N3876</a>.
+</p>
+
+<p>
+This paper simply takes a completely different approach to producing hash
+codes from types, in order to solve a problem that was beyond the scope of
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3333.html">N3333</a>
+and
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n3876.pdf">N3876</a>.
+The problem solved herein is how to support the hashing of N different types of
+keys using M different hashing algorithms, using an amount of source code that
+is proportional to N+M, as opposed to the current system based on
+<code>std::hash&lt;T&gt;</code> which requires an amount of source code
+proportional to N*M.  And consequently in practice today M==1, and the single
+hashing algorithm is supplied only by the std::lib implementor. As it is too
+difficult and error prone for the client to supply alternative algorithms for
+all of the built-in scalar types (<code>int</code>, <code>long</code>,
+<code>double</code>, etc.).  Indeed, it has even been too difficult for the
+committee to supply hashing support for all of the types our clients might
+reasonably want to use as keys: <code>pair</code>, <code>tuple</code>,
+<code>vector</code>, <code>complex</code>, <code>duration</code>,
+<code>forward_list</code> etc.
+</p>
+
+<p>
+This paper makes ubiquitous hash support for most types as easy and as
+practical as is today's support for <code>swap</code> and
+<code>operator==</code>.
+</p>
+
+<p>
+This paper starts with an assertion:
+</p>
+
+<blockquote class=note><p>
+Types should not know how to hash themselves.
+</p></blockquote>
+
+<p>
+The rest of this paper begins with demonstrating the problems created when
+software systems assume that types do know how to hash themselves, and what
+can be done to solve these problems.
+</p>
+
+<a name="Example"></a><h2>The Example</h2>
+
+<p>
+Instead of starting with a basic example like <code>std::string</code> or
+<code>int</code>, this paper will introduce an example class X
+that is meant to be representative of a type that a programmer would write,
+and would want to create a hash code for:
+</p>
+
+<blockquote><pre>
+namespace mine
+{
+
+class X
+{
+    std::tuple&lt;short, unsigned char, unsigned char&gt; date_;
+    std::vector&lt;std::pair&lt;int, int&gt;&gt;                data_;
+
+public:
+    X();
+    // ...
+    friend bool operator==(X const&amp; x, X const&amp; y)
+    {
+        return std::tie(x.date_, x.data_) == std::tie(y.date_, y.data_);
+    }
+};
+
+}  // mine
+</pre></blockquote>
+
+<blockquote class=note><p>
+How do we write the hash function for X?
+</p></blockquote>
+
+<a name="Solution1"></a><h2>Solution 1: Specialize <code>std::hash&lt;X&gt;</code></h2>
+
+<p>
+If we standardize
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n3876.pdf">N3876</a>
+which gives us <code>hash_combine</code> and <code>hash_val</code> from
+<a href="http://www.boost.org/doc/libs/1_55_0/doc/html/hash/combine.html">boost</a>,
+then this is relatively doable:
+</p>
+
+<blockquote><pre>
+}  // mine
+
+namespace std
+{
+
+template &lt;&gt;
+struct hash&lt;mine::X&gt;
+{
+    size_t
+    operator()(mine::X const&amp; x) const noexcept
+    {
+        size_t h = hash&lt;tuple_element&lt;0, decltype(x.date_)&gt;::type&gt;{}(get&lt;0&gt;(x.date_));
+        hash_combine(h, get&lt;1&gt;(x.date_), get&lt;2&gt;(x.date_));
+        for (auto const&amp; p : x.data_)
+            hash_combine(h, p.first, p.second);
+        return h;
+    }
+};
+
+}  // std
+</pre></blockquote>
+
+<p>
+First we need to break out of our own namespace, and then specialize
+<code>std::hash</code> in <code>namespace std</code>. And we also need to add
+a <code>friend</code> statement to our class X:
+</p>
+
+<blockquote><pre>
+friend struct std::hash&lt;X&gt;;
+</pre></blockquote>
+
+<p>
+Without <code>hash_combine</code> from 
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n3876.pdf">N3876</a>
+we would have to write our own <code>hash_combine</code>. This could easily
+result in a bad hash function as aptly described in
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n3876.pdf">N3876</a>.
+</p>
+
+<a name="Solution1B"><h3>What about implementing it with
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3333.html">N3333</a>?</h3>
+
+<p>
+In our first attempt to use the tools presented in
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3333.html">N3333</a>,
+we were surprised at the difficulty, as we were expecting it to be easier.
+However after studying the reference implementation in
+<a href="http://llvm.org">LLVM</a>, we succeeded in writing the following
+<code>friend</code> function of X:
+</p>
+
+<blockquote><pre>
+friend
+std::hash_code
+hash_value(X const&amp; x)
+{
+    using std::hash_value;
+    return std::hash_combine
+        (
+            hash_value(std::get&lt;0&gt;(x.date_)),
+            hash_value(std::get&lt;1&gt;(x.date_)),
+            hash_value(std::get&lt;2&gt;(x.date_)),
+            std::hash_combine_range(x.data_.begin(), x.data_.end())
+        );
+}
+</pre></blockquote>
+
+<p>
+We also strongly suspect that with a little more work on the proposal, this
+could be simplified down to:
+</p>
+
+<blockquote><pre>
+friend
+std::hash_code
+hash_value(X const&amp; x)
+{
+    using std::hash_value;
+    return std::hash_combine(hash_value(x.date_), std::hash_combine_range(x.data_.begin(), x.data_.end()));
+}
+</pre></blockquote>
+
+<p>
+Or possibly even:
+</p>
+
+<blockquote><pre>
+friend
+std::hash_code
+hash_value(X const&amp; x) noexcept
+{
+    using std::hash_value;
+    return std::hash_combine(hash_value(x.date_), hash_value(x.data_));
+}
+</pre></blockquote>
+
+<p>
+The reduced burden on the author of X on writing the code to hash X is very
+much welcomed!  However, hashing algorithms are notoriously difficult to write.
+Has the author of X written a <i>good</i> hashing algorithm?
+</p>
+
+<p>
+The answer is that the author of X does not know, until he experiments with
+his data.  The hashing algorithm is supplied by the std::lib implementor.  If
+testing reveals that the algorithm chosen by the std::lib implementor is not
+appropriate for the client's data set, then <b>everything</b> offered by both
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3333.html">N3333</a>
+and
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n3876.pdf">N3876</a>
+is for naught.  The author of X is on his own, starting from scratch, to
+build an alternate hashing algorithm -- even if just to experiment.
+</p>
+
+<p>
+This concern is not theoretical.  If the keys to be hashed can be influenced by
+a malicious attacker, it is quite possible for the attacker to arrange for
+<i>many distinct</i> keys that all hash to the <i>same</i> hash code.  Even
+some <i>seeded</i> hashing algorithms are vulnerable to such an attack.
+</p>
+
+<p>
+<a href="https://131002.net/siphash/murmur3collisions-20120827.tar.gz">Here</a>
+is a very short and fast C++ program that can generate as many distinct keys as
+you like which all hash to the same hash code using
+<a href="http://code.google.com/p/smhasher/wiki/MurmurHash3">MurmurHash3</a>,
+even with a randomized seed.
+<a href="https://131002.net/siphash/citycollisions-20120730.tar.gz">Here</a> is
+another such C++ program demonstrating a similar seed-independent attack on
+<a href="https://code.google.com/p/cityhash/">CityHash64</a>.  These attacks
+do not mean that these are bad hashing algorithms.  They simply are evidence
+that it is not wise to tie yourself down to a single hashing algorithm.  And
+if the effort to change, or experiment with, hashing algorithms takes effort
+that is O(N) (where N is the number of types or sub-types to be hashed), then
+one is tied down.
+</p>
+
+<p>
+This paper demonstrates infrastructure allowing the author of X to switch
+hashing algorithms with O(1) work, regardless of how many sub-types of X need
+to be hashed.  No matter what hashing algorithm is used, the C++ code to hash
+X is the same:
+</p>
+
+<blockquote><pre>
+template &lt;class HashAlgorithm&gt;
+friend
+void
+hash_append(HashAlgorithm&amp; h, X const&amp; x) noexcept
+{
+    using std::hash_append;
+    hash_append(h, x.date_, x.data_);
+}
+</pre></blockquote>
+
+<p>
+With this proposal, the author of X gets simplicity, without being heavily invested
+in any single hashing algorithm.  The hashing algorithm is completely encapsulated
+in the templated parameter <code>HashAlgorithm</code>, and the author of X remains
+fully and gratefully ignorant of any specific hashing algorithm.
+</p>
+
+<a name="generalpurpose"></a><h2>How to get X to use a general purpose hashing algorithm</h2>
+
+<p>
+The key to solving this problem is the recognition of one simple observation:
+</p>
+
+<blockquote class=note><p>
+Types should not know how to hash themselves.  However types do know what parts
+of their state should be exposed to a hashing algorithm.
+</p></blockquote>
+
+<p>
+The question now becomes:  How do you present X to a general purpose hashing
+algorithm without binding it to any specific algorithm?
+</p>
+
+<p>
+Just as an example, here is a very simple hashing algorithm that many have used
+with great success:
+</p>
+
+<blockquote><pre>
+std::size_t
+fnv1a (void const* key, std::size_t len)
+{
+    unsigned char const* p = static_cast&lt;unsigned char const*&gt;(key);
+    unsigned char const* const e = p + len;
+    std::size_t h = 14695981039346656037u;
+    for (; p &lt; e; ++p)
+        h = (h ^ *p) * 1099511628211u;
+    return h;
+}
+</pre></blockquote>
+
+<p>
+Although most modern hashing algorithms are much more complicated than
+<a href="http://www.isthe.com/chongo/tech/comp/fnv/index.html"><code>fnv1a</code></a>
+shown above, there are similarities among them.
+</p>
+
+<ul>
+<li>They generally take a stream of bytes as their input.  This is often
+specified as a  <code>void const*</code> and a <code>size_t</code> length.</li>
+
+<li>
+This interface implies that they work on a contiguous array of bytes.
+</li>
+
+<li>
+The algorithms generally have an initialization stage, often taking an
+optional seed, followed by an accumulation stage which depends on the
+supplied bytes, followed by a finalization stage after all of the bytes
+are consumed.
+</li>
+</ul>
+
+<p>
+Not all, but most of the algorithms also have the property that they consume
+bytes in the order that they are received, possibly with a fixed sized
+internal buffer.  This characteristic can be taken advantage of in order to
+hash <i>discontiguous</i> memory.
+</p>
+
+<p>
+For example consider this minor repackaging of the FNV-1a algorithm:
+</p>
+
+<blockquote><pre>
+class fnv1a
+{
+    std::size_t state_ = 14695981039346656037u;
+public:
+    using result_type = std::size_t;
+
+    void
+    operator()(void const* key, std::size_t len) noexcept
+    {
+        unsigned char const* p = static_cast&lt;unsigned char const*&gt;(key);
+        unsigned char const* const e = p + len;
+        for (; p &lt; e; ++p)
+            state_ = (state_ ^ *p) * 1099511628211u;
+    }
+
+    explicit
+    operator result_type() noexcept
+    {
+        return state_;
+    }
+};
+</pre></blockquote>
+
+<p>
+Now the algorithm can be accessed in 3 stages:
+</p>
+
+<ol>
+<li>The algorithm is initialized in a constructor, in this case the
+implicit default constructor.  Other constructors / initializations
+should be possible.  But we start out with this simplest of algorithms.</li>
+<li>The algorithm consumes bytes in the <code>operator()(void const* key,
+std::size_t len)</code> function. Note that this function can be called any
+number of times.  In each call the hashed memory is contiguous.  But there is
+no requirement at all that separate calls refer to a single block of memory.
+On each call, the state of the algorithm is recalled from the previous call
+(or from the initialization step) and updated with the new <code>len</code>
+bytes located at <code>key</code>.</li>
+<li>The algorithm is finalized when the object is converted to a
+<code>result_type</code> (in this case a <code>size_t</code>).
+This is the finalization stage, which in this
+case is trivial, but could be arbitrarily complex.</li>
+</ol>
+
+<p>
+With the FNV-1a algorithm divided into its 3 stages like this, one can call
+it in various ways, for example:
+</p>
+
+<blockquote><pre>
+fnv1a::result_type
+hash_contiguous(int (&amp;data)[3])
+{
+    fnv1a h;
+    h(data, sizeof(data));
+    return static_cast&lt;fnv1a::result_type&gt;(h);
+}
+</pre></blockquote>
+
+<p>
+or
+</p>
+
+<blockquote><pre>
+fnv1a::result_type
+hash_discontiguous(int data1, int data2, int data3)
+{
+    fnv1a h;
+    h(&amp;data1, sizeof(data1));
+    h(&amp;data2, sizeof(data2));
+    h(&amp;data3, sizeof(data3));
+    return static_cast&lt;fnv1a::result_type&gt;(h);
+}
+</pre></blockquote>
+
+<p>
+But either way it is called, given the same inputs, the algorithm outputs
+the exact same result:
+</p>
+
+<blockquote><pre>
+int data[] = {5, 3, 8};
+assert((hash_contiguous(data) == hash_discontiguous(5, 3, 8)));
+</pre></blockquote>
+
+<p>
+We can say that <code>fnv1a</code> meets the requirements of a
+<code>HashAlgorithm</code>.  A <code>HashAlgorithm</code> is a class type
+that can be constructed (default, or possibly with seeding), has an
+<code>operator()</code> member function with the signature represented above.
+ The <code>operator()</code> member function processes bytes, updating the
+internal state of the <code>HashAlgorithm</code>.  This internal state can be
+arbitrarily complex.  Indeed an extreme example of internal state could be a
+copy of every chunk of memory supplied to the <code>HashAlgorithm</code>. 
+And finally a <code>HashAlgorithm</code> can be explicitly converted to the
+nested type <code>result_type</code>, which when used with the unordered
+containers should be an alias for <code>size_t</code>.
+</p>
+
+<p>
+At all times during its lifetime, a <code>HashAlgorithm</code> is
+<code>CopyConstructible</code> and <code>CopyAssignable</code>, with each
+copy getting an independent copy of the state from the right-hand-side of the
+copy (value semantics -- no aliasing among copies).  Thus if one knew that
+two sequences of data shared a common prefix, one could hash the prefix in
+just one sequence, make a copy of the <code>HashAlgorithm</code>, and then
+continue after the prefix in each sequence with the two independent
+<code>HashAlgorithm</code>s.  This would be a pure optimization, getting the
+same results as if one had hashed each sequence in full.
+</p>
+
+<a name="Universal"></a><h3>Introducing the Universal hash function!</h3>
+
+<p>
+Given the concept of <code>HashAlgorithm</code>, a universal hash functor,
+which takes <b>any</b> type <code>T</code> can now be written (almost):
+</p>
+
+<blockquote><pre>
+template &lt;class HashAlgorithm&gt;
+struct uhash
+{
+    using result_type = typename HashAlgorithm::result_type;
+
+    template &lt;class T&gt;
+    result_type
+    operator()(T const&amp; t) const noexcept
+    {
+        HashAlgorithm h;
+        using std::hash_append;
+        hash_append(h, t);
+        return static_cast&lt;result_type&gt;(h);
+    }
+};
+</pre></blockquote>
+
+<p>
+Now one can use <code>uhash&lt;fnv1a&gt;</code> as the hash function for
+<code>std::unordered_map</code>, for example:
+</p>
+
+<blockquote><pre>
+std::unordered_map&lt;MyKey, std::string, uhash&lt;fnv1a&gt;&gt; the_map;
+</pre></blockquote>
+
+<p>
+First note several important attributes of <code>uhash</code>:
+</p>
+
+<ol>
+<li>
+<code>uhash</code> depends only on the hashing algorithm, which is
+encapsulated in the <code>HashAlgorithm</code>.  <code>uhash</code> does not
+depend upon the type <code>T</code> being hashed.
+</li>
+<li>
+<code>uhash</code> is simple.  Though such a utility should certainly be 
+supplied by the std::lib, any programmer can very easily implement their own
+variant of <code>uhash</code> for desired customizations (e.g. 
+<a href="http://en.wikipedia.org/wiki/Random_seed">random seeding</a>,
+<a href="http://en.wikipedia.org/wiki/Salt_(cryptography)">salting</a>,
+or <a href="http://en.wikipedia.org/wiki/Padding_(cryptography)">padding</a>),
+<b>without</b> having to revisit the hashing code for distinct types.
+</li>
+<li>
+For applications other than unordered containers, and for hashing algorithms
+that support it, the programmer can easily create a hash functor that returns
+something besides a <code>size_t</code>.  For example, this could come in
+handy for computing a
+<a href="http://en.wikipedia.org/wiki/SHA-2">SHA-256</a> result.  And all
+without having to revisit each individual type!
+</li>
+</ol>
+
+<p>
+Let's walk through <code>uhash</code> one step at a time.
+</p>
+
+<ol>
+<li><p>
+The <code>HashAlgorithm</code> is constructed (default constructed in this
+example, but that is not the only possibility).  This step initializes the
+hashing algorithm encapsulated in the <code>HashAlgorithm</code>.
+</p></li>
+<li><p>
+It is appended to using <code>t</code> as a key.  The function
+<code>hash_append</code> is implemented for each type that supports hashing.
+We will see below that such support code need be written only once per type in
+order to support many hashing algorithms.  It is implemented in the type's own
+namespace, but there are implementations in namespace std for most scalars
+(just like <code>swap</code>).
+</p></li>
+<li><p>
+And then the <code>HashAlgorithm</code> is explicitly converted to the
+desired result. This is where the algorithm is "finalized."
+</p></li>
+</ol>
+
+<p>
+The above <code>hash</code> functor is accessing the generic hashing algorithm
+by its 3 distinct phases. Additionally, this <code>hash</code> functor could
+even be defaulted to use your favorite hash algorithm:
+</p>
+
+<blockquote><pre>
+template &lt;class HashAlgorithm = fnv1a&gt; struct uhash;
+</pre></blockquote>
+
+<p>
+The question usually arises now:  Are you proposing that <code>uhash&lt;&gt;</code>
+replace <code>hash&lt;T&gt;</code> as the default hash functor in the
+unordered containers?  The answer is it really almost doesn't matter.  With
+templated using declarations, it is just so easy for programmers to specify
+their own defaults:
+</p>
+
+<blockquote><pre>
+namespace my
+{
+template &lt;class Key, class T, class Hash = std::uhash&lt;&gt;, class Pred = std::equal_to&lt;Key&gt;,
+          class Alloc = std::allocator&lt;std::pair&lt;Key const, T&gt;&gt;&gt;
+    using unordered_map = std::unordered_map&lt;Key, T, Hash, Pred, Alloc&gt;;
+}  // my
+
+// ...
+
+my::unordered_map&lt;MyKey, std::string&gt; the_map;  // uses std::uhash&lt;&gt; instead of std::hash&lt;MyKey&gt;
+</pre></blockquote>
+
+
+<a name="hash_append"></a><h3>What is <code>hash_append</code>?</h3>
+
+<p>
+The <code>hash_append</code> function is the way that individual types
+communicate with the <code>HashAlgorithm</code>.
+</p>
+
+<p>
+Each type <code>T</code> is responsible only for exposing its hash-worthy state
+to the <code>HashAlgorithm</code> in the function  <code>hash_append</code>.
+<code>T</code> is <i>not</i> responsible for combining hash codes.  Nor is it
+responsible for any hashing arithmetic whatsoever.  It is only responsible for
+pointing out where its data is, how many different chunks of data there are,
+and what order they should be presented to the <code>HashAlgorithm</code>.
+</p>
+
+<p>
+For example, here is how X might implement <code>hash_append</code>:
+</p>
+
+<blockquote><pre>
+class X
+{
+    std::tuple&lt;short, unsigned char, unsigned char&gt; date_;
+    std::vector&lt;std::pair&lt;int, int&gt;&gt;                data_;
+
+public:
+    // ...
+    friend bool operator==(X const&amp; x, X const&amp; y)
+    {
+        return std::tie(x.date_, x.data_) == std::tie(y.date_, y.data_);
+    }
+
+    <b>// Hook into the system like this
+    template &lt;class HashAlgorithm&gt;
+    friend void hash_append(HashAlgorithm&amp; h, X const&amp; x) noexcept
+    {
+        using std::hash_append;
+        hash_append(h, x.date_);
+        hash_append(h, x.data_);
+    }</b>
+}
+</pre></blockquote>
+
+<p>
+Like <code>swap</code>, <code>hash_append</code> is a customization point for
+each type.  Only a type knows what parts of itself it should expose to a
+<code>HashAlgorithm</code>, even though the type has no idea what algorithm
+is being used to do the hashing.  Note that X need not concern itself with
+details like whether or not its sub-types are <i>contiguously hashable</i>. 
+Those details will be handled by the <code>hash_append</code> for the
+individual sub-types. The <i>only</i> information the
+<code>hash_append</code> overload for X must implement is what sub-types need
+to be presented to the <code>HashAlgorithm</code>, and in what order.
+Furthermore the <code>hash_append</code> function is intimately tied to the
+<code>operator==</code> for the same type.  For example if for some reason
+<code>x.data_</code> did not participate in the equality computation, then it
+should also not participate in the <code>hash_append</code> computation.
+</p>
+
+<a name="hash_append_rules"></a><h4>Rules Relating <code>hash_append</code> to <code>operator==</code></h4>
+
+<p>
+For all combination of two values of X, <code>x</code> and <code>y</code>, there
+are two rules to follow in designing <code>hash_append</code> for type X. 
+Actually the second rule is more of a guideline.  But it should be followed as
+closely as possible:
+</p>
+
+<ol>
+<li><p>
+If <code>x == y</code>, then both <code>x</code> and <code>y</code>
+<i>shall</i> send the same message to the <code>HashAlgorithm</code> in
+<code>hash_append</code>.
+</p></li>
+<li><p>
+If <code>x != y</code>, then <code>x</code> and <code>y</code> <i>should</i>
+send different messages to the <code>HashAlgorithm</code> in
+<code>hash_append</code>.
+</p></li>
+</ol>
+
+<p>
+It is very important to keep these two rules in mind when designing the
+<code>hash_append</code> function for any type, or for any instantiation of a
+class template.  Failure to follow the first rule will mean that equal values
+hash to different codes.  Clients such as unordered containers will simply
+fail to work, resulting in run time errors if this rule is violated.  Failure
+to follow the second guideline will result in hash collisions for the two
+different values that send identical messages to the
+<code>HashAlgorithm</code>, and will thus degrade the performance of clients
+such as unordered containers.
+</p>
+
+<a name="hash_append_vector"></a><h3><code>hash_append</code> for <code>vector&lt;T, A&gt;</code></h3>
+
+<p>
+For example <code>std::vector&lt;T, A&gt;</code> would
+never expose its <code>capacity()</code>, since <code>capacity()</code> can be
+different for <code>vector</code>'s that otherwise compare equal.  Likewise
+it should not expose its <code>allocator_type</code> to <code>hash_append</code>,
+since this value also does not participate in the equality computation.
+</p>
+
+<p>
+Should <code>vector</code> expose its <code>size()</code> to the
+<code>HashAlgorithm</code>? To find out, lets look closer at the
+<code>operator==</code> for <code>vector</code>:
+</p>
+
+<blockquote><p>
+Two <code>vector</code>'s <code>x</code> and <code>y</code> compare equal if
+<code>x.size() == y.size()</code> and if <code>x[i] == y[i]</code> for
+<code>i</code> in the range of 0 to <code>x.size()</code>.
+</p></blockquote>
+
+<p>
+To meet <a href="#hash_append_rules">rule 1</a>, it is sufficient that every
+element in the <code>vector</code> be sent to the <code>HashAlgorithm</code>
+as part of the <code>vector</code>'s message. A logical convention is that
+the elements will be sent in order from <code>begin()</code> to
+<code>end()</code>.  But this alone will not satisfy <a
+href="#hash_append_rules">rule 2</a>.  Consider:
+</p>
+
+<blockquote><pre>
+std::vector&lt;std::vector&lt;int&gt;&gt; v1{};
+std::vector&lt;std::vector&lt;int&gt;&gt; v2{1};
+assert(v1 != v2);
+</pre></blockquote>
+
+<p>
+<code>v1</code> and <code>v2</code> are not equal.  <code>v1.size() ==
+0</code> and  <code>v2.size() == 1</code>.  However <code>v2.front().size()
+== 0</code>. If an empty <code>vector&lt;int&gt;</code> sends no message at
+all to the <code>HashAlgorithm</code>, then <code>v2</code>, even though it
+is not empty, also sends no message to the <code>HashAlgorithm</code>.  And
+therefore <code>v1</code> and <code>v2</code> send the same (0 length)
+message to the <code>HashAlgorithm</code>, violating <a
+href="#hash_append_rules">rule 2</a>.
+</p>
+
+<p>
+One idea for fixing this is to special case 0-length <code>vector</code>s to 
+output a special value such as "empty" or 0.  However in the first case the
+result would be ambiguous with a <code>vector&lt;string&gt;</code> of length
+1 containing the string "empty".  The second case has the exact same problem
+but for <code>vector&lt;int&gt;</code>.
+</p>
+
+<p>
+The right way to fix this problem is to have  <code>vector&lt;T&gt;</code>
+send its <code>size()</code> in addition to sending all of its members to the
+<code>HashAlgorithm</code>.  Now the only question is:  Should it send its
+<code>size</code> before or after sending its members to the
+<code>HashAlgorithm</code>?
+</p>
+
+<p>
+To answer this last question, consider another sequence container:
+<code>forward_list&lt;T&gt;</code>.  It has the exact same issues as we have
+been discussing for <code>vector&lt;T&gt;</code>, but
+<code>forward_list&lt;T&gt;</code> has no <code>size()</code> member.  In
+order to send its <code>size()</code>, <code>forward_list&lt;T&gt;</code> has
+to loop through all of its members to first compute <code>size()</code>.  In
+order to avoid the requirement that <code>hash_append</code> for
+<code>forward_list&lt;T&gt;</code> make two passes through the list, we
+should specify that the <code>size()</code> of the container is sent to the
+<code>HashAlgorithm</code> <i>after</i> all of the elements are sent.  And
+for consistency, we should do this for all std-containers for which
+<code>hash_append</code> is defined.
+</p>
+
+<blockquote><pre>
+template &lt;class HashAlgorithm, class T, class Alloc&gt;
+void
+hash_append(HashAlgorithm&amp; h, std::vector&lt;T, Alloc&gt; const&amp; v) noexcept
+{
+    for (auto const&amp; t : v)
+        hash_append(h, t);
+    hash_append(h, v.size());
+}
+</pre></blockquote>
+
+<p>
+I.e. <code>vector</code> considers itself a message composed of 0 or more
+sub-messages, and appends each sub-message (in order) to the state of the
+generic <code>HashAlgorithm</code>.  And this is followed with a final
+message consisting of the <code>size()</code> of the <code>vector</code>.
+</p>
+
+<p>
+Note that as
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3333.html">N3333</a>
+and
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n3876.pdf">N3876</a>
+both stand today, this critically important but subtle detail is not treated,
+and is left up to the client (the author of X) to get right.  This proposal
+states that this is a detail that the <code>hash_append</code> for
+<code>vector</code> (and every other hashable std-container) is responsible for.
+</p>
+
+<p><b>Emphasis</b></p>
+<blockquote><p>
+The message a type sends to a <code>HashAlgorithm</code> is part of its
+public API. E.g. whether or not a container includes its <code>size()</code>
+in its <code>hash_append</code> message, and if so, whether the 
+<code>size()</code> is prepended or appended to the message, is critical
+information a type's client needs to know, in order to ensure that their
+composition of some type's message with another type's message doesn't
+produce an ambiguous message (doesn't create collisions).
+</p><p>
+The standard should clearly document the message emanating from every
+<code>hash_append</code> it defines, to the extent possible. It might not be
+possible to nail down that an implementation is using IEEE floating point or
+two's complement signed integers.  But the standard can certainly document
+the message produced by a <code>vector</code> or any other std-defined class
+type.
+</p></blockquote>
+
+<a name="hash_append_pair"></a><h3><code>hash_append</code> for <code>std::pair&lt;T, U&gt;</code></h3>
+
+<p>
+The situation is simpler for <code>std::pair&lt;T, U&gt;</code>:
+</p>
+
+<blockquote><pre>
+template &lt;class HashAlgorithm, class T, class U&gt;
+void
+hash_append (HashAlgorithm&amp; h, std::pair&lt;T, U&gt; const&amp; p) noexcept
+{
+    hash_append (h, p.first);
+    hash_append (h, p.second);
+}
+</pre></blockquote>
+
+<p>
+All there is to do is to just <code>hash_append</code> the first and second
+members of the pair.
+</p>
+
+<a name="hash_append_int"></a><h3><code>hash_append</code> for <code>int</code></h3>
+
+<p>
+Eventually <code>hash_append</code> will drill down to a scalar type such as
+<code>int</code>:
+</p>
+
+<blockquote><pre>
+template &lt;class HashAlgorithm&gt;
+void
+hash_append(HashAlgorithm&amp; h, int const&amp; i) noexcept
+{
+    h(&amp;i, sizeof(i));
+}
+</pre></blockquote>
+
+<p>
+Whereupon a contiguous chunk of memory is actually accumulated by the
+<code>HashAlgorithm</code>, using the <code>HashAlgorithm</code>'s
+<code>operator()</code>. Recall that the <code>HashAlgorithm</code> has a
+member function <code>operator()(const void* key, std::size_t len)
+noexcept</code>.  And the <code>int</code> is just a chunk of
+<i>contiguous</i> memory that is <i>hashable</i>.  It is now prudent to
+deeply consider what it means to say that a type (such as <code>int</code>)
+is <i>contiguously hashable</i>.
+</p>
+
+<p>
+A type <code>T</code> is <i>contiguously hashable</i> if for all combinations of
+two values of a type, say <code>x</code> and <code>y</code>, if <code>x ==
+y</code>, then it must also be true that <code>memcmp(addressof(x),
+addressof(y), sizeof(T)) == 0</code>.  I.e. if <code>x == y</code>, then
+<code>x</code> and <code>y</code> have the same bit pattern representation. A
+2's complement <code>int</code> satisfies this property because every bit
+pattern an <code>int</code> can have results in a distinct value (<a
+href="#hash_append_rules">rule 2</a>).  And there are no "padding bits" which might take on
+random values.  This property is necessary because if two values are equal, then
+they must hash to the same hash code (<a href="#hash_append_rules">rule 1</a>).
+</p>
+
+<a name="is_contiguously_hashable"></a><h3>An Optimization: <code>is_contiguously_hashable&lt;T&gt;</code>:</h3>
+
+<p>
+With that in mind we can easily imagine a type trait:
+</p>
+
+<blockquote><pre>
+template &lt;class T&gt; struct is_contiguously_hashable;
+</pre></blockquote>
+
+<p>
+which derives from either <code>true_type</code> or <code>false_type</code>. And
+on 2's complement systems,
+<code>is_contiguously_hashable&lt;int&gt;::value</code> is <code>true</code>.
+And we might anticipate that some other types, such as <code>char</code> and
+<code>long long</code> are also <i>contiguously hashable</i>.  With this
+tool we can now easily write <code>hash_append</code> for all contiguously
+hashable types:
+</p>
+
+<blockquote><pre>
+template &lt;class HashAlgorithm, class T&gt;
+inline
+std::enable_if_t
+&lt;
+    is_contiguously_hashable&lt;T&gt;::value
+&gt;
+hash_append(HashAlgorithm&amp; h, T const&amp; t) noexcept
+{
+    h(addressof(t), sizeof(t));
+}
+</pre></blockquote>
+
+<p>
+Now the task remains to specialize <code>is_contiguously_hashable</code>
+properly for those scalars we want to use this implementation of
+<code>hash_append</code> for, and for any other scalars, implement
+<code>hash_append</code> appropriately.  As an example of the latter, consider
+IEEE floating point types.
+</p>
+
+<p>
+An IEEE floating point type is <i>not contiguously hashable</i> because <code>0.
+== -0.</code> but these two values are represented with different bit patterns. 
+<a href="#hash_append_rules">Rule 1</a> would be violated if hashed contiguously. Therefore the
+<code>hash_append</code> for IEEE floating point types must go to extra effort
+to ensure that <code>0.</code> and <code>-0.</code> hash to identical hash
+codes, but <b>without</b> dictating a specific hash algorithm.  This could be
+done like so:
+</p>
+
+<blockquote><pre>
+template &lt;class HashAlgorithm, class T&gt;
+inline
+std::enable_if_t
+&lt;
+    std::is_floating_point&lt;T&gt;::value
+&gt;
+hash_append(HashAlgorithm&amp; h, T t) noexcept
+{
+    if (t == 0)
+        t = 0;
+    h(&amp;t, sizeof(t));
+}
+</pre></blockquote>
+
+<p>
+I.e. if the value is -0., reset the value to 0., and <i>then</i> contiguously
+hash the resulting bits.
+</p>
+
+<p>
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3333.html">N3333</a>
+also introduced a very similar <code>is_contiguous_layout</code> trait. 
+Although the paper did not make it perfectly clear, we believe
+<code>is_contiguously_hashable</code> is
+approximately the same trait, but with a better name.  Just because a type
+has a <i>contiguous layout</i> does not necessarily imply that a type is
+<i>contiguously hashable</i>.  IEEE floating point is a case in point.  IEEE
+floating point does have a contiguous layout (and is trivially copyable, and
+has a standard layout).  And yet still it is not <i>contiguously hashable</i>
+because of how its <code>operator==</code> works with signed zeros (violating
+<a href="#hash_append_rules">rule 1</a>).
+</p>
+
+<p>
+Class types that are composed of only  <i>contiguously hashable</i> types
+and that have no padding bytes, may also be considered to be
+<i>contiguously hashable</i>.  For example consider this specialization of
+<code>is_contiguously_hashable&lt;std::pair&lt;T, U&gt;&gt;</code>:
+</p>
+
+<blockquote><pre>
+template &lt;class T, class U&gt;
+struct is_contiguously_hashable&lt;std::pair&lt;T, U&gt;&gt;
+    : public std::integral_constant&lt;bool, is_contiguously_hashable&lt;T&gt;::value &amp;&amp;
+                                          is_contiguously_hashable&lt;U&gt;::value &amp;&amp;
+                                          sizeof(T) + sizeof(U) == sizeof(std::pair&lt;T, U&gt;)&gt;
+{
+};
+</pre></blockquote>
+
+<p>
+In English:  If the <code>pair</code>'s two types are both contiguously
+hashable, and if the size of the two members is the same size as the
+<code>pair</code> (so there are no padding bytes), then the entire
+<code>pair</code> itself is contiguously hashable!
+</p>
+
+<p>
+This same logic can be applied to <code>array</code>, <code>tuple</code>, and
+possibly user-defined types as well (but only with the user-defined type's
+author's permission).  Consequently, a great many types can be easily and
+safely classified as contiguously hashable.  This is important because with
+modern hash algorithm implementations, the bigger the chunk of contiguous
+memory you can send to the <code>HashAlgorithm</code> at one time, the higher
+the performance (in terms of bytes-hashed/second) the
+<code>HashAlgorithm</code> is likely to perform.
+</p>
+
+<p>
+With that in mind (the bigger the memory chunk the better), consider again
+<code>hash_append</code> for <code>vector</code>:
+</p>
+
+<blockquote><pre>
+template &lt;class HashAlgorithm, class T, class Alloc&gt;
+inline
+std::enable_if_t
+&lt;
+    !is_contiguously_hashable&lt;T&gt;::value
+&gt;
+hash_append(HashAlgorithm&amp; h, std::vector&lt;T, Alloc&gt; const&amp; v) noexcept
+{
+    for (auto const&amp; t : v)
+        hash_append(h, t);
+    hash_append(h, v.size());
+}
+
+template &lt;class HashAlgorithm, class T, class Alloc&gt;
+inline
+std::enable_if_t
+&lt;
+    is_contiguously_hashable&lt;T&gt;::value
+&gt;
+hash_append(HashAlgorithm&amp; h, std::vector&lt;T, Alloc&gt; const&amp; v) noexcept
+{
+    h(v.data(), v.size()*sizeof(T));
+    hash_append(h, v.size());
+}
+</pre></blockquote>
+
+<p>
+I.e. if the <code>T</code> <b>is</b> contiguously hashable, then even though
+<code>vector</code> itself is not, there can still be a <i>huge</i> optimization
+made by having <code>vector</code> send its <i>contiguous</i> <code>data</code>
+buffer to <code>hash_append</code>.
+</p>
+
+<p>
+Note that this <b>is</b> a pure optimization.  I.e. the
+<code>HashAlgorithm</code> sees the <i>exact</i> same sequence of bytes, in
+the same order, whether or not this optimization for <code>vector</code> is
+done.  But if it is done, then the <code>HashAlgorithm</code> sees almost all
+of the bytes at once.
+</p>
+
+<p>
+This optimization could be made for <code>vector</code> without any help from the
+<code>std::lib</code>. Other optimizations are possible, but could only be made
+from within the <code>std::lib</code>.  For example, what if <code>T</code> is
+<code>bool</code> in the above example?  <code>vector&lt;bool&gt;</code> doesn't
+follow the usual <code>vector</code> rules.  What about
+<code>deque&lt;T&gt;</code>?  It could hash its internal contiguous buffers all
+at once, but there is no way to implement that without intimate knowledge of the
+internals of the <code>deque</code> implementation.  Externally, the best one
+can do for <code>deque&lt;T&gt;</code> is to send each individual <code>T</code>
+to <code>hash_append</code> one at a time.  This still gives the very same
+correct message, but is just much slower.
+</p>
+
+<p>
+Because only the std::lib implementor can fully implement this optimization for
+types such as <code>deque</code>, <code>bitset</code> and
+<code>vector&lt;bool&gt;</code>, it is important that we standardize
+<code>is_contiguously_hashable</code> and <code>hash_append</code> instead of
+asking the programmer to implement them (for std-defined types).
+</p>
+
+<p>
+If you believe <b>your type</b> to be contiguously hashable, you should
+specialize <code>is_contiguously_hashable&lt;YourType&gt;</code> appropriately,
+as has been shown for <code>pair</code>.  This would mean that not only is
+hashing <code>YourType</code> optimized, but hashing
+<code>vector&lt;YourType&gt;</code>, et. al. is also optimized!  But note that
+there is no bullet proof way to automate the registration of
+<code>YourType</code> with <code>is_contiguously_hashable</code> as IEEE
+floating point so ably demonstrates.  To do so requires an in depth analysis
+of <code>operator==</code> for <code>YourType</code>, which only the author
+of <code>YourType</code> is qualified to do.
+</p>
+
+<a name="hash_combine"></a><h3>Wait a minute.  Isn't <code>hash_append</code> the same thing as
+<code>boost::hash_combine</code>?</h3>
+
+<p>No!</p>
+
+<p>
+<code>boost::hash_combine</code> is used to combine an already computed hash
+code with an object that is to be hashed with <code>boost::hash&lt;T&gt;</code>
+(and this is also the 
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n3876.pdf">N3876</a>
+<code>hash_combine</code>, modulo using <code>std::hash&lt;T&gt;</code>).
+</p>
+<p>
+The 
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3333.html">N3333</a>
+<code>hash_combine</code> takes two objects, hashes both of them with
+<code>std::hash&lt;T&gt;</code>, and combines those two hash codes into one.
+</p>
+
+<p>
+In contrast <code>hash_append</code> is used to expose an object's <i>hashable
+state</i> to an <b>arbitrary</b> hashing algorithm.  It is up to the generic
+hashing algorithm to decide how to combine later bytes with earlier bytes.
+</p>
+
+
+<a name="serialization"></a><h3>Wait a minute.  Isn't <code>hash_append</code> the same thing as
+serialization?</h3>
+
+<p>
+It is very closely related.  Close enough that there may be a way to
+elegantly combine the two.  Each type can expose its state to a
+<code>HashAlgorithm</code> or <code>Serializer</code>.  However there
+<i>are</i> differences.  IEEE floating point is our poster-child for the
+difference.  For hashing, IEEE floating point needs to hide the difference
+between -0. and 0.  For serialization one needs to keep these two values
+distinct.  Combining these two functions, for now, remains beyond the scope
+of this paper.
+</p>
+
+<a name="variadic"></a><h3>Is there a variadic version of <code>hash_append</code>?</h3>
+
+<p>
+Yes, this is easily written as:
+</p>
+
+<blockquote><pre>
+template &lt;class HashAlgorithm, class T0, class T1, class ...T&gt;
+inline
+void
+hash_append (HashAlgorithm&amp; h, T0 const&amp; t0, T1 const&amp; t1, T const&amp; ...t) noexcept
+{
+    hash_append (h, t0);
+    hash_append (h, t1, t...);
+}
+</pre></blockquote>
+
+<p>
+This allows <code>hash_append</code> for X (for example) to be rewritten as:
+</p>
+
+<blockquote><pre>
+template &lt;class HashAlgorithm&gt;
+friend void hash_append(HashAlgorithm&amp; h, X const&amp; x) noexcept
+{
+    using std::hash_append;
+    hash_append(h, x.date_, x.data_);
+}
+</pre></blockquote>
+
+<a name="adapt_algorithm"></a><h3>How easily can algorithms other than FNV-1a be used?</h3>
+
+<p>
+Algorithms such as
+<a href="https://code.google.com/p/cityhash/">CityHash</a> are not efficiently
+adapted to this infrastructure, because as currently coded, CityHash actually
+hashes the end of the buffer first.  However
+<a href="http://burtleburtle.net/bob/hash/spooky.html">SpookyHash</a>, which
+is reported to have quality comparable to CityHash is trivial to incorporate:
+</p>
+
+<blockquote><pre>
+#include "SpookyV2.h"
+
+class spooky
+{
+    SpookyHash state_;
+public:
+    using result_type = std::size_t;
+
+    spooky(std::size_t seed1 = 1, std::size_t seed2 = 2) noexcept
+    {
+        state_.Init(seed1, seed2);
+    }
+
+    void
+    operator()(void const* key, std::size_t len) noexcept
+    {
+        state_.Update(key, len);
+    }
+
+    explicit
+    operator result_type() noexcept
+    {
+        std::uint64_t h1, h2;
+        state_.Final(&amp;h1, &amp;h2);
+        return h1;
+    }
+
+};
+</pre></blockquote>
+
+<p>
+<a href="http://code.google.com/p/smhasher/wiki/MurmurHash2">MurmurHash2</a>,
+<a href="http://code.google.com/p/smhasher/wiki/MurmurHash3">MurmurHash3</a>,
+and the cryptographically secure algorithms
+<a href="https://131002.net/siphash/">SipHash</a> and
+the <a href="http://en.wikipedia.org/wiki/SHA-2">SHA-2 family</a>
+are also efficiently adaptable to this framework.  Indeed, 
+<a href="https://code.google.com/p/cityhash/">CityHash</a> is the <i>only</i>
+hashing algorithm we have come across to date which is not efficiently adapted
+to this framework.
+</p>
+
+<a name="switch_algorithm"></a><h3>What is involved in switching hashing algorithms?</h3>
+
+<p>
+Given the class X shown above, with its complex state distributed among at
+least two different contiguous chunks of memory, and potentially many more
+if the container switched from <code>vector</code> to <code>deque</code> or
+<code>list</code>, one can create an unordered container with the default
+hash function like so:
+</p>
+
+<blockquote><pre>
+std::unordered_set&lt;X, std::uhash&lt;&gt;&gt; my_set;
+</pre></blockquote>
+
+<p>
+If one instead wanted to specify FNV-1a, the code is easily modified to:
+</p>
+
+<blockquote><pre>
+std::unordered_set&lt;X, std::uhash&lt;fnv1a&gt;&gt; my_set;
+</pre></blockquote>
+
+<p>
+This would change the hash code algorithm for every <code>vector</code>,
+every <code>deque</code>, every <code>string</code>, every <code>char</code>,
+every <code>int</code>, etc. for which X considered part of its hash-worthy state.
+That is, hashing algorithms are controlled at the top of the data structure
+chain, at the point where the client (e.g. <code>unordered_map</code>) asks for
+the hash.  It is not controlled at all down at the bottom of the data structure
+chain.  I.e. <code>int</code> has no clue how to hash itself.  It only knows
+what state needs to be exposed to a hashing algorithm.
+</p>
+
+<p>
+And there is no combining step.  The hash algorithm works identically as
+if you had copied all of the various discontiguous chunks of state into
+one big contiguous chunk of memory, and fed that one big chunk to the
+hash algorithm.
+</p>
+
+<p>
+If one wants to use <code>spooky</code> instead, simply change in <b>one</b>
+place:
+</p>
+
+<blockquote><pre>
+std::unordered_set&lt;X, std::uhash&lt;<b>spooky</b>&gt;&gt; my_set;
+</pre></blockquote>
+
+<p>
+If a new hashing algorithm is invented tomorrow, and you want to use it, all
+that needs to be done is to write an adaptor for it:
+</p>
+
+<blockquote><pre>
+class new_hash_function
+{
+public:
+    using result_type = std::size_t;
+
+    new_hash_function() noexcept;
+
+    void
+    operator()(void const* key, std::size_t len) noexcept;
+
+    explicit
+    operator result_type() noexcept;
+};
+</pre></blockquote>
+
+<p>
+And then use it:
+</p>
+
+<blockquote><pre>
+std::unordered_set&lt;X, std::uhash&lt;<b>new_hash_function</b>&gt;&gt; my_set;
+</pre></blockquote>
+
+<p>
+You do not need to revisit the <code>hash_append</code> for X, nor for any
+of X's sub-types.  The the N hashing algorithms x M sub-types problem has
+been solved!
+</p>
+
+<a name="pimpl"></a><h3>How does one <code>hash_append</code>
+<a href="http://en.wikipedia.org/wiki/Pimpl#C.2B.2B">Pimpl</a> designs?</h3>
+
+<p>
+So far, every <code>hash_append</code> function shown must be templated on
+<code>HashAlgorithm</code> so as to handle any hashing algorithm requested by
+some unknown, far away client.  But with the 
+<a href="http://en.wikipedia.org/wiki/Pimpl#C.2B.2B">Pimpl</a> design, one
+can not send a templated <code>HashAlgorithm</code> past the implementation
+firewall.
+</p>
+
+<p>
+Or can you ... ?
+</p>
+
+<p>
+With the help of <code>std::function</code> one can <i>type erase</i> the
+templated <code>HashAlgorithm</code>, adapting it to a type with a concrete
+type, and pass that concrete <code>HashAlgorithm</code> through the
+implementation firewall.  Imagine a class as shown
+<a href="http://en.wikipedia.org/wiki/Pimpl#C.2B.2B">here</a>.
+Here is how it can support arbitrary hash algorithms with the proposed
+infrastructure:
+</p>
+
+<blockquote><pre>
+class Handle
+{
+    struct CheshireCat;               // Not defined here
+    CheshireCat* smile;               // Handle
+
+public:
+    // Other operations...
+
+    // Hash support
+    using type_erased_hasher = acme::type_erased_hasher&lt;std::size_t&gt;;
+
+    friend
+    void
+    hash_append(type_erased_hasher&amp;, CheshireCat const&amp;);
+
+    template &lt;class HashAlgorithm&gt;
+    friend
+    void
+    hash_append(HashAlgorithm&amp; h, Handle const&amp; x)
+    {
+        using std::hash_append;
+        if (x.smile == nullptr)
+            hash_append(h, nullptr);
+        else
+        {
+            type_erased_hasher temp(std::move(h));
+            hash_append(temp, *x.smile);
+            h = std::move(*temp.target&lt;HashAlgorithm&gt;());
+        }
+    }
+};
+</pre></blockquote>
+
+<p>
+So you still have to implement a templated <code>hash_append</code> for
+<code>Handle</code>, but the implementation of that function forwards to a
+<b>non-template</b> function which can be implemented in the source, within
+the definition of <code>CheshireCat</code>:
+</p>
+
+<blockquote><pre>
+friend
+void
+hash_append(Handle::type_erased_hasher&amp; h, CheshireCat const&amp; c)
+{
+    using std::hash_append;
+    hash_append(h, c.data1_, c.data2_, <i>etc.</i> ...);
+}
+</pre></blockquote>
+
+<p>
+Besides the type of the <code>HashAlgorithm</code>, <code>hash_append</code>
+for <code>CheshireCat</code> looks just like any other
+<code>hash_append</code>.
+</p>
+
+<p>
+The magic is in <code>acme::type_erased_hasher&lt;std::size_t&gt;</code>, not
+proposed (thus the namespace <code>acme</code>).
+<a href="#type_erased_hasher">Appendix A</a> outlines exactly how to code
+<code>acme::type_erased_hasher&lt;std::size_t&gt;</code>. In a nutshell, this
+is a <code>HashAlgorithm</code> <i>adaptor</i>, which takes any
+<code>HashAlgorithm</code>, stores it in a <code>std::function&lt;void(void
+const*, std::size_t)&gt;</code>, and makes the <code>std::function</code>
+behave like a <code>HashAlgorithm</code>.
+</p>
+
+<p>
+Think about what has just happened here.  You've compiled CheshireCat.cpp
+today. And <i>tomorrow</i>, when somebody invents a brand new hash algorithm,
+your CheshireCat.cpp uses it, with no re-compile necessary, for the cost of a
+virtual function call (or many such calls) to the <code>HashAlgorithm</code>.
+ And yet no other client of this new <code>HashAlgorithm</code> (outside of
+those called by <code>CheshireCat</code>), is forced to access the new
+hashing algorithm via a virtual function call. That borders on magic!
+</p>
+
+<p>
+It is this very concern (hashing of Pimpl's) that decided the name of the
+member function of <code>HashAlgorithm</code>s which appends state to the
+hash algorithm:
+</p>
+
+<blockquote><pre>
+void operator()(void const* key, std::size_t len) noexcept;
+</pre></blockquote>
+
+<p>
+Had this member function been given any other name, such as:
+</p>
+
+<blockquote><pre>
+void append(void const* key, std::size_t len) noexcept;
+</pre></blockquote>
+
+<p>
+then programmers would not be able to use <code>std::function</code> to
+create a type-erased wrapper around a templated <code>HashAlgorithm</code>.
+</p>
+
+<a name="seeding"></a><h3>How does one apply random seeding?</h3>
+
+<p>
+Many hash algorithms can be randomly seeded during the initialization stage
+in such a way that the hash code produced for a type is constant between
+invocations by a single client (just like a non-seeded algorithm), but varies
+between clients. The variance might be per-process, but could also be as
+frequent as per-hash-functor construction, excluding copy or move
+construction. In the latter case one might have two distinct
+<code>unordered_set</code>s (for example) of the same type, and even
+containing the same data, and yet have the two containers result in different
+hash codes for the same values.  Doing so can help harden an application from
+attacks when the application must hash keys supplied by an untrusted source.
+</p>
+
+<p>
+This is remarkably easily done with this proposal.  One codes <i>one</i> new
+hash functor, which can be used with <i>any</i> <code>HashAlgorithm</code>
+which accepts a seed, and for <i>any</i> type which already has
+<code>hash_append</code> implemented (even those <code>CheshireCat</code>s
+which have already been compiled, and can not be recompiled).
+</p>
+
+<p>
+Here is one possible implementation for a hash functor that is randomly seeded
+by a seed selected on a per-process basis:
+</p>
+
+<blockquote><pre>
+std::tuple&lt;std::uint64_t, std::uint64_t&gt;
+get_process_seed();
+
+template &lt;class HashAlgorithm = acme::siphash&gt;
+class process_seeded_hash
+{
+public:
+    using result_type = typename HashAlgorithm::result_type;
+
+    template &lt;class T&gt;
+    result_type
+    operator()(T const&amp; t) const noexcept
+    {
+        std::uint64_t seed0;
+        std::uint64_t seed1;
+        std::tie(seed0, seed1) = get_process_seed();
+        HashAlgorithm h(seed0, seed1);
+        using std::hash_append;
+        hash_append(h, t);
+        return static_cast&lt;result_type&gt;(h);
+    }
+};
+</pre></blockquote>
+
+<p>
+And then in a source:
+</p>
+
+<blockquote><pre>
+namespace
+{
+
+std::tuple&lt;std::uint64_t, std::uint64_t&gt;
+init_seeds()
+{
+    std::mt19937_64 eng{std::random_device{}()};
+    return std::tuple&lt;std::uint64_t, std::uint64_t&gt;{eng(), eng()};
+}
+
+}   // unnamed
+
+std::tuple&lt;std::uint64_t, std::uint64_t&gt;
+get_process_seed()
+{
+    static std::tuple&lt;std::uint64_t, std::uint64_t&gt; seeds = init_seeds();
+    return seeds;
+}
+</pre></blockquote>
+
+<p>
+And then use it:
+</p>
+
+<blockquote><pre>
+std::unordered_set&lt;MyType, process_seeded_hash&lt;&gt;&gt; my_set;
+</pre></blockquote>
+
+<p>
+In this example, the hashing algorithm is initialized with a random seed when
+<code>process_seeded_hash</code> is invoked.  The same seed is used to
+initialize the algorithm on each hash functor invocation, and for all copies
+of the functor, for the life of the process.
+</p>
+
+<p>
+Alternatively, one could randomly seed the hash functor on each default
+construction:
+</p>
+
+<blockquote><pre>
+template &lt;class HashAlgorithm = acme::siphash&gt;
+class randomly_seeded_hash
+{
+private:
+    static std::mutex mut_s;
+    static std::mt19937_64 rand_s;
+
+    std::size_t seed0_;
+    std::size_t seed1_;
+public:
+    using result_type = typename HashAlgorithm::result_type;
+
+    randomly_seeded_hash()
+    {
+        std::lock_guard&lt;std::mutex&gt; _(mut_s);
+        seed0_ = rand_s();
+        seed1_ = rand_s();
+    }
+
+    template &lt;class T&gt;
+    result_type
+    operator()(T const&amp; t) const noexcept
+    {
+        HashAlgorithm h(seed0_, seed1_);
+        using std::hash_append;
+        hash_append(h, t);
+        return static_cast&lt;result_type&gt;(h);
+    }
+};
+
+template &lt;class HashAlgorithm&gt;
+std::mutex
+randomly_seeded_hash&lt;HashAlgorithm&gt;::mut_s;
+
+template &lt;class HashAlgorithm&gt;
+std::mt19937_64
+randomly_seeded_hash&lt;HashAlgorithm&gt;::rand_s{std::random_device{}()};
+</pre></blockquote>
+
+<p>
+Perhaps using it like:
+</p>
+
+<blockquote><pre>
+std::unordered_set&lt;MyType, randomly_seeded_hash&lt;acme::spooky&gt;&gt; my_set;
+</pre></blockquote>
+
+
+<p>
+One uses the same technique to apply
+<a href="http://en.wikipedia.org/wiki/Salt_(cryptography)">salting</a>,
+or <a href="http://en.wikipedia.org/wiki/Padding_(cryptography)">padding</a>
+to a type to be hashed.  E.g. one would prepend and/or append the
+<a href="http://en.wikipedia.org/wiki/Salt_(cryptography)">salt</a> or
+<a href="http://en.wikipedia.org/wiki/Padding_(cryptography)">padding</a>
+to the message of <code>T</code> by using additional calls to
+<code>hash_append</code> in the <code>operator()(T const&amp; t)</code> of the
+hash functor.
+</p>
+
+<p><b>Emphasis</b></p>
+<blockquote><p>
+There is no need for the standard to specify a random seeding policy or
+interface, because using this infrastructure the client can very easily
+specify his own random seeding policy <b>without</b> having to revisit every
+type that needs to be hashed, and <b>without</b> having to heavily invest in
+any given hashing algorithm.  It can be done with only a few dozen lines of
+code.  And he can easily do so in a per-use manner: I.e. in use-case A we
+need to randomly seed the hashing of types X and Y. And in use-case B we need
+to <i>not</i> seed the hashing of types Y and Z. Type Y is correctly handled
+in both use-cases, and without having to revisit Y or Y's sub-types.  Y
+remains ignorant of the detail as to whether it is being hashed with a random
+seed or not (or even with what hashing algorithm).
+</p>
+Flexibility is built into this system in exactly the right places so as to
+achieve maximum options for the programmer with an absolute minimum of
+programmer intervention.  The std::lib merely has to set up the right
+infrastructure, and provide a simple default.
+<p>
+</p></blockquote>
+
+<a name="unordered"></a><h3>What about unordered containers?</h3>
+
+<p>
+The unordered containers present a problem.  The problem is not specific to this
+infrastructure.  Neither
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3333.html">N3333</a>
+nor
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n3876.pdf">N3876</a>
+solve this problem either.  But we highlight the problem here so as to
+definitively state that we do not solve the problem here either.
+</p>
+
+<p>
+Given two <code>unordered_set&lt;int&gt;</code>:
+</p>
+
+<blockquote><pre>
+std::unordered_set&lt;int&gt; s1{1, 2, 3};
+std::unordered_set&lt;int&gt; s2{3, 2, 1};
+</pre></blockquote>
+
+<p>
+One can assert that <code>s1 == s2</code>, and yet if one iterates over
+<code>s1</code> and <code>s2</code>, one will not (in general) come upon the
+same elements in the same order.  So in what order do you hash the elements
+of an unordered sequence?  Since <code>s1 == s2</code>, then <code>hash(s1)
+== hash(s2)</code> must also be true.
+</p>
+
+<p>
+There are several answers to this dilemma that will work.  However there is no
+answer that is definitely better than all other answers.  Therefore we recommend
+that we <i>not</i> standardize a <code>hash_append</code> overload for any of
+the unordered containers.  If a client really wants to hash an unordered
+container, then they can choose a technique that works for them, and do so.
+</p>
+
+<p>
+For example, one could hash each element using a copy of the
+<code>HashAlgorithm</code>, and then append the sum of all hash codes to the
+state of the original <code>HashAlgorithm</code>:
+</p>
+
+<blockquote><pre>
+template &lt;class HashAlgorithm, class Key, class Hash, class Pred, class Alloc&gt;
+void
+hash_append(HashAlgorithm&amp; h, std::unordered_set&lt;Key, Hash, Pred, Alloc&gt; const&amp; s)
+{
+    using result_type = typename HashAlgorithm::result_type;
+    result_type k{};
+    for (auto const&amp; x : s)
+    {
+        HashAlgorithm htemp{h};
+        hash_append(htemp, x);
+        k += static_cast&lt;result_type&gt;(htemp);
+    }
+    hash_append(h, k, s.size());
+}
+</pre></blockquote>
+
+<p>
+Or one could sort all the elements and hash the elements in sorted order:
+</p>
+
+<blockquote><pre>
+template &lt;class HashAlgorithm, class Key, class Hash, class Pred, class Alloc&gt;
+void
+hash_append(HashAlgorithm&amp; h, std::unordered_set&lt;Key, Hash, Pred, Alloc&gt; const&amp; s)
+{
+    hash_append(h, std::set&lt;Key&gt;(s.begin(), s.end()));
+}
+</pre></blockquote>
+
+<p>
+And there are various other schemes.  They are all implementable.  But they each
+have their advantages and disadvantages.  Therefore this proposal proposes
+none of them.  Should the future expose the ideal <code>hash_append</code>
+specification for unordered containers, it can always be added at that time.
+</p>
+
+<a name="testing"></a><h3>How much does this cost, in terms of speed and
+hash quality, compared to the current N x M method of custom hash functor
+implementation?</h3>
+
+<p>
+The answer to this question is nothing.  But to demonstrate this
+answer, X has been given a randomized default constructor:
+</p>
+
+<blockquote><pre>
+std::mt19937_64 eng;
+
+X::X()
+{
+    std::uniform_int_distribution&lt;short&gt; yeardata(1914, 2014);
+    std::uniform_int_distribution&lt;unsigned char&gt; monthdata(1, 12);
+    std::uniform_int_distribution&lt;unsigned char&gt; daydata(1, 28);
+    std::uniform_int_distribution&lt;std::size_t&gt; veclen(0, 100);
+    std::uniform_int_distribution&lt;int&gt; int1data(1, 10);
+    std::uniform_int_distribution&lt;int&gt; int2data(-3, 3);
+    std::get&lt;0&gt;(date_) = yeardata(eng);
+    std::get&lt;1&gt;(date_) = monthdata(eng);
+    std::get&lt;2&gt;(date_) = daydata(eng);
+    data_.resize(veclen(eng));
+    for (auto&amp; p : data_)
+    {
+        p.first = int1data(eng);
+        p.second = int2data(eng);
+    }
+}
+</pre></blockquote>
+
+<p>
+Given this, one can easily create a great number of random X's and specify any
+hash algorithm.  Herein I'm testing 7 implementations of hashing 1,000,000 X's:
+</p>
+
+<ul>
+<li><p>
+Using <code>std::hash</code> augmented with
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n3876.pdf">N3876</a>
+as shown in <a href="#Solution1">Solution 1</a>.
+</p></li>
+<li><p>
+Using <code>llvm::hash_value</code> as shown <a href="#Solution1B">here</a>
+which is intended to be representative of
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3333.html">N3333</a>.
+</p></li>
+<li><p>
+Using <code>uhash&lt;fnv1a&gt;</code> where <code>fnv1a</code> is derived from
+<a href="http://www.isthe.com/chongo/tech/comp/fnv/index.html">here</a>.
+</p></li>
+<li><p>
+Using <code>uhash&lt;jenkins1&gt;</code> where <code>jenkins1</code> is derived from
+<a href="http://en.wikipedia.org/wiki/Jenkins_hash_function">here</a>.
+</p></li>
+<li><p>
+Using <code>uhash&lt;MurmurHash2A&gt;</code> where <code>MurmurHash2A</code> is derived from
+<a href="https://code.google.com/p/pyfasthash/source/browse/trunk/src/MurmurHash/MurmurHash2A.cpp?r=19">here</a>.
+</p></li>
+<li><p>
+Using <code>uhash&lt;spooky&gt;</code> where <code>spooky</code> is derived from
+<a href="http://burtleburtle.net/bob/hash/spooky.html">here</a>.
+</p></li>
+<li><p>
+Using <code>uhash&lt;siphash&gt;</code> where <code>siphash</code> is derived from
+<a href="https://131002.net/siphash/">here</a>.
+</p></li>
+</ul>
+
+<p>
+The hash function quality tester suite used herein is described below.
+</p>
+
+<ol>
+<li><p>
+This test looks at each 64 bit hash code as a collection of 16
+hex-digits.  The expectation is that each hex-digit should be roughly equally
+represented in each hexadecimal place of the hash code.  The test returns
+maximum deviation of the average, from the expected average.  An ideal score
+is 0.
+</p></li>
+<li><p>
+This test simply counts the number of duplicate hashes.  A score of 0 indicates
+each hash code is unique.  A score of 1 indicates that all hash codes are the
+same.
+</p></li>
+<li><p>
+This test is
+<a href="https://code.google.com/p/smhasher/wiki/Distribution">TestDistribution</a>
+gratefully borrowed from the
+<a href="https://code.google.com/p/smhasher/wiki/SMHasher">smhasher</a>
+test suite.  An ideal score is 0.
+</p></li>
+<li><p>
+This test hashes the hash codes into a list of buckets sized to the number of
+hash codes (load factor == 1).  It then scores each bucket with the number of
+comparisons required to look up each element in the bucket, and then averages
+the number of comparisons per lookup.  Given a randomized hash, the result
+should be lf/2+1, where lf is load factor.  This test returns the percent
+difference above/below the ideal randomized result.
+</p></li>
+<li><p>
+This test hashes the hash codes into a list of buckets sized to the number of
+hash codes (load factor == 1).  It then returns the max collision count among
+all of the buckets.  This represents the maximum cost for a lookup of an
+element not found.  Assuming the not-found-key hashes to a random bucket,
+the average cost of looking up a not-found-key is simply the load factor (i.e.
+independent of the quality of the hash function distribution).
+</p></li>
+</ol>
+
+<p>
+</p>
+
+<p>
+A million hash codes are generated from a million randomized but unique X's,
+randomized by a default constructed <code>std::mt19937_64</code>, and fed to
+these tests.  For each test, the smaller the result the better.
+</p>
+
+<blockquote>
+<table border="1" cellpadding="5">
+<caption>Test Results -- smaller is better</caption>
+<tr>
+<th></th><th>test 1</th> <th>test 2</th> <th>test 3</th> <th>test 4</th> <th>test 5</th> <th>total time (sec)</th>
+</tr>
+<tr>
+<th>std::hash&lt;X&gt;</th> <td>0.273744</td> <td>0.0000460148</td> <td>0.966285</td> <td>-0.000257333</td> <td>8</td> <td>0.472963s</td>
+</tr>
+<tr>
+<th>llvm::hash_value</th> <td>0.012</td> <td>0</td> <td>0.000913715</td> <td>0.000254667</td> <td>8</td> <td>0.545283s</td>
+</tr>
+<tr>
+<th>fnv1a</th> <td>0.012576</td> <td>0</td> <td>0.00111228</td> <td>0.000248</td> <td>9</td> <td>0.84607s</td>
+</tr>
+<tr>
+<th>jenkins1</th> <td>0.0121775</td> <td>0</td> <td>0.00121271</td> <td>-0.000572667</td> <td>9</td> <td>1.1119s</td>
+</tr>
+<tr>
+<th>MurmurHash2A</th> <td>15</td> <td>0.000110984</td> <td>6.36293</td> <td>0.000393333</td> <td>9</td> <td>0.467501s</td>
+</tr>
+<tr>
+<th>spooky</th> <td>0.010816</td> <td>0</td> <td>0.000968923</td> <td>-0.000359333</td> <td>9</td> <td>0.628721s</td>
+</tr>
+<tr>
+<th>siphash</th> <td>0.011072</td> <td>0</td> <td>0.00113216</td> <td>-0.000162667</td> <td>8</td> <td>0.584353s</td>
+</tr>
+</table>
+</blockquote>
+
+<p>
+The intent in showing the above table is two-fold:  To show that running times
+are competitive, and that with the exception of <code>MurmurHash2A</code>, and
+possibly <code>std::hash&lt;X&gt;</code>, the quality results are competitive.
+If one insists on picking "the best algorithm" from this table, we caution
+you with one additional test.
+</p>
+
+<p>
+The table below represents the same test except that X's data members have
+been changed as shown:
+</p>
+
+<blockquote><pre>
+std::tuple&lt;<del>short</del> <ins>int</ins>, unsigned char, unsigned char&gt; date_;
+std::vector&lt;std::pair&lt;int, <del>int</del> <ins>short</ins>&gt;&gt;              data_;
+</pre></blockquote>
+
+<p>
+Other than this change in types, no other change has been made.  Not even the
+random values assigned to each type.  Here are the results:
+</p>
+
+<blockquote>
+<table border="1" cellpadding="5">
+<caption>Test Results (alternative) -- smaller is better</caption>
+<tr>
+<th></th><th>test 1</th> <th>test 2</th> <th>test 3</th> <th>test 4</th> <th>test 5</th> <th>total time (sec)</th>
+</tr>
+<tr>
+<th>std::hash&lt;X&gt;</th> <td>0.273744</td> <td>0.0000460148</td> <td>0.966285</td> <td>-0.000257333</td> <td>8</td> <td>0.476888s</td>
+</tr>
+<tr>
+<th>llvm::hash_value</th> <td>0.0111664</td> <td>0</td> <td>0.00105212</td> <td>0.000167333</td> <td>8</td> <td>1.10327s</td>
+</tr>
+<tr>
+<th>fnv1a</th> <td>0.011456</td> <td>0</td> <td>0.00132384</td> <td>-0.00015</td> <td>9</td> <td>0.708467s</td>
+</tr>
+<tr>
+<th>jenkins1</th> <td>0.010512</td> <td>0</td> <td>0.000864258</td> <td>-0.000433333</td> <td>10</td> <td>0.9079s</td>
+</tr>
+<tr>
+<th>MurmurHash2A</th> <td>15</td> <td>0.000115991</td> <td>6.36293</td> <td>-0.000863333</td> <td>8</td> <td>1.09589s</td>
+</tr>
+<tr>
+<th>spooky</th> <td>0.013328</td> <td>0</td> <td>0.00127677</td> <td>-0.000210667</td> <td>9</td> <td>1.33591s</td>
+</tr>
+<tr>
+<th>siphash</th> <td>0.01224</td> <td>0</td> <td>0.00111516</td> <td>0.000342667</td> <td>8</td> <td>1.63656s</td>
+</tr>
+</table>
+</blockquote>
+
+<p>
+While none of the quality metrics changes that much with this minor change,
+the timing tests did vary considerably.  For example
+<code>llvm::hash_value</code> was previously one of the faster algorithms
+(fastest among those with good quality results), and is now 50% slower than
+the fastest among those with quality results.  The take-away point is that
+there is no "best algorithm".  But there is a lot of value in being able to
+<i>easily</i> change algorithms for testing, performance and security purposes.
+</p>
+
+<a name="Summary"></a><h2>Summary</h2>
+
+<p>
+This paper presents an infrastructure that decouples types from hashing
+algorithms.  This decoupling has several benefits:
+</p>
+
+<ul>
+<li>Clients can very easily switch hashing algorithms used by
+very complex data structures, thus enabling comparisons as shown
+in the previous section.</li>
+<li>Hash algorithm designers can concentrate on designing better hash
+algorithms, with little worry about how these new algorithms can be
+incorporated into existing code.</li>
+<li>Type designers can create their hash support just once, without
+worrying about what hashing algorithm should be used.</li>
+<li>Clients can easily adopt most existing algorithms to this proposed
+infrastructure.</li>
+<li>The resulting hash codes are a true reflection of the original design
+of the hashing algorithms, even though applied to complex data structures
+spanning discontiguous memory.</li>
+</ul>
+
+<a name="proposedinfrastructure"></a><h3>Summary of proposed infrastructure</h3>
+
+<blockquote><pre>
+template &lt;class T&gt; struct is_contiguously_hashable;                                     // A type property trait
+template &lt;class HashAlgorithm&gt; void hash_append(HashAlgorithm&amp; h, T const&amp; t) noexcept; // overloaded for each type T
+template &lt;class HashAlgorithm = <i>unspecified-default-hasher</i>&gt; struct uhash;               // A hashing functor
+</pre></blockquote>
+
+<p>
+There is an example implementation and lots of example code using the example
+implementation <a href="https://github.com/HowardHinnant/hash_append">here</a>.
+See
+<a href="https://github.com/HowardHinnant/hash_append/blob/master/hash_append.h">hash_append.h</a>
+for the example implementation.
+</p>
+
+<a name="type_erased_hasher"></a><h2>Appendix A: <code>type_erased_hasher</code></h2>
+
+<p>
+Though <code>type_erased_hasher</code> is not proposed, it easily could be if
+the committee so desires.  Here is how it is implemented, whether by the
+programmer, or by a std::lib implementor:
+</p>
+
+<blockquote><pre>
+template &lt;class ResultType&gt;
+class type_erased_hasher
+{
+public:
+    using result_type = ResultType;
+    
+private:    
+    using function = std::function&lt;void(void const*, std::size_t)&gt;;
+
+    function hasher_;
+    result_type (*convert_)(function&amp;);
+
+public:
+    template &lt;class HashAlgorithm,
+                 class = std::enable_if_t
+                 &lt;
+                      std::is_constructible&lt;function, HashAlgorithm&gt;{} &amp;&amp;
+                      std::is_same&lt;typename std::decay_t&lt;HashAlgorithm&gt;::result_type,
+                                   result_type&gt;{}
+                 &gt;
+             &gt;
+    explicit
+    type_erased_hasher(HashAlgorithm&amp;&amp; h)
+        : hasher_(std::forward&lt;HashAlgorithm&gt;(h))
+        , convert_(convert&lt;std::decay_t&lt;HashAlgorithm&gt;&gt;)
+    {
+    }
+
+    void
+    operator()(void const* key, std::size_t len)
+    {
+        hasher_(key, len);
+    }
+
+    explicit
+    operator result_type() noexcept
+    {
+        return convert_(hasher_);
+    }
+
+    template &lt;class T&gt;
+    T*
+    target() noexcept
+    {
+        return hasher_.target&lt;T&gt;();
+    }
+
+private:
+    template &lt;class HashAlgorithm&gt;
+    static
+    result_type
+    convert(function&amp; f) noexcept
+    {
+        return static_cast&lt;result_type&gt;(*f.target&lt;HashAlgorithm&gt;());;
+    }
+};
+</pre></blockquote>
+
+<p>
+<code>type_erased_hasher</code> must be templated on <code>result_type</code>
+(or have a concrete <code>result_type</code>), otherwise it can not have an
+explicit conversion operator to that type.
+</p>
+
+<p>
+The <code>type_erased_hasher</code> stores a <code>std::function&lt;void(void
+const*, std::size_t)&gt;</code>, and a pointer to a function taking such a
+<code>function</code> and returning a <code>result_type</code>. The latter is
+necessary to capture the type of the <code>HashAlgorithm</code> in the
+<code>type_erased_hasher</code> constructor, so that the same
+<code>HashAlgorithm</code> type can later be used in the conversion to
+<code>result_type</code>.
+</p>
+
+<p>
+The constructor is naturally templated on <code>HashAlgorithm</code>, which
+can be perfectly forwarded to the underlying <code>std::function</code>.  The
+constructor also initialized the function pointer <code>convert_</code> using
+the decayed type of <code>HashAlgorithm</code>.  The pointed-to function will
+extract the <code>HashAlgorithm</code> from the <code>std::function</code>
+and explicitly convert it to the <code>result_type</code>.
+</p>
+
+<p>
+Note that the conversion to <code>result_type</code> isn't explicitly used in
+the <a href="#pimpl">Pimpl</a> example of this paper.  However the
+<code>hash_append</code> of the private implementation may need to copy the
+<code>type_erased_hasher</code>, and possibly convert a copy to a
+<code>result_type</code> as part of its hash computation. Such code has been
+prototyped in motivating examples, such as the <code>hash_append</code> for
+an unordered sequence container.
+</p>
+
+<p>
+The <a href="#pimpl">Pimpl</a> example does need access to the stored
+<code>HashAlgorithm</code> after the call to <code>hash_append</code> to
+recover its state.  This is accomplished with the <code>target</code>
+function which simply forwards to <code>std::function</code>'s
+<code>target</code> function.
+</p>
+
+<a name="bikeshed"></a><h2>Appendix B: B is for Bike Shed</h2>
+
+<ul>
+<li>
+<p>
+In Elements of Programming, Stepanov uses the term <i>uniquely represented</i> for
+the property this paper refers to as <i>contiguously hashable</i>.
+Therefore another good name name for <code>is_contiguously_hashable</code> is
+<code>is_uniquely_represented</code>.
+</p>
+</li>
+
+</ul>
+
+<a name="debugHasher"></a><h2>Appendix C: <code>debugHasher</code></h2>
+
+<p>
+Another interesting "hash algorithm" is <code>debugHasher</code>.  This is a
+small utility that can be used to help type authors debug their
+<code>hash_append</code> function.  This utility is not proposed.  It is simply
+presented herein to illustrate the utility of this overall hashing infrastructure
+design.
+</p>
+
+<blockquote><pre>
+#include &lt;iostream&gt;
+#include &lt;iomanip&gt;
+#include &lt;vector&gt;
+
+class debugHasher
+{
+    std::vector&lt;unsigned char&gt; buf_;
+public:
+    using result_type = std::size_t;
+
+    void
+    operator()(void const* key, std::size_t len) noexcept
+    {
+        unsigned char const* p = static_cast&lt;unsigned char const*&gt;(key);
+        unsigned char const* const e = p + len;
+        for (; p &lt; e; ++p)
+            buf_.push_back(*p);
+    }
+
+    explicit
+    operator std::size_t() noexcept
+    {
+        std::cout &lt;&lt; std::hex;
+        std::cout &lt;&lt; std::setfill('0');
+        unsigned int n = 0;
+        for (auto c : buf_)
+        {
+            std::cout &lt;&lt; std::setw(2) &lt;&lt; (unsigned)c &lt;&lt; ' ';
+            if (++n == 16)
+            {
+                std::cout &lt;&lt; '\n';
+                n = 0;
+            }
+        }
+        std::cout &lt;&lt; '\n';
+        std::cout &lt;&lt; std::dec;
+        std::cout &lt;&lt; std::setfill(' ');
+        return buf_.size();
+    }
+};
+</pre></blockquote>
+
+<p>
+<code>debugHasher</code> is a fake "hashing algorithm" that does nothing but
+collect the bytes sent to a hash by the entire collection of the calls to
+<code>hash_append</code> made by a key and all of its sub-types.  The collection
+of bytes is output to <code>cout</code> when the hasher is converted to its
+<code>result_type</code>.
+</p>
+
+<p>
+As can be readily seen, it is not difficult to create such a debugging tool.  It
+is then used, just as easily:
+</p>
+
+<blockquote><pre>
+std::vector&lt;std::vector&lt;std::pair&lt;int, std::string&gt;&gt;&gt; v {{{1, "abc"}},
+                                                         {{2, "bca"}, {3, "cba"}},
+                                                         {}};
+std::cout &lt;&lt; uhash&lt;debugHasher&gt;{}(v) &lt;&lt; '\n';
+</pre></blockquote>
+
+<p>
+Assuming a 32 bit <code>int</code>, 64 bit <code>size_t</code>, and little
+endian, this will reliably output:
+</p>
+
+<blockquote><pre>
+01 00 00 00 61 62 63 00 01 00 00 00 00 00 00 00 
+02 00 00 00 62 63 61 00 03 00 00 00 63 61 62 00 
+02 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 
+03 00 00 00 00 00 00 00 
+56
+</pre></blockquote>
+
+<p>
+The last line is simply the number of bytes that have been sent to the
+<code>HashAlgorithm</code>.  The first 4 lines are those bytes, formatted as
+two hex digits per byte, with bytes separated by a space, and 16 bytes per
+line for readability.  If one carefully inspects this byte stream and
+compares it to the data structure which has been "hashed", and to the
+proposed <code>hash_append</code> above for <code>vector</code>,
+<code>string</code> and <code>pair</code>, one can verify that the byte
+stream is consistent with the specification.
+</p>
+
+<p>
+Improving <code>debugHasher</code> to collect useful statistics such as the
+number of times called, and the average number of bytes hashed per call, is left
+as a fun exercise for the reader.
+</p>
+
+<a name="wording"></a><h2>Appendix D: Proposed Wording</h2>
+
+<p>
+Add a new section to [hash.requirements]:
+</p>
+
+<blockquote>
+<h3>HashAlgorithm requirements [hash.algo.rqmts]</h3>
+
+<p>
+A type <code>H</code> meets the <code>HashAlgorithm</code> requirements if
+all of the following are met:
+</p>
+
+<ul>
+<li><p>
+<code>H::result_type</code> is valid and denotes a
+<code>MoveConstrutible</code> type (14.8.2 [temp.deduct]).
+</p></li>
+
+<li><p>
+<code>H</code> is either default constructible, or constructible by some
+documented seed.  This construction shall initialize <code>H</code> to a
+deterministic state such that if two instances are constructed with the
+same arguments, then they have equivalent state.
+</p></li>
+
+<li><p>
+<code>H</code> is <code>CopyConstructible</code>.  Updates to the state of
+one copy shall have no impact on any other copy.
+</p></li>
+
+<li><p>
+<code>H</code> is <code>CopyAssignable</code>.  Updates to the state of one
+copy shall have no impact on any other copy.
+</p></li>
+
+<li><pre>
+void operator()(void const* key, std::size_t len);
+</pre>
+<blockquote><p>
+<i>Requires:</i> If <code>len &gt; 0</code>, <code>key</code> points to
+<code>len</code> contiguous bytes to be consumed by the
+<code>HashAlgorithm</code>.  The conversion to <code>result_type</code> has
+not been called on this object since construction, or since
+<code>*this</code> was assigned to.
+</p>
+<p>
+<i>Effects:</i> Updates the state of the <code>HashAlgorithm</code> using the
+<code>len</code> bytes referred to by <code>{key, len}</code>.
+</p>
+<p>
+If <code>len == 0</code> then <code>key</code> is not dereferenced, and there
+are no effects.
+</p>
+<p>
+Consider two keys <code>{k1, len1}</code> and <code>{k2, len2}</code>, with
+<code>len1 &gt; 0</code> and <code>len2 &gt; 0</code>. If <code>len1 !=
+len2</code>, the two keys are considered not equivalent. If <code>len1 ==
+len2</code> and if <code>memcmp(k1, k2, len1) == 0</code>, the two keys are
+equivalent, else they are not equivalent.
+</p>
+<p>
+ If two instances of <code>HashAlgorithm</code> (e.g. <code>h1</code> and
+ <code>h2</code>) have the same state prior to an update operation, and given
+ two equivalent keys <code>{k1, len}</code> and <code>{k2, len}</code>, then
+ after <code>h1(k1, len)</code> and <code>h2(k2, len)</code>, then
+ <code>h1</code> and <code>h2</code> shall have the same updated state. If
+ <code>{k1, len1}</code> and <code>{k2, len2}</code> are not equivalent, then
+ after <code>h1(k1, len1)</code> and <code>h2(k2, len2)</code>, 
+ <code>h1</code> and <code>h2</code> should have different updated state.
+</p>
+<p>
+Given a key <code>{k, len}</code> with <code>len &gt; 0</code>, one can
+create multiple keys each with length <i>l<sub>i</sub></i>, where the first
+key <i>k<sub>0</sub></i> <code>== k</code>, and subsequent keys
+<i>k<sub>i</sub></i> == <i>k<sub>i-1</sub></i> + <i>l<sub>i-1</sub></i>. 
+Combined with a constraint that &sum;  <i>l<sub>i</sub></i> <code>==
+len</code>, the single key <code>{k, len}</code> shall be equivalent to the
+application of all of the keys <code>{</code><i>k<sub>i</sub></i>,
+<i>l<sub>i</sub></i><code>}</code> applied in order.
+</p>
+<p>
+The <code>HashAlgorithm</code> shall not access this memory range after the
+update operation returns.
+</p></blockquote></li>
+
+<li>
+<pre>
+explicit operator result_type();
+</pre>
+<blockquote>
+<p>
+<i>Requires:</i> This operation has not been called on this object since
+construction or since <code>*this</code> was assigned to.
+</p>
+<p>
+<i>Effects:</i> Converts the state of the <code>HashAlgorithm</code> to a
+<code>result_type</code>.  Two instances of the same type of
+<code>HashAlgorithm</code>, with the same state, shall return the same value.
+ It is unspecified if this operation changes the state of the
+<code>HashAlgorithm</code>.
+</p>
+<p>
+<i>Returns:</i> The converted state.
+</p>
+</blockquote>
+</li>
+</ul>
+
+</blockquote>
+
+<p>
+Add a new section to [hash.requirements]:
+</p>
+
+<blockquote>
+<h3><code>HashAlgorithm</code>-based <code>Hash</code> requirements [hash.algo.hash.rqmts]</h3>
+
+<p>
+A type <code>H</code> meets the <code>HashAlgorithm</code>-based
+<code>Hash</code> requirements if all of following are met:
+</p>
+
+<ul>
+<li>
+<p>
+<code>H</code> meets the <code>Hash</code> requirements ([hash.requirements]).
+</p>
+</li>
+
+<li>
+<p>
+<code>H</code> is a class template instantiation of the form
+</p>
+<blockquote><pre>
+template &lt;class HashAlgorithm, class Args&gt; struct H;
+</pre></blockquote>
+
+<p>
+where Args is zero or more type arguments, and the first template parameter
+meets the <code>HashAlgorithm</code> requirements ([hash.algo.rqmts]).  The
+<code>HashAlgorithm</code> parameter may be defaulted.
+</p>
+</li>
+
+<li>
+<p>
+<code>H</code> has the nested type:
+</p>
+<blockquote>
+<code>using result_type = typename HashAlgorithm::result_type;</code>
+</blockquote>
+</li>
+
+<li>
+<p>
+<code>H</code> is either default constructible, or constructible by some
+documented seed.  This construction shall initialize <code>H</code>.
+<code>H</code> may be stateless or have state.  If not stateless, different
+default constructions, and different seeded constructions (even with the same
+seeds), are not required to initialize <code>H</code> to the same state.
+</p>
+</li>
+
+<li><p>
+<code>H</code> is <code>CopyConstructible</code>.
+</p></li>
+
+<li><p>
+<code>H</code> is <code>CopyAssignable</code>.
+</p></li>
+
+<li>
+<pre>
+template &lt;class T&gt;
+    result_type
+    operator()(T const&amp; t) const;
+</pre>
+<blockquote>
+<p>
+<i>Requires:</i> <code>HashAlgorithm</code> shall be constructible as
+specified by a concrete <code>H</code> type.
+</p>
+<p>
+<i>Effects:</i> Constructs a <code>HashAlgorithm h</code> with automatic
+storage.  Each concrete <code>H</code> type shall specify how <code>h</code>
+is constructed. However <code>h</code> shall be constructed to the same state
+for every invocation of <code>(*this)(t)</code>.  Updates the state of the
+<code>HashAlgorithm</code> in an unspecified manner, except that there shall
+be exactly one call to:
+</p>
+<blockquote><pre>
+using std::hash_append;
+hash_append(h, t);
+</pre></blockquote>
+<p>
+at some time during the update operation.  Furthermore, subsequent calls
+shall update the the local <code>h</code> with exactly the same state every
+time, except as changed by different values for <code>t</code>, unless there
+is an intervening assignment to <code>*this</code> between calls to this
+operator.
+</p>
+<p>
+<i>Returns:</i> <code>static_cast&lt;result_type&gt;(h)</code>.
+</p>
+<p>
+[<i>Note:</i>  For the same value of <code>t</code>, the same value is
+returned on subsequent calls unless there is an intervening assignment to
+<code>*this</code> between calls to this operator.  &mdash; <i>end note</i>]
+</p>
+</blockquote>
+</li>
+</ul>
+
+</blockquote>
+
+<p>
+Add a new row to Table 49 &mdash; Type property predicates in [meta.unary.prop]:
+</p>
+
+<blockquote>
+<table border="1">
+<tr>
+<th>Template</th> <th>Condition</th> <th>Preconditions</th>
+</tr>
+<tr>
+<td>
+<pre>
+template &lt;class T&gt;
+struct is_contiguously_hashable;
+</pre>
+</td>
+<td>
+A type <code>T</code> is contiguously hashable if for any two
+values <code>x</code> and <code>y</code> of a type, if <code>x ==
+y</code>, then it must also be true that <code>memcmp(addressof(x),
+addressof(y), sizeof(T)) == 0</code>.  It <code>T</code> is an array type,
+then <code>T</code> is contiguously hashable if
+<code>remove_extent_t&lt;T&gt;</code> is contiguously hashable.
+</td>
+<td>
+<code>T</code> shall be a complete object type.
+A program may specialize this trait if <code>T</code> is a user-defined type
+and the specialization conforms to the Condition.
+</td>
+</tr>
+</table>
+</blockquote>
+
+<p>
+Add a new section to [unord.hash]:
+</p>
+
+<blockquote>
+<h3><code>hash_append</code> [unord.hash_append]</h3>
+
+<pre>
+template &lt;class HashAlgorithm, class T&gt;
+void
+hash_append(HashAlgorithm&amp; h, T const&amp; t);
+</pre>
+
+<blockquote>
+<p>
+<i>Remarks:</i> This function shall not participate in overload resolution,
+unless <code>is_contiguously_hashable&lt;T&gt;::value</code> is <code>true</code>.
+</p>
+<p>
+<i>Effects:</i> <code>h(addressof(t), sizeof(t))</code>.
+</p>
+</blockquote>
+
+<p>
+For any scalar types <code>T</code>, except for member pointers, for which
+<code>is_contiguously_hashable&lt;T&gt;{}</code> evaluates to
+<code>false</code>, there shall exist an overload of <code>hash_append</code>
+similar to that shown above for <i>contiguously hashable</i> types. For each
+of these overloads for scalar types <code>T</code>, the implementation shall
+ensure that for two values of <code>T</code> (e.g. <code>t1</code> and
+<code>t2</code>), if <code>t1 == t2</code>, then <code>hash_append(h,
+t1)</code> shall update the state of <code>h</code> to the same state as does
+<code>hash_append(h, t2)</code>. And if <code>t1 != t2</code>, then
+<code>hash_append(h, t1)</code> should update the state of <code>h</code> to
+a different state as does <code>hash_append(h, t2)</code>. It is unspecified
+exactly what signature such overloads will have, so it is not portable to
+form function pointers to these overloads.
+</p>
+
+<p>
+[<i>Note:</i>
+</p>
+<p>
+For example, here is a plausible implementation of <code>hash_append</code>
+for IEEE floating point:
+</p>
+
+<blockquote><pre>
+template &lt;class HashAlgorithm, class T&gt;
+enable_if_t
+&lt;
+    is_floating_point&lt;T&gt;{}
+&gt;
+hash_append(HashAlgorithm&amp; h, T t)
+{
+    if (t == 0)
+        t = 0;
+    h(&amp;t, sizeof(t));
+}
+</pre></blockquote>
+
+<p>
+This implementation accepts the <code>T</code> by value instead of by
+<code>const&amp;</code>, and gives -0. and 0. the same bit representation
+prior to forwarding the value to the <code>HashAlgorithm</code> (since these
+two values compare equal).
+</p>
+
+<p>
+And here is a plausible definition for <code>nullptr_t</code>:
+</p>
+
+<blockquote><pre>
+template &lt;class HashAlgorithm&gt;
+void
+hash_append(HashAlgorithm&amp; h, nullptr_t)
+{
+    void const* p = nullptr;
+    h(&amp;p, sizeof(p));
+}
+</pre></blockquote>
+
+<p>
+&mdash; <i>end note</i>]
+</p>
+
+<pre>
+template &lt;class HashAlgorithm, class T, size_t N&gt;
+void
+hash_append(HashAlgorithm&amp; h, T (&amp;a)[N]);
+</pre>
+
+<blockquote>
+<p>
+<i>Remarks:</i> This function shall not participate in overload resolution,
+unless <code>is_contiguously_hashable&lt;T&gt;::value</code> is <code>false</code>.
+</p>
+<p>
+<i>Effects:</i>
+</p>
+<blockquote><pre>
+for (auto const&amp; t : a)
+    hash_append(h, t);
+</pre></blockquote>
+
+<p>
+[<i>Note:</i>
+It is intentional that the <code>hash_append</code> for built-in arrays
+behave in exactly this way, sending a "message" to the
+<code>HashAlgorithm</code> of each element, in order, and nothing else.  This
+"message" to the <code>HashAlgorithm</code> is considered part of a built-in
+array's API.  It is also intentional that for arrays of <code>T</code> that
+are <i>contiguously hashable</i>, the exact same message is sent to the
+<code>HashAlgorithm</code>, except in one call instead of many.
+&mdash; <i>end note</i>]
+</p>
+
+</blockquote>
+
+<pre>
+template &lt;class HashAlgorithm, class T0, class T1, class ...T&gt;
+inline
+void
+hash_append (HashAlgorithm&amp; h, T0 const&amp; t0, T1 const&amp; t1, T const&amp; ...t);
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i>
+</p>
+<blockquote><pre>
+hash_append (h, t0);
+hash_append (h, t1, t...);
+</pre></blockquote>
+</blockquote>
+
+</blockquote>
+
+<p>
+Add a new section to [unord.hash]:
+</p>
+
+<blockquote>
+<h3><code>uhash</code> [unord.hash.uhash]</h3>
+
+<pre>
+template &lt;class HashAlgorithm = <i>unspecified</i>&gt;
+struct uhash
+{
+    using result_type = typename HashAlgorithm::result_type;
+
+    template &lt;class T&gt;
+    result_type
+    operator()(T const&amp; t) const;
+};
+</pre>
+
+<p>
+Instantiations of <code>uhash</code> meet the
+<code>HashAlgorithm</code>-based <code>Hash</code> requirements
+([hash.algo.hash.rqmts]).
+</p>
+
+<p>
+The template parameter <code>HashAlgorithm</code> meets the 
+<code>HashAlgorithm</code> requirements ([hash.algo.rqmts]).  The unspecified
+default for this parameter refers to an implementation provided default
+<code>HashAlgorithm</code>.
+</p>
+
+<pre>
+template &lt;class HashAlgorithm&gt;
+template &lt;class T&gt;
+typename HashAlgorithm::result_type
+uhash&lt;HashAlgorithm&gt;::operator()(T const&amp; t) const;
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> Default constructs a <code>HashAlgorithm</code> with
+automatic storage duration (for example named <code>h</code>), and
+calls <code>hash_append(h, t)</code> (unqualified).
+</p>
+<p>
+<i>Returns:</i> <code>static_cast&lt;result_type&gt;(h)</code>.
+</p>
+</blockquote>
+</blockquote>
+
+
+<p>
+Add to [type.info]:
+</p>
+
+<blockquote>
+<pre>
+class type_info {
+...
+};
+
+<ins>
+template &lt;HashAlgorithm&gt;
+    void hash_append(HashAlgorithm&amp; h, type_info const&amp; t);
+</ins>
+</pre>
+
+<p>...</p>
+
+<pre>
+template &lt;HashAlgorithm&gt;
+    void hash_append(HashAlgorithm&amp; h, type_info const&amp; t);
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i>  Updates the state of <code>h</code> with data that is
+unique to <code>t</code> with respect to all other <code>type_info</code>s
+that compare not equal to <code>t</code>.
+</p>
+</blockquote>
+
+</blockquote>
+
+<p>
+Add to the synopsis in [syserr]:
+</p>
+
+<blockquote><pre>
+template &lt;class HashAlgorithm&gt;
+    void hash_append(HashAlgorithm&amp; h, error_code const&amp; ec)
+</pre></blockquote>
+
+<p>
+Add to [syserr.hash]:
+</p>
+
+<blockquote>
+<pre>
+template &lt;class HashAlgorithm&gt;
+    void hash_append(HashAlgorithm&amp; h, error_code const&amp; ec)
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> <code>hash_append(h, ec.value(), &amp;ec.category());</code>
+</p>
+</blockquote>
+
+</blockquote>
+
+<p>
+Add to the synopsis in [utility]:
+</p>
+
+<blockquote><pre>
+template &lt;class T, class U&gt;
+struct is_contiguously_hashable&lt;pair&lt;T, U&gt;&gt;
+    : public integral_constant&lt;bool, is_contiguously_hashable&lt;T&gt;{} &amp;&amp; 
+                                     is_contiguously_hashable&lt;U&gt;{} &amp;&amp;
+                                     sizeof(T) + sizeof(U) == sizeof(pair&lt;T, U&gt;)&gt;
+    {};
+
+template &lt;class HashAlgorithm, class T, class U&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, pair&lt;T, U&gt; const&amp; p)
+</pre></blockquote>
+
+<p>
+Add a new section to [pairs]: [pairs.hash]:
+</p>
+
+<blockquote>
+<h3>Hashing pair [pairs.hash]</h3>
+
+<pre>
+template &lt;class HashAlgorithm, class T, class U&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, pair&lt;T, U&gt; const&amp; p)
+</pre>
+<blockquote>
+<p>
+<i>Remarks:</i> This function shall not participate in overload resolution,
+unless <code>is_contiguously_hashable&lt;pair&lt;T, U&gt;&gt;::value</code>
+is <code>false</code>.
+</p>
+<p>
+<i>Effects:</i> <code>hash_append(h, p.first, p.second);</code>
+</p>
+</blockquote>
+</blockquote>
+
+<p>
+Add to the synopsis in [tuple.general]:
+</p>
+
+<blockquote><pre>
+template &lt;class ...T&gt;
+    struct is_contiguously_hashable&lt;tuple&lt;T...&gt;&gt;;
+
+template &lt;class HashAlgorithm, class ...T&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, tuple&lt;T...&gt; const&amp; t)
+</pre></blockquote>
+
+
+<p>
+Add to [tuple.special]:
+</p>
+
+<blockquote>
+
+<pre>
+template &lt;class ...T&gt;
+    struct is_contiguously_hashable&lt;tuple&lt;T...&gt;&gt;;
+</pre>
+
+<blockquote>
+<p>
+Publicly derives from <code>true_type</code> if for each <code>Type</code> in
+<code>T...</code>, <code>is_contiguously_hashable&lt;Type&gt;{}</code> is
+<code>true</code>, and if the sum of all <code>sizeof(Type)</code> is equal
+to <code>sizeof(tuple&lt;T...&gt;)</code>, else publicly derives from
+<code>false_type</code>.
+</p>
+</blockquote>
+
+<pre>
+template &lt;class HashAlgorithm, class ...T&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, tuple&lt;T...&gt; const&amp; t)
+</pre>
+
+<blockquote>
+<p>
+<i>Remarks:</i> This function shall not participate in overload resolution,
+unless <code>is_contiguously_hashable&lt;tuple&lt;T...&gt;&gt;::value</code>
+is <code>false</code>.
+</p>
+<p>
+<i>Effects:</i> Calls <code>hash_append(h, get&lt;I&gt;(t))</code> for each
+<code>I</code> in the range [0, sizeof...(T)).  If sizeof...(T) is 0, the
+function has no effects.
+</p>
+</blockquote>
+
+</blockquote>
+
+
+<p>
+Add to the synopsis in [template.bitset]:
+</p>
+
+<blockquote><pre>
+template &lt;class HashAlgorithm, size_t N&gt;
+    void hash_append(HashAlgorithm&amp; h, bitset&lt;N&gt; const&amp; bs)
+</pre></blockquote>
+
+<p>
+Add to [bitset.hash]:
+</p>
+
+<blockquote>
+<pre>
+template &lt;class HashAlgorithm, size_t N&gt;
+    void hash_append(HashAlgorithm&amp; h, bitset&lt;N&gt; const&amp; bs)
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> Calls <code>hash_append(h, w)</code> successively for some
+<code>w</code> integral type for which each bit in <code>w</code> corresponds
+to a bit value contained in <code>bs</code>.  The last <code>w</code> may
+contain padding bits which shall be set to 0.  After all bits have been
+appended to <code>h</code>, calls <code>hash_append(h, bs.size())</code>.
+</p>
+</blockquote>
+
+</blockquote>
+
+<p>
+Add to the synopsis in [memory.syn]:
+</p>
+
+<blockquote><pre>
+template &lt;class HashAlgorithm, class T, class D&gt;
+    void hash_append(HashAlgorithm&amp; h, unique_ptr&lt;T, D&gt; const&amp; p);
+template &lt;class HashAlgorithm, class T&gt;
+    void hash_append(HashAlgorithm&amp; h, shared_ptr&lt;T&gt; const&amp; p);
+</pre></blockquote>
+
+<p>
+Add to [util.smartptr.hash]:
+</p>
+
+<blockquote>
+<pre>
+template &lt;class HashAlgorithm, class T, class D&gt;
+    void hash_append(HashAlgorithm&amp; h, unique_ptr&lt;T, D&gt; const&amp; p);
+template &lt;class HashAlgorithm, class T&gt;
+    void hash_append(HashAlgorithm&amp; h, shared_ptr&lt;T&gt; const&amp; p);
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> <code>hash_append(h, p.get());</code>
+</p>
+</blockquote>
+
+</blockquote>
+
+<p>
+Add to the synopsis in [time.syn]:
+</p>
+
+<blockquote><pre>
+template &lt;class Rep, class Period&gt;
+struct is_contiguously_hashable&lt;duration&lt;Rep, Period&gt;&gt;
+    : public integral_constant&lt;bool, is_contiguously_hashable&lt;Rep&gt;{}&gt;
+    {};
+
+template &lt;class Clock, class Duration&gt;
+struct is_contiguously_hashable&lt;time_point&lt;Clock, Duration&gt;&gt;
+    : public integral_constant&lt;bool, is_contiguously_hashable&lt;Duration&gt;{}&gt;
+    {};
+
+template &lt;class HashAlgorithm, class Rep, class Period&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, duration&lt;Rep, Period&gt; const&amp; d);
+
+template &lt;class HashAlgorithm, class Clock, class Duration&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, time_point&lt;Clock, Duration&gt; const&amp; tp);
+</pre></blockquote>
+
+<p>
+Add a new section to [time.duration], [time.duration.hash]:
+</p>
+
+<blockquote>
+<h3>duration hash [time.duration.hash]</h3>
+<pre>
+template &lt;class HashAlgorithm, class Rep, class Period&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, duration&lt;Rep, Period&gt; const&amp; d);
+</pre>
+<blockquote>
+<p>
+<i>Remarks:</i> This function shall not participate in overload resolution,
+unless <code>is_contiguously_hashable&lt;duration&lt;Rep, Period&gt;&gt;::value</code>
+is <code>false</code>.
+</p>
+<p>
+<i>Effects:</i> <code>hash_append(h, d.count())</code>.
+</p>
+</blockquote>
+</blockquote>
+
+<p>
+Add a new section to [time.point], [time.point.hash]:
+</p>
+
+<blockquote>
+<h3>time_point hash [time.point.hash]</h3>
+<pre>
+template &lt;class HashAlgorithm, class Clock, class Duration&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, time_point&lt;Clock, Duration&gt; const&amp; tp);
+</pre>
+<blockquote>
+<p>
+<i>Remarks:</i> This function shall not participate in overload resolution,
+unless <code>is_contiguously_hashable&lt;time_point&lt;Clock, Duration&gt;&gt;::value</code>
+is <code>false</code>.
+</p>
+<p>
+<i>Effects:</i> <code>hash_append(h, tp.time_since_epoch())</code>.
+</p>
+</blockquote>
+</blockquote>
+
+<p>
+Add to the synopsis in [type.index.synopsis]:
+</p>
+
+<blockquote><pre>
+template &lt;class HashAlgorithm&gt;
+    void hash_append(HashAlgorithm&amp; h, type_index const&amp; ti);
+</pre></blockquote>
+
+<p>
+Add to [type.index.hash]:
+</p>
+
+<blockquote>
+<pre>
+template &lt;class HashAlgorithm&gt;
+    void hash_append(HashAlgorithm&amp; h, type_index const&amp; ti);
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> <code>hash_append(h, *ti.target);</code>
+</p>
+</blockquote>
+
+</blockquote>
+
+<p>
+Add to the synopsis in [string.classes]:
+</p>
+
+<blockquote><pre>
+template &lt;class HashAlgorithm, class CharT, class Traits, class Alloc&gt;
+    void hash_append(HashAlgorithm&amp; h, basic_string&lt;CharT, Traits, Alloc&gt; const&amp; s);
+</pre></blockquote>
+
+<p>
+Add to [basic.string.hash]:
+</p>
+
+<blockquote>
+<pre>
+template &lt;class HashAlgorithm, class CharT, class Traits, class Alloc&gt;
+    void hash_append(HashAlgorithm&amp; h, basic_string&lt;CharT, Traits, Alloc&gt; const&amp; s);
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i>
+</p>
+<blockquote><pre>
+for (auto c : s)
+    hash_append(h, c);
+hash_append(h, s.size());
+</pre></blockquote>
+
+<p>
+[<i>Note:</i> If <code>is_contiguously_hashable&lt;CharT&gt;{}</code> is <code>true</code>,
+then the following may replace the loop (as an optimization):
+</p>
+
+<blockquote><pre>
+h(s.data(), s.size()*sizeof(CharT));
+</pre></blockquote>
+
+<p>
+&mdash; <i>end note</i>]
+</p>
+
+</blockquote>
+
+</blockquote>
+
+<p>
+Add to the synopsis of <code>&lt;array&gt;</code> in [sequences.general]:
+</p>
+
+<blockquote>
+<pre>
+template &lt;class T, size_t N&gt;
+struct is_contiguously_hashable&lt;array&lt;T, N&gt;&gt;
+    : public integral_constant&lt;bool, is_contiguously_hashable&lt;T&gt;{} &amp;&amp; 
+                                     sizeof(T)*N == sizeof(array&lt;T, N&gt;)&gt;
+    {};
+
+template &lt;class HashAlgorithm, class T, size_t N&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, array&lt;T, N&gt; const&amp; a);
+</pre>
+</blockquote>
+
+<p>
+Add to the synopsis of <code>&lt;deque&gt;</code> in [sequences.general]:
+</p>
+
+<blockquote>
+<pre>
+template &lt;class HashAlgorithm, class T, class Allocator&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, deque&lt;T, Allocator&gt; const&amp; x);
+</pre>
+</blockquote>
+
+<p>
+Add to the synopsis of <code>&lt;forward_list&gt;</code> in [sequences.general]:
+</p>
+
+<blockquote>
+<pre>
+template &lt;class HashAlgorithm, class T, class Allocator&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, forward_list&lt;T, Allocator&gt; const&amp; x);
+</pre>
+</blockquote>
+
+<p>
+Add to the synopsis of <code>&lt;list&gt;</code> in [sequences.general]:
+</p>
+
+<blockquote>
+<pre>
+template &lt;class HashAlgorithm, class T, class Allocator&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, list&lt;T, Allocator&gt; const&amp; x);
+</pre>
+</blockquote>
+
+<p>
+Add to the synopsis of <code>&lt;vector&gt;</code> in [sequences.general]:
+</p>
+
+<blockquote>
+<pre>
+template &lt;class HashAlgorithm, class T, class Allocator&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, vector&lt;T, Allocator&gt; const&amp; x);
+
+template &lt;class HashAlgorithm, class Allocator&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, vector&lt;bool, Allocator&gt; const&amp; x);
+</pre>
+</blockquote>
+
+<p>
+Add to [array.special]:
+</p>
+
+<blockquote>
+<pre>
+template &lt;class HashAlgorithm, class T, size_t N&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, array&lt;T, N&gt; const&amp; a);
+</pre>
+
+<blockquote>
+<p>
+<i>Remarks:</i> This function shall not participate in overload resolution,
+unless <code>is_contiguously_hashable&lt;array&lt;T, N&gt;&gt;::value</code>
+is <code>false</code>.
+</p>
+<p>
+<i>Effects:</i>
+<blockquote><pre>
+for (auto const&amp; t : a)
+    hash_append(h, t);
+</pre></blockquote>
+</p>
+</blockquote>
+</blockquote>
+
+<p>
+Add to [deque.special]:
+</p>
+
+<blockquote>
+<pre>
+template &lt;class HashAlgorithm, class T, class Allocator&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, deque&lt;T, Allocator&gt; const&amp; x);
+</pre>
+
+<blockquote>
+<i>Effects:</i>
+<blockquote><pre>
+for (auto const&amp; t : x)
+    hash_append(h, t);
+hash_append(h, x.size());
+</pre></blockquote>
+<p>
+[<i>Note:</i> When <code>is_contiguously_hashable&lt;T&gt;{}</code> is
+<code>true</code>, an implementation may optimize by calling <code>h(p,
+s)</code> on suitable contiguous sub-blocks of the <code>deque</code>.
+&mdash; <i>end note</i>]
+</p>
+</blockquote>
+</blockquote>
+
+<p>
+Add to [forwardlist.spec]:
+</p>
+
+<blockquote>
+<pre>
+template &lt;class HashAlgorithm, class T, class Allocator&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, forward_list&lt;T, Allocator&gt; const&amp; x);
+</pre>
+
+<blockquote>
+<i>Effects:</i>
+<blockquote><pre>
+typename forward_list&lt;T, Allocator&gt;::size_type s{};
+for (auto const&amp; t : x)
+{
+    hash_append(h, t);
+    ++s;
+}
+hash_append(h, s);
+</pre></blockquote>
+</blockquote>
+</blockquote>
+
+<p>
+Add to [list.special]:
+</p>
+
+<blockquote>
+<pre>
+template &lt;class HashAlgorithm, class T, class Allocator&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, list&lt;T, Allocator&gt; const&amp; x);
+</pre>
+
+<blockquote>
+<i>Effects:</i>
+<blockquote><pre>
+for (auto const&amp; t : x)
+    hash_append(h, t);
+hash_append(h, x.size());
+</pre></blockquote>
+</blockquote>
+</blockquote>
+
+<p>
+Add to [vector.special]:
+</p>
+
+<blockquote>
+<pre>
+template &lt;class HashAlgorithm, class T, class Allocator&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, vector&lt;T, Allocator&gt; const&amp; x);
+</pre>
+
+<blockquote>
+<i>Effects:</i>
+<blockquote><pre>
+for (auto const&amp; t : x)
+    hash_append(h, t);
+hash_append(h, x.size());
+</pre></blockquote>
+<p>
+[<i>Note:</i> When <code>is_contiguously_hashable&lt;T&gt;{}</code> is
+<code>true</code>, an implementation may optimize by calling
+<code>h(x.data(), x.size()*sizeof(T))</code> in place of the loop. &mdash;
+<i>end note</i>]
+</p>
+</blockquote>
+</blockquote>
+
+<p>
+Add to [vector.bool]:
+</p>
+
+<blockquote>
+<pre>
+template &lt;class HashAlgorithm, class Allocator&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, vector&lt;bool, Allocator&gt; const&amp; x);
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> Calls <code>hash_append(h, w)</code> successively for some
+<code>w</code> integral type for which each bit in <code>w</code> corresponds
+to a bit value contained in <code>x</code>.  The last <code>w</code> may
+contain padding bits which shall be set to 0.  After all bits have been
+appended to <code>h</code>, calls <code>hash_append(h, x.size())</code>.
+</p>
+</blockquote>
+</blockquote>
+
+<p>
+Add to the synopsis of <code>&lt;map&gt;</code> in [associative.map.syn]:
+</p>
+
+<blockquote>
+<pre>
+template &lt;class HashAlgorithm, class Key, class T, class Compare class Allocator&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, map&lt;Key, T, Compare, Allocator&gt; const&amp; x);
+
+template &lt;class HashAlgorithm, class Key, class T, class Compare class Allocator&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, multimap&lt;Key, T, Compare, Allocator&gt; const&amp; x);
+</pre>
+</blockquote>
+
+<p>
+Add to the synopsis of <code>&lt;set&gt;</code> in [associative.set.syn]:
+</p>
+
+<blockquote>
+<pre>
+template &lt;class HashAlgorithm, class Key, class Compare class Allocator&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, set&lt;Key, Compare, Allocator&gt; const&amp; x);
+
+template &lt;class HashAlgorithm, class Key, class Compare class Allocator&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, multiset&lt;Key, Compare, Allocator&gt; const&amp; x);
+</pre>
+</blockquote>
+
+<p>
+Add to [map.special]:
+</p>
+
+<blockquote>
+<pre>
+template &lt;class HashAlgorithm, class Key, class T, class Compare class Allocator&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, map&lt;Key, T, Compare, Allocator&gt; const&amp; x);
+</pre>
+<blockquote>
+<p>
+<i>Effects:</i>
+</p>
+<blockquote><pre>
+for (auto const&amp; t : x)
+    hash_append(h, t);
+hash_append(h, x.size());
+</pre></blockquote>
+</blockquote>
+</blockquote>
+
+<p>
+Add to [multimap.special]:
+</p>
+
+<blockquote>
+<pre>
+template &lt;class HashAlgorithm, class Key, class T, class Compare class Allocator&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, multimap&lt;Key, T, Compare, Allocator&gt; const&amp; x);
+</pre>
+<blockquote>
+<p>
+<i>Effects:</i>
+</p>
+<blockquote><pre>
+for (auto const&amp; t : x)
+    hash_append(h, t);
+hash_append(h, x.size());
+</pre></blockquote>
+</blockquote>
+</blockquote>
+
+<p>
+Add to [set.special]:
+</p>
+
+<blockquote>
+<pre>
+template &lt;class HashAlgorithm, class Key, class Compare class Allocator&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, set&lt;Key, Compare, Allocator&gt; const&amp; x);
+</pre>
+<blockquote>
+<p>
+<i>Effects:</i>
+</p>
+<blockquote><pre>
+for (auto const&amp; t : x)
+    hash_append(h, t);
+hash_append(h, x.size());
+</pre></blockquote>
+</blockquote>
+</blockquote>
+
+<p>
+Add to [multiset.special]:
+</p>
+
+<blockquote>
+<pre>
+template &lt;class HashAlgorithm, class Key, class Compare class Allocator&gt;
+    void
+    hash_append(HashAlgorithm&amp; h, multiset&lt;Key, Compare, Allocator&gt; const&amp; x);
+</pre>
+<blockquote>
+<p>
+<i>Effects:</i>
+</p>
+<blockquote><pre>
+for (auto const&amp; t : x)
+    hash_append(h, t);
+hash_append(h, x.size());
+</pre></blockquote>
+</blockquote>
+</blockquote>
+
+<p>
+Add to the synopsis in [complex.syn]:
+</p>
+
+<blockquote><pre>
+template &lt;class HashAlgorithm, class T&gt;
+    void hash_append(HashAlgorithm&amp; h, complex&lt;T&gt; const&amp; x);
+</pre></blockquote>
+
+<p>
+Add to [complex.ops]:
+</p>
+
+<blockquote>
+<pre>
+template &lt;class HashAlgorithm, class T&gt;
+    void hash_append(HashAlgorithm&amp; h, complex&lt;T&gt; const&amp; x);
+</pre>
+<blockquote>
+<p>
+<i>Effects:</i> Calls <code>hash_append(h, x.real(), x.imag())</code>.
+</p>
+</blockquote>
+
+</blockquote>
+
+<p>
+Add to the synopsis in [thread.thread.id]:
+</p>
+
+<blockquote><pre>
+template &lt;class HashAlgorithm&gt;
+    void hash_append(HashAlgorithm&amp; h, thread::id const&amp; id);
+</pre></blockquote>
+
+<p>
+Add to [thread.thread.id]:
+</p>
+
+<blockquote>
+<pre>
+template &lt;class HashAlgorithm&gt;
+    void hash_append(HashAlgorithm&amp; h, thread::id const&amp; id);
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i>  Updates the state of <code>h</code> with <code>id</code>.
+</p>
+</blockquote>
+
+</blockquote>
+
+
+
+<a name="Acknowledgments"></a><h2>Acknowledgments</h2>
+
+<p>
+Thanks to Daniel James (et al.) for highlighting the problem of hashing
+zero-length containers with no message.
+</p>
+
+<p>
+Thanks to Dix Lorenz (et al.) for pointing out that the
+<code>result_type</code> of the <code>HashAlgorithm</code> need not be
+<code>size_t</code>, and indeed, can not be if we want this infrastructure to
+fully handle cryptographic hash functions (which produce results larger than
+a <code>size_t</code>).
+</p>
+
+<p>
+Thanks to Jeremy Maitin-Shepard for pointing out problems in an earlier scheme
+to hash <code>std::string</code> and arrays of char identically.  Also thanks
+to Jeremy and Chris Jefferson for their guidance on hashing unordered sequences.
+</p>
+
+<p>
+Additional thanks to Walter Brown, Daniel Kr&uuml;gler, and Richard Smith for
+their invaluable review and guidance.
+</p>
+
+<p>
+This research has been generously supported by <a
+href="https://www.ripplelabs.com">Ripple Labs</a>.  We would especially like to
+thank our colleagues on the RippleD team.
+</p>
+
+</body>
+</html>

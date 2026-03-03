@@ -1,0 +1,188 @@
+<html><head>
+<title>Making std::owner_less more flexible</title>
+  <style type='text/css'>
+  p {text-align:justify}
+  li {text-align:justify}
+  blockquote.note
+  {
+          background-color:#E0E0E0;
+          padding-left: 15px;
+          padding-right: 15px;
+          padding-top: 1px;
+          padding-bottom: 1px;
+  }
+  p code {color:navy}
+  ins p code {color:#00A000}
+  ins {color:#00A000}
+  del {color:#A00000}
+  table#boilerplate { border:0 }
+  table#boilerplate td { padding-left: 2em }
+  table.bordered, table.bordered th, table.bordered td {
+    border: 1px solid;
+    text-align: center;
+  }
+  ins.block {color:#00A000; text-decoration: none}
+  del.block {color:#A00000; text-decoration: none}
+  </style>
+</head><body>
+<table id="boilerplate">
+<tr><td>Document number</td><td>P0074R0</td></tr>
+<tr><td>Date</td><td>2015-09-23</td></tr>
+<tr><td>Project</td><td>Programming Language C++, Library Working Group</td></tr>
+<tr><td>Reply-to</td><td>Jonathan Wakely &lt;cxx@kayari.org&gt;</td></tr>
+</table><hr>
+<h1>Making std::owner_less more flexible</h1>
+<ul>
+ <li>
+ <ul>
+  <li><a href="#Introduction">Introduction</a></li>
+  <li><a href="#Motivation.and.Scope">Motivation and Scope</a></li>
+  <li><a href="#Design.Decisions">Design Decisions</a></li>
+  <li><a href="#Impact.On.The.Standard">Impact On The Standard</a></li>
+  <li><a href="#Technical.Specification">Technical Specification</a></li>
+  <li><a href="#Implementation.Experience">Implementation Experience</a></li>
+  <li><a href="#Acknowledgements">Acknowledgements</a></li>
+ </ul>
+ </li>
+</ul>
+<a name="Introduction"></a>
+<h2>Introduction</h2>
+
+<p>The class template <code>std::owner_less</code> is inconvenient to use for anything but
+the simplest cases:</p>
+
+<pre><code>  shared_ptr&lt;int&gt; sp1;
+  shared_ptr&lt;void&gt; sp2;
+  shared_ptr&lt;long&gt; sp3;
+  weak_ptr&lt;int&gt; wp1;
+
+  owner_less&lt;shared_ptr&lt;int&gt;&gt; cmp;
+  cmp(sp1, sp2);   // error, doesn't compile
+  cmp(sp1, wp1);
+  cmp(sp1, sp3);   // error, doesn't compile
+  cmp(wp1, sp1);
+  cmp(wp1, wp1);   // error, doesn't compile
+</code></pre>
+
+<a name="Motivation.and.Scope"></a>
+<h2>Motivation and Scope</h2>
+
+<p>The first error in the example in the introduction can be avoided by using
+<code>owner_less&lt;shared_ptr&lt;void&gt;&gt;</code> but the initial attempt to do so still fails
+because <code>sp1</code> can be converted to both <code>shared_ptr&lt;void&gt;</code> and <code>weak_ptr&lt;void&gt;</code>:</p>
+
+<pre><code>  owner_less&lt;shared_ptr&lt;void&gt;&gt; cmpv;
+  cmpv(sp1, sp2);  // error, ambiguous conversion
+</code></pre>
+
+<p>To make it compile it's necessary to explicitly convert the <code>shared_ptr&lt;int&gt;</code>
+to the right argument type:</p>
+
+<pre><code>  owner_less&lt;shared_ptr&lt;void&gt;&gt; cmpv;
+  cmpv(shared_ptr&lt;void&gt;(sp1), sp2);
+</code></pre>
+
+<p>Not only is this more verbose and  less clear, but the conversion creates a
+temporary, incrementing and decrementing the reference count.</p>
+
+<p><code>shared_ptr::owner_before</code> and <code>weak_ptr::owner_before</code> are function templates
+that support mixed comparisons between <code>shared_ptr&lt;A&gt;</code> and <code>weak_ptr&lt;B&gt;</code>,
+but <code>owner_less</code> only supports comparing <code>shared_ptr&lt;A&gt;</code> and <code>weak_ptr&lt;A&gt;</code>.
+Mixing pointers to different types either causes implicit conversions
+(and reference-count updates) or just fails to compile.
+This is an unnecessary restriction, because the <code>shared_ptr</code> aliasing
+constructor means that objects which share ownership can store completely
+unrelated types of pointer.</p>
+
+<p>Even if we don't care about mixing different types,
+the three <code>owner_less::operator()</code> overloads only support three out of four
+combinations of argument types,
+and the <a href="https://www.sgi.com/tech/stl/AdaptableBinaryFunction.html">Adaptable Binary Function</a> typedefs <code>first_argument_type</code> and <code>second_argument_type</code>
+only describe the argument types for one of those three overloads.</p>
+
+<p>The proposed addition removes the typedefs, as they are unnecessary since
+C++11, and allows the example in the introduction to
+handle all the comparisons without creating any temporaries:</p>
+
+<pre><code>  owner_less&lt;&gt; cmp;
+  cmp(sp1, sp2);   // no temporary created
+  cmp(sp1, wp1);
+  cmp(sp1, sp3);   // ok
+  cmp(wp1, sp1);
+  cmp(wp1, wp1);   // ok
+</code></pre>
+
+<a name="Design.Decisions"></a>
+<h2>Design Decisions</h2>
+
+<p>The proposed addition is directly inspired by <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3421.htm">N3421</a>
+and so is not novel.</p>
+
+<p>There is no need to constrain the proposed member function templates,
+because <code>owner_before</code> is unconstrained.</p>
+
+<p>The member function templates simply return <code>bool</code> rather than using <code>decltype</code>
+to detect the result of <code>x.owner_before(y)</code>. Although this means that in
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3421.htm">N3421</a> terms the proposed specialization is not
+completely "transparent" there is no need to use <code>decltype</code> because <code>bool</code>
+is always the right return type.
+By defining the nested <code>is_transparent</code> typedef the following is supported:</p>
+
+<pre><code>  set&lt;shared_ptr&lt;X&gt;, owner_less&lt;&gt;&gt; s;
+  shared_ptr&lt;void&gt; key = get_key();
+  auto iter = s.find(key);
+</code></pre>
+
+<p>It might makes sense to alter the existing <code>owner_less&lt;shared_ptr&lt;T&gt;&gt;</code> and
+<code>owner_less&lt;weak_ptr&lt;T&gt;&gt;</code> partial specializations to add a fourth overload
+that takes two <code>weak_ptr</code>s or two <code>shared_ptr</code>s respectively, and also to
+remove the nested typedefs. The fourth overload seems unnecessary if this
+proposal is accepted, because it would still be simpler to use the new
+<code>owner_less&lt;void&gt;</code> specialization. Removing the typedefs is a potentially
+breaking change so is left for another proposal to do later if that change
+is wanted.</p>
+
+<a name="Impact.On.The.Standard"></a>
+<h2>Impact On The Standard</h2>
+
+<p>This is a pure library extension. In C++ today <code>owner_less&lt;void&gt;</code> is an
+incomplete type, so defining it should not cause problems for any correct
+programs.</p>
+
+<a name="Technical.Specification"></a>
+<h2>Technical Specification</h2>
+
+<p>In [util.smartptr.ownerless] p1 add a default template argument of type <code>void</code>,</p>
+
+<pre><code>template&lt;class T<ins> = void</ins>&gt; struct owner_less;
+</code></pre>
+
+<p>And after the two partial specializations add:</p>
+
+<pre><code><ins class="block">
+template&lt;&gt; struct owner_less&lt;void&gt; {
+  template&lt;class T, class U&gt;
+    bool operator()(shared_ptr&lt;T&gt; const&amp;, shared_ptr&lt;U&gt; const&amp;) const;
+  template&lt;class T, class U&gt;
+    bool operator()(shared_ptr&lt;T&gt; const&amp;, weak_ptr&lt;U&gt; const&amp;) const;
+  template&lt;class T, class U&gt;
+    bool operator()(weak_ptr&lt;T&gt; const&amp;, shared_ptr&lt;U&gt; const&amp;) const;
+  template&lt;class T, class U&gt;
+    bool operator()(weak_ptr&lt;T&gt; const&amp;, weak_ptr&lt;U&gt; const&amp;) const;
+
+  typedef unspecified is_transparent;
+};
+</ins>
+</code></pre>
+
+<a name="Implementation.Experience"></a>
+<h2>Implementation Experience</h2>
+
+<p>The implementation is trivial and has been tested in the GNU libstdc++
+library.</p>
+
+<a name="Acknowledgements"></a>
+<h2>Acknowledgements</h2>
+
+<p>Thanks to Marshal Clow for comments on the proposal.</p>
+</body></html>

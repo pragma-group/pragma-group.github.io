@@ -1,0 +1,216 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN">
+<html>
+  <head>
+    <meta content="text/html;charset=UTF-8" http-equiv="Content-Type">
+    <title>An improved std::{unordered_,}map::emplace</title>
+    <style type="text/css">
+      html { margin: 0; padding: 0; color: black; background-color: white; }
+      body { padding: 2em; font-size: medium; font-family: "DejaVu Serif", serif; line-height: 150%; }
+      code { font-family: "DejaVu Sans Mono", monospace; color: #006; }
+
+      h1, h2, h3 { margin: 1.5em 0 .75em 0; line-height: 125%; }
+
+      div.code { white-space: pre-line; font-family: "DejaVu Sans Mono", monospace;
+                 border: thin solid #E0E0E0; background-color: #F8F8F8; padding: 1em;
+                 border-radius: 4px; }
+
+      div.strictpre { white-space: pre; }
+
+      .docinfo { float: right }
+      .docinfo p { margin: 0; text-align:right; }
+      .docinfo address { font-style: normal; }
+
+      .quote { border: thin solid #E0E0E0; background-color: #F8F8F8; padding: 1em; border-radius: 4px; }
+
+      .insert { border-left: thick solid #0A0; border-right: thick solid #0A0; padding: 0 1em; }
+      .delete { border-left: thick solid #A00; border-right: thick solid #A00; padding: 0 1em; text-decoration: line-through; }
+      .comment { color: #456; }
+    </style>
+  </head>
+  <body>
+    <div class="docinfo">
+      <p>ISO/IEC JTC1 SC22 WG21 N4006</p>
+      <p>Date: 2014-05-26</p>
+      <address>Thomas K&ouml;ppe &lt;<a href="mailto:tkoeppe@google.com">tkoeppe@google.com</a>&gt;</address>
+    </div>
+
+    <h1>An improved emplace() for unique-key maps</h1>
+
+    <h2>Contents</h2>
+    <!-- fgrep -e "<h2 id=" map-emplace.html | sed -e 's/.*id="\(.*\)">\(.*\)<\/h2>/<li><a href="#\1">\2<\/a><\/li>/g' -->
+    <ol>
+      <li><a href="#motivation">Motivation</a></li>
+      <li><a href="#impact">Impact on the standard</a></li>
+      <li><a href="#design">Design Decisions</a></li>
+      <li><a href="#wording">Proposed wording</a></li>
+      <li><a href="#notes">Notes</a></li>
+      <li><a href="#criticism">Criticism</a></li>
+      <li><a href="#ack">Acknowledgements</a></li>
+    </ol>
+
+    <h2 id="motivation">Motivation</h2>
+
+    <p>A new problem has surfaced with the existing interface of unique-keyed map containers
+    (<code>std::map</code>, <code>std::unordered_map</code>) when those containers are used
+    with movable types. The following snippet is representative:</p>
+
+    <div class="code">std::map&lt;std::string, std::unique_ptr&lt;Foo&gt;&gt; m;
+      m["foo"] = nullptr;
+
+      std::unique_ptr&lt;Foo&gt; p(new Foo);
+      auto res = m.emplace("foo", std::move(p));
+
+      assert(p);&nbsp;&nbsp;&nbsp;&nbsp;<span class="comment">// ???</span>
+    </div>
+
+    <p>What is the value of <code>p</code>? It is currently unspecified whether
+    <code>p</code> has been moved-from. It would certainly be desirable to have
+    deterministic, standardised semantics for this operation. For example, a user
+    may wish to attempt adding a given unique pointer to a number of containers
+    until an insertion succeeds; having the object destroyed by a failed insertion
+    seems surprising and rarely helpful.</p>
+
+    <p>The author had initially proposed in <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n3873.html">N3873</a>
+    to add new specialised algorithms to unique-key maps, <code>emplace_stable</code>
+    and <code>emplace_or_update</code>, which would make the appropriate guarantees,
+    and which would be able to do so by virtue of separate key and mapped element
+    parameters, as opposed to the variadic parameters of <code>emplace</code> that are
+    passed through to a <code>pair</code> constructor. When that paper was presented in Issaquah
+    in February 2014, Jeffrey Yasskin created
+    <a href="https://cplusplus.github.io/LWG/lwg-active.html#2362">LWG 2362</a> to track the
+    core problem, namely the lack of specification of whether moving-from happens. At the meeting,
+    there seems to have been a strong consensus that <code>emplace</code>
+    should &ldquo;just work&rdquo;, but that no progress could be made until a concrete proposal
+    had been worked out. At the same time, new algorithms should not be added, and a fixed
+    <code>emplace</code> would provide the desired functionality. It was also recognized that
+    fixing <code>emplace</code> would not be trivial and that there would need to be a way
+    to extract the key from the arguments.</p>
+
+    <h2 id="impact">Impact on the standard</h2>
+
+    <p>This is purely modification of the standard library, specifically to the headers
+    of <code>std::map</code> [map.overview] and <code>std::unordered_map</code> [unord.map.overview]. The
+    containers continue to meet their respective container requirements.</p>
+
+    <h2 id="design">Design Decisions</h2>
+
+    <p>Recall the current signature of <code>emplace</code> inside a <code>map&lt;K, T&gt;</code> or <code>unordered_map&lt;K, T&gt;</code>:</p>
+
+    <div class="code">template &lt;typename ...Args&gt
+      pair&lt;iterator, bool&gt; emplace(Args &amp;&amp;... args);</div>
+
+    <p>Also recall the container requirements [associative.reqmts, unord.req]:</p>
+
+    <p class="quote"><em>Effects:</em> Inserts a <code>T</code> object <code>t</code> constructed with
+    <code>std::forward&lt;Args&gt;(args)...</code> if and only if there is no element in the container
+    with key equivalent to the key of <code>t</code>.</p>
+
+    <p>This implies that the fundamental requirement is that the following construction is valid:</p>
+
+    <div class="code">value_type(std::forward&lt;Args&gt;(args)...)&nbsp;&nbsp;&nbsp;&nbsp;<!--
+    --><span class="comment">// std::pair&lt;const K, T&gt;(std::forward&lt;Args&gt;(args)...)</span></div>
+
+    <p>The only <code>value_type</code> constructors that can possibly be used are the <code>pair</code>
+    constructors [pairs.pair], which are:</p>
+
+    <ol>
+      <li><code>pair(const pair &amp;)</code></li>
+      <li><code>pair(pair &amp;&amp;)</code></li>
+      <li><code>pair(const T1 &amp;, const T2 &amp;)</code></li>
+      <li><code>template &lt;typename U, typename V&gt; pair(U &amp;&amp;, V &amp;&amp;)</code></li>
+      <li><code>template &lt;typename U, typename V&gt; pair(const pair&lt;U, V&gt; &amp;)</code></li>
+      <li><code>template &lt;typename U, typename V&gt; pair(pair&lt;U, V&gt; &amp;&amp;)</code></li>
+      <li><code>template &lt;typename ...Args1, typename ...Args2&gt; pair(piecewise_construct_t, tuple&lt;Args1...&gt, tuple&lt;Args2...&gt;)</code></li>
+    </ol>
+
+    <p>Constructors 4, 5 and 6 only participate in overload resolution if <code>U</code> and
+    <code>V</code> are implicitly convertible to <code>T1</code> and <code>T2</code>, respectively
+    (but see <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2013/n3680.html">N3680</a>
+    for an open issue).</p>
+
+    <p>Observe that only constructor calls with one, two or three arguments can possibly be valid.
+    It is therefore feasible to replace the single, variadic function template for <code>emplace</code>
+    by three separate overloads with respectively one, two and three parameters. We propose to augment
+    two of these three overloads with an appropriate non-construction guarantee.</p>
+
+    <h2 id="wording">Proposed wording</h2>
+
+    <p>From [map.overview] and [unord.map.overview], remove the lines:</p>
+    <blockquote class="delete">
+      <div class="code">template &lt;class... Args&gt; pair&lt;iterator, bool&gt; emplace(Args&amp;&amp;... args);
+        template &lt;class... Args&gt; iterator emplace_hint(const_iterator position, Args&amp;&amp;... args);</div>
+    </blockquote>
+    <p>Instead, add the following:</p>
+    <blockquote class="insert">
+      <div class="code">template &lt;class W&gt; pair&lt;iterator, bool&gt; emplace(W&amp;&amp; w);
+        template &lt;class U, class V&gt; pair&lt;iterator, bool&gt; emplace(U&amp;&amp; u, V&amp;&amp; v);
+        template &lt;class U, class V&gt; pair&lt;iterator, bool&gt; emplace(piecewise_construct_t, U&amp;&amp; u, V&amp;&amp; v);
+        template &lt;class W&gt; iterator emplace_hint(const_iterator position, W&amp;&amp; w);
+        template &lt;class U, class V&gt; iterator emplace_hint(const_iterator position, U&amp;&amp; u, V&amp;&amp; v);
+        template &lt;class U, class V&gt; iterator emplace_hint(const_iterator position, piecewise_construct_t, U&amp;&amp; u, V&amp;&amp; v);</div>
+    </blockquote>
+    <p>Furthermore, add the following to [map.modifiers] and [unord.map.modifiers]:</p>
+    <blockquote class="insert">
+      <div class="code">template &lt;class U, class V&gt; pair&lt;iterator, bool&gt; emplace(U&amp;&amp; u, V&amp;&amp; v);
+template &lt;class U, class V&gt; pair&lt;iterator, bool&gt; emplace(piecewise_construct_t, U&amp;&amp; u, V&amp;&amp; v);</div>
+      <p><em>Effects:</em> If the key equivalent to the provided key already exists, does nothing. In the first form,
+      the provided key is <code>u</code> if <code>u</code>
+      is a reference to <code>key_type</code>, and <code>key_type(std::forward&lt;U&gt;(u))</code> otherwise.
+      In the second form, <code>u</code> and <code>v</code> shall be references to tuples, and the provided key is a <code>key_type</code>
+      object constructed from the forwarded tuple elements. It is unspecified whether a temporary <code>key_type</code>
+      is actually constructed.</p>
+      <p><em>Remarks:</em> No mapped element is constructed if the key already exists. In particular, even if the
+      mapped element comes from an rvalue reference argument, the argument will not be moved-from.</p>
+    </blockquote>
+
+    <h2 id="notes">Notes</h2>
+
+    <p>We only provide non-construction guarantees for those overloads where the key is explicitly visible.
+    The one-parameter overload allows for arguments which have conversions to pairs, and a non-construction
+    guarantee cannot be given in general. (For instance, if the conversion of <code>w</code> to <code>value_type</code>
+    produces a temporary, it may not be possible to obtain the key without constructing the temporary.)</p>
+
+    <p>It is also not whether a key object must be constructed in the other cases. In the two-parameter
+    overload, it seems sufficient that <code>u</code> is a reference to a <code>key_type</code> to not
+    require a temporary, but even if <code>u</code> has a different type, a transparent comparator may
+    still be able to perform the key look-up without requiring an actual key object. (This applies only
+    to the ordered map. For the unordered map, there are no &ldquo;transparent hash functors&rdquo;, and
+    thus a key object must always be available.) The three-parameter overload may <em>not</em> require
+    a key object construction if the second argument has a type like <code>tuple&lt;key_type &amp;&gt;</code>.</p>
+
+    <p>In light of these difficulties, we chose to simply leave it unspecified whether a temporary key
+    object is constructed. It seems less important to specify this for keys than it does for mapped
+    elements. An alternative would be to add further, explicit overloads with first parameter <code>const key_type &amp;</code> (mimicking
+    the <code>pair</code> constructors), but this seems unnecessary.</p>
+
+    <h2 id="criticism">Criticism</h2>
+
+    <p>The author&rsquo;s main argument in <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n3873.html">N3873</a>
+    against fixing <code>emplace</code> and rather
+    introduce new member functions is still pertinent and worth bearing in mind:</p>
+
+    <p>If <code>emplace</code> is fixed to behave in a well-defined fashion with regard to moving
+    from its arguments if the key already exists, this fix is unobservable.  From within the
+    language, a user cannot tell whether her platform conforms to the fixed semantics. When moving
+    to a different platform that is lacking the fix, the code would continue to compile, but
+    silently behave differently. This is surprising, hard to catch, and against the spirit of
+    providing clean transition paths. Conversely, a user eager to rely on this fix would find
+    himself hard-pressed to guarantee that it will work as intended on all deployed platforms. (One
+    could take this to a pathological extreme and have a conforming C++11 implementation randomly
+    either move-from or not, so that any unit test designed to catch this would be flaky. This is
+    contrived, but hopefully illustrates the potential reluctance to rely on this fix.)</p>
+
+    <p>The author considers this argument to bear considerable weight. A technical solution to the
+    transitioning problem could be to define another preprocessor macro such as <code>STD_EMPLACE_DOES_NOT_MOVE</code>,
+    but that seems gratuitous. On the other hand, a new set of functions with new names sidesteps this
+    problem and makes it immediately obvious whether this new feature is available, and it also avoids
+    the different treatment of the various overloads of <code>emplace</code> that we are forced to
+    include in the present proposal.</p>
+
+    <h2 id="ack">Acknowledgements</h2>
+
+    <p>Many thanks once again to Geoffrey Romer, Jeffrey Yasskin and Stuart Taylor
+    for providing invaluable feedback and discussion.</p>
+
+  </body>
+</html>

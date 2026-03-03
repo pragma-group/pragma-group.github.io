@@ -1,0 +1,242 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN">
+<html>
+  <head>
+    <meta content="text/html;charset=UTF-8" http-equiv="Content-Type">
+    <title>A light-weight, compact dynamic array</title>
+    <style type="text/css">
+      html { margin: 0; padding: 0; color: black; background-color: white; }
+      body { padding: 2em; font-size: medium; font-family: "DejaVu Serif", serif; line-height: 150%; }
+      code { font-family: "DejaVu Sans Mono", monospace; color: #006; }
+
+      h1, h2, h3 { margin: 1.5em 0 .75em 0; line-height: 125%; }
+
+      div.code { white-space: pre-line; font-family: "DejaVu Sans Mono", monospace;
+                 border: thin solid #E0E0E0; background-color: #F8F8F8; padding: 1em;
+                 border-radius: 4px; }
+
+      div.strictpre { white-space: pre; }
+
+      .docinfo { float: right }
+      .docinfo p { margin: 0; text-align:right; }
+      .docinfo address { font-style: normal; }
+
+      .quote { display: inline-block; clear: both; margin-left: 1ex;
+                 border: thin solid #E0E0E0; background-color: #F8F8F8; padding: 1ex; }
+
+      .insert { border-left: thick solid #0A0; border-right: thick solid #0A0; padding: 0 1em; }
+      .comment { color: #456; }
+
+      abbr[title] { border-bottom: thin dotted black; cursor: help; }
+    </style>
+  </head>
+  <body>
+    <div class="docinfo">
+      <p>ISO/IEC JTC1 SC22 WG21 P00210r0</p>
+      <p>Date: 2016-01-29</p>
+      <p>To: LEWG</p>
+      <address>Thomas K&ouml;ppe &lt;<a href="mailto:tkoeppe@google.com">tkoeppe@google.com</a>&gt;</address>
+    </div>
+
+    <h1>A light-weight, compact dynamic array</h1>
+
+    <!-- fgrep -e "<h2 id=" vlarray.html | sed -e 's/.*id="\(.*\)">\(.*\)<\/h2>/<li><a href="#\1">\2<\/a><\/li>/g' -->
+    <h2>Contents</h2>
+    <ol>
+      <li><a href="#motivation">Summary</a></li>
+      <li><a href="#impact">Impact</a></li>
+      <li><a href="#synopsis">Synopsis</a></li>
+      <li><a href="#limitations">Limitations</a></li>
+      <li><a href="#appendix1">Appendix I: What&rsquo;s wrong with dynamic arrays?</a></li>
+      <li><a href="#appendix2">Appendix II: Early feedback</a></li>
+      <li><a href="#ack">Acknowledgements</a></li>
+    </ol>
+
+    <h2 id="motivation">Summary</h2>
+
+    <p><strong>Short form.</strong> We propose a light-weight, dynamic array which is in every
+    aspect identical to <code>std::vector&lt;T, A&gt;</code> except that it does not allow
+    efficient size-changing operations. For many use cases, the two containers can be used
+    interchangeably, but the light-weight container will typically only consume 2/3 of the space
+    of a vector, since it does not need to keep track of a capacity separately from the size. In
+    other words, it is just like <code>std::vector&lt;T, A&gt;</code> with the following
+    modifications:</p>
+    <ul>
+      <li>No <code>insert</code>, <code>push_back</code>, <code>emplace{,_back}</code>, <code>erase</code>.</li>
+      <li>No <code>reserve</code>, <code>capacity</code>.
+      <li><code>resize(n)</code> always reallocates unless <code>n == size()</code>.</li>
+    </ul>
+
+    <p><strong>Bike shed: what is it called?</strong> The first obvious problem is how to name
+    this container. Names like <code>flexible_array</code> or <code>flarray</code> seem unwieldy,
+    <code>small_vector</code> suggests <abbr title="small string optimisation">SSO</abbr>-like
+    optimisations, <code>vlarray</code> is too much like <abbr title="variable-length array">VLA</abbr>
+    or valarray, and <code>dyn_array</code> is too close to <code>dynarray</code>. As a
+    placeholder we use &ldquo;<code>compact_vector</code>&rdquo; for now, with the understanding
+    that this will need to be revised. We are open to suggestions.</p>
+
+    <p><strong>What this proposal is not:</strong> A preliminary discussion on the reflector
+    showed that a lot of people have specific expectations, desires and goals in this design
+    space. We would like to establish clear boundaries for this proposal:</p>
+    <ul>
+      <li>Not a proposal for a fixed-size array. The proposed container can be resized.</li>
+      <li>Not a proposal for an unmovable array. The proposed container can be moved and swapped
+        as usual.</li>
+      <li>Not a proposal for &ldquo;stack-allocation optimisation&rdquo;. The proposed container
+        is an ordinary, dynamic container that uses an allocator to obtain storage.</li>
+      <li>Not a fix or revival of <code>std::dynarray</code>. This proposal does not share the
+        goals of <code>dynarray</code>, and it comes with its own motivation and rationale.</li>
+    </ul>
+
+    <p>First and foremost we would like this proposal to be considered in isolation and on its
+    own merits. We will gladly work on unification and harmonising with the authors of any other
+    paper in this design space that LEWG finds desirable, once that time comes.</p>
+
+    <p><strong>Long rationale.</strong> The author considers dynamic arrays (i.e. <code>new
+    T[n]()</code>) a misfeature of the language (see the <a href="#appendix">appendix</a> for a
+    summary of its failings). In almost every way, one may replace such a dynamic array with
+    <code>std::vector&lt;T&gt;(n)</code>, except for the undeniable fact that a vector is
+    larger. While we already need to store and communicate the size of a dynamic array in order
+    to use it safely, there is generally no reason for the cost of keeping a separate capacity
+    counter around. Until now, the library has been missing a simpler dynamic container that
+    meets precisely, and without the cost of unwanted generality, those needs which currently
+    call for dynamic arrays.</p>
+
+    <p><strong>The solution.</strong> We propose a new container class template, for now and for
+    exposition only referred to as <code>compact_vector</code>, which is in every aspect like
+    <code>std::vector</code>, except that it does not have growing insertion operations,
+    shrinking erasure operations, or a notion of capacity. Note in particular that we still
+    have <code>resize()</code>.</p>
+
+    <p><strong>Example.</strong></p>
+    <div class="code">compact_vector&lt;compact_vector&lt;short&gt;&gt; v(1000000);
+
+      for (auto &amp; x : v) {
+      &nbsp;&nbsp;&nbsp;&nbsp;x.resize(make_number(), make_default_value());
+      &nbsp;&nbsp;&nbsp;&nbsp;process(x.begin(), x.end());
+      }
+    </div>
+    <p>Using a <code>vector&lt;short&gt;</code> instead of
+    <code>compact_vector&lt;short&gt;</code> would require a million unused additional
+    capacity pointers. If the size of each <code>v[i]</code> is small, this may well be
+    a non-trivial cost which the proposed container avoids.</p>
+
+    <h2 id="impact">Impact</h2>
+
+    <p>This is a pure library extension.</p>
+
+    <h2 id="synopsis">Synopsis</h2>
+
+    <div class="code">template &lt;typename T, typename Alloc = allocator&lt;T&gt;&gt;
+      class compact_vector {
+      public:
+      &nbsp;&nbsp;&nbsp;// "types" as in vector
+ 
+      &nbsp;&nbsp;&nbsp;// "constructor/copy/destroy" as in vector, requiring ForwardIterator
+
+      &nbsp;&nbsp;&nbsp;// "iterators" as in vector
+
+      &nbsp;&nbsp;&nbsp;// "capacity"
+      &nbsp;&nbsp;&nbsp;size_type size() const noexcept;
+      &nbsp;&nbsp;&nbsp;bool empty() const noexcept;
+      &nbsp;&nbsp;&nbsp;void resize(size_type n);
+      &nbsp;&nbsp;&nbsp;void resize(size_type n, const T &amp; value);
+
+      &nbsp;&nbsp;&nbsp;// "element access" as in vector
+
+      &nbsp;&nbsp;&nbsp;// "data access" as in vector
+
+      &nbsp;&nbsp;&nbsp;// "modifiers"
+      &nbsp;&nbsp;&nbsp;void swap(compact_vector &amp;) noexcept(allocator_traits::&lt;A&gt;::propagate_on_container_swap::value || allocator_traits::&lt;A&gt;::is_always_equal::value);
+      &nbsp;&nbsp;&nbsp;void clear() noexcept;
+
+      &nbsp;&nbsp;&nbsp;// relational operators as in vector
+
+      &nbsp;&nbsp;&nbsp;// "specialized algorithms" as in vector
+
+      &nbsp;&nbsp;&nbsp;explicit operator vector&lt;T, Alloc&gt;&amp;&amp;() &amp;&amp; noexcept;
+      };</div>
+
+    <h3>Notes</h3>
+    <ul>
+      <li>The two-iterator constructor and the two-iterator overload of <code>assign</code>
+        require forward iterators (so as to be able to precompute the size).</li>
+      <li>The explicit conversion to vector is a stealing conversion; we expect
+        <code>compact_vector</code> to be implemented in such a fashion that the allocated
+        storage can be transplanted into a <code>vector</code> with the same template
+        arguments. Note that we do <em>not</em> have the opposite operation, stealing
+        <em>from</em> a vector. To do so we would require a vector whose size is equal to its
+        capacity, which cannot be achieved portably. This would be nice to have in the
+        future, since it would allow using a <code>vector</code> as a &ldquo;builder&rdquo;
+        for a &ldquo;frozen&rdquo; <code>compact_vector</code>.</li>
+      <li>Iterators and references remain valid unless a <code>resize</code> function is called
+        with <code>n != size()</code>.</li>
+    </ul>
+
+    <h2 id="limitations">Limitations</h2>
+
+    <p>We can replace uses of <code>new T[n]()</code> and most uses of <code>new T[n]</code> with
+      <code>compact_vector&lt;T&gt;(n)</code>. The only feature that we deliberately choose not
+      to provide is uninitialised storage, like <code>new char[n]</code>. User code benefits
+      from uninitialised allocations (and this is a real use case!), but it requires cooperation
+      from the user for correctness. Users requiring uninitialised storage can resort to
+      <code>std::unique_ptr&lt;char[]&gt;(new char[n])</code>.</p>
+
+    <h2 id="appendix1">Appendix I: What&rsquo;s wrong with dynamic arrays?</h2>
+
+    <p>Dynamic arrays, i.e. arrays created via either <code>new T[n]</code> or some placement variant
+    thereof, are an odd-man-out in many regards. We will enumerate a few.</p>
+
+    <ul>
+      <li>Dynamic arrays cannot be used independently of their value without separately
+        communicating their size, which needs to be captured somewhere else explicitly at the
+        time of construction of the array. Yet the size also needs to be stored internally in
+        the implementation to allow for destructor calls. The former violates encapsulation,
+        the latter economy.</li>
+      <li>Dynamic arrays are the <em>only</em> part of C++ in which truly dynamic typing
+        happens: An object is created whose type is not known statically, and there is not even
+        an expression whose value is that object. This is weird. (By contrast, <code>Base * p =
+        new Derived</code> does at least contain an expression with which one might statically
+        derive a description of the created object, even though that code snippet does not
+        capture it.)</li>
+      <li>Dynamic arrays cannot be constructed and destroyed like normal objects: <code>new
+        T</code> means something surprising when <code>T</code> is an array type, and
+        <code>p-&gt;~T()</code> is ill-formed. This means, for example, that there is no
+        straightforward notion of an <code>allocate_shared</code> for a shared pointer
+        to an array; rather, we have a sequence of elements under shared ownership which
+        are destroyed by a hand-crafted deleter that destroys array <em>elements</em>.</li>
+      <li>Dynamic arrays have repeatedly been the subject of arcane standard defects. The
+        inability to use array-placement-new on account of unknowable overhead (&ldquo;<code>+
+        y</code>&rdquo;) remains unresolved (cf. <a href="http://wg21.link/cwg476">CWG 476</a>,
+        <a href="http://wg21.link/ewg68">EWG 68</a>).</li>
+      <li>Dynamic arrays generally conflate the two responsibilities of memory allocation and
+        object construction. The library&rsquo;s pervasive use of allocators to create memory
+        and objects separately, one-by-one under the control of the user, has been demonstrated
+        as the superior way to manage collections of objects. Hundreds of student hours spent on
+        implementing Baby&rsquo;s First Vector by starting with <code>T * ptr = new T[n];</code>
+        have shown the general confusion between something that is empty and something which
+        consists of <code>n</code> default-constructed objects.</li>
+    </ul>
+
+    <h2 id="appendix2">Appendix II: Early feedback</h2>
+
+    <p>A draft of this paper was circulated on the LEWG reflector for early feedback. Here are
+    some arbitrarily selected responses.</p>
+    <ul>
+      <li>Many people are indifferent towards this proposal. There is a trade-off between adding
+      more library types and the benefits of having a perfect fit for this particular use case.</li>
+      <li>Herb Sutter suggested that the C++ Core Guidelines are <a
+      href="https://github.com/isocpp/CppCoreGuidelines/blob/master/CppCoreGuidelines.md#gslowner-ownership-pointers">looking
+      for a type like this</a>, for the same reasons: To replace array-<code>new</code>.</li>
+      <li>Several people suggested that their users are interested in stack optimisations, not this.</li>
+      <li>There were suggestions that SG14 may be interested.</li>
+    </ul>
+
+    <h2 id="ack">Acknowledgements</h2>
+
+    <p>The author wishes to thank everyone who provided valuable feedback on the LEWG reflector.
+      Particular thanks go to David Krauss, Edward Smith-Rowland and Howard Hinnant for
+      improving the stealing interface, and to Ville Voutilainen for suggesting the name
+      <code>compact_vector</code>.</p>
+
+  </body>
+</html>

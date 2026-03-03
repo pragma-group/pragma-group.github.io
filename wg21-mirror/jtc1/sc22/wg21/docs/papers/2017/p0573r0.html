@@ -1,0 +1,336 @@
+<html>
+<head>
+	<title>abbreviated lambdas</title>
+
+	<style>
+	p {text-align:justify}
+	li {text-align:justify}
+	blockquote.note
+	{
+		background-color:#E0E0E0;
+		padding-left: 15px;
+		padding-right: 15px;
+		padding-top: 1px;
+		padding-bottom: 1px;
+	}
+	ins {color:#00A000}
+	del {color:#A00000}
+	code {white-space:pre;}
+	</style>
+</head>
+<body>
+
+<address align=left>
+Document number: P0573R0<br />
+Date: 2017-02-03 <br />
+Audience: Evolution Working Group <br/>
+Reply-To: Barry Revzin &lt;barry.revzin@gmail.com> <br/>
+</address>
+<hr/>
+<h1 align=center>Abbreviated Lambdas for Fun and Profit</h1>
+
+<h2>Contents</h2>
+
+<ul>
+<li><a href="#Motivation">Motivation</a></li>
+<li><a href="#Proposal">Proposal</a></li>
+<ul>
+  <li><a href="#expr"><code>=> expr</code></a></li>
+  <li><a href="#unary">Unary <code>operator>></code></a></li>
+  <li><a href="#omit">Omitting type names</a></li>
+</ul>
+<li><a href="#Examples">Examples</a></li>
+<li><a href="#Effects">Effects on Existing Code</a></li>
+<li><a href="#Priors">Prior Work</a></li>
+<li><a href="#Acks">Acknowledgements and References</a></li>
+</ul>
+
+<a name="Motivation"></a><h2>Motivation</h2>
+
+<p>There are two, somewhat related motivations for an abbreviated lambda syntax. The first is to address the problem of trying to pass in overload sets as function arguments <a href="#ft1">[1]</a>:
+
+<blockquote><pre>
+template &lt;class T&gt;
+T twice(T x) { return x + x; }
+
+template &lt;class I&gt;
+void f(I first, I last) {
+    transform(first, last, twice); // error
+}
+</pre></blockquote>
+
+C++14 generic lambdas allow us a way to solve this problem by just wrapping the overloaded name in a lambda:
+
+<blockquote><pre>
+transform(first, last, [](auto&& x) {
+    return twice(std::forward&lt;decltype(x)&gt;(x));
+});
+</pre></blockquote>
+
+<p>But that isn't actually correct, although it's the "obvious" code that most people would produce, and the problems are pretty subtle. The first problem is that it fails to return a reference where the function returned a reference, so there's an extra copy here in some cases (or just a hard error, if the type happens to be noncopyable). That's an easy fix though, just add the appropriate trailing return type:
+
+<blockquote><pre>
+transform(first, last, [](auto&& x) -> decltype(auto) {
+    return twice(std::forward&lt;decltype(x)&gt;(x));
+});
+</pre></blockquote>
+
+Now we always have the right return type. But it's still not quite right: there's no condition checking on the argument, so the lambda isn't SFINAE-friendly. This could lead to hard errors where it's used in a situation where that matters, such as:
+
+<blockquote><pre>
+struct Widget;
+
+bool test(int );
+bool test(Widget );
+
+void invoke(std::function&lt;bool(int)> );         // #1
+void invoke(std::function&lt;bool(std::string)> ); // #2
+
+// error: unresolved overloaded function type
+invoke(test);             
+
+// error with a really long stack trace
+invoke([](auto&& x) -> decltype(auto) {       
+    return test(std::forward&lt;decltype(x)&gt;(x));
+});
+</pre></blockquote>
+
+Situations like this come up from time to time, and will probably only become more common with the introduction of <code>std::variant</code> and the ability to easily use lambdas in <code>std::visit()</code> thanks to variadic <code>using</code> declarations <a href="#ft2">[2]</a>. 
+
+<p>The real, correct, way to lift an overloaded function into a function object would invole writing all of this (and even <i>this</i> version isn't <code>noexcept</code>-correct, which may matter in some cases!):
+
+<blockquote><code>// finally OK: calls #1
+<font color="blue"><b>invoke</b></font>([](auto&& <font color="blue"><b>x</b></font>) 
+    -> decltype(test(std::forward&lt;decltype(x)&gt;(x)))
+{
+	return <font color="blue"><b>test</b></font>(std::<font color="blue"><b>forward</b></font>&lt;decltype(x)&gt;(<font color="blue"><b>x</b></font>));
+});
+</code></blockquote>
+
+<p>That's <b>a lot</b> to have to type for what's conceptually a very simple thing: passing a function, that happens to be overloaded, to a function template. That lambda in of itself is 108 characters long, most of which is boilerplate that drowns out the important parts of the call (which I highlighted in <font color="blue"><b>blue</b></font>). That's far too long. Moreover, it's literally too long for many slides, so what you see at talks at conferences is typically people omit the perfect-forwarding for brevity's sake, and the forwarding syntax itself is so long that people just use macros:
+
+<blockquote><code>#define FWD(x) static_cast&lt;decltype(x)&&>(x)
+
+[](auto&& x) -> decltype(test(FWD(x))) { return test(FWD(x)); }
+</code></blockquote>
+
+<p>Now we're down to just 64 characters. This is a good deal better, and we can even wrap the entire lifting process into a lambda to make it even shorter, but do we really want to be in a position where we're recommending the use of macros? 
+
+<p>Another place where this <code>FWD</code> macro comes especially handy is when we want to forward arguments <i>into</i> a lambda, just for normal purposes:
+
+<blockquote><code>template &lt;class T>
+void foo(T&& arg) {
+    bar([arg=std::forward&lt;T>(arg)]{ ... });
+}
+</code></blockquote>
+
+<p>Again, that's so much to type. If I was copying <code>arg</code>, I could just type <code>arg</code> or <code>=</code>. If I was taking arg by reference, I could write <code>&arg</code> or <code>&</code>. But with forwarding, which is a fairly common operation, I need to write this 28-character beast (or, with macro, 13). But at least I <i>can</i> forward a single argument verbosely. With a parameter pack, I can capture the pack by copy or by reference, but to capture the whole thing by forward I would need to put it into a <code>std::tuple</code>. That seems very unsatisfying.
+
+<p>These all seem like major annoyances in modern C++. Too much code to write simple things. 
+
+<a name="Proposal"></a><h2>Proposal</h2>
+
+<p>This paper proposes three language extensions. The extensions themselves are independent, but together combine to allow for terse, readable, correct lambdas and functions.
+
+<a name="expr"/><h3><code>=> expr</code></h3>
+
+<p>This paper proposes the creation of a new lambda introducer, <code>=&gt;</code>, which allows for a single expression in the body that will be its return statement. This will synthesize a SFINAE-friendly, <code>noexcept</code>-correct lambda by doing the code triplication for you. 
+
+<p>That is, the lambda:
+<blockquote><pre>
+[](auto&& x) => test(x)
+</pre></blockquote>
+shall be exactly equivalent to the lambda:
+<blockquote><pre>
+[](auto&& x) noexcept(noexcept(test(x))) -> decltype(test(x)) { return test(x); }
+</pre></blockquote>
+
+When SFINAE is important, the repetition of the function body makes the code difficult to read. At best. At worst, the code becomes error-prone when one changes the body of the function while forgetting to change the body of the trailing <code>decltype</code>. Even when SFINAE is not important, for the simplest lambdas, brevity is important for readability and omitting the <code>return</code> keyword would be helpful.
+
+<p>The code duplication or triplication in short function bodies is also a common problem that wants for a solution <a href="#ft3">[3]</a>, but this proposal is focused solely on lambda expressions.
+
+<a name="unary" /><h3>Unary <code>operator>></code></h3>
+
+<p>Another source of boilerplate is generic code is <code>std::forward</code>. When dealing with templates, the uses of <code>forward</code> can overwhelm all the rest of the code, to the point where many talks and examples just omit references entirely to save space and many programmers just give up trying to read it. Hence the viability of the <code>FWD()</code> macro presented earlier. 
+
+<p>Unlike <code>std::move</code> and <code>std::ref</code>, which are used to do non-typical things and deserve to be visible markers for code readability, <code>std::forward</code> is very typically used in the context of using forwarding references. It does not have as clear a need to be a signpost. 
+
+<p>This paper would like to see a shorter way to forward arguments and proposes non-overloadable unary <code>operator >></code>, where <code>>>expr</code> shall be defined as <code>static_cast&lt;decltype(expr)&&>(expr)</code>, and shall not overloadable. Furthermore, the symbol <code>>></code> in the capture of a lambda expression can be used to "decay-copy" <a href="#ft4">[4]</a> the named variable or all variables.
+
+<p>This lambda:
+<blockquote><pre>
+[](auto&& x) { return test(>>x); }
+</pre></blockquote>
+is equivalent by definition to this one:
+<blockquote><pre>
+[](auto&& x) { return test(std::forward&lt;decltype(x)>(x)); }
+</pre></blockquote>
+
+<p>This function (a one-time delayed invoker):
+<blockquote><pre>template &lt;class F, class... Args>
+auto delay_invoke(F&& f, Args&&... args) {
+    return [>>]() => std::invoke(>>f, >>args...);
+}
+</pre></blockquote>
+is logically, though not strictly, equivalent to this one:
+<blockquote><pre>template &lt;class F, class... Args>
+auto delay_invoke(F&& f, Args&&... args) {
+    return [f=std::forward&lt;F>(f), tup=std::forward_as_tuple(std::forward&lt;Args>(args)...)]() -> decltype(auto) {
+        return std::apply(std::forward&lt;F>(f), std::move(tup));
+    };
+}
+</pre></blockquote>
+
+<p>Using <code>>></code> to forward doesn't just make the code shorter. It makes it easier to read and easier to write. In the second example, it let's us naturally and directly invoke the function without having to do the indirection through a tuple (which is is neither easy to read nor write nor reason about). It's also probably easier for the compiler too. 
+
+<p>Unary <code>operator>></code> will have equivalent precedence to the other prefix operators, like <code>operator!</code>. 
+
+<a name="omit" /><h3>Omission of type names in lambdas</h3>
+One of the motivations of generic lambdas was to use <code>auto</code> as a substitute for long type names, which helps quite a bit. But since <code>auto&&</code> has become such a regular choice of argument for lambdas, and is rarely a wrong choice, it doesn't really bestow any information to the code. It would be great if we could allow the type name to be omitted, in which case it will be assumed to be <code>auto&&</code>. That is, if:
+<blockquote><pre>
+[](x) { return x+1; }
+</pre></blockquote>
+could be exactly equivalent to the lambda:
+<blockquote><pre>
+[](auto&& x) { return x+1; }
+</pre></blockquote>
+
+However, this is impossible to do for all lambdas. The example:
+
+<blockquote><pre>
+struct arg { arg(int ) { } };
+auto lambda = [](arg ) { return sizeof(arg); }
+int x = lambda(1);
+</pre></blockquote>
+
+is well-formed today, yielding a value of (typically) 1 for <code>x</code>, and we can't just change that to yield (typically) 4. But while there's little we can do here, we can do something for precisely those simple lambdas that this proposal is focused on. The fragment <code>[](x) => expr</code> currently is ill-formed. So this paper proposes, for those abbreviated lambdas using the <code>=></code> syntax, to allow for the the omission of type names. Any standalone identifier shall be a parameter of type <code>auto&&</code>. Omitted type names can be interspersed with provided type names, and a trailing <code>...</code> will indicate a parameter pack of forwarding references. That is, the lambdas:
+
+<blockquote><pre>[](x, int y) => x &lt; y
+[](args...) => test(>>args...)
+</pre></blockquote>
+shall be exactly equivalent to the C++14 lambdas
+<blockquote><pre>
+[](auto&& x, int y) noexcept(...) -> decltype(x &lt; y) { return x &lt; y; }
+[](auto&&... args) noexcept(...) -> decltype(test(std::forward&lt;decltype(args)>(args)...)) { return test(std::forward&lt;decltype(args)>(args)...); }
+</pre></blockquote>
+
+<p>No default arguments will be allowed in the case of type omission, due to potential ambiguities in parsing. 
+
+<h4>Alternative methods to omit type names</h4>
+<p>The goal of this proposal is to ultimately allow for the omission of type names in lambdas, defaulting to <code>auto&&</code>. The specific mechanism proposed for achieving this goal (simplying allowing omission the case of <code>=></code> lambdas, requiring lookahead parsing) is just one such possible way of solving this problem. Other alternatives include:
+
+<ul>
+<li> Using a placeholder (e.g. <code>:</code>) to indicate that all type will be omitted. It would be impossible to specify an unnamed argument of a specific type.
+<blockquote><code>
+[]@(x, y)    // equivalent to [](auto&& x, auto&& y)
+[]@(args...) // equivalent to [](auto&&... args)
+[]@(int )    // ill-formed
+</code></blockquote>
+<li> Using a placeholder (e.g. <code>:</code> or <code>^</code>) for a particular argument to indicate that its type name is omitted. With each parameter individually marked, it would be possible to specify an unnamed argument
+<blockquote><code>
+[](@x, @y)   // equivalent to [](auto&& x, auto&& y)
+[](@args...) // eqiuvalent to [](auto&&... args)
+[](@x, y)    // equivalent to [](auto&& x, y &lt;unnamed> )
+</code></blockquote>
+<li> As in the original generic lambda proposal <a href="#ft5">[5]</a>, allow for the omission of the <i>type-specifier</i>:
+<blockquote><code>
+[](&&x, &&y)       // equivalent to [](auto&& x, auto&& y)
+[](const&... args) // equivalent to [](auto const&... args)
+</code></blockquote>
+</ul>
+
+Each of these alternatives uses additional indicators to allow for the omission of type names, and so would be just as valid in current lambdas as in those using the proposed <code>=></code> syntax.
+
+<a name="Examples"></a><h2>Examples</h2>
+<p> Putting all three features together, binding an overload member function, <code>func</code>, to an instance, <code>obj</code>, as a function argument is reduced from:
+<blockquote><pre>
+[&obj](auto&&... args) noexcept(noexcept(obj.func(std::forward&lt;decltype(args)>(args)...))) -> decltype(obj.func(std::forward&lt;decltype(args)>(args)...)) { return obj.func(std::forward&lt;decltype(args)>(args)...); }
+</pre></blockquote>
+to
+<blockquote><pre>
+[&obj](args...) => obj.func(>>args...)
+</pre></blockquote>
+
+<p>That is a reduction from 212 (144 if you don't care about <code>noexcept</code>) characters to 39. 
+
+<p>Here are other examples of improved usage as compared to C++14 best practices.
+
+<p>Sorting in decreasing order: same typing, but arguably clearer:
+
+<blockquote><code>std::sort(begin(v), end(v), [](auto&& x, auto&& y) { return x > y; }); // C++14
+std::sort(begin(v), end(v), std::greater<>{});                         // C++14 with function object
+std::sort(begin(v), end(v), [](x,y) => x > y);                         // this proposal - don't need to know about std::greater
+</code></blockquote>
+
+<p>Sorting in decreasing order by ID:
+<blockquote><code>std::sort(begin(v), end(v), [](auto&& x, auto&& y) { return x.id > y.id; }); // C++14
+std::sort(begin(v), end(v), std::greater<>{}, &amp;Object::id);                  // ranges with projections
+std::sort(begin(v), end(v), [](x,y) => x.id > y.id);                         // this proposal
+</code></blockquote>
+
+<p>Finding an element based on a member function call, with and without additional arguments:
+<blockquote><code>auto it = std::find_if(begin(v), end(v), [](auto&& e) { return e.isMatch(); }); // C++14 with lambda
+auto it = std::find_if(begin(v), end(v), std::mem_fn(&amp;Object::isMatch));        // C++11 with mem_fn
+auto it = std::find_if(begin(v), end(v), [](e) => e.isMatch());                 // this proposal
+
+auto it = std::find_if(begin(v), end(v), std::bind(&amp;Object::matches, _1, std::ref(target)));
+auto it = std::find_if(begin(v), end(v), [&](auto&& e) { return e.matches(target); });
+auto it = std::find_if(begin(v), end(v), [&](e) => e.matches(target));
+</code></blockquote>
+
+<p>Calling an overload where SFINAE matters and getting it wrong is a mess:
+<blockquote><pre>
+bool invoke(std::function&lt;bool(int)> f);         // #1
+bool invoke(std::function&lt;bool(std::string)> f); // #2
+
+invoke([](auto x) { return x == 2; });                     // error! (283 lines of diagnostic on gcc)
+invoke([](auto x) -> decltype(x == 2) { return x == 2; }); // OK C++14: calls #1
+invoke([](x) => x == 2);                                   // OK this proposal: calls #1
+</pre></blockquote>
+
+<p>Implementing currying, in C++17. This is dramatically more concise than what you would otherwise have to do in C++17 <a href="#ft6">[6]</a>, thanks to being able to capture parameter packs by decay-copy and easily get the SFINAE right (here it is critical) without duplication.
+<blockquote><code>template &lt;class F>
+auto curry(F&& f) {
+    return [>>](auto&&... args) -> decltype(auto) {
+        if constexpr (std::is_callable&lt;F&(decltype(args)...)>::value) {
+            return std::invoke(f, >>args...);
+        }
+        else {
+            return curry([>>, f](auto&&... new_args) =>
+                std::invoke(f, args..., >>new_args...)
+            );
+        }
+    };
+}
+</code></blockquote>
+
+<a name="Effects"></a><h2>Effects on Existing Code</h2>
+
+<p>The token <code>=></code> can appear in code in rare cases, such as in the context of passing a the address of the assignment operator as a template non-template parameter, as in <code>X&lt;Y::operator=></code>. However, such usage is incredibly rare, so this proposal would have very limited effect on existing code. Thanks to Richard Smith for doing a search. 
+
+<p>Unary <code>operator>></code> cannot appear in legal code today, or in this proposed context in a lambda-capture, so that is a pure language extension.
+
+<a name="Priors"></a><h2>Prior Work</h2>
+
+The original paper introducing what are now generic lambdas <a href="#ft5">[5]</a> also proposed extensions for omitting the <i>type-specifier</i> and dropping the body of a lambda if it's a single expression. This paper provides a different path towards those that same goal.
+
+<p>The usage of <code>=></code> (or the similar <code>-></code>) in the context of lambdas appears in many, many programming languages of all varieties. A non-exhaustive sampling: C#, D, Erlang, F#, Haskell, Java, JavaScript, ML, OCaml, Swift. The widespread use is strongly suggestive that the syntax is easy to read and quite useful. 
+
+<p>There has also been an idea floating around, if not a specific proposal, to lift an overloaded function into a lambda with the syntax <code>[]f</code>. This is certainly far more concise than what is proposed as an alternative in this paper (<code>[](args...) => f(>>args...)</code>).
+
+<a name="Acks"></a><h2>Acknowledgements and References</h2>
+
+Thanks to Andrew Sutton and Tomasz Kaminski for considering and rejecting several bad iterations of this proposal. Thanks to Richard Smith for looking into the practicality of this design. Thanks to Nicol Bolas for refocusing the paper as three independent language extensions. Thanks to John Shaw for putting up with a torrent of bad ideas. 
+
+<p> <a name="ft1"/> [1] <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0119r2.pdf">Overload sets as function arguments</a>
+<p> <a name="ft2"/> [2] <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0195r2.html">Pack expansions in using-declarations</a>
+<p> <a name="ft3"/> [3] <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0238r0.html">Return type deduction and SFINAE</a>
+<p> <a name="ft4"/> [4] <a href="http://eel.is/c++draft/thread.decaycopy">[thread.decaycopy]</a> defines this as <blockquote><code>template &lt;class T>
+decay_t&lt;T> decay_copy(T&& v) {
+    return std::forward&lt;T>(v);
+}</code></blockquote>
+<p> <a name="ft5"/> [5] <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3418.pdf">Proposal for Generic (Polymorphic) Lambda Expressions</a>
+<p> <a name="ft6"/> [6] <a href="https://vittorioromeo.info/index/blog/cpp17_curry.html">zero-overhead C++17 currying & partial application</a>, most of the implementation revolves around properly forward-capturing the parameter packs
+
+</body>
+</html>

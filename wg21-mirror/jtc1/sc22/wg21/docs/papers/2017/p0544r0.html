@@ -1,0 +1,2156 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+
+<style type="text/css">
+
+body { color: #000000; background-color: #FFFFFF; max-width: 60em}
+del { text-decoration: line-through; color: #8B0040; }
+ins { text-decoration: underline; color: #005100; }
+
+p.example { margin-left: 2em; }
+pre.example { margin-left: 2em; }
+div.example { margin-left: 2em; }
+
+code.extract { background-color: #F5F6A2; }
+pre.extract { margin-left: 2em; background-color: #F5F6A2;
+  border: 1px solid #E1E28E; }
+
+p.function { }
+.attribute { margin-left: 2em; }
+.attribute dt { float: left; font-style: italic;
+  padding-right: 1ex; }
+.attribute dd { margin-left: 0em; }
+
+blockquote.std { color: #000000; background-color: #F1F1F1;
+  border: 1px solid #D1D1D1;
+  padding-left: 0.5em; padding-right: 0.5em; }
+blockquote.stddel { text-decoration: line-through;
+  color: #000000; background-color: #FFEBFF;
+  border: 1px solid #ECD7EC;
+  padding-left: 0.5empadding-right: 0.5em; ; }
+
+blockquote.stdins { text-decoration: underline;
+  color: #000000; background-color: #C8FFC8;
+  border: 1px solid #B3EBB3; padding: 0.5em; }
+
+blockquote pre em { font-family: normal }
+
+table { border: 1px solid black; border-spacing: 0px;
+  margin-left: auto; margin-right: auto; }
+th { text-align: left; vertical-align: top;
+  padding-left: 0.8em; border: none; }
+th.multicol { text-align: center; vertical-align:top;
+  padding-left: 0.8em; border: none; }
+td { text-align: left; vertical-align: top;
+  padding-left: 0.8em; border: none; border-top: 1px solid black; }
+
+ul.function { list-style-type: none; margin-top: 0.5ex }
+ul.function > li { padding-top:0.25ex; padding-bottom:0.25ex }
+
+pre.function { margin-bottom:0.5ex }
+
+pre span.comment { font-family: serif; font-style: italic }
+
+caption { font-size: 1.25em; font-weight: bold; padding-bottom: 3px;}
+</style>
+
+<title>User Injection of Filesystems</title>
+</head>
+
+<body>
+
+<p><b>Document number:</b> p0544R0
+<br><b>Date:</b> 2017-02-01
+<br><b>Audience:</b> Library Evolution Working Group
+<br><b>Reply to:</b>
+Titus Winters &lt;<a href="mailto:titus@google.com">titus@google.com</a>&gt;,
+Geoff Romer &lt;<a href="mailto:gromer@google.com">gromer@google.com</a>&gt;
+</p>
+
+<h1>User Injection of Filesystems</h1>
+
+<ol>
+<li><a href="#rationale">Rationale</a>
+</li><li><a href="#design">Design Choices</a>
+</li><li><a href="#wording">Proposed Wording</a>
+</li></ol>
+
+<h2 id="rationale">Rationale</h2>
+
+<p>The existing proposals in the Filesystem TS (now adopted for inclusion with
+C++17) effectively specify the C++ filesystem API as a set of C++ wrappers and
+types (like <code>directory_iterator</code>) directly on top of whatever is
+provided by the OS for filesystem interaction.  This is easy to specify and
+implement, but inflexible and likely does not provide the functionality needed
+for a modern C++ codebase — for example, it is impossible to fake
+filesystem errors in testing, or to use the same interfaces for in-memory
+filesystems (avoiding the essential OS and I/O overhead).  Our belief, based on
+extensive experience in the Google codebase and production systems, is that
+most robust C++ installations will wind up wrapping the proposed interface in
+order to provide opportunities to change the backing store, simulate errors
+for testing, etc.  To that end, we propose the definition of a filesystem type,
+and injection mechanisms to allow user-customization of the filesystem backend
+used by the free functions provided by the Filesystem TS.</p>
+
+<p>This proposal is pure-library, OS and compiler agnostic, and is
+backwards compatible with any existing code written against the
+Filesystem TS. It has not yet been implemented in this form. However,
+the filesystems at use in Google production work in roughly this way
+with small differences.  In the Google design, multiple filesystems
+are present at once, they are all pinned into the filesystem at some
+root (/memfile, /virtualfs, etc) with the OS local filesystem as the
+generic fallback.  This works for us because we have no symlinks.
+Once symlinks are in the equation, the design has to shift to
+something like what we are describing.
+</p>
+
+<h2 id="design">Design Choices</h2>
+
+<p>The biggest point of discussion in the design for filesystem injection is
+how to specify where injection takes place. Is it a new filesystem root? If so,
+how is it specified (especially on POSIX systems)? If you can inject at any
+point in a filesystem, does that injection respect symlinks?  If so, that
+requires one (or more) OS calls on every filesystem call to resolve symlinks
+in order to determine if the specified path(s) fall inside the injection point.
+Since we cannot determine one policy that will satisfy all users for the above
+questions, we instead choose to present a more general injection mechanism:
+replace the filesystem entirely.  In conjunction with the ability to get the
+“default” filesystem, a user can then build a solution that forwards to the
+underlying filesystem in a fashion congruent with any of the above designs.</p>
+
+<!--Rationale for using the non-throwing versions: it's more general in
+the case of status(), and it enables us to support exception-disabled
+environments. -->
+
+<p>Under this design, the expected cost is bounded by following an
+atomic pointer plus a vtable dereference. In comparison to the
+overhead of performing I/O through the OS, this is expected to be
+negligible.</p>
+
+<!-- Rationale for using atomic instead of shared_ptr: simplicity -->
+
+<h2 id="wording">Proposed Wording</h2>
+
+<p>Changes are relative to <a href="http://wg21.link/N4582">N4582</a>.</p>
+
+<!--
+* directory_iterator overhaul
+* filesystem class
+* default filesystem class
+* inject_filesystem, get_default_filesystem
+* individual filesystem functions
+-->
+
+<p>Add the following to the <code>&lt;filesystem&gt;</code> synopsis in
+[fs.filesystem.syn]:</p>
+
+<blockquote class="std">
+…
+<pre>class filesystem_error;
+class directory_entry;
+<ins>
+class filesystem;
+class default_filesystem_impl;  <i>// exposition only</i>
+class directory_traverser;
+</ins>
+class directory_iterator;
+
+<i>// range access for</i> directory_iterator
+directory_iterator begin(directory_iterator iter) noexcept;
+directory_iterator end(const directory_iterator&amp;) noexcept;
+<ins>
+bool operator==(const directory_iterator&amp; lhs, const directory_iterator&amp; rhs);
+bool operator!=(const directory_iterator&amp; lhs, const directory_iterator&amp; rhs);
+</ins>
+class recursive_directory_iterator;
+</pre>
+…
+<pre>typedef chrono::time_point&lt;<i>trivial-clock</i>&gt; file_time_type;
+<ins>
+<i>// filesystem injection</i>
+extern atomic&lt;filesystem*&gt; current_filesystem;  <i>// exposition only</i>
+void inject_filesystem(filesystem&amp; fs);
+filesystem&amp; default_filesystem();
+</ins>
+<i>// filesystem operation functions</i>
+</pre>
+…
+</blockquote>
+
+<p>Add a new paragraph to the end of [fs.err.report] as follows:</p>
+
+<blockquote class="stdins">
+<p>When a function that does not take an <code>error_code</code> parameter is
+specified to call a function that takes an <code>error_code</code> parameter,
+the outer function is understood to construct a local <code>error_code</code>
+variable <code>ec</code> to pass to the function call. If <code>!ec</code>
+after the call completes, unless otherwise specified the function throws a
+<code>filesystem_error</code> exception containing <code>ec</code>, an
+implementation-defined message, and any paths that were passed to the
+function.</p>
+</blockquote>
+
+<p>Insert new sections above [class.directory_iterator]:</p>
+
+<blockquote class="stdins">
+<h2>27.10.? Class <code>filesystem</code> [class.filesystem]</h2>
+
+<p>Class <code>filesystem</code> defines the base class for the types
+of objects that provide access to the fundamental operations of a specific
+file system. A special <code>filesystem</code> object
+([class.default_filesystem_impl]) provides access to the native file system
+provided by the operating system, and other <code>filesystem</code> objects
+can implement virtual file systems for purposes such as testing.</p>
+
+<p>Classes derived from <code>filesystem</code> shall satisfy all of the
+requirements of <code>filesystem</code>.</p>
+
+<pre>class filesystem {
+public:
+  filesystem() = default;
+  virtual ~filesystem();
+  filesystem(const filesystem&) = delete;
+  filesystem& operator=(const filesystem&) = delete;
+
+  virtual bool copy_file(const path&amp; from, const path&amp; to,
+                         copy_options options, error_code&amp; ec) noexcept = 0;
+  virtual bool create_directory(const path&amp; p, error_code&amp; ec) noexcept = 0;
+  virtual bool create_directory(const path&amp; p, const path&amp; existing_p,
+                                error_code&amp; ec) noexcept = 0;
+  virtual void create_directory_symlink(
+      const path&amp; to, const path&amp; new_symlink, error_code&amp; ec) noexcept = 0;
+  virtual void create_hard_link(const path&amp; to, const path&amp; new_hard_link,
+                                error_code&amp; ec) noexcept = 0;
+  virtual void create_symlink(const path&amp; to, const path&amp; new_symlink,
+                              error_code&amp; ec) noexcept = 0;
+  virtual path current_path(error_code&amp; ec) const = 0;
+  virtual void current_path(const path&amp; p, error_code&amp; ec) noexcept = 0;
+  virtual bool equivalent(const path&amp; p1, const path&amp; p2, error_code&amp; ec) const noexcept = 0;
+  virtual uintmax_t file_size(const path&amp; p, error_code&amp; ec) const noexcept = 0;
+  virtual uintmax_t hard_link_count(const path&amp; p, error_code&amp; ec) const noexcept = 0;
+  virtual file_time_type last_write_time(const path&amp; p, error_code&amp; ec) const noexcept = 0;
+  virtual void last_write_time(const path&amp; p, file_time_type new_time,
+                               error_code&amp; ec) const noexcept = 0;
+  virtual void permissions(const path&amp; p, perms prms, error_code&amp; ec) const noexcept = 0;
+  virtual path read_symlink(const path&amp; p, error_code&amp; ec) const = 0;
+  virtual bool remove(const path&amp; p, error_code&amp; ec) noexcept = 0;
+  virtual void rename(const path&amp; old_p, const path&amp; new_p, error_code&amp; ec) noexcept = 0;
+  virtual void resize_file(const path&amp; p, uintmax_t new_size, error_code&amp; ec) noexcept = 0;
+  virtual space_info space(const path&amp; p, error_code&amp; ec) const noexcept = 0;
+  virtual file_status status(const path&amp; p, error_code&amp; ec) const noexcept = 0;
+  virtual file_status symlink_status(const path&amp; p, error_code&amp; ec) const noexcept = 0;
+  virtual path system_complete(const path&amp; p, error_code&amp; ec) const = 0;
+  virtual path temp_directory_path(error_code&amp; ec) = 0;
+
+  virtual unique_ptr&lt;directory_traverser&gt; directory_traverser(
+      const path&amp; p, directory_options options, error_code&amp; ec) const = 0;
+};
+</pre>
+
+<h3>27.10.?.1 <code>filesystem</code> members [filesystem.members]</h3>
+
+<h4>27.10.?.1.1 Copy file [filesystem.copy_file]</h4>
+<pre class="function">virtual bool copy_file(const path&amp; from, const path&amp; to,
+                       copy_options options, error_code&amp; ec) noexcept = 0;
+</pre>
+</blockquote>
+
+<p>Copy [fs.op.copy_file] paragraphs 3 to 9 here, with edits as
+specified:</p>
+
+<blockquote class="std">
+<ul class="function">
+<li><i>Requires:</i> At most one constant from each <code>copy_options</code>
+  group is present in <code>options</code>.</li>
+<li><i>Effects:</i> Report a file already exists error as specified in
+  Error reporting (27.5.6.5) if:
+  <ul>
+  <li><code>exists(to)</code> and <code>equivalent(from, to)</code>, or</li>
+  <li><code>exists(to)</code> and
+    <code>(options &amp; (copy_options::skip_existing |
+    copy_options::overwrite_existing | copy_options::update_existing)) ==
+    copy_options::none</code>.</li>
+  </ul>
+  Otherwise copy the contents and attributes of the file <code>from</code>
+  resolves to to the file <code>to</code> resolves to if:
+  <ul>
+  <li><code>!exists(to)</code>, or</li>
+  <li><code>exists(to)</code> and <code>(options &amp;
+    copy_options::overwrite_existing) != copy_options::none</code>, or</li>
+  <li><code>exists(to)</code> and <code>(options &amp;
+    copy_options::update_existing) != copy_options::none</code>, and
+    <code>from</code> is more recent than <code>to</code>, determined as if
+    by use of the <code>last_write_time</code> function.</li>
+  </ul>
+  Otherwise no effects.</li>
+<li><i>Returns:</i> <code>true</code> if the <code>from</code> file was copied,
+  otherwise <code>false</code>. <del>The signature with argument
+  <code>ec</code> r</del><ins>R</ins>eturn <code>false</code> if an error
+  occurs.</li>
+<li><del><i>Throws:</i> As specified in Error reporting (27.5.6.5).</del></li>
+<li><i>Complexity:</i> At most one direct or indirect invocation of
+  <code>status(to)</code>.</li>
+</ul>
+</blockquote>
+
+<blockquote class="stdins">
+<h4>27.10.?.1.2 Create directory [filesystem.create_directory]</h4>
+<pre class="function">virtual bool create_directory(const path&amp; p, error_code&amp; ec) noexcept = 0;
+</pre>
+</blockquote>
+
+<p>Copy [fs.op.create_directory] paragraphs 1 to 4 here, with edits as
+specified:</p>
+
+<blockquote class="std">
+<ul class="function">
+<li><i>Effects:</i> Establishes the postcondition by attempting to create the
+  directory <code>p</code> resolves to<del>, as if by POSIX
+  <code>mkdir()</code> with a second argument of
+  <code>static_cast&lt;int&gt;(perms::all)</code></del>. Creation failure
+  because <code>p</code> resolves to an existing directory shall not be
+  treated as an error.</li>
+<li><i>Postcondition:</i> <code>is_directory(p)</code>.</li>
+<li><i>Returns:</i> <code>true</code> if a new directory was created,
+  otherwise <code>false</code>. <del>The signature with argument
+  <code>ec</code> r</del><ins>R</ins>eturns <code>false</code> if an error
+  occurs.</li>
+<li><del><i>Throws:</i> As specified in Error reporting (27.5.6.5).</del></li>
+</ul>
+</blockquote>
+
+<blockquote class="stdins">
+<pre class="function">virtual bool create_directory(const path&amp; p, const path&amp; existing_p,
+                              error_code&amp; ec) noexcept = 0;
+</pre>
+</blockquote>
+
+<p>Copy [fs.op.create_directory] paragraphs 5 to 8 here, with edits as
+specified:</p>
+
+<blockquote class="std">
+<ul class="function">
+<li><i>Effects:</i> Establishes the postcondition by attempting to create the
+  directory <code>p</code> resolves to, with attributes copied from directory
+  <code>existing_p</code>. The set of attributes copied is operating system
+  dependent. Creation failure because <code>p</code> resolves to an existing
+  directory shall not be treated as an error. [<i>Note:</i> For POSIX based
+  operating systems the attributes are those copied by native API
+  <code>stat(existing_p.c_str(), &amp;attributes_stat)</code> followed by
+  <code>mkdir(p.c_str(), attributes_stat.st_mode)</code>. For Windows based
+  operating systems the attributes are those copied by native API
+  <code>CreateDirectoryExW(existing_p.c_str(), p.c_str(), 0)</code>. —
+  <i>end note</i>]</li>
+<li><i>Postcondition:</i> <code>is_directory(p)</code>.</li>
+<li><i>Returns:</i> <code>true</code> if a new directory was created, otherwise
+  <code>false</code>. <del>The signature with argument <code>ec</code>
+  r</del><ins>R</ins>eturns false if an error occurs.</li>
+<li><del><i>Throws:</i> As specified in Error reporting (27.5.6.5).</del></li>
+</ul>
+</blockquote>
+
+<blockquote class="stdins">
+<h4>27.10.?.1.3 Create directory symlink [filesystem.create_directory_symlink]
+</h4>
+<pre class="function">virtual void create_directory_symlink(
+    const path&amp; to, const path&amp; new_symlink, error_code&amp; ec) noexcept = 0;
+</pre>
+</blockquote>
+
+<p>Copy [fs.op.create_dir_symlk] paragraphs 1 to 5 here, with edits as
+specified:</p>
+
+<blockquote class="std">
+<ul class="function">
+<li><i>Effects:</i> Establishes the postcondition<del>, as if by POSIX
+  <code>symlink()</code></del>.</li>
+<li><i>Postcondition:</i> <code>new_symlink</code> resolves to a symbolic
+  link file that contains an unspecified representation of <code>to</code>.
+  </li>
+<li><del><i>Throws:</i> As specified in Error reporting (27.5.6.5).</del></li>
+<li><del>[<i>Note:</i> Some operating systems require symlink creation to
+identify that the link is to a directory. Portable code should use
+<code>create_directory_symlink()</code> to create directory symlinks rather
+than <code>create_symlink()</code> — <i>end note</i>]</del></li>
+<li><del>[<i>Note:</i> Some operating systems do not support symbolic links at
+all or support them only for regular files. Some file systems (such as the
+FAT file system) do not support symbolic links regardless of the operating
+system. — <i>end note</i>]</del></li>
+</ul>
+</blockquote>
+
+<blockquote class="stdins">
+<h4>27.10.?.1.4 Create hard link [filesystem.create_hard_link]</h4>
+<pre class="function">virtual void create_hard_link(const path&amp; to, const path&amp; new_hard_link,
+                              error_code&amp; ec) noexcept = 0;
+</pre>
+</blockquote>
+
+<p>Copy [fs.op.create_hard_lk] paragraphs 1 to 4 here, with edits as
+specified:</p>
+
+<blockquote class="std">
+<ul class="function">
+<li><i>Effects:</i> Establishes the postcondition<del>, as if by POSIX
+  <code>link()</code></del>.</li>
+<li><i>Postcondition:</i>
+  <ul>
+  <li><code>exists(to) &amp;&amp; exists(new_hard_link) &amp;&amp;
+    equivalent(to, new_hard_link)</code></li>
+  <li>The contents of the file or directory <code>to</code> resolves to are
+    unchanged.</li>
+  </ul></li>
+<li><del><i>Throws:</i> As specified in Error reporting (27.5.6.5).</del></li>
+<li><del>[<i>Note:</i> Some operating systems do not support hard links at all
+  or support them only for regular files. Some file systems (such as the FAT
+  file system) do not support hard links regardless of the operating system.
+  Some file systems limit the number of links per file. —
+  <i>end note</i>]</del></li>
+</ul>
+</blockquote>
+
+<blockquote class="stdins">
+<h4>27.10.?.1.5 Create symlink [filesystem.create_symlink]</h4>
+<pre class="function">virtual void create_symlink(const path&amp; to, const path&amp; new_symlink,
+                            error_code&amp; ec) noexcept = 0;
+</pre>
+</blockquote>
+
+<p>Copy [fs.op.create_symlink] paragraphs 1 to 4 here, with edits as
+specified:</p>
+
+<blockquote class="std">
+<ul class="function">
+<li><i>Effects:</i> Establishes the postcondition<del>, as if by POSIX
+  <code>symlink()</code></del>.</li>
+<li><i>Postcondition:</i> <code>new_symlink</code> resolves to a symbolic
+  link file that contains an unspecified representation of <code>to</code>.
+  </li>
+<li><del><i>Throws:</i> As specified in Error reporting (27.5.6.5).</del></li>
+<li><del>[<i>Note:</i> Some operating systems do not support symbolic links at
+  all or support them only for regular files. Some file systems (such as the
+  FAT file system) do not support symbolic links regardless of the operating
+  system. — <i>end note</i>]</del></li>
+</ul>
+</blockquote>
+
+<blockquote class="stdins">
+<h4>27.10.?.1.6 Current path [filesystem.current_path]</h4>
+<pre class="function">virtual path current_path(error_code&amp; ec) const = 0;
+</pre>
+</blockquote>
+
+<p>Copy [fs.op.current_path] paragraphs 1 to 5 here, with edits as
+specified:</p>
+
+<blockquote class="std">
+<ul class="function">
+<li><i>Returns:</i> The absolute path of the current working directory<del>,
+  obtained as if by POSIX <code>getcwd()</code></del>. <del>The
+  signature with argument <code>ec</code> r</del><ins>R</ins>eturns
+  <code>path()</code> if an error occurs.</li>
+<li><del><i>Throws:</i> As specified in Error reporting (27.5.6.5).</del></li>
+<li><i>Remarks:</i> The current working directory is the directory,
+  associated with the process, that is used as the starting location in
+  pathname resolution for relative paths.</li>
+<li><del>[<i>Note:</i> The current_path() name was chosen to emphasize that
+  the return is a path, not just a single directory name.</del></li>
+<li><del>The current path as returned by many operating systems is a dangerous
+  global variable. It may be changed unexpectedly by a third-party or system
+  library functions, or by another thread. — <i>end note</i>]</del></li>
+</ul>
+</blockquote>
+
+<blockquote class="stdins">
+<pre class="function">virtual void current_path(const path&amp; p, error_code&amp; ec) noexcept = 0;
+</pre>
+</blockquote>
+
+<p>Copy [fs.op.current_path] paragraphs 6 to 9 here, with edits as
+specified:</p>
+
+<blockquote class="std">
+<ul class="function">
+<li><i>Effects:</i> Establishes the postcondition<del>, as if by POSIX
+  <code>chdir()</code></del>.</li>
+<li><i>Postcondition:</i> <code>equivalent(p, current_path())</code>.</li>
+<li><del><i>Throws:</i> As specified in Error reporting (27.5.6.5).</del></li>
+<li><del>[<i>Note:</i> The current path for many operating systems is a
+  dangerous global state. It may be changed unexpectedly by a third-party or
+  system library functions, or by another thread. — <i>end note</i>]
+  </del></li>
+</ul>
+</blockquote>
+
+<blockquote class="stdins">
+<h4>27.10.?.1.7 Equivalent [filesystem.equivalent]</h4>
+<pre class="function">virtual bool equivalent(const path&amp; p1, const path&amp; p2, error_code&amp; ec) const noexcept = 0
+</pre>
+</blockquote>
+
+<p>Copy [fs.op.equivalent] paragraphs 1 to 4 here, with edits as
+specified:</p>
+
+<blockquote class="std">
+<ul class="function">
+<li><i>Effects:</i> Determines <code>file_status s1</code> and <code>s2</code>,
+  as if by <code>status(p1)</code> and <code>status(p2)</code>, respectively.
+  </li>
+<li><i>Returns:</i> <code>true</code>, if <code>s1 == s2</code> and
+  <code>p1</code> and <code>p2</code> resolve to the same file system entity,
+  else <code>false</code>. <del>The signature with argument <code>ec</code>
+  r</del><ins>R</ins>eturns <code>false</code> if an error occurs.</li>
+<li>Two paths are considered to resolve to the same file system entity if
+  two candidate entities reside on the same device at the same location.
+  <del>This is determined as if by the values of the POSIX <code>stat</code>
+  structure, obtained as if by <code>stat()</code> for the two paths, having
+  equal <code>st_dev</code> values and equal <code>st_ino</code> values.</del>
+  </li>
+<li><del><i>Throws:</i> <code>filesystem_error</code> if <code>(!exists(s2))
+  || (is_other(s1) &amp;&amp; is_other(s2))</code>, otherwise as specified in
+  Error reporting (27.5.6.5).</del></li>
+</ul>
+</blockquote>
+
+<blockquote class="stdins">
+<h4>27.10.?.1.8 File size [filesystem.file_size]</h4>
+<pre class="function">virtual uintmax_t file_size(const path&amp; p, error_code&amp; ec) const noexcept = 0;
+</pre>
+</blockquote>
+
+<p>Copy [fs.op.file_size] paragraphs 1 to 2 here, with edits as specified:</p>
+
+<blockquote class="std">
+<ul class="function">
+<li><i>Returns:</i> If <code>!exists(p) || !is_regular_file(p)</code> an error
+  is reported 27.5.6.5. Otherwise, the size in bytes of the file <code>p</code>
+  resolves to<del>, determined as if by the value of the POSIX
+  <code>stat</code> structure member <code>st_size</code> obtained as if by
+  POSIX <code>stat()</code></del>. <del>The signature with argument
+  <code>ec</code> r</del><ins>R</ins>eturns
+  <code>static_cast&lt;uintmax_t&gt;(-1)</code> if an error occurs.</li>
+<li><del><i>Throws:</i> As specified in Error reporting (27.5.6.5).</del></li>
+</ul>
+</blockquote>
+
+<blockquote class="stdins">
+<h4>27.10.?.1.9 Hard link count [filesystem.hard_link_count]</h4>
+<pre class="function">virtual uintmax_t hard_link_count(const path&amp; p, error_code&amp; ec) const noexcept = 0;
+</pre>
+</blockquote>
+
+<p>Copy [fs.op.hard_lk_ct] paragraphs 1 to 2 here, with edits as specified:</p>
+
+<blockquote class="std">
+<ul class="function">
+<li><i>Returns:</i> The number of hard links for <code>p</code>. <del>The
+  signature with argument <code>ec</code> r</del><ins>R</ins>eturns
+  <code>static_cast&lt;uintmax_t&gt;(-1)</code> if an error occurs.</li>
+<li><del><i>Throws:</i> As specified in Error reporting (27.5.6.5).</del></li>
+</ul>
+</blockquote>
+
+<blockquote class="stdins">
+<h4>27.10.?.1.10 Last write time [filesystem.last_write_time]</h4>
+<pre class="function">virtual file_time_type last_write_time(const path&amp; p, error_code&amp; ec) const noexcept = 0;
+</pre>
+</blockquote>
+
+<p>Copy [fs.op.last_write_time] paragraphs 1 to 2 here, with edits as
+specified:</p>
+
+<blockquote class="std">
+<ul class="function">
+<li><i>Returns:</i> The time of last data modification of <code>p</code><del>,
+  determined as if by the value of the POSIX <code>stat</code> structure member
+  <code>st_mtime</code> obtained as if by POSIX <code>stat()</code></del>.
+  <del>The signature with argument <code>ec</code> r</del><ins>R</ins>eturns
+  <code>file_time_type::min()</code> if an error occurs.</li>
+<li><del><i>Throws:</i> As specified in Error reporting (27.5.6.5).</del></li>
+</ul>
+</blockquote>
+
+<blockquote class="stdins">
+<pre class="function">virtual void last_write_time(const path&amp; p, file_time_type new_time,
+                             error_code&amp; ec) const noexcept = 0;
+</pre>
+</blockquote>
+
+<p>Copy [fs.op.last_write_time] paragraphs 3 to 5 here, with edits as
+specified:</p>
+
+<blockquote class="std">
+<ul class="function">
+<li><i>Effects:</i> Sets the time of last modification of the file resolved
+  to by <code>p</code> to <code>new_time</code><del>, as if by POSIX
+  <code>futimens()</code></del>.</li>
+<li><del><i>Throws:</i> As specified in Error reporting (27.5.6.5).</del></li>
+<li><del>[<i>Note:</i> A postcondition of <code>last_write_time(p) ==
+  new_time</code> is not specified since it might not hold for file systems
+  with coarse time granularity. — <i>end note</i>]</del></li>
+</ul>
+</blockquote>
+
+<blockquote class="stdins">
+<h4>27.10.?.1.11 Permissions [filesystem.permissions]</h4>
+<pre class="function">virtual void permissions(const path&amp; p, perms prms, error_code&amp; ec) const noexcept = 0;
+</pre>
+</blockquote>
+
+<p>Copy [fs.op.permissions] paragraphs 1 to 4 here, with edits as
+specified:</p>
+
+<blockquote class="std">
+<ul class="function">
+<li><i>Requires:</i> <code>!((prms &amp; prms::add_perms) != perms::none&lt;br&gt;
+  &amp;&amp; (prms &amp; perms::remove_perms) != perms::none)</code>.</li>
+<li><i>Effects:</i> Applies the effective permissions bits from
+  <code>prms</code> to the file <code>p</code> resolves to<del>, as if by POSIX
+  <code>fchmodat()</code></del>. The effective permission bits are determined
+  as specified in Table 150.
+  <table>
+  <caption>Table 150 — Effects of permission bits</caption>
+  <tbody><tr>
+    <th>Bits present in <code>prms</code></th>
+    <th>Effective bits applied</th>
+  </tr>
+  <tr>
+    <td>Neither <code>add_perms</code> nor <code>remove_perms</code></td>
+    <td><code>prms &amp;&amp; perms::mask</code></td>
+  </tr>
+  <tr>
+    <td><code>add_perms</code></td>
+    <td><code>status(p).permissions() | (prms &amp; perms::mask)</code></td>
+  </tr>
+  <tr>
+    <td><code>remove_perms</code></td>
+    <td><code>status(p).permissions() &amp; (prms &amp; perms::mask)
+  </code></td></tr>
+  </tbody></table>
+  </li>
+<li>[<i>Note:</i> Conceptually permissions are viewed as bits, but the actual
+  implementation may use some other mechanism. — <i>end note</i>]</li>
+<li><del><i>Throws:</i> As specified in Error reporting (27.5.6.5).</del></li>
+</ul>
+</blockquote>
+
+<blockquote class="stdins">
+<h4>27.10.?.1.12 Read symlink [filesystem.read_symlink]</h4>
+<pre class="function">virtual path read_symlink(const path&amp; p, error_code&amp; ec) const noexcept = 0;
+</pre>
+</blockquote>
+
+<p>Copy [fs.op.read_symlink] paragraphs 1 to 2 here, with edits as
+specified:</p>
+
+<blockquote class="std">
+<ul class="function">
+<li><i>Returns:</i> If <code>p</code> resolves to a symbolic link, a
+  <code>path</code> object containing the contents of that symbolic link.
+  <del>The signature with argument <code>ec</code> returns <code>path()</code>
+  if an error occurs.</del></li>
+<li><del><i>Throws:</i> As specified in Error reporting (27.5.6.5).</del>
+  [<i>Note:</i> It is an error if <code>p</code> does not resolve to a
+  symbolic link. — <i>end note</i>]</li>
+</ul>
+</blockquote>
+
+<blockquote class="stdins">
+<h4>27.10.?.1.13 Remove [filesystem.remove]</h4>
+<pre class="function">virtual bool remove(const path&amp; p, error_code&amp; ec) noexcept = 0;
+</pre>
+</blockquote>
+
+<p>Copy [fs.op.remove] paragraphs 1 to 5 here, with edits as specified:</p>
+
+<blockquote class="std">
+<ul class="function">
+<li><i>Effects:</i> If <code>exists(symlink_status(p,ec))</code>, it is
+  removed<del> as if by POSIX <code>remove()</code></del>.</li>
+<li>[<i>Note:</i> A symbolic link is itself removed, rather that the file it
+  resolves to being removed. — <i>end note</i>]</li>
+<li><i>Postcondition:</i> <code>!exists(symlink_status(p))</code>.</li>
+<li><i>Returns:</i> <code>false</code> if <code>p</code> did not exist,
+  otherwise <code>true</code>. <del>The signature with argument <code>ec</code>
+  r</del><ins>R</ins>eturns <code>false</code> if an error occurs.</li>
+<li><del><i>Throws:</i> As specified in Error reporting (27.5.6.5).</del></li>
+</ul>
+</blockquote>
+
+<blockquote class="stdins">
+<h4>27.10.?.1.14 Rename [filesystem.rename]</h4>
+<pre class="function">virtual void rename(const path&amp; old_p, const path&amp; new_p, error_code&amp; ec) noexcept = 0;
+</pre>
+</blockquote>
+
+<p>Copy [fs.op.rename] paragraphs 1 to 3 here, with edits as specified:</p>
+
+<blockquote class="std">
+<ul class="function">
+<li><i>Effects:</i> Renames <code>old_p</code> to <code>new_p</code><del>,
+  as if by POSIX <code>rename()</code></del>.</li>
+<li>[<i>Note:</i> If <code>old_p</code> and <code>new_p</code> resolve to
+  the same existing file, no action is taken. Otherwise, if <code>new_p</code>
+  resolves to an existing non-directory file, it is removed, while if
+  <code>new_p</code> resolves to an existing directory, it is removed if
+  empty on POSIX compliant operating systems but is an error on some other
+  operating systems. A symbolic link is itself renamed, rather than the file
+  it resolves to being renamed. — <i>end note</i>]</li>
+<li><del><i>Throws:</i> As specified in Error reporting (27.5.6.5).</del></li>
+</ul>
+</blockquote>
+
+<blockquote class="stdins">
+<h4>27.10.?.1.15 Resize file [filesystem.resize_file]</h4>
+<pre class="function">virtual void resize_file(const path&amp; p, uintmax_t new_size, error_code&amp; ec) noexcept = 0;
+</pre>
+</blockquote>
+
+<p>Copy [fs.op.resize_file] paragraphs 1 to 3 here, with edits as
+specified:</p>
+
+<blockquote class="std">
+<ul class="function">
+<li><i>Postcondition:</i> <code>file_size() == new_size</code>.</li>
+<li><del><i>Throws:</i> As specified in Error reporting (27.5.6.5).</del></li>
+<li><del><i>Remarks:</i> Achieves its postconditions as if by POSIX
+  <code>truncate()</code>.</del></li>
+</ul>
+</blockquote>
+
+<blockquote class="stdins">
+<h4>27.10.?.1.16 Space [filesystem.space]</h4>
+<pre class="function">virtual space_info space(const path&amp; p, error_code&amp; ec) const noexcept = 0;
+</pre>
+</blockquote>
+
+<p>Copy [fs.op.space] paragraphs 1 to 3 here, with edits as specified:</p>
+
+<blockquote class="std">
+<ul class="function">
+<li><i>Returns:</i> An object of type <code>space_info</code>. <del>The value
+  of the <code>space_info</code> object is determined as if by using POSIX
+  <code>statvfs</code> to obtain a POSIX <code>struct statvfs</code>, and then
+  multiplying its <code>f_blocks</code>, <code>f_bfree</code>, and
+  <code>f_bavail</code> members by its <code>f_frsize</code> member, and
+  assigning the results to the <code>capacity</code>, <code>free</code>, and
+  <code>available</code> members respectively.</del> <ins>The object's
+  members will be set as follows:
+  <ul>
+  <li><code>capacity</code> will be set to the total storage capacity of
+    the storage volume containing <code>p</code>.</li>
+  <li><code>free</code> will be set to the total amount of free space on
+    the storage volume containing <code>p</code>.</li>
+  <li><code>available</code> will be set to the amount of free space that
+    is available to hold user data on the storage volume containing
+    <code>p</code> [<i>Note:</i> This can be less than <code>free</code>
+    because it excludes storage reserved for file system internals. —
+    <i>end note</i>].</li>
+  </ul></ins>
+  Any members for which the value cannot be determined shall be set to
+  <code>static_cast&lt;uintmax_t&gt;(-1)</code>. <del>For the signature with
+  argument <code>ec</code>, a</del><ins>A</ins>ll members are set to
+  <code>static_cast&lt;uintmax_t&gt;(-1)</code> if an error occurs.</li>
+<li><del><i>Throws:</i> As specified in Error reporting (27.5.6.5).</del></li>
+<li><del><i>Remarks:</i> The value of member <code>space_info::available</code>
+  is operating system dependent. [<i>Note:</i> <code>available</code> may
+  be less than <code>free</code>. — <i>end note</i>]</del></li>
+</ul>
+</blockquote>
+
+<blockquote class="stdins">
+<h4>27.10.?.1.17 Status [filesystem.status]</h4>
+<pre class="function">virtual file_status status(const path&amp; p, error_code&amp; ec) const noexcept = 0;
+</pre>
+</blockquote>
+
+<p>Copy [fs.op.status] paragraphs 4 to 9 here, with edits as specified:</p>
+
+<blockquote class="std">
+<ul class="function">
+<li><i>Effects:</i> If possible, determines the attributes of the file
+  <code>p</code> resolves to<del>, as if by POSIX <code>stat()</code></del>.
+  If, during attribute determination, the underlying file system API reports
+  an error, sets <code>ec</code> to indicate the specific error reported.
+  Otherwise, <code>ec.clear()</code>.</li>
+<li>[<i>Note:</i> This allows users to inspect the specifics of underlying API
+  errors even when the value returned by <code>status()</code> is not
+  <code>file_status(file_type::none)</code>. — <i>end note</i>]</li>
+<li><i>Returns:</i> If <code>ec != error_code()</code>:
+  <ul>
+  <li>If the specific error indicates that <code>p</code> cannot be resolved
+    because some element of the path does not exist, return
+    <code>file_status(file_type::not_found)</code>.</li>
+  <li>Otherwise, if the specific error indicates that <code>p</code> can be
+    resolved but the attributes cannot be determined, return
+    <code>file_status(file_type::unknown)</code>.</li>
+  <li>Otherwise, return <code>file_status(file_type::none)</code>.</li>
+  </ul>
+  <p>[<i>Note:</i> These semantics distinguish between <code>p</code> being
+  known not to exist, <code>p</code> existing but not being able to
+  determine its attributes, and there being an error that prevents even
+  knowing if <code>p</code> exists. These distinctions are important to some
+  use cases. — <i>end note</i>]</p>
+  <p>Otherwise,
+  </p><ul>
+  <li>If the attributes indicate a regular file, <del>as if by POSIX
+    <code>S_ISREG</code>,</del> return
+    <code>file_status(file_type::regular)</code>. [<i>Note:</i>
+    <code>file_type::regular</code> implies appropriate
+    <code>&lt;fstream&gt;</code> operations would succeed, assuming no
+    hardware, permission, access, or file system race errors. Lack of
+    <code>file_type::regular</code> does not necessarily imply
+    <code>&lt;fstream&gt;</code> operations would fail on a directory. —
+    <i>end note</i>]</li>
+  <li>Otherwise, if the attributes indicate a directory, <del>as if by POSIX
+    <code>S_ISDIR</code>,</del> return
+    <code>file_status(file_type::directory)</code>. [<i>Note:</i>
+    <code>file_type::directory</code> implies
+    <code>directory_iterator(p)</code> would succeed. — <i>end note</i>]
+    </li>
+  <li>Otherwise, if the attributes indicate a block special file, <del>as if
+    by POSIX <code>S_ISBLK</code>,</del> return
+    <code>file_status(file_type::block)</code>.</li>
+  <li>Otherwise, if the attributes indicate a character special file, <del>as
+    if by POSIX <code>S_ISCHR</code>,</del> return
+    <code>file_status(file_type::character)</code>.</li>
+  <li>Otherwise, if the attributes indicate a fifo or pipe file, <del>as if by
+    POSIX <code>S_ISFIFO</code>,</del> return
+    <code>file_status(file_type::fifo)</code>.</li>
+  <li>Otherwise, if the attributes indicate a socket, <del>as if by POSIX
+    <code>S_ISSOCK</code>,</del> return
+    <code>file_status(file_type::socket)</code>.</li>
+  <li>Otherwise, return <code>file_status(file_type::unknown)</code>.
+  </li></ul><p></p></li>
+<li><i>Remarks:</i> If a symbolic link is encountered during pathname
+  resolution, pathname resolution continues using the contents of the
+  symbolic link.</li>
+</ul>
+</blockquote>
+
+<blockquote class="stdins">
+<h4>27.10.?.1.18 Symlink status [filesystem.symlink_status]</h4>
+<pre class="function">virtual file_status symlink_status(const path&amp; p, error_code&amp; ec) const noexcept = 0;
+</pre>
+</blockquote>
+
+<p>Copy [fs.op.symlink_status] paragraphs 1 to 4 here, with edits as
+specified:</p>
+
+<blockquote class="std">
+<ul class="function">
+<li><i>Effects:</i> Same as status(), above, except that the attributes of
+  <code>p</code> are <del>determined as if by POSIX <code>lstat()</code></del>
+  <ins>always determined, even if <code>p</code> names a symbolic link</ins>.
+  </li>
+<li><i>Returns:</i> Same as status(), above, except that if the attributes
+  indicate a symbolic link, <del>as if by POSIX <code>S_ISLNK</code>,</del>
+  return <code>file_status(file_type::symlink)</code>. <del>The signature with
+  argument <code>ec</code> r</del><ins>R</ins>eturns
+  <code>file_status(file_type::none)</code> if an error occurs.</li>
+<li><i>Remarks:</i>Pathname resolution terminates if <code>p</code> names a
+  symbolic link.</li>
+<li><del><i>Throws:</i> As specified in Error reporting (27.5.6.5).</del></li>
+</ul>
+</blockquote>
+
+<blockquote class="stdins">
+<h4>27.10.?.1.19 System complete [filesystem.system_complete]</h4>
+<pre class="function">virtual path system_complete(const path&amp; p error_code&amp; ec) const = 0;
+</pre>
+</blockquote>
+
+<p>Copy [fs.op.system_complete] paragraphs 1 to 6 here, with edits as
+specified:</p>
+
+<blockquote class="std">
+<ul class="function">
+<li><i>Effects:</i> Composes an absolute path from <code>p</code>, using the
+  same rules used <del>by the operating system</del> to resolve a path
+  passed <del>as the filename argument to standard library open functions</del>
+  <ins>to other functions in this section</ins>.</li>
+<li><i>Returns:</i> The composed path. <del>The signature with argument
+  <code>ec</code> r</del><ins>R</ins>eturns <code>path()</code> if an error
+  occurs.</li>
+<li><i>Postcondition:</i> For the returned path, <code>rp,
+  rp.is_absolute()</code> is true.</li>
+<li><del><i>Throws:</i> As specified in Error reporting (27.5.6.5).</del></li>
+<li>[<i>Example:</i> For POSIX based operating systems,
+  <code>system_complete(p)</code> has the same semantics as
+  <code>absolute(p, current_path())</code>.</li>
+<li>For Windows based operating systems, <code>system_complete(p)</code> has
+  the same semantics as <code>absolute(p, current_path())</code> if
+  <code>p.is_absolute() || !p.has_root_name()</code> or <code>p</code> and
+  <code>base</code> have the same <code>root_name()</code>. Otherwise it acts
+  like <code>absolute(p, cwd)</code> is the current directory for the
+  <code>p.root_name()</code> drive. This will be the current directory for
+  that drive the last time it was set, and thus may be residue left over from
+  a prior program run by the command processor. Although these semantics are
+  useful, they may be surprising. — <i>end example</i>]</li>
+</ul>
+</blockquote>
+
+<blockquote class="stdins">
+<h4>27.10.?.1.20 Temp directory path [filesystem.temp_directory_path]</h4>
+<pre class="function">virtual path temp_directory_path(error_code&amp; ec) const = 0;
+</pre>
+</blockquote>
+
+<p>Copy [fs.op.temp_dir_path] paragraphs 1 to 4 here, with edits as
+specified:</p>
+
+<blockquote class="std">
+<ul class="function">
+<li><i>Returns:</i> An unspecifed directory path suitable for temporary files.
+  An error shall be reported if <code>!exists(p) || !is_directory(p)</code>,
+  where <code>p</code> is the path to be returned. <del>The signature with
+  argument <code>ec</code> r</del><ins>R</ins>eturns <code>path()</code> if
+  an error occurs.</li>
+<li><del><i>Throws:</i> As specified in Error reporting (27.5.6.5).</del></li>
+<li>[<i>Example:</i> For POSIX based operating systems, an implementation
+  might return the path supplied by the first environment variable found in
+  the list TMPDIR, TMP, TEMP, TEMPDIR, or if none of these are found,
+  <code>"/tmp"</code>.</li>
+<li>For Windows based operating systems, an implementation might return the
+  path reported by the Windows <code>GetTempPath</code> API function. —
+  <i>end example</i>]</li>
+</ul>
+</blockquote>
+
+<blockquote class="stdins">
+<h4>27.10.?.1.21 Directory traverser [filesystem.directory_traverser]</h4>
+<pre class="function">virtual unique_ptr&lt;directory_traverser&gt; directory_traverser(
+    const path&amp; p, directory_options options, error_code&amp; ec) const = 0;
+</pre>
+</blockquote>
+
+<p>Copy [directory_iterator.members] paragraphs 2 to 4 here, with edits as
+specified:</p>
+
+<blockquote class="std">
+<ul class="function">
+<li><i>Effects:</i> For the directory that <code>p</code> resolves to,
+  <del>constructs an iterator</del><ins>allocates a
+  <code>directory_traverser</code> </ins> for the first element in a sequence
+  of <code>directory_entry</code> elements representing the files in the
+  directory, if any; otherwise the <del>end iterator</del><ins>past-the-end
+  value</ins>. However, if
+  <blockquote>
+  <code>(options &amp; directory_options::skip_permissions_denied) !=
+  directory_options::none</code>
+  </blockquote>
+  and construction encounters an error indicating that permission to access
+  <code>p</code> is denied, constructs the <del>end iterator</del>
+  <ins>past-the-end value</ins> and does not report an error.</li>
+<li><ins><i>Returns:</i> a pointer to the allocated
+  <code>directory_traverser</code>.</ins></li>
+<li><del><i>Throws:</i> As specified in Error reporting (27.5.6.5).</del></li>
+<li><del>[<i>Note:</i> To iterate over the current directory, use
+  <code>directory_iterator(".")</code> rather than
+  <code>directory_iterator("")</code>. — <i>end note</i>]</del></li>
+</ul>
+</blockquote>
+
+<blockquote class="stdins">
+<h2>27.10.? Class <code>default_filesystem_impl</code>
+[class.default_filesystem_impl]</h2>
+
+<p>Class <code>default_filesystem_impl</code> is for exposition only. An
+implementation is permitted to provide equivalent functionality without
+providing a class with this name. This class provides a default implementation
+of the <code>filesystem</code> interface, which is implemented by delegating
+to the underlying operating system.</p>
+
+<p>Descriptions are provided only where this class differs from the
+base class <code>filesystem</code>.</p>
+
+<pre>class default_filesystem_impl : public filesystem {  <i>// exposition only</i>
+public:
+  virtual bool copy_file(const path&amp; from, const path&amp; to,
+                         copy_options options, error_code&amp; ec) noexcept;
+  virtual bool create_directory(const path&amp; p, error_code&amp; ec) noexcept;
+  virtual bool create_directory(const path&amp; p, const path&amp; existing_p,
+                                error_code&amp; ec) noexcept;
+  virtual void create_directory_symlink(
+      const path&amp; to, const path&amp; new_symlink, error_code&amp; ec) noexcept;
+  virtual void create_hard_link(const path&amp; to, const path&amp; new_hard_link,
+                                error_code&amp; ec) noexcept;
+  virtual void create_symlink(const path&amp; to, const path&amp; new_symlink,
+                              error_code&amp; ec) noexcept;
+  virtual path current_path(error_code&amp; ec);
+  virtual void current_path(const path&amp; p, error_code&amp; ec) noexcept;
+  virtual bool equivalent(const path&amp; p1, const path&amp; p2, error_code&amp; ec) noexcept;
+  virtual uintmax_t file_size(const path&amp; p, error_code&amp; ec) noexcept;
+  virtual uintmax_t hard_link_count(const path&amp; p, error_code&amp; ec) noexcept;
+  virtual file_time_type last_write_time(const path&amp; p, error_code&amp; ec) noexcept;
+  virtual void last_write_time(const path&amp; p, file_time_type new_time,
+                               error_code&amp; ec) noexcept;
+  virtual void permissions(const path&amp; p, perms prms, error_code&amp; ec) noexcept;
+  virtual path read_symlink(const path&amp; p, error_code&amp; ec);
+  virtual bool remove(const path&amp; p, error_code&amp; ec) noexcept;
+  virtual void rename(const path&amp; old_p, const path&amp; new_p, erorr_code&amp; ec) noexcept;
+  virtual void resize_file(const path&amp; p, uintmax_t new_size, error_code&amp; ec) noexcept;
+  virtual space_info space(const path&amp; p, error_code&amp; ec) noexcept;
+  virtual file_status status(const path&amp; p, error_code&amp; ec) noexcept;
+  virtual file_status symlink_status(const path&amp; p, error_code&amp; ec) noexcept;
+  virtual path system_complete(const path&amp; p, error_code&amp; ec);
+  virtual path temp_directory_path(error_code&amp; ec);
+
+  virtual unique_ptr&lt;directory_traverser&gt; directory_traverser(
+      const path&amp; p, directory_options options, error_code&amp; ec);
+};
+</pre>
+
+<h3>27.10.?.1 <code>filesystem</code> members
+[default_filesystem_impl.members]</h3>
+<h4>27.10.?.1.1 Create directory
+  [default_filesystem_impl.create_directory]</h4>
+<pre class="function">virtual bool create_directory(const path&amp; p, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Remarks:</i> Achieves its postconditions as if by POSIX
+  <code>mkdir()</code> with a second argument of
+  <code>static_cast&lt;int&gt;(perms::all)</code>.</li>
+</ul>
+
+<h4>27.10.?.1.2 Create directory symlink
+  [default_filesystem_impl.create_directory_symlink]</h4>
+<pre class="function">virtual void create_directory_symlink(
+    const path&amp; to, const path&amp; new_symlink, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Remarks:</i> Achieves its postconditions as if by POSIX
+  <code>symlink()</code>.</li>
+</ul>
+
+<h4>27.10.?.1.3 Create hard link [default_filesystem.create_hard_link]</h4>
+<pre class="function">virtual void create_hard_link(const path&amp; to, const path&amp; new_hard_link,
+                              error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Remarks:</i> Achieves its postconditions as if by POSIX
+  <code>link()</code>.</li>
+</ul>
+
+<h4>27.10.?.1.4 Create symlink [default_filesystem.create_symlink]</h4>
+<pre class="function">virtual void create_symlink(const path&amp; to, const path&amp; new_symlink,
+                            error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Remarks:</i> Achieves its postconditions as if by POSIX
+  <code>symlink()</code>.</li>
+</ul>
+
+<h4>27.10.?.1.5 Current path [default_filesystem.current_path]</h4>
+<pre class="function">virtual path current_path(error_code&amp; ec);
+</pre>
+<ul class="function">
+<li><i>Remarks:</i> Obtains the current working directory as if by POSIX
+  <code>getcwd()</code>.</li>
+</ul>
+
+<pre class="function">virtual void current_path(const path&amp; p, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Remarks:</i> Achieves its postconditions as if by POSIX
+  <code>chdir()</code>.</li>
+</ul>
+
+<h4>27.10.?.1.6 Equivalent [default_filesystem.equivalent]</h4>
+<pre class="function">virtual bool equivalent(const path&amp; p1, const path&amp; p2, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Remarks:</i> Determines equivalence of the two files as if by the
+  values of the POSIX <code>stat</code> structure, obtained as if by
+  <code>stat()</code> for the two paths, having equal <code>st_dev</code>
+  values and equal <code>st_ino</code> values.</li>
+</ul>
+
+<h4>27.10.?.1.7 File size [default_filesystem.file_size]</h4>
+<pre class="function">virtual uintmax_t file_size(const path&amp; p, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Remarks:</i> Determines the size as if by the value of the POSIX
+  <code>stat</code> structure member <code>st_size</code> obtained as if by
+  POSIX <code>stat()</code>.</li>
+</ul>
+
+<h4>27.10.?.1.8 Last write time[default_filesystem.last_write_time]</h4>
+<pre class="function">virtual file_time_type last_write_time(const path&amp; p, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Remarks:</i> Determines the modification time as if by the value of
+  the POSIX <code>stat</code> structure member <code>st_mtime</code> obtained
+  as if by POSIX <code>stat()</code>.</li>
+</ul>
+
+<pre class="function">virtual void last_write_time(const path&amp; p, file_time_type new_time,
+                             error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Remarks:</i> Sets the modification time as if by POSIX
+  <code>futimens()</code>.</li>
+</ul>
+
+<h4>27.10.?.1.9 Permissions [default_filesystem.permissions]</h4>
+<pre class="function">virtual void permissions(const path&amp; p, perms prms, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Remarks:</i> Applies the effective permission bits as if by POSIX
+  <code>fchmodat()</code>.</li>
+</ul>
+
+<h4>27.10.?.1.10 Remove [default_filesystem.remove]</h4>
+<pre class="function">virtual bool remove(const path&amp; p, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Remarks:</i> Removes the file as if by POSIX <code>remove()</code>.
+  </li>
+</ul>
+
+<h4>27.10.?.1.11 Rename [default_filesystem.rename]</h4>
+<pre class="function">virtual void rename(const path&amp; old_p, const path&amp; new_p, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Remarks:</i> Renames the file as if by POSIX <code>rename()</code>.
+  </li>
+</ul>
+
+<h4>27.10.?.1.12 Resize file [default_filesystem.resize_file]</h4>
+<pre class="function">virtual void resize_file(const path&amp; p, uintmax_t new_size, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Remarks:</i> Achieves its postconditions as if by POSIX
+  <code>truncate()</code>.</li>
+</ul>
+
+<h4>27.10.?.1.13 Space [default_filesystem.space]</h4>
+<pre class="function">virtual space_info space(const path&amp; p, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Remarks:</i> The value of the <code>space_info</code> object is
+  determined as if by using POSIX <code>statvfs</code> to obtain a POSIX
+  <code>struct statvfs</code>, and then multiplying its <code>f_blocks</code>,
+  <code>f_bfree</code>, and <code>f_bavail</code> members by its
+  <code>f_frsize</code> member, and assigning the results to the
+  <code>capacity</code>, <code>free</code>, and <code>available</code> members
+  respectively.</li>
+</ul>
+
+<h4>27.10.?.1.14 Status [default_filesystem.status]</h4>
+<pre class="function">virtual file_status status(const path&amp; p, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Remarks:</i> Determines the attributes as if by POSIX
+  <code>stat()</code>.</li>
+</ul>
+
+<h4>27.10.?.1.15 Symlink status [default_filesystem.symlink_status]</h4>
+<pre class="function">virtual file_status symlink_status(const path&amp; p, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Remarks:</i> Determines the attributes as if by POSIX
+  <code>lstat()</code>.</li>
+</ul>
+
+<h2>27.10.? Class <code>directory_traverser</code> [class.directory_traverser]
+</h2>
+<pre>class directory_traverser {
+public:
+  directory_traverser() = default;
+  virtual ~directory_traverser() = default;
+
+  virtual const directory_entry&amp; dereference() const = 0;
+  virtual void increment(error_code&amp; ec) noexcept = 0;
+  virtual bool equal(const directory_traverser&amp; rhs) const = 0;
+  virtual bool is_end() const noexcept = 0;
+  virtual unique_ptr&lt;directory_traverser&gt; clone() const = 0;
+};
+</pre>
+
+<p>The <code>directory_traverser</code> class defines the base class for the
+types of objects that represent how a directory in a particular filesystem
+implementation is traversed. An instance of such a type is either a
+past-the-end value, or points to an element of a sequence of
+<code>directory_entry</code> objects representing the contents of the
+directory.</p>
+
+<p>Classes derived from <code>directory_traverser</code> shall satisfy all
+of the requirements of <code>directory_traverser</code>.</p>
+
+<p>[<i>Note:</i> If a file is removed from or added to a directory after the
+construction of a <code>directory_traverser</code> for the directory, it is
+unspecified whether or not subsequently incrementing the
+<code>directory_traverser</code> will ever result in it pointing to
+the removed or added directory entry. See POSIX <code>readdir_r</code>.
+— <i>end note</i>]</p>
+
+<h3>27.10.?.1 <code>directory_traverser</code> members
+[directory_traverser.members]</h3>
+
+<pre class="function">virtual const directory_entry&amp; dereference() const = 0;
+</pre>
+<ul class="function">
+<li><i>Precondition:</i> <code>!is_end()</code></li>
+<li><i>Returns:</i> The current element of the sequence being traversed.</li>
+</ul>
+
+<pre class="function">virtual void increment(error_code&amp; ec) = 0;
+</pre>
+<ul class="function">
+<li><i>Precondition:</i> <code>!is_end()</code></li>
+<li><i>Effects:</i> Advances <code>*this</code> to the next element of the
+sequence being traversed. If there is no such element, makes <code>*this</code>
+a past-the-end value.</li>
+</ul>
+
+<pre class="function">virtual bool equal(const directory_traverser&amp; rhs) const = 0;
+</pre>
+<ul class="function">
+<li><i>Precondition:</i> <code>rhs</code> has the same dynamic type as
+<code>*this</code>.</li>
+<li><i>Returns:</i> <code>true</code> if <code>rhs</code> points to the same
+sequence element as <code>*this</code>, or if they are both past-the-end
+values, and <code>false</code> otherwise.</li>
+</ul>
+
+<pre class="function">virtual bool is_end() const = 0;
+</pre>
+<ul class="function">
+<li><i>Returns:</i> <code>true</code> if <code>*this</code> represents a
+past-the-end value, and <code>false</code> otherwise.</li>
+</ul>
+
+<pre class="function">virtual unique_ptr&lt;directory_traverser&gt; clone() const = 0;
+</pre>
+<ul class="function">
+<li><i>Returns:</i> a value <code><i>v</i></code> such that
+<code><i>v</i>-&gt;equal(*this)</code> (and the dynamic type of
+<code>*<i>v</i></code> is the same as the dynamic type of
+<code>*this</code>).</li>
+</ul>
+</blockquote>
+
+<p>Revise the <code>directory_iterator</code> class synopsis as follows:</p>
+
+<blockquote class="std">
+<pre>namespace std::filesystem {
+  class directory_iterator {
+  public:
+    typedef directory_entry        value_type;
+    typedef ptrdiff_t              difference_type;
+    typedef const directory_entry* pointer;
+    typedef const directory_entry&amp; reference;
+    typedef input_iterator_tag     iterator_category;
+
+    <i>// member functions</i>
+    directory_iterator() noexcept;
+    explicit directory_iterator(const path&amp; p);
+    directory_iterator(const path&amp; p, directory_options options);
+    directory_iterator(const path&amp; p, error_code&amp; ec) noexcept;
+    directory_iterator(const path&amp; p, directory_options options,
+                       error_code&amp; ec) noexcept;
+    directory_iterator(const directory_iterator&amp; rhs);
+    directory_iterator(directory_iterator&amp;&amp; rhs) noexcept;
+   ~directory_iterator();
+
+    directory_iterator&amp; operator=(const directory_iterator&amp; rhs);
+    directory_iterator&amp; operator=(directory_iterator&amp;&amp; rhs) noexcept;
+
+    const directory_entry&amp; operator*() const;
+    const directory_entry* operator-&gt;() const;
+    directory_iterator&amp;    operator++();
+    directory_iterator&amp;    increment(error_code&amp; ec) noexcept;
+
+    <i>// other members as required by 24.2.3, input iterators</i>
+<ins>
+  private:
+    unique_ptr&lt;directory_traverser&gt; traverser;   <i>// exposition only</i></ins>
+  };
+}
+</pre>
+</blockquote>
+
+<p>Revise [directory_iterator.members] as follows:</p>
+
+<blockquote class="std">
+<h3>27.10.13.1 <code>directory_iterator</code> members
+[directory_iterator.members]</h3>
+<pre class="function">directory_iterator() noexcept;
+</pre>
+<ul class="function">
+<li><i>Effects:</i> <del>Constructs the end iterator.</del><ins>Initializes
+  <code>traverser</code> with <code>nullptr</code>.</ins></li>
+</ul>
+
+<pre class="function">explicit directory_iterator(const path&amp; p);
+directory_iterator(const path&amp; p, directory_options options);
+directory_iterator(const path&amp; p, error_code&amp; ec) noexcept;
+directory_iterator(const path&amp; p, directory_options options, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Effects:</i> <del>For the directory that <code>p</code> resolves to,
+  constructs an iterator for the first element in a sequence of
+  <code>directory_entry</code> elements representing the files in the
+  directory, if any; otherwise the end iterator. However, if
+  <blockquote>
+  <code>(options &amp; directory_options::skip_permissions_denied) !=
+  directory_options::none</code>
+  </blockquote>
+  and construction encounters an error indicating that permission to access
+  <code>p</code> is denied, constructs the end iterator and does not report
+  an error.</del><ins>Initializes <code>traverser</code> with the result of
+  <code>current_filesystem.load()-&gt;directory_traverser(p, options,
+  ec)</code> (with <code>options</code> equal to
+  <code>directory_options::none</code> if not specified by the caller). The
+  signatures with argument <code>ec</code> construct the end iterator if an
+  error occurs.</ins></li>
+<li><i>Throws:</i> As specified in Error reporting (27.5.6.5).</li>
+<li>[<i>Note:</i> To iterate over the current directory, use
+<code>directory_iterator(".")</code> rather than
+<code>directory_iterator("")</code>. — <i>end note</i>]</li>
+</ul>
+
+<pre class="function">directory_iterator(const directory_iterator&amp; rhs);
+</pre>
+<ins>
+<ul class="function">
+<li><i>Effects:</i> Initializes <code>traverser</code> with
+<code>rhs.traverser-&gt;clone()</code>.</li>
+</ul>
+</ins>
+<pre class="function">directory_iterator(directory_iterator&amp;&amp; rhs);
+</pre>
+<ul class="function">
+<li><i>Effects:</i> <del>Constructs an object of class
+<code>directory_iterator</code>.</del><ins>Initializes <code>traverser</code>
+with <code>std::move(rhs.traverser)</code>.</ins></li>
+<li><del><i>Postconditions:</i> <code>*this</code> has the original value of
+<code>rhs</code>.</del></li>
+</ul>
+
+<pre class="function">directory_iterator&amp; operator=(const directory_iterator&amp; rhs);
+</pre>
+<ins>
+<ul class="function">
+<li><i>Effects:</i> If <code>*this</code> and <code>rhs</code> are the same
+object, no effect. Otherwise, assigns <code>rhs.traverser-&gt;clone()</code>
+to <code>traverser</code>.</li>
+<li><i>Returns:</i> <code>*this</code>.</li>
+</ul>
+</ins>
+<pre class="function">directory_iterator&amp; operator=(directory_iterator&amp;&amp; rhs) noexcept;
+</pre>
+<ul class="function">
+<li><i>Effects:</i> <del>If <code>*this</code> and <code>rhs</code> are the
+  same object, the member has no effect.</del><ins>Assigns
+  <code>std::move(rhs.traverser)</code> to <code>traverser</code>.</ins></li>
+<li><del><i>Postconditions:</i> <code>*this</code> has the original value of
+  <code>rhs</code>.</del></li>
+<li><i>Returns:</i> <code>*this</code>.</li>
+</ul>
+
+<ins>
+<pre class="function">const directory_entry&amp; operator*() const;
+</pre>
+<ul class="function">
+<li><i>Effects:</i> Equivalent to <code>return
+  traverser-&gt;dereference();</code>.</li>
+</ul>
+
+<pre class="function">const directory_entry* operator-&gt;() const;
+</pre>
+<ul class="function">
+<li><i>Effects:</i> Equivalent to <code>return
+  &amp;traverser-&gt;dereference();</code>.</li>
+</ul>
+</ins>
+
+<pre class="function">directory_iterator&amp; operator++();
+directory_iterator&amp; increment(error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Effects:</i> <del>As specified by Input iterators (24.2.3).</del>
+  <ins>Invokes <code>traverser-&gt;increment()</code>.</ins></li>
+<li><i>Returns:</i> <code>*this</code>.</li>
+<li><i>Throws:</i> As specified in Error reporting (27.5.6.5).</li>
+</ul>
+
+</blockquote>
+
+<p>Add the following to the end of [directory_iterator.nonmembers]:</p>
+
+<blockquote class="stdins">
+<pre class="function">bool operator==(const directory_iterator&amp; lhs, const directory_iterator&amp; rhs);
+</pre>
+<ul class="function">
+<li><i>Returns:</i> A value determined by Table ?.
+<table>
+<caption>Table ? — <code>operator==(const directory_iterator&amp;,
+  const directory_iterator&amp;)</code> return value</caption>
+<tbody><tr>
+  <td></td>
+  <td><b><code>rhs.traverser == nullptr || rhs.traverser-&gt;is_end()</code>
+    </b></td>
+  <td><b><code>!(rhs.traverser == nullptr || rhs.traverser-&gt;is_end())</code>
+    </b></td>
+</tr>
+<tr>
+  <td><b><code>lhs.traverser == nullptr || lhs.traverser-&gt;is_end()</code>
+    </b></td>
+  <td><code>true</code></td>
+  <td><code>false</code></td>
+</tr>
+<tr>
+  <td><b><code>!(lhs.traverser == nullptr || lhs.traverser-&gt;is_end())</code>
+    </b></td>
+  <td><code>false</code></td>
+  <td><code>lhs.traverser-&gt;equal(*rhs.traverser)</code></td>
+</tr>
+</tbody></table>
+</li>
+</ul>
+
+<pre class="function">bool operator!=(const directory_iterator&amp; lhs, const directory_iterator&amp; rhs);
+</pre>
+<ul class="function">
+<li><i>Effects:</i> Equivalent to <code>!(lhs == rhs)</code>.</li>
+</ul>
+</blockquote>
+
+<p>Insert a new section above [fs.op.funcs]:</p>
+<blockquote class="stdins">
+<h2>27.10.? Filesystem injection [fs.inject]</h2>
+
+<h3>27.10.?.1 Current filesystem [fs.inject.current]</h3>
+<pre class="function">extern atomic&lt;filesystem*&gt; current_filesystem;
+</pre>
+<p>The <code>current_filesystem</code> variable is for exposition only. An
+implementation is permitted to provide equivalent functionality without
+providing a variable with this name.</p>
+
+<p><code>current_filesystem</code> will be initialized to
+<code>&amp;default_filesystem()</code> before the body
+of <code>main()</code> begins execution. [<i>Note</i> Implementations
+are encouraged to initialize before main() begins execution. --<i>end
+note</i>]</p>
+
+<h3>27.10.?.2 Inject filesystem [fs.inject.inject]</h3>
+<pre class="function">void inject_filesystem(filesystem&amp; fs);
+</pre>
+<ul class="function">
+<li><i>Effects:</i> Equivalent to <code>current_filesystem =
+  addressof(fs);</code>.</li>
+<li><i>Remarks:</i> <code>fs</code> must remain live until the next call
+  to <code>inject_filesystem</code>, and until all pending calls to
+  filesystem operation functions have completed execution.</li>
+</ul>
+
+<h3>27.10.?.3 Default filesystem [fs.inject.default]</h3>
+<pre class="function">filesystem&amp; default_filesystem();
+</pre>
+<ul class="function">
+<li><i>Returns:</i> An object of type <code>default_filesystem_impl</code>.
+  All invocations of this function will return the same object, and this
+  object will not be destroyed during program execution.</li>
+</ul>
+
+</blockquote>
+
+<p>Revise [fs.op.copy] paragraph 6 as follows:</p>
+
+<blockquote class="std">
+<p>Otherwise if <code>is_regular_file(f)</code>, then:
+</p><ul>
+<li>If <code>(options &amp; copy_options::directories_only) !=
+  copy_options::none</code>, then return.</li>
+<li>Otherwise if <code>(options &amp; copy_options::create_symlinks) !=
+  copy_options::none</code>, then <del>create a symbolic link to the source
+  file</del><ins><code>create_symlink(from, to)</code></ins>.</li>
+<li>Otherwise if <code>(options &amp; copy_options::create_hard_links) !=
+  copy_options::none</code>, then <del>create a hard link to the source
+  file</del><ins><code>create_hard_link(from, to)</code></ins>.</li>
+<li>Otherwise if <code>is_directory(t)</code>, then <code>copy_file(from,
+  to/from.filename(), options)</code>.</li>
+<li>Otherwise, <code>copy_file(from, to, options)</code>.</li>
+</ul>
+<p></p>
+</blockquote>
+
+<p>Revise [fs.op.copy_file] as follows:</p>
+
+<blockquote class="std">
+<pre class="function">bool copy_file(const path&amp; from, const path&amp; to);
+bool copy_file(const path&amp; from, const path&amp; to, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Returns:</i> <code>copy_file(from, to, copy_options::none)</code> or
+  <code>copy_file(from, to, copy_options::none, ec)</code>, respectively.</li>
+<li><i>Throws:</i> As specified in Error reporting (27.5.6.5).</li>
+</ul>
+<pre class="function">bool copy_file(const path&amp; from, const path&amp; to, copy_options options);
+bool copy_file(const path&amp; from, const path&amp; to, copy_options options,
+               error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><del><i>Requires:</i> At most one constant from each
+  <code>copy_options</code> group is present in <code>options</code>.</del>
+  </li>
+<li><i>Effects:</i> <del>Report a file already exists error as specified in
+  Error reporting (27.5.6.5) if:
+  <ul>
+  <li><code>exists(to)</code> and <code>equivalent(from, to)</code>, or</li>
+  <li><code>exists(to)</code> and
+    <code>(options &amp; (copy_options::skip_existing |
+    copy_options::overwrite_existing | copy_options::update_existing)) ==
+    copy_options::none</code>.</li>
+  </ul>
+  Otherwise copy the contents and attributes of the file <code>from</code>
+  resolves to to the file <code>to</code> resolves to if:
+  <ul>
+  <li><code>!exists(to)</code>, or</li>
+  <li><code>exists(to)</code> and <code>(options &amp;
+    copy_options::overwrite_existing) != copy_options::none</code>, or</li>
+  <li><code>exists(to)</code> and <code>(options &amp;
+    copy_options::update_existing) != copy_options::none</code>, and
+    <code>from</code> is more recent than <code>to</code>, determined as if
+    by use of the <code>last_write_time</code> function.</li>
+  </ul>
+  Otherwise no effects.</del><ins>Invokes
+  <code>current_filesystem.load()-&gt;copy_file(from, to, options, ec)</code>
+  and handles any errors as specified in Error reporting (27.10.7).</ins></li>
+<li><i>Returns:</i> <del><code>true</code> if the <code>from</code> file was
+  copied, otherwise <code>false</code>. The signature with argument
+  <code>ec</code> return <code>false</code> if an error occurs.</del>
+  <ins>The return value of the <code>copy_file()</code> member call.</ins></li>
+<li><i>Throws:</i> As specified in Error reporting (27.5.6.5).</li>
+<li><del><i>Complexity:</i> At most one direct or indirect invocation of
+  <code>status(to)</code>.</del></li>
+</ul>
+</blockquote>
+
+<p>Revise [fs.op.create_directory] as follows:</p>
+
+<blockquote class="std">
+<pre class="function">bool create_directory(const path&amp; p);
+bool create_directory(const path&amp; p, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Effects:</i> <del>Establishes the postcondition by attempting to create
+  the directory <code>p</code> resolves to<del>, as if by POSIX
+  <code>mkdir()</code> with a second argument of
+  <code>static_cast&lt;int&gt;(perms::all)</code></del>. Creation failure
+  because <code>p</code> resolves to an existing directory shall not be
+  treated as an error.</del><ins>Invokes
+  <code>current_filesystem.load()-&gt;create_directory(p, ec)</code>
+  and handles any errors as specified in Error reporting (27.10.7).</ins></li>
+<li><del><i>Postcondition:</i> <code>is_directory(p)</code>.</del></li>
+<li><i>Returns:</i> <del><code>true</code> if a new directory was created,
+  otherwise <code>false</code>. The signature with argument <code>ec</code>
+  returns <code>false</code> if an error occurs.</del> <ins>The return value
+  of the <code>create_directory()</code> member call.</ins></li>
+<li><i>Throws:</i> As specified in Error reporting (27.5.6.5).</li>
+</ul>
+
+<pre class="function">bool create_directory(const path&amp; p, const path&amp; existing_p);
+bool create_directory(const path&amp; p, const path&amp; existing_p, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Effects:</i> <del>Establishes the postcondition by attempting to create
+  the directory <code>p</code> resolves to, with attributes copied from
+  directory <code>existing_p</code>. The set of attributes copied is operating
+  system dependent. Creation failure because <code>p</code> resolves to an
+  existing directory shall not be treated as an error. [<i>Note:</i> For POSIX
+  based operating systems the attributes are those copied by native API
+  <code>stat(existing_p.c_str(), &amp;attributes_stat)</code> followed by
+  <code>mkdir(p.c_str(), attributes_stat.st_mode)</code>. For Windows based
+  operating systems the attributes are those copied by native API
+  <code>CreateDirectoryExW(existing_p.c_str(), p.c_str(), 0)</code>. —
+  <i>end note</i>]</del><ins>Invokes
+  <code>current_filesystem.load()-&gt;create_directory(p, existing_p,
+  ec);</code> and handles any errors as specified in Error reporting
+  (27.10.7).</ins></li>
+<li><del><i>Postcondition:</i> <code>is_directory(p)</code>.</del></li>
+<li><i>Returns:</i> <del><code>true</code> if a new directory was created,
+  otherwise <code>false</code>. The signature with argument <code>ec</code>
+  returns false if an error occurs.</del> <ins>The return value of the
+  <code>create_directory()</code> member call.</ins></li>
+<li><i>Throws:</i> As specified in Error reporting (27.5.6.5).</li>
+</ul>
+</blockquote>
+
+<p>Revise [fs.op.create_dir_symlk] as follows:</p>
+
+<blockquote class="std">
+<pre class="function">void create_directory_symlink(const path&amp; to, const path&amp; new_symlink);
+void create_directory_symlink(const path&amp; to, const path&amp; new_symlink,
+                              error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Effects:</i> <del>Establishes the postcondition, as if by POSIX
+  <code>symlink()</code></del> <ins>Invokes
+  <code>current_filesystem.load()-&gt;create_directory_symlink(to,
+  new_symlink, ec)</code> and handles any errors as specified in Error
+  reporting (27.10.7).</ins></li>
+<li><del><i>Postcondition:</i> <code>new_symlink</code> resolves to a symbolic
+  link file that contains an unspecified representation of <code>to</code>.
+  </del></li>
+<li><i>Throws:</i> As specified in Error reporting (27.5.6.5).</li>
+<li>[<i>Note:</i> Some operating systems require symlink creation to
+identify that the link is to a directory. Portable code should use
+<code>create_directory_symlink()</code> to create directory symlinks rather
+than <code>create_symlink()</code> — <i>end note</i>]</li>
+<li>[<i>Note:</i> Some operating systems do not support symbolic links at
+all or support them only for regular files. Some file systems (such as the
+FAT file system) do not support symbolic links regardless of the operating
+system. — <i>end note</i>]</li>
+</ul>
+</blockquote>
+
+<p>Revise [fs.op.create_hard_lk] as follows:</p>
+
+<blockquote class="std">
+<pre class="function">void create_hard_link(const path&amp; to, const path&amp; new_hard_link);
+void create_hard_link(const path&amp; to, const path&amp; new_hard_link,
+                      error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Effects:</i> <del>Establishes the postcondition, as if by POSIX
+  <code>link()</code></del> <ins>Invokes
+  <code>current_filesystem.load()-&gt;create_hard_link(to,
+  new_hard_link, ec)</code> and handles any errors as specified in Error
+  reporting (27.10.7)</ins>.</li>
+<li><del><i>Postcondition:</i>
+  <ul>
+  <li><code>exists(to) &amp;&amp; exists(new_hard_link) &amp;&amp; equivalent(to,
+    new_hard_link)</code></li>
+  <li>The contents of the file or directory <code>to</code> resolves to are
+    unchanged.</li>
+  </ul></del></li>
+<li><i>Throws:</i> As specified in Error reporting (27.5.6.5).</li>
+<li>[<i>Note:</i> Some operating systems do not support hard links at all or
+  support them only for regular files. Some file systems (such as the FAT
+  file system) do not support hard links regardless of the operating
+  system. Some file systems limit the number of links per file. —
+  <i>end note</i>]</li>
+</ul>
+</blockquote>
+
+<p>Revise [fs.op.create_symlink] as follows:</p>
+
+<blockquote class="std">
+<pre class="function">void create_symlink(const path&amp; to, const path&amp; new_symlink);
+void create_symlink(const path&amp; to, const path&amp; new_symlink,
+                    error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Effects:</i> <del>Establishes the postcondition, as if by POSIX
+  <code>symlink()</code></del> <ins>Invokes
+  <code>current_filesystem.load()-&gt;create_symlink(to, new_symlink,
+  ec)</code> and handles any errors as specified in Error reporting
+  (27.10.7)</ins>.</li>
+<li><del><i>Postcondition:</i> <code>new_symlink</code> resolves to a symbolic
+  link file that contains an unspecified representation of <code>to</code>.
+  </del></li>
+<li><i>Throws:</i> As specified in Error reporting (27.5.6.5).</li>
+<li>[<i>Note:</i> Some operating systems do not support symbolic links at all
+  or support them only for regular files. Some file systems (such as the FAT
+  file system) do not support symbolic links regardless of the operating
+  system. — <i>end note</i>]</li>
+</ul>
+</blockquote>
+
+<p>Revise [fs.op.current_path] as follows:</p>
+
+<blockquote class="std">
+<pre class="function">path current_path();
+path current_path(error_code&amp; ec);
+</pre>
+<ul class="function">
+<li><ins><i>Effects:</i> Invokes
+  <code>current_filesystem.load()-&gt;current_path(ec)</code> and handles any
+  errors as specified in Error reporting (27.10.7).</ins></li>
+<li><i>Returns:</i> <del>The absolute path of the current working directory,
+  obtained as if by POSIX <code>getcwd()</code>. The signature with
+  argument <code>ec</code> returns <code>path()</code> if an error occurs.
+  </del> <ins>The return value of the <code>current_path()</code> member
+  call.</ins></li>
+<li><i>Throws:</i> As specified in Error reporting (27.5.6.5).</li>
+<li><del><i>Remarks:</i> The current working directory is the directory,
+  associated with the process, that is used as the starting location in
+  pathname resolution for relative paths.</del></li>
+<li>[<i>Note:</i> The <code>current_path()</code> name was chosen to emphasize
+  that the return is a path, not just a single directory name.</li>
+<li>The current path as returned by many operating systems is a dangerous
+  global variable. It may be changed unexpectedly by a third-party or system
+  library functions, or by another thread. — <i>end note</i>]</li>
+</ul>
+
+<pre class="function">void current_path(const path&amp; p);
+void current_path(const path&amp; p, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Effects:</i> <del>Establishes the postcondition, as if by POSIX
+  <code>chdir()</code></del> <ins>Invokes
+  <code>current_filesystem.load()-&gt;current_path(p, ec)</code> and handles
+  any errors as specified in Error reporting (27.10.7).</ins></li>
+<li><del><i>Postcondition:</i> <code>equivalent(p, current_path())</code>.
+  </del></li>
+<li><i>Throws:</i> As specified in Error reporting (27.5.6.5).</li>
+<li>[<i>Note:</i> The current path for many operating systems is a dangerous
+  global state. It may be changed unexpectedly by a third-party or system
+  library functions, or by another thread. — <i>end note</i>]</li>
+</ul>
+</blockquote>
+
+<p>Revise [fs.op.equivalent] as follows:</p>
+
+<blockquote class="std">
+<pre class="function">bool equivalent(const path&amp; p1, const path&amp; p2);
+bool equivalent(const path&amp; p1, const path&amp; p2, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Effects:</i> <del>Determines <code>file_status s1</code> and
+  <code>s2</code>, as if by <code>status(p1)</code> and
+  <code>status(p2)</code>, respectively</del> <ins>Invokes
+  <code>current_filesystem.load()-&gt;equivalent(p1, p2, ec)</code> and handles
+  any errors as specified in Error reporting (27.10.7)</ins>.</li>
+<li><i>Returns:</i> <del><code>true</code>, if <code>s1 == s2</code> and
+  <code>p1</code> and <code>p2</code> resolve to the same file system entity,
+  else <code>false</code>. The signature with argument <code>ec</code> returns
+  <code>false</code> if an error occurs.</del> <ins>The return value of the
+  <code>equivalent()</code> member call.</ins></li>
+<li><del>Two paths are considered to resolve to the same file system entity
+  if two candidate entities reside on the same device at the same location.
+  This is determined as if by the values of the POSIX <code>stat</code>
+  structure, obtained as if by <code>stat()</code> for the two paths, having
+  equal <code>st_dev</code> values and equal <code>st_ino</code> values.</del></li>
+<li><i>Throws:</i> <del><code>filesystem_error</code> if <code>(!exists(s1)
+  &amp;&amp; !exists(s2)) || (is_other(s1) &amp;&amp; is_other(s2))</code>, otherwise
+  a</del><ins>A</ins>s specified in Error reporting (27.5.6.5).</li>
+</ul>
+</blockquote>
+
+<p>Revise [fs.op.file_size] as follows:</p>
+
+<blockquote class="std">
+<pre class="function">uintmax_t file_size(const path&amp; p);
+uintmax_t file_size(const path&amp; p, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><ins><i>Effects:</i> Invokes
+  <code>current_filesystem.load()-&gt;file_size(p, ec)</code> and handles any
+  errors as specified in Error reporting (27.10.7).</ins></li>
+<li><i>Returns:</i> <del>If <code>!exists(p) || !is_regular_file(p)</code>
+  an error is reported 27.5.6.5. Otherwise, the size in bytes of the file
+  <code>p</code> resolves to, determined as if by the value of the POSIX
+  <code>stat</code> structure member <code>st_size</code> obtained as if by
+  POSIX <code>stat()</code>. The signature with argument <code>ec</code>
+  returns <code>static_cast&lt;uintmax_t&gt;(-1)</code> if an error occurs.
+  </del> <ins>The return value of the <code>file_size()</code> member
+  call.</ins></li>
+<li><i>Throws:</i> As specified in Error reporting (27.5.6.5).</li>
+</ul>
+</blockquote>
+
+<p>Revise [fs.op.hard_lk_ct] as follows:</p>
+
+<blockquote class="std">
+<pre class="function">uintmax_t hard_link_count(const path&amp; p);
+uintmax_t hard_link_count(const path&amp; p, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><ins><i>Effects:</i> Invokes
+  <code>current_filesystem.load()-&gt;hard_link_count(p, ec)</code> and handles
+  any errors as specified in Error reporting (27.10.7).</ins></li>
+<li><i>Returns:</i> <del>The number of hard links for <code>p</code></del>.
+  The signature with argument <code>ec</code> returns
+  <code>static_cast&lt;uintmax_t&gt;(-1)</code> if an error occurs.<ins>The
+  return value of the <code>hard_link_count()</code> member call.</ins></li>
+<li><i>Throws:</i> As specified in Error reporting (27.5.6.5).</li>
+</ul>
+</blockquote>
+
+<p>Revise [fs.op.last_write_time] as follows:</p>
+
+<blockquote class="std">
+<pre class="function">file_time_type last_write_time(const path&amp; p);
+file_time_type last_write_time(const path&amp; p, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><ins><i>Effects:</i> Invokes
+  <code>current_filesystem.load()-&gt;last_write_time(p, ec)</code> and handles
+  any errors as specified in Error reporting (27.10.7).</ins></li>
+<li><i>Returns:</i> <del>The time of last data modification of <code>p</code>,
+  determined as if by the value of the POSIX <code>stat</code> structure
+  member <code>st_mtime</code> obtained as if by POSIX <code>stat()</code>.
+  The signature with argument <code>ec</code> returns
+  <code>file_time_type::min()</code> if an error occurs.</del><ins>The
+  return value of the <code>last_write_time()</code> member call.</ins></li>
+<li><i>Throws:</i> As specified in Error reporting (27.5.6.5).</li>
+</ul>
+
+<pre class="function">void last_write_time(const path&amp; p, file_time_type new_time);
+void last_write_time(const path&amp; p, file_time_type new_time,
+                     error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Effects:</i> <del>Sets the time of last data modification of the file
+  resolved to by <code>p</code> to <code>new_time</code>, as if by POSIX
+  <code>futimens()</code></del> <ins>Invokes
+  <code>current_filesystem.load()-&gt;last_write_time(p, new_time, ec)</code>
+  and handles any errors as specified in Error reporting (27.10.7)</ins>.</li>
+<li><i>Throws:</i> As specified in Error reporting (27.5.6.5).</li>
+<li>[<i>Note:</i> A postcondition of <code>last_write_time(p) ==
+  new_time</code> is not specified since it might not hold for file systems
+  with coarse time granularity. — <i>end note</i>]</li>
+</ul>
+</blockquote>
+
+<p>Revise [fs.op.permissions] as follows:</p>
+
+<blockquote class="std">
+<pre class="function">void permissions(const path&amp; p, perms prms);
+void permissions(const path&amp; p, perms prms, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>!((prms &amp; prms::add_perms) != perms::none&lt;br&gt;
+  &amp;&amp; (prms &amp; perms::remove_perms) != perms::none)</code>.</li>
+<li><i>Effects:</i> <del>Applies the effective permissions bits from
+  <code>prms</code> to the file <code>p</code> resolves to, as if by POSIX
+  <code>fchmodat()</code>. The effective permission bits are determined
+  as specified in Table 150.
+  <table>
+  <caption>Table 150 — Effects of permission bits</caption>
+  <tbody><tr>
+    <th>Bits present in <code>prms</code></th>
+    <th>Effective bits applied</th>
+  </tr>
+  <tr>
+    <td>Neither <code>add_perms</code> nor <code>remove_perms</code></td>
+    <td><code>prms &amp;&amp; perms::mask</code></td>
+  </tr>
+  <tr>
+    <td><code>add_perms</code></td>
+    <td><code>status(p).permissions() | (prms &amp; perms::mask)</code></td>
+  </tr>
+  <tr>
+    <td><code>remove_perms</code></td>
+    <td><code>status(p).permissions() &amp; (prms &amp; perms::mask)
+  </code></td></tr>
+  </tbody></table>
+  </del><ins>Invokes
+  <code>current_filesystem.load()-&gt;permissions(p, prms, ec)</code> and
+  handles any errors as specified in Error reporting (27.10.7).</ins>
+  </li>
+<li><del>[<i>Note:</i> Conceptually permissions are viewed as bits, but the
+  actual implementation may use some other mechanism. — <i>end note</i>]
+  </del></li>
+<li><i>Throws:</i> As specified in Error reporting (27.5.6.5).</li>
+</ul>
+</blockquote>
+
+<p>Revise [fs.op.read_symlink] as follows:</p>
+
+<blockquote class="std">
+<pre class="function">path read_symlink(const path&amp; p);
+path read_symlink(const path&amp; p, error_code&amp; ec);
+</pre>
+<ul class="function">
+<li><ins><i>Effects:</i> Invokes
+  <code>current_filesystem.load()-&gt;read_symlink(p, ec)</code> and handles
+  any errors as specified in Error reporting (27.10.7).</ins></li>
+<li><i>Returns:</i> <del>If <code>p</code> resolves to a symbolic link, a
+  <code>path</code> object containing the contents of that symbolic link.
+  The signature with argument <code>ec</code> returns <code>path()</code> if
+  an error occurs.</del> <ins>The return value of the
+  <code>read_symlink()</code> member call.</ins></li>
+<li><i>Throws:</i> As specified in Error reporting (27.5.6.5). [<i>Note:</i>
+  It is an error if <code>p</code> does not resolve to a symbolic link.
+  — <i>end note</i>]</li>
+</ul>
+</blockquote>
+
+<p>Revise [fs.op.remove] as follows:</p>
+
+<blockquote class="std">
+<pre class="function">bool remove(const path&amp; p);
+bool remove(const path&amp; p, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Effects:</i> <del>If <code>exists(symlink_status(p,ec))</code>, it is
+  removed as if by POSIX <code>remove()</code></del> <ins>Invokes
+  <code>current_filesystem.load()-&gt;remove(p, ec)</code> and handles any
+  errors as specified in Error reporting (27.10.7)</ins>.</li>
+<li><del>[<i>Note:</i> A symbolic link is itself removed, rather than the file
+  it resolves to being removed. — <i>end note</i>]</del></li>
+<li><del><i>Postcondition:</i> <code>!exists(symlink_status(p))</code>.</del>
+  </li>
+<li><i>Returns:</i> <del><code>false</code> if <code>p</code> did not exist,
+  otherwise <code>true</code>. The signature with argument
+  <code>ec</code> returns <code>false</code> if an error occurs.</del>
+  <ins>The return value of the <code>remove()</code> member call</ins></li>
+<li><i>Throws:</i> As specified in Error reporting (27.5.6.5).</li>
+</ul>
+</blockquote>
+
+<p>Revise [fs.op.rename] as follows:</p>
+
+<blockquote class="std">
+<pre class="function">void rename(const path&amp; old_p, const path&amp; new_p);
+void rename(const path&amp; old_p, const path&amp; new_p, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Effects:</i> <del>Renames <code>old_p</code> to <code>new_p</code>, as
+  if by POSIX <code>rename()</code></del> <ins>Invokes
+  <code>current_filesystem.load()-&gt;rename(old_p, new_p, ec)</code> and
+  handles any errors as specified in Error reporting (27.10.7)</ins>.</li>
+<li><del>[<i>Note:</i> If <code>old_p</code> and <code>new_p</code> resolve to
+  the same existing file, no action is taken. Otherwise, if <code>new_p</code>
+  resolves to an existing non-directory file, it is removed, while if
+  <code>new_p</code> resolves to an existing directory, it is removed if empty
+  on POSIX compliant operating systems but is an error on some other operating
+  systems. A symbolic link is itself renamed, rather than the file it resolves
+  to being renamed. — <i>end note</i>]</del></li>
+<li><i>Throws:</i> As specified in Error reporting (27.5.6.5).</li>
+</ul>
+</blockquote>
+
+<p>Revise [fs.op.resize_file] as follows:</p>
+
+<blockquote class="std">
+<pre class="function">void resize_file(const path&amp; p, uintmax_t new_size);
+void resize_file(const path&amp; p, uintmax_t new_size, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><ins><i>Effects:</i> Invokes
+  <code>current_filesystem.load()-&gt;resize_file(p, new_size, ec)</code> and
+  handles any errors as specified in Error reporting (27.10.7).</ins></li>
+<li><del><i>Postcondition:</i> <code>file_size() == new_size</code>.</del></li>
+<li><i>Throws:</i> As specified in Error reporting (27.5.6.5).</li>
+<li><del><i>Remarks:</i> Achieves its postconditions as if by POSIX
+  <code>truncate()</code>.</del></li>
+</ul>
+</blockquote>
+
+<p>Revise [fs.op.space] as follows:</p>
+
+<blockquote class="std">
+<pre class="function">space_info space(const path&amp; p);
+space_info space(const path&amp; p, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><ins><i>Effects:</i> Invokes
+  <code>current_filesystem.load()-&gt;space(p, ec)</code> and handles any
+  errors as specified in Error reporting (27.10.7).</ins></li>
+<li><i>Returns:</i> <del>An object of type <code>space_info</code>. The value
+  of the <code>space_info</code> object is determined as if by using POSIX
+  <code>statvfs</code> to obtain a POSIX <code>struct statvfs</code>, and
+  then multiplying its <code>f_blocks</code>, <code>f_bfree</code>, and
+  <code>f_bavail</code> members by its <code>f_frsize</code> member, and
+  assigning the results to the <code>capacity</code>, <code>free</code>, and
+  <code>available</code> members respectively. Any members for which the
+  value cannot be determined shall be set to
+  <code>static_cast&lt;uintmax_t&gt;(-1)</code>. For the signature with
+  argument <code>ec</code>, all members are set to
+  <code>static_cast&lt;uintmax_t&gt;(-1)</code> if an error occurs.</del>
+  <ins>The return value of the <code>space()</code> member call.</ins></li>
+<li><i>Throws:</i> As specified in Error reporting (27.5.6.5).</li>
+<li><del><i>Remarks:</i> The value of member
+  <code>space_info::available</code> is operating system dependent.
+  [<i>Note:</i> <code>available</code> may be less than <code>free</code>.
+  — <i>end note</i>]</del></li>
+</ul>
+</blockquote>
+
+<p>Revise [fs.op.status] as follows:</p>
+
+<blockquote class="std">
+<pre class="function">file_status status(const path&amp; p);
+</pre>
+<ul class="function">
+<li><i>Effects:</i> As if:
+  <pre>error_code ec;
+file_status result = status(p, ec);
+if (result == file_type::none)
+  throw filesystem_error(<i>implementation-supplied-message</i> , p, ec);
+return result;
+</pre></li>
+<li><i>Returns:</i> See above.</li>
+<li><i>Throws:</i> <code>filesystem_error</code> [<i>Note:</i>
+  <code>result</code> values of <code>file_status(file_type::not_found)</code>
+  and <code>file_status(file_type::unknown)</code> are not considered
+  failures and do not cause an exception to be thrown. — <i>end note</i>]
+  </li>
+</ul>
+
+<pre class="function">file_status status(const path&amp; p, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Effects:</i> <del>If possible, determines the attributes of the file
+  <code>p</code> resolves to, as if by POSIX <code>stat()</code>.
+  If, during attribute determination, the underlying file system API reports
+  an error, sets <code>ec</code> to indicate the specific error reported.
+  Otherwise, <code>ec.clear()</code>.</del> <ins>Equivalent to
+  <code>return current_filesystem.load()-&gt;status(p, ec);</code>.</ins></li>
+<li><del>[<i>Note:</i> This allows users to inspect the specifics of
+  underlying API errors even when the value returned by <code>status()</code>
+  is not <code>file_status(file_type::none)</code>. — <i>end note</i>]
+  </del></li>
+<li><del><i>Returns:</i> If <code>ec != error_code()</code>:
+  <ul>
+  <li>If the specific error indicates that <code>p</code> cannot be resolved
+    because some element of the path does not exist, return
+    <code>file_status(file_type::not_found)</code>.</li>
+  <li>Otherwise, if the specific error indicates that <code>p</code> can be
+    resolved but the attributes cannot be determined, return
+    <code>file_status(file_type::unknown)</code>.</li>
+  <li>Otherwise, return <code>file_status(file_type::none)</code>.</li>
+  </ul>
+  <p>[<i>Note:</i> These semantics distinguish between <code>p</code> being
+  known not to exist, <code>p</code> existing but not being able to
+  determine its attributes, and there being an error that prevents even
+  knowing if <code>p</code> exists. These distinctions are important to some
+  use cases. — <i>end note</i>]</p>
+  <p>Otherwise,
+  </p><ul>
+  <li>If the attributes indicate a regular file, as if by POSIX
+    <code>S_ISREG</code>, return
+    <code>file_status(file_type::regular)</code>. [<i>Note:</i>
+    <code>file_type::regular</code> implies appropriate
+    <code>&lt;fstream&gt;</code> operations would succeed, assuming no
+    hardware, permission, access, or file system race errors. Lack of
+    <code>file_type::regular</code> does not necessarily imply
+    <code>&lt;fstream&gt;</code> operations would fail on a directory. —
+    <i>end note</i>]</li>
+  <li>Otherwise, if the attributes indicate a directory, as if by POSIX
+    <code>S_ISDIR</code>, return
+    <code>file_status(file_type::directory)</code>. [<i>Note:</i>
+    <code>file_type::directory</code> implies
+    <code>directory_iterator(p)</code> would succeed. — <i>end note</i>]
+    </li>
+  <li>Otherwise, if the attributes indicate a block special file, as if
+    by POSIX <code>S_ISBLK</code>, return
+    <code>file_status(file_type::block)</code>.</li>
+  <li>Otherwise, if the attributes indicate a character special file, as
+    if by POSIX <code>S_ISCHR</code>, return
+    <code>file_status(file_type::character)</code>.</li>
+  <li>Otherwise, if the attributes indicate a fifo or pipe file, as if by
+    POSIX <code>S_ISFIFO</code>, return
+    <code>file_status(file_type::fifo)</code>.</li>
+  <li>Otherwise, if the attributes indicate a socket, as if by POSIX
+    <code>S_ISSOCK</code>, return
+    <code>file_status(file_type::socket)</code>.</li>
+  <li>Otherwise, return <code>file_status(file_type::unknown)</code>.
+  </li></ul><p></p></del></li>
+<li><del><i>Remarks:</i> If a symbolic link is encountered during pathname
+  resolution, pathname resolution continues using the contents of the
+  symbolic link.</del></li>
+</ul>
+</blockquote>
+
+<p>Revise [fs.op.symlink_status] as follows:</p>
+
+<blockquote class="std">
+<pre class="function">file_status symlink_status(const path&amp; p);
+</pre>
+<ins>
+<ul class="function">
+<li><i>Effects:</i> As if:
+<pre>error_code ec;
+file_status result = status_symlink(p, ec);
+if (result == file_type::none)
+  throw filesystem_error(<i>implementation-supplied-message</i>, p, ec);
+return result;
+</pre></li>
+<li><i>Returns:</i> See above.</li>
+<li><i>Throws:</i> <code>filesystem_error</code> [<i>Note:</i>
+  <code>result</code> values of <code>file_status(file_type::not_found)</code>
+  and <code>file_status(file_type::unknown)</code> are not considered
+  failures and do not cause an exception to be thrown. — <i>end note</i>]
+  </li>
+</ul>
+</ins>
+
+<pre class="function">file_status symlink_status(const path&amp; p, error_code&amp; ec) noexcept;
+</pre>
+<ul class="function">
+<li><i>Effects:</i> <del>Same as status(), above, except that the attributes
+  of <code>p</code> are determined as if by POSIX <code>lstat()</code></del>
+  <ins>Equivalent to
+  <code>return current_filesystem.load()-&gt;symlink_status(p, ec)</code>
+  </ins>.</li>
+<li><del><i>Returns:</i> Same as status(), above, except that if the
+  attributes indicate a symbolic link, as if by POSIX <code>S_ISLNK</code>,
+  return <code>file_status(file_type::symlink)</code> The signature with
+  argument <code>ec</code> returns <code>file_status(file_type::none)</code>
+  if an error occurs.</del></li>
+<li><del><i>Remarks:</i> Pathname resolution terminates if <code>p</code>
+  names a symbolic link.</del></li>
+<li><del><i>Throws:</i> As specified in Error reporting (27.5.6.5).</del></li>
+</ul>
+</blockquote>
+
+<p>Revise [fs.op.system_complete] as follows:</p>
+
+<blockquote class="std">
+<pre class="function">path system_complete(const path&amp; p);
+path system_complete(const path&amp; p, error_code&amp; ec);
+</pre>
+<ul class="function">
+<li><i>Effects:</i> <del>Composes an absolute path from <code>p</code>, using
+  the same rules used by the operating system to resolve a path passed as the
+  filename argument to standard library open functions</del> <ins>Invokes
+  <code>current_filesystem.load()-&gt;system_complete(p, ec)</code> and handles
+  any errors as specified in Error reporting (27.10.7)</ins>.</li>
+<li><i>Returns:</i> <del>The composed path. The signature with argument
+  <code>ec</code> returns <code>path()</code> if an error occurs.</del>
+  <ins>The return value of the <code>system_complete()</code> member
+  call.</ins></li>
+<li><del><i>Postcondition:</i> For the returned path, <code>rp</code>,
+  <code>rp.is_absolute()</code> is true.</del></li>
+<li><i>Throws:</i> As specified in Error reporting (27.5.6.5).</li>
+<li><del>[<i>Example:</i> For POSIX based operating systems,
+  <code>system_complete(p)</code> has the same semantics as
+  <code>absolute(p, current_path())</code>.</del></li>
+<li><del>For Windows based operating systems, <code>system_complete(p)</code>
+  has the same semantics as <code>absolute(p, current_path())</code> if
+  <code>p.is_absolute() || !p.has_root_name()</code> or <code>p</code> and
+  <code>base</code> have the same <code>root_name()</code>. Otherwise it acts
+  like <code>absolute(p, cwd)</code> is the current directory for the
+  <code>p.root_name()</code> drive. This will be the current directory for
+  that drive the last time it was set, and thus may be residue left over from
+  a prior program run by the command processor. Although these semantics are
+  useful, they may be surprising. — <i>end example</i>]</del></li>
+</ul>
+</blockquote>
+
+<p>Revise [fs.op.temp_dir_path] as follows:</p>
+
+<blockquote class="std">
+<pre class="function">path temp_directory_path();
+path temp_directory_path(error_code&amp; ec);
+</pre>
+<ul class="function">
+<li><ins><i>Effects:</i> Invokes
+  <code>current_filesystem.load()-&gt;temp_directory_path(ec)</code> and
+  handles any errors as specified in Error reporting (27.10.7).</ins></li>
+<li><i>Returns:</i> <del>An unspecifed directory path suitable for temporary
+  files. An error shall be reported if <code>!exists(p) ||
+  !is_directory(p)</code>, where <code>p</code> is the path to be returned.
+  The signature with argument <code>ec</code> returns <code>path()</code> if
+  an error occurs.</del> <ins>The return value of the
+  <code>temp_directory_path()</code> member call.</ins></li>
+<li><i>Throws:</i> As specified in Error reporting (27.5.6.5).</li>
+<li><del>[<i>Example:</i> For POSIX based operating systems, an implementation
+  might return the path supplied by the first environment variable found in
+  the list TMPDIR, TMP, TEMP, TEMPDIR, or if none of these are found,
+  <code>"/tmp"</code>.</del></li>
+<li><del>For Windows based operating systems, an implementation might return
+  the path reported by the Windows <code>GetTempPath</code> API function.
+  — <i>end note</i>]</del></li>
+</ul>
+</blockquote>
+
+
+</body></html>

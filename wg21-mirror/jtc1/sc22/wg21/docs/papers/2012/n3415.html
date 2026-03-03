@@ -1,0 +1,693 @@
+<html>
+<head><title>N3415 - A Database Access Library</title></head>
+<body>
+<table border=0>
+<tr>
+  <td><b>Doc No:</b></td>
+  <td>N3415 = 12-0105</td>
+</tr>
+<tr>
+  <td><b>Date:</b></td>
+  <td>2012-09-13</td>
+</tr>
+<tr>
+  <td><b>Reply to:</b>&nbsp;</td>
+  <td>Bill Seymour &lt;stdbill<tt>.</tt>h<sup>@</sup>pobox<tt>.</tt>com&gt;</td>
+</tr>
+</table>
+<p><hr size=5>
+<center>
+<h2>A Database Access Library</h2>
+<h3>Bill Seymour<br>2012-09-13</h3>
+</center>
+<hr size=5>
+<h2>Abstract</h2>
+
+One feature that some programming languages have, usually as part of
+an associated library, is some mechanism for accessing SQL databases.
+This paper begins to explore the design of such a library for C++.
+
+<p>As this is probably not something that we would want to require of every standard library
+implementation, this library is proposed for a Technical Report (the former Type&nbsp;III TR)
+rather than a Technical Specification (n&eacute;e Type&nbsp;II TR).
+
+<p>One possible design might be something that looks like the
+<nobr><tt>java.sql.*</tt></nobr> stuff; but it seems like we can do
+better than that in C++.  In particular, we can probably have result sets
+that look like collections and cursors that look like iterators.
+
+<p>In general, constructors and destructors are not shown below unless there&rsquo;s
+something interesting about them.
+
+<p>The author will ask &ldquo;What&rsquo;s your interest?&rdquo; in Portland;
+and he&rsquo;ll have a working model ready for Bristol if he&rsquo;s encouraged
+to build one.
+
+<p><hr size=5>
+<h2>Connecting to a database</h2>
+<pre>
+class connection
+{
+public:
+    <a href="#ctor">connection</a>(<a name="arg4ctor">const</a> std::string&amp; <i><a href="#proto">protocol</a></i>,
+               const std::string&amp; <i>database</i>,
+               const std::string&amp; <i>user_id</i>,
+               const std::string&amp; <i>password</i>);
+
+    <a href="#defctor">connection</a><a name="arg0ctor">()</a>;
+
+    bool <a href="#features">has_scrolling_cursors</a><a name="has">()</a> const noexcept;
+
+    void <a href="#commit">commit</a><a name="trans">()</a>;
+    void <a href="#commit">rollback</a>();
+
+    bool <a href="#autocom">auto_commit</a><a name="autooff">()</a> const noexcept;
+    bool <a href="#autocom">auto_commit</a>(bool) noexcept;
+};
+</pre>
+
+<p><a name="ctor">At a minimum,</a> we&rsquo;ll want to be able to specify
+<a href="#arg4ctor">which database we want to connect to and supply a user ID and password</a>.
+
+<p><a name="proto">The constructor&rsquo;s</a> <a href="#arg4ctor"><tt><i>protocol</i></tt></a> argument
+specifies the mechanism for communicating with the database; and acceptable strings
+should include at least <tt>"SQL/CLI"</tt> which specifies the mechanism described
+in <nobr>ISO/IEC&nbsp;9075-3.</nobr>  (Most folks call this &ldquo;ODBC&rdquo;,
+but since we&rsquo;re an ISO working group, we refer to the ISO standard.)
+Additional implementation-defined protocol strings, e.g., <tt>"Oracle</tt>
+<tt>Call</tt> <tt>Interface"</tt>, may be supported.
+
+<p>What goes in the <a href="#arg4ctor"><tt><i>database</i></tt></a> argument is implementation-defined
+and probably depends on the protocol.  For example, if the protocol is
+<tt>"Oracle</tt> <tt>Call</tt> <tt>Interface"</tt>, <tt><i>database</i></tt>
+might be a string that gets looked up in a file called <i>tnsnames.ora</i>.
+
+<p><a name="defctor">The</a> <a href="#arg0ctor">default constructor</a> will create
+a <tt>connection</tt> object from some sort of connection pool.  This needs to be
+explored further.
+
+<p><a name="features">In general,</a> we won&rsquo;t know what features
+we have available until after we&rsquo;ve connected to a particular database.
+The <a href="#has"><nobr><tt>has_scrolling_cursors()</tt></nobr></a>
+member function is shown as an example of one thing we might need to discover at
+run time.  There could be others.
+
+<p><a name="commit">Transaction control</a> typically happens at the connection level, not the statement
+level; so <a href="#trans"><nobr><tt>commit()</tt></nobr> and <nobr><tt>rollback()</tt></nobr></a> are
+members of this class.
+
+<p><a name="autocom">Some databases have an &ldquo;auto-commit&rdquo; feature</a> that treats every
+statement as a separate transaction.  At a minimum, we need <a href="#autooff">a way to turn that off</a>.
+
+<p>Note that, unlike a <nobr><tt>java.sql.Connection</tt>,</nobr> this class
+is not a statement factory.  Rather, a <tt>connection</tt> object will be
+passed by reference to a <tt>statement</tt> constructor.  (The idea is that
+we don&rsquo;t want several different factory methods for creating different
+kinds of statements since that&rsquo;s not extensible.)
+
+<p><hr size=5>
+<h2>Executing SQL statements</h2>
+
+<p><hr size=3>
+<h3>A base class for statements:</h3>
+<pre>
+class statement
+{
+public:
+    typedef /* some unsigned integer type */ position_type;
+    typedef /* some integer type, possibly bool */ <a href="#indic">indicator</a>;
+
+    explicit statement(connection&amp;);
+    <a name="arg2ctor">statement</a>(connection&amp;, const std::string&amp; <i><a href="#sqlarg">sql</a></i>);
+
+    virtual ~statement() noexcept;
+
+    virtual void <a name="setsql">set_sql</a>(const std::string&amp; <i><a href="#sqlarg">sql</a></i>);
+
+    <a name="prepdef">void</a> <a href="#prep">prepare</a>();
+    void <a href="#prep">prepare</a>(const std::string&amp; <i><a href="#sqlarg">sql</a></i>)
+    {
+        set_sql(<i>sql</i>);
+        prepare();
+    }
+
+    <a name="setdef">template&lt;class T&gt;</a> void <a href="#set">set</a>(position_type <i>pos</i>, const T&amp; <i>val</i>);
+    <a name="setnull">template&lt;class T&gt;</a> void <a href="#set">set_null</a>(position_type <i>pos</i>);
+    template&lt;class T&gt; void <a href="#set">set_null</a>(position_type <i>pos</i>, const T&amp;);
+
+    <a name="binddef">template&lt;class T&gt;</a> void <a href="#bind">bind</a>(position_type <i>pos</i>, T* <i>val</i>, <a href="#indic">indicator</a>* <i>ind</i> = 0);
+    <a name="nonbinddef">void</a> <a href="#notempbind">bind</a>(position_type <i>pos</i>, char* <i>val</i>, std::size_t <i>siz</i>, <a href="#indic">indicator</a>* <i>ind</i> = 0);
+
+    void execute();
+    void <a href="exec">execute</a>(const std::string&amp; <i><a href="#sqlarg">sql</a></i>)
+    {
+        set_sql(<i>sql</i>);
+        execute();
+    }
+};
+</pre>
+
+This class provides all the functionality required to execute SQL statements
+that don&rsquo;t return results; and statements that do return results
+can be derived from this.  (Alternatively, this could be an abstract base
+class and we could derive from it a class called, say, <tt>ddl_statement</tt>,
+that provides no additional functionality; but that seems needlessly fussy.)
+
+<p>We use &ldquo;dynamic SQL&rdquo;; that is, the SQL statement that we intend
+to execute is just a string that gets interpreted by the database engine at run time.
+That&rsquo;s fundamentally how ODBC and similar connection mechanisms work; and we
+can&rsquo;t change that even though we might want to.
+
+<p><a name="sqlarg">The SQL can be specified</a> eagerly at construction time
+<nobr>(<tt><a href="arg2ctor">statement(connection,string)</a></tt>),</nobr>
+lazily at execution time <nobr>(<tt><a href="#exec">execute(string)</a></tt>),</nobr>
+or at any time in between <nobr>(<tt><a href="#setsql">set_sql(string)</a></tt>).</nobr>
+Furthermore, the SQL can change between executions.
+
+<p><a name="prep">The SQL statement can have placeholders</a> for data that change between executions;
+and such statements typically need to be &ldquo;<a href="#prepdef">prepared</a>&rdquo;.
+Exactly what that means depends on the database engine.
+
+<p><a name="set">After such statements have been prepared,</a> but before they&rsquo;re executed,
+the placeholders need to be replaced with the actual data; and that&rsquo;s what
+<nobr><tt><a href="#setdef">set(position_type,</tt>&nbsp;<tt>const</tt>&nbsp;<tt>T&amp;)</a></tt></nobr> does.
+This template is the equivalent of the Java <nobr><tt>PreparedStatement</tt></nobr>
+zoo of <nobr><tt>setString()</tt>,</nobr> <nobr><tt>setInt()</tt>,</nobr> etc.
+The first argument is an ordinal that specifies which placeholder we&rsquo;re setting.
+(The usual practice, even in Java, is for these ordinals to be <nobr>1-based,</nobr>
+not <nobr>0-based.</nobr>  Is that what we want to do?)
+
+<p>We sometimes need to set placeholders to a null value; and that&rsquo;s what
+the <tt><a href="#setnull">set_null</a></tt> template does.  The second argument in the two-argument version
+isn&rsquo;t used for anything except inferring the template argument.
+
+<p><a name="bind">Both placeholders and returned values can be hooked to program variables.</a>
+This is variously called &ldquo;binding&rdquo; or &ldquo;describing&rdquo;
+depending on whether you&rsquo;re talking about input or output data.
+Both are just called &ldquo;binding&rdquo; in this paper.
+
+<p>For example, let&rsquo;s say I have a placeholder of some integer type.
+Rather than calling <nobr><tt>set(1,</tt>&nbsp;<tt><i>my_int_value</i>)</tt></nobr>
+before each execution of the SQL statement, between preparing the statement
+and the first execution I could say,
+<pre>
+    int val;
+    // ...
+    <i>my_statement</i>.<a href="#binddef">bind(1, &amp;val)</a>;
+</pre>
+and then just assign a value to <tt>val</tt> before each execution.
+
+<p>This works for data returned by a query as well:&nbsp;&nbsp;the bound variable
+will have the new value after each fetch of a query&rsquo;s cursor.  (More about
+queries and cursors later.)
+
+<p><a name="indic">There&rsquo;s a complication,</a> however, if the value can be null.  Each
+bound program variable optionally has associated with it an &ldquo;indicator
+variable&rdquo;, an integer that serves as a boolean indicating whether
+the bound variable contains real data or rather should be considered null.
+
+<p><a name="notempbind">We&rsquo;ll also have</a> <a href="#nonbinddef">a non-template <nobr><tt>bind()</tt></nobr></a>
+that binds to an array of <tt>char</tt> of specified size.  This could be
+useful for LOBs and BLOBs.
+
+<p>Note that this paper doesn&rsquo;t address an interesting problem:&nbsp;&nbsp;inferring
+SQL types given C++ types.  That might not even be possible in general and might require
+<nobr><tt>enum</tt>s</nobr> or other integer constants that can be used to specify
+SQL types.  (There&rsquo;s probably a reason why other database access libraries
+have them.)
+
+<p><hr size=3>
+<h3>Derived statement types:</h3>
+
+Statements that return results can be derived from the <tt>statement</tt> class.
+They differ in the kind of results that they return.
+
+<p>Do we want to do this with template specialization rather than subclassing?
+(The template argument could be the result type with <tt>void</tt> being
+a reasonable choice.)
+
+<p>If we do use template specialization and have something like:
+<pre>
+    typedef basic_statement&lt;void&gt; ddl_statement;
+</pre>
+should we move the <nobr><tt>execute()</tt></nobr> functions to the derived
+classes?  They could return the results (like in Java) rather than having
+separate <nobr><tt>results()</tt></nobr> functions as shown below.
+
+<p>On the other hand, having separate <nobr><tt>results()</tt></nobr> functions
+would allow deferring construction of a result, which might be expensive,
+to when the user actually asks for it.  Note that the user might not
+ask for it at all, and so lazy evaluation seems appropriate.
+
+<p><hr>
+<h4>Data manipulation statements:</h4>
+<pre>
+class dml_statement : public statement
+{
+public:
+    explicit dml_statement(connection&amp;);
+    dml_statement(connection&amp;, const std::string&amp; <i>sql</i>);
+
+    typedef std::size_t result_type;
+    result_type results() const;
+};
+</pre>
+
+These are <tt>INSERT</tt>, <tt>UPDATE</tt> and <tt>DELETE</tt> statements.
+They return the number of rows affected.  If you don&rsquo;t care how many
+rows are affected, you can just use an object of the <tt>statement</tt> type.
+
+<p><hr>
+<h4>Procedure and function calls:</h4>
+<pre>
+class row;
+
+class call_statement : public statement
+{
+public:
+    explicit call_statement(connection&amp;);
+    call_statement(connection&amp;, const std::string&amp; <i>sql</i>);
+
+    void set_sql(const std::string&amp;);
+
+    typedef row result_type;
+    result_type results();
+};
+</pre>
+
+Some databases allow storing procedures and functions, typically written
+in some vendor-lock-in language, for execution by the database itself;
+and such routines can return zero or more data elements.  (A <tt>row</tt>
+is a possibly empty collection of data elements.  More about that shortly.)
+
+<p>An overload of <nobr><tt>statement::set_sql()</tt></nobr> is shown
+because the actual syntax for calling stored routines might not be the same
+for all database engines, and so some translation might be needed.
+
+<p>If the routine doesn&rsquo;t return any values, you <i>might</i> be able
+to just use a <tt>statement</tt>.  It depends on whether we need to do any
+translation of the string that contains the call.
+
+<p>If the database doesn&rsquo;t support such stored routines, the constructor
+should probably throw an exception.
+
+<p><hr>
+<h4>Queries:</h4>
+<pre>
+template&lt;class Cursor&gt; class table;
+
+template&lt;class Cursor&gt;
+class query : public statement
+{
+public:
+    explicit query(connection&amp;);
+    query(connection&amp;, const std::string&amp; <i>sql</i>);
+
+    void prefetch_count(std::size_t) noexcept;
+
+    typedef table&lt;Cursor&gt; result_type;
+    result_type results();
+};
+</pre>
+
+These are <tt>SELECT</tt> statements.  They return whole tables.
+(A <tt>table</tt> is a possibly empty collection of <tt>row</tt>s.
+More about that shortly.)
+
+<p>Some databases allow specifying the maximum number of rows that will be
+returned in a single burst of communication from the database box.
+The <nobr><tt>prefetch_count(size_t)</tt></nobr> function sets that number.
+If the database doesn&rsquo;t support setting a prefetch count,
+this function quietly does nothing.  (There&rsquo;s no reason
+to fail since the statement will still work just fine.  It might not happen
+as quickly as the user would like, but there&rsquo;s nothing that can be done
+about that anyway.)
+
+<p><hr size=5>
+<h2>Getting query results</h2>
+<hr size=3>
+<h3>One datum:</h3>
+<pre>
+class column
+{
+public:
+    // copyable, moveable, swappable
+
+    bool is_null() const noexcept;
+
+    template&lt;class T&gt; void get(T&amp;) const;
+    template&lt;class T&gt; T get() const;
+};
+
+bool operator==(const column&amp;, const column&amp;);
+bool operator!=(const column&amp;, const column&amp;);
+bool operator&lt; (const column&amp;, const column&amp;);
+bool operator&gt; (const column&amp;, const column&amp;);
+bool operator&lt;=(const column&amp;, const column&amp;);
+bool operator&gt;=(const column&amp;, const column&amp;);
+</pre>
+
+This is a kind of &ldquo;any&rdquo; type.  Unfortunately, we really don&rsquo;t
+know the actual type until run time.
+
+<p>They need to be copyable and moveable so that they can be
+stored in standard-library containers.
+
+<p>The <tt>get</tt> templates are the equivalent of a Java <tt>ResultSet</tt>&rsquo;s
+<nobr><tt>getString()</tt>,</nobr> <nobr><tt>getInt()</tt>,</nobr> etc.
+By making these members of the <tt>column</tt>, instead of members of some
+collection of <tt>column</tt>s, we eliminate the argument that specifies
+which <tt>column</tt> we&rsquo;re talking about.
+
+<p>We can have just these two member templates instead of a whole zoo
+of <nobr><tt>get<i>Foo</i>()</tt></nobr> functions like in Java.  The idea is that
+<tt>T</tt> could be any fundamental type, <tt>std::string</tt>,
+and maybe <tt>std::crono::duration</tt> and <tt>std::crono::time_point</tt>
+or similar types that might be better for holding civil times (and that
+understand time zones).
+
+<p>(We should probably also support LOBs and BLOBs somehow, but this author
+has no experience with them and doesn&rsquo;t understand the issues.)
+
+<p>Note that, in the database world, &ldquo;null&rdquo; is a possible value
+for anything; and any operation involving a null value yields a null.
+This is a problem with comparisons and is usually resolved by saying
+that any comparison involving a null is <tt>false</tt>.  Do we want to
+mimic that behavior?  It can sometimes have surprising results.  (For
+example, <tt>==</tt> and <tt>!=</tt> can both be false.)
+
+<p><hr size=3>
+<h3>A collection of <tt>column</tt>s:</h3>
+A <tt>row</tt> looks like a <tt>const</tt>&nbsp;<tt>vector&lt;column&gt;</tt>
+that has the additional behavior of allowing retrieval of a particular <tt>column</tt>
+by name as well as by index.  (Note the <nobr><tt>operator[](string)</tt></nobr>
+and <nobr><tt>at(string)</tt></nobr> members).
+
+<p>At a minimum, it needs to be moveable since <nobr><tt>call_statement::results()</tt></nobr>
+returns one of these by value.
+
+<p><pre>
+class row
+{
+public:
+    typedef <i>implementation-detail</i> cols; // the underlying container type
+
+    typedef cols::size_type size_type;
+    typedef cols::value_type value_type;
+    typedef cols::const_reference reference;
+    typedef cols::const_reference const_reference;
+
+    // copyable, moveable, swappable
+
+    size_type size() const;
+    bool empty() const;
+
+    reference operator[](size_type <i>index</i>) const;
+    reference at(size_type <i>index</i>) const;
+
+    reference operator[](const std::string&amp; <i>name</i>) const;
+    reference at(const std::string&amp; <i>name</i>) const;
+
+  //
+  // And just in case anybody actually cares:
+  //
+
+    typedef cols::difference_type difference_type;
+    typedef cols::const_pointer pointer;
+    typedef cols::const_pointer const_pointer;
+    typedef cols::const_iterator iterator;
+    typedef cols::const_iterator const_iterator;
+    typedef cols::const_reverse_iterator reverse_iterator;
+    typedef cols::const_reverse_iterator const_reverse_iterator;
+
+    reference front() const;
+    reference back() const;
+
+    iterator begin() const;
+    iterator end() const;
+    reverse_iterator rbegin() const;
+    reverse_iterator rend() const;
+
+    const_iterator cbegin() const;
+    const_iterator cend() const;
+    const_reverse_iterator crbegin() const;
+    const_reverse_iterator crend() const;
+};
+
+bool operator==(const row&amp;, const row&amp;);
+bool operator!=(const row&amp;, const row&amp;);
+bool operator< (const row&amp;, const row&amp;);
+bool operator> (const row&amp;, const row&amp;);
+bool operator<=(const row&amp;, const row&amp;);
+bool operator>=(const row&amp;, const row&amp;);
+</pre>
+
+<p><a name="table"><hr size=3></a>
+<h3>A collection of <tt>row</tt>s:</h3>
+
+A <tt>table</tt> is the result set that a query generates.  At a minimum, it needs to be moveable
+since <nobr><tt>query&lt;&gt;::results()</tt></nobr> returns one of these by value.
+
+<p>A <tt>table</tt> does not satisfy the requirements for a container.
+Indeed, it&rsquo;s basically just an iterator factory.
+
+<p><pre>
+template&lt;class Cursor&gt; class table
+{
+public:
+    typedef const row value_type;
+    typedef value_type* pointer;
+    typedef value_type&amp; reference;
+    typedef Cursor iterator;
+    typedef Cursor const_iterator;
+
+    // copyable, moveable, swappable
+
+    const_iterator begin() const;
+    const_iterator end() const;
+
+    const_iterator cbegin() const;
+    const_iterator cend() const;
+};
+</pre>
+Should we make it reversible?
+<pre>
+template&lt;&gt; class table&lt;<a href="#scrcur">scrolling_cursor</a>&gt;
+{
+public:
+    typedef const row value_type;
+    typedef value_type* pointer;
+    typedef value_type&amp; reference;
+    typedef scrolling_cursor iterator;
+    typedef scrolling_cursor const_iterator;
+    typedef std::reverse_iterator&lt;iterator&gt; reverse_iterator;
+    typedef std::reverse_iterator&lt;const_iterator&gt; const_reverse_iterator;
+
+    // copyable, moveable, swappable
+
+    const_iterator begin() const;
+    const_iterator end() const;
+
+    const_iterator cbegin() const;
+    const_iterator cend() const;
+
+    const_reverse_iterator rbegin() const;
+    const_reverse_iterator rend() const;
+
+    const_reverse_iterator crbegin() const;
+    const_reverse_iterator crend() const;
+};
+</pre>
+
+<p><a name="curtag"><hr size=3></a>
+<h3>Cursors:</h3>
+
+<pre>
+struct cursor_tag : public std::input_iterator_tag { };
+struct scrolling_cursor_tag : public cursor_tag { };
+</pre>
+
+Unfortunately, even a scrolling cursor, despite being able to move
+back and forth through the data, is still just an input iterator.
+The reason is that we&rsquo;re dealing with read-only data.  Furthermore,
+typically only one row is in memory at a time, and so every use
+potentially fetches a new row (very much like an <tt>istream_iterator</tt>).
+
+<p>But we can still have a <tt>scrolling_cursor_tag</tt> so that
+algorithms that want bidirectional or random-access iterators, but
+only need the moving-back-and-forth behavior, can be written to use
+<a href="#scrcur"><tt>scrolling_cursor</tt>s</a> as well.
+
+<p><a name="curbase"><hr></a>
+<h4>A base class:</h4>
+<pre>
+class cursor_base
+{
+public:
+    typedef /*   signed integer type */ difference_type;
+    typedef /* unsigned integer type */ position_type;
+    typedef const row value_type;
+    typedef value_type* pointer;
+    typedef value_type&amp; reference;
+
+    // copyable, moveable, swappable
+
+    bool fetch_next();
+
+    reference operator*() const;
+    pointer operator-&gt;() const;
+};
+
+bool operator==(const cursor_base&amp;, const cursor_base&amp;);
+bool operator!=(const cursor_base&amp;, const cursor_base&amp;);
+</pre>
+
+This is a base class into which we refactor all the stuff
+that doesn&rsquo;t depend on whether it&rsquo;s a scrolling cursor.
+
+<p><nobr><tt>fetch_next()</tt></nobr> tries to get the next row
+from the database and returns whether it was successful.
+It performs no operation (except for returning <tt>false</tt>)
+when there is no next row.
+
+<p>For two cursors, <tt>lhs</tt> and <tt>rhs</tt>,<tt> <nobr>lhs==rhs</nobr> </tt>implies
+either that both are past the end, or that both are iterating over the same
+<tt>table</tt> and have fetched the same number of <tt>row</tt>s.  As is the case
+for input iterators generally, <tt>==</tt> does not imply that <tt>*lhs</tt>
+and <tt>*rhs</tt> have the same identity.
+
+<p><a name="cur"><hr></a>
+<h4>The non-scrolling cursor:</h4>
+<pre>
+class cursor : public <a href="#curbase">cursor_base</a>
+{
+public:
+    typedef <a href="#curtag">cursor_tag</a> iterator_category;
+
+    // copyable, moveable, swappable
+
+    cursor&amp; operator++()
+    cursor  operator++(int);
+};
+</pre>
+
+Given <tt>cursor_base</tt>, all our non-scrolling cursor needs to add
+are <tt>iterator_category</tt> and the <nobr><tt>++</tt></nobr> operators.
+
+<p>Note that the copy returned by the postfix <nobr><tt>++</tt></nobr>
+might not be valid after the original is used in any way.
+
+<p><a name="scrcur"><hr></a>
+<h4>The scrolling cursor:</h4>
+<pre>
+class scrolling_cursor : public <a href="#curbase">cursor_base</a>
+{
+public:
+    typedef <a href="#curtag">scrolling_cursor_tag</a> iterator_category;
+
+    // copyable, moveable, swappable
+
+    bool fetch_prior();
+    bool fetch_first();
+    bool fetch_last();
+    bool fetch_relative(difference_type);
+    bool fetch_absolute(position_type);
+
+    scrolling_cursor&amp; operator++();
+    scrolling_cursor  operator++(int);
+
+    scrolling_cursor& operator--();
+    scrolling_cursor  operator--(int);
+
+    scrolling_cursor&amp; operator+=(difference_type);
+    scrolling_cursor&amp; operator-=(difference_type);
+
+    scrolling_cursor  operator+(difference_type) const;
+    scrolling_cursor  operator-(difference_type) const;
+    difference_type   operator-(const scrolling_cursor&amp;) const;
+
+    reference operator[](position_type); // does fetch_absolute
+};
+
+void advance(scrolling_cursor&amp;, scrolling_cursor::difference_type);
+
+scrolling_cursor::difference_type
+  distance(const scrolling_cursor&amp;, const scrolling_cursor&amp;);
+
+bool operator&lt; (const scrolling_cursor&amp;, const scrolling_cursor&amp;);
+bool operator&gt; (const scrolling_cursor&amp;, const scrolling_cursor&amp;);
+bool operator&lt;=(const scrolling_cursor&amp;, const scrolling_cursor&amp;);
+bool operator&gt;=(const scrolling_cursor&amp;, const scrolling_cursor&amp;);
+</pre>
+
+As stated before, despite the ability to move back and forth through the data,
+this is still just an input iterator:  the data is read-only, the
+<nobr><tt>[]</tt></nobr> operator modifies the iterator itself
+by actually fetching a row, and using the cursor in any way
+will invalidate copies.
+
+<p>For two <tt>scrolling_cursor</tt>s, <tt>lhs</tt> and <tt>rhs</tt>, where
+<tt>lhs</tt> most recently fetched the <nobr><i>i</i><sup>th</sup></nobr> row and
+<tt>rhs</tt> most recently fetched the <nobr><i>j</i><sup>th</sup></nobr> row,
+<tt>lhs</tt>&nbsp;<tt>&lt;</tt>&nbsp;<tt>rhs</tt> implies that both are
+iterating over the same <tt>table</tt> and <i>i</i>&nbsp;<tt>&lt;</tt>&nbsp;<i>j</i>
+(where &ldquo;past the end&rdquo; is greater than any actual <tt>row</tt>&rsquo;s
+ordinal).
+
+<p><hr size=5>
+<h2>Handling errors</h2>
+<hr size=3>
+<h3>An exception:</h3>
+<pre>
+class sql_error : public std::logic_error
+{
+    int  cd;
+    char st[6];
+public:
+    sql_error(const std::string&amp; <i>msg</i>, int <i>code</i>, const char* <i>state</i> = 0);
+    sql_error(const char* <i>msg</i>, int <i>code</i>, const char* <i>state</i> = 0);
+
+    int sqlcode() const noexcept { return cd; }
+    const char* sqlstate() const noexcept { return st; }
+    const char* errmsg() const noexcept { return logic_error::what(); }
+};
+</pre>
+
+The constructors&rsquo; third argument can be a null pointer, and defaults to a null pointer,
+for the benefit of sub-standard database engines that don&rsquo;t support <tt>SQLSTATE</tt>.
+
+<p>Since <tt>SQLSTATE</tt>, when it&rsquo;s supported at all, is always at most five characters,
+this can be implemented as a <nobr>C-style</nobr> <nobr><tt>'\0'</tt>-terminated</nobr>
+string in a <nobr><tt>char[6]</tt></nobr> without fear of causing any additional problems
+(like where to put a <tt>std::string</tt> when the problem is that we&rsquo;re
+running out of memory).
+
+<p><hr size=3>
+<h3>Low-level error messages:</h3>
+<pre>
+extern std::ostream* error_stream;
+extern std::ostream* warning_stream;
+
+bool write_error_message(const char*) noexcept;
+bool write_error_message(const std::string&amp;) noexcept;
+bool write_warning_message(const char*) noexcept;
+bool write_warning_message(const std::string&amp;) noexcept;
+</pre>
+
+This is mainly an implementation detail in the author&rsquo;s proof of
+concept (in development&hellip;probably ready for Bristol);
+but there doesn&rsquo;t seem to be any compelling reason
+to keep it secret; and the user might find it useful to control
+where error and warning messages get written.  Indeed, many users
+might want to turn off warnings entirely.
+
+<p>Both of the above pointers are initialized to <nobr><tt>&amp;std::cerr</tt></nobr>
+by default.  The user can choose to send error and/or warning messages
+to a file instead, or can turn such messages off entirely by setting either
+or both of the pointers to null.
+
+<p><hr size=5>
+Bill Seymour, &lt;stdbill<tt>.</tt>h<sup>@</sup>pobox<tt>.</tt>com&gt;
+</body>
+</html>
+ 

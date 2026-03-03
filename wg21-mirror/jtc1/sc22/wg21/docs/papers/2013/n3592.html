@@ -1,0 +1,350 @@
+<html>
+<style>
+ins {background-color:#A0FFA0}
+del {background-color:#FFA0A0}
+</style>
+<title>Alternative cancellation and data escape mechanisms for transactions</title>
+<body>
+Document Number: N3592
+<br>Date: 2013-03-15
+<br>Authors: Torvald Riegel
+<br>Project: Programming Language C++, EWG, SG5 Transactional Memory
+<br>Reply to: Torvald Riegel &lt;triegel at redhat dot com&gt;
+
+
+<h1><b>Alternative cancellation and data escape mechanisms for transactions</b></h1>
+<h2><b>What is cancellation?</b></h2>
+
+Cancellation refers to the ability to cancel the execution of an atomic transaction: When a transaction cannot or does not want to continue execution until it commits, it can stop execution and roll back the actions done so far as part of the transaction.  Conceptually, this has always been a part of transactional systems, for example to ensure failure atomicity (i.e., make sets of operations execute completely or not at all even when some of the operations might fail).  Even though Transactional Memory (TM) currently focuses primarily on using transactions for concurrency control and not failure atomicity, there are use cases for the latter too (e.g., guaranteeing program invariants in concurrent settings, or speculative execution).
+
+<p/>
+In what follows, I will describe cancellation and data escape mechanisms for transactions as specified by the <a href="https://sites.google.com/site/tmforcplusplus/C%2B%2BTransactionalConstructs-1.1.pdf">current draft specification</a> and the changes summarized in N3589.  These are supposed to replace the cancellation mechanisms in the current draft (i.e., the <code>__transaction_cancel</code> keyword and the cancel-and-throw functionality); they are <a href="#Examples">compatible</a> with the minimal exceptions proposal described in N3589.  The data escape mechanisms allow transaction to communicate data out of cancelled transactions (i.e, the data escapes the transaction's atomicity).  Also, whenever I refer to transactions, this always means atomic transactions, not the relaxed transaction variant.
+
+<p/>
+The cancellation mechanisms described here are supposed to serve as a foundation for higher-level features that make use of cancellation, such as composable forms of error recovery or more focused kinds of speculative execution.  They also try to provide cancellation with no language extensions or changes (besides a minor extension to the syntax of transaction statements); most of the functionality can be expressed as library features.  Likewise, it can be implemented in just the TM-specific implementation parts.
+
+
+<h2><b>Cancellation vs. exceptions</b></h2>
+
+At first sight, it might look like cancellation and exception handling are more or less the same.  I disagree with that, and will briefly argue in what follows that they are sufficiently different to justify having separate mechanisms for both.  The (non)difference between cancellation and exceptions, as well as when both can be safely combined, is also under heavy discussion in SG5 (see N3591 for a summary of some of these discussions), and there is no consensus so far.  Even if we should find a way to unify cancellation and exceptions, this proposal can hopefully serve as a draft specification for major parts of the semantics of cancellation.
+
+<p/>
+In a nutshell, I think that the best mental model of cancellation is to understand it as a local expression of a failure that does not necessarily specify a certain failure recovery or failure handling scheme.  In short, the transactions gives up, and doesn't execute further.  The part of the program that <em>started</em> the transaction is then responsible for ensuring forward progress: It can retry the transaction, choose another potential execution path, or fail.  Note that a cancellation "failure" does not need to be something fatal; it can also be a component that just states that it does not think that it is worthwhile to continue execution (i.e., it fails to achieve its purpose).  For example, with speculative execution, a transaction can execute as long as it thinks that this might be beneficial; if it assumes that another path might be more efficient, it can cancel itself, and the other path can then be tried to be executed.
+
+<p/>
+In contrast, exceptions are an error propagation mechanism with very precise rules how the failure should be propagated, and which parts of the program get to handle the failure first.  Catching an exception is a way to stop this propagation at a specific point in the program. Error handling schemes that align well with this kind of propagation also work well with exceptions, but handling/recovery schemes that do not have this call-chain-unwinding structure are harder to implement.
+
+<p/>
+With exceptions, the program defines what happens when an exception is thrown (i.e., defines what destructors execute during unwinding), and the invariants that the program needs or establishes during unwinding are only known to the program.  In particular, the extent to which programs roll back changes when handling exceptions can vary.  Exceptions are sometimes used as means for non-local control flow, in which case rolling back all changes during unwinding is <em>not</em> the desired behavior.  However, often it is desired to clean up after incompletely executed operations, so as to ensure invariants.  Programming this cleanup code can be tedious, and it is less likely to be well-tested code.
+
+<p/>
+Transactions and cancellation simplify such cleanup because of the atomicity guarantees that they give: when a transaction is canceled, all its operations get rolled back.  However, this also shows that we can't simply replace exceptions in legacy code with cancellation because we do not know in general which program state is supposed to be rolled back.  In turn, this also means that we cannot treat all exceptions in transactions as cancellation events; instead, we would need programmers to specify that this is safe and does not roll back more state than expected.
+
+<p/>
+Similarly, we cannot easily express cancellation as exceptions because cancellation is supposed to stop execution immediately, whereas exceptions are supposed to propagate.  If cancellation would be a normal exception, it could be intercepted by surrounding catch(...) blocks, which could prevent the transaction from being actually cancelled.
+
+<p/>
+Thus, exceptions and cancellation have differences, and one cannot easily substitute one for the other.  It could perhaps be possible to express cancellation with extensions to existing exception handling semantics, but I do not see this to yield a large benefit.  SG5 has discussed proposals that tried to make cancellation look like exceptions, and this rather lead to confusion than ease-of-use because it seemed to make people believe that cancellation would always behave like exceptions (see N3591).  Therefore, I think that it is better to provide cancellation as a separate mechanism.  This ensures that exceptions behave in a transactional context in the same way they would in a nontransactional context, which should make it easier to use existing code in transactions.
+
+<p/>
+Hans Boehm has pointed out in discussions on the SG5 reflector that explicit cancellation, for example if in the form of a separate mechanism, can by-pass existing exception handling code.  There is concern that the existing exception handling code could be the only way to make forward progress (e.g., because only it contains a fallback execution path), and that cancellation would thus not be safe to use in callbacks called from library code, and that in turn cancellation would be too error-prone.  I and other SG5 members do not share this concern.  It is certainly possible for programmers to misuse cancellation, but there are simple rules under which using cancellation is safe.  First, cancellation obviously needs to execute in a transactional context, and thus needs to be associated with some transaction.  Second, if the code that executes this transaction can make forward progress without this transaction (e.g., as in the case of speculative execution), then cancellation is safe because forward progress can be guaranteed by just the caller of the transaction.  However, if this transaction needs to finish execution, then using cancellation might not be safe.  In such a case, cancellation would cause similar problems as throwing an exception of a wrong type (i.e., so that certain exception handlers do not execute). 
+
+<p/>
+Please note that the above is not a comprehensive discussion of cancellation vs. exceptions, but a more detailed discussion would exceed the scope and purpose of this paper (which is to specify library-based cancellation and data escape mechanisms).
+
+
+<h2><b>Letting data escape from canceled transactions</b></h2>
+
+If there is more than one cause for cancellation in a transaction, it is likely that we need to communicate data about what caused the cancellation to the part of the program that started the transaction.  For example, if a failed operation leads to cancellation, we need to describe the error so that it can either be reported properly to the user, or an alternative execution path can be picked that avoids this particular error.  Note that even though the transaction rolls back completely, we often need this information to ensure forward progress.  As soon as we have to report errors, it becomes likely that this will require not just primitive types and error codes but instead one or more strings, for example.  Therefore, we need to be able let data escape from a transaction, in the sense that the memory modifications representing the data must not be rolled back when the transaction is canceled.
+
+<p/>
+We cannot just use existing copy constructors or similar under the covers because we do not know in general which of the memory writes that they execute should actually escape (e.g., reference counting or copy-on-write schemes won't work). Instead, programmers must specify this, and there are different ways to do that (see <a href="https://groups.google.com/a/isocpp.org/d/msg/tm/LI4BgXWbGWU/22KvDRqTF1cJ">this thread</a> on the SG5 reflector for further discussion). For example, one could provide an escape mechanism only for certain types (e.g., standard exception types); but which ones do we pick, and are they sufficient in practice?  Instead, I think it is best to provide both a low-level and high-level mechanism, as explained next.
+
+<h3>The low-level approach: a special escaping memcpy</h3>
+
+At the minimum, we need to read data transactionally and copy it with nontransactional (i.e., escaping) writes to some target buffer.  We can let the TM implementation provide a special memcpy function for this:
+
+<blockquote><pre>
+void* escaping_memcpy(void *dest, const void *src, size_t n);
+</pre></blockquote>
+
+<var>*src</var> is accessed like any other memory access in the transaction (i.e., it is part of the transaction).  Writes to <var>*dest</var> are different:
+<ul>
+<li>They are not guaranteed to be part of a transaction (so this should target thread-private memory, for example).  Concurrent accesses by other threads to <var>*dest</var> are a data race.
+<li>They are guaranteed to have executed before a cancellation handler runs (see below), so before cancellation of the transaction has taken place.
+<li>If the transaction aborts before it has been canceled explicitly, then any prior writes to <var>*dest</var> will be undone before the transaction restarts.
+<li>The TM implementation must ensure that <var>*dest</var> can be read transactionally by the current transaction during its whole execution.  (We could also require separation between <var>*dest</var> and <var>*src</var>, but the former is straight-forward to implement at least in STMs, and required for the high-level mechanism discussed next.)
+<li>Any transactional writes to <var>*dest</var> by this transaction result in undefined behavior.
+</ul>
+
+This mechanism allows programmers to let data escape to preallocated buffers or thread-private variables.  We do not need an inverse function (i.e., nontransactional reads and transactional writes) because we are allowed to read from <var>*dest</var> transactionally.  
+
+<h3>The allocation-based approach</h3>
+
+The disadvantage of the low-level approach is that it requires custom code to let data escape.  Also, we cannot generate such code automatically from programmer-provided copy constructors, for example, because the compiler cannot know which writes are supposed to escape.  We could require programmers and libraries to provide special escaping copy constructors that use <code>escaping_memcpy</code>, but this would add a lot of almost-duplicate code to the standard libraries.
+
+<p/>
+What we need is a concise way for programmers to specify which data should escape.  One possible way to do this is to let programmers assert that all writes to memory allocated with a special allocator escape, and only those writes.  We could either expose this special allocator and expect programmers to use it as necessary, or let the TM implementation provide two library functions that temporarily replace the default allocator in the current transaction with the special allocator:
+
+<blockquote><pre>
+std::escape_allocations_begin();
+// All allocations with the default allocator will now use the special escape allocator.
+Foo* escaping_copy = new Foo(src);
+std::escape_allocations_end();
+// Now we're not using the special allocator anymore.
+</pre></blockquote>
+
+Like in the example, this allows to run copy constructors unmodified to let data escape, iff they follow the rule that exactly all writes to data allocated with the default allocators are supposed to escape.  This holds for automatically generated copy constructors, and should also hold for the majority of programmer-provided copy constructors of objects that use the default allocators.  It still either requires the programmer to verify that the copy constructors adhere to this rule, or the type to declare whether they do -- but it is the most convenient way for letting data escape that I am aware of.  Writes to the specially allocated memory regions would follow the same rules as if performed with <code>escaping_memcpy</code>, with the addition that allocated memory regions would be released iff the transaction aborts before it has been canceled.
+
+<p/>
+The additional implementation complexity compared to <code>escaping_memcpy</code> should typically be modest.  There are different implementation possibilities for STMs, which do not add overhead to the transactional load/store fast paths; virtually replacing the default allocators is also simple and will not affect other threads because the allocators have to be wrapped anyway for STM transactions by the TM (and cancellable transactions need to run instrumented code anyway).  HTMs that do not support data escape have to fall back to STM execution anyway on cancellation.  HTMs that do support data escape (e.g., nonspeculative writes) can implement this with additional copying, for example.
+
+<p/>
+Finally, the previous discussion assumed that the data should escape to the nontransactional context (i.e., escape from the outermost transaction).  This can be extended to support escaping to enclosing transactions as well by requiring a cancellation handler (see below) to be provided as an additional parameter on calls to the three library functions; the cancellation handler would then specify which transaction the data should escape from.
+
+
+<h2><b>Expressing cancellation</b></h2>
+
+A cancellation mechanism has to handle three major tasks:
+<ol>
+<li> the part of the program that started the transaction needs to be notified that the transaction was canceled,
+<li> when canceling a transaction, the program needs to be able to select which transaction from among all enclosing transactions should be canceled (i.e., if there are nested transactions), and
+<li> we (optionally) need to be able to let information escape from a canceled transaction.
+</ol>
+
+<p/>
+Both (1) and (2) are based on something that I call cancellation handlers, which are function objects that can be attached to transactions.  They get executed instead of a canceled transaction, and also serve as IDs for transactions.  For (3), we can use the data escape mechanism presented previously.
+
+<h3>Extended syntax for cancellable transactions</h3>
+
+Let us start with the cancellation handler (CH).   (Note that I'm just considering transaction statements in this paper; also, this paper's focus is more on design than on the details of the syntax, and any suggestions for how to improve the syntax are much appreciated.)
+
+<blockquote><pre>
+__transaction_atomic { /* Cannot be canceled. */ }
+__transaction_atomic (CH) { /* Can be canceled. */ }
+</pre></blockquote>
+
+CH is optional and can be put into parentheses before the compound statement.  If no CH is present, this transaction cannot be canceled, which is only checked dynamically to avoid requiring further annotation on functions (i.e., this would have similar issues as transaction_safe annotations; see N3589). If a nested transaction cannot be canceled, then the enclosing transaction is tried to be canceled, recursively; if the outermost transaction cannot be canceled, the program is terminated.  One positive result of this for implementations is that they know whether they can use flat nesting at compile time, and do not have to conservatively assume closed nesting to be required (this can decrease the runtime overheads of nesting, and current HTMs support flat nesting only).
+
+<p/>
+Informally, CH is a function or lambda returning void that takes no arguments.  Iff the transaction is canceled, it will be executed after the transaction has been rolled back.  Thus, CH appears to execute instead of the transaction; because we are dealing with an atomic transaction, no side effects of it remain after it has been rolled back, so we are virtually back at the program state before executing the transaction.  Another way to imagine this construct is it being equivalent to something like:
+
+<blockquote><pre>
+if (next_transaction_canceled_oracle())
+  CH();
+else
+  __transaction_atomic { /* Can be canceled. */ }
+</pre></blockquote>
+
+where the oracle can always predict whether the next upcoming transaction will be canceled.  I'd hope that this is easy to remember given the syntax.  Note that CH will not be executed as part of a transaction (unless the program is already executing in another transactional context).
+
+<p/>
+CH can be a pointer to a function object or function of suitable type, in which case the pointer also serves as the ID of the transaction (see below for how this ID is used).  Alternatively, the programmer can also supply a lambda directly (and then the ID of the transaction will not be known to the program).
+
+<h3>New library features for cancellation</h3>
+
+A transaction can be canceled by calling a library function:
+
+<blockquote><pre>
+__transaction_atomic ([]() { std::terminate() })
+{
+  f1();
+  if (flag)
+    std::transaction_cancel(); // Cancels the transaction.
+                               // Does not return.
+  f2();
+}
+</pre></blockquote>
+
+In this example, if flag is true during the execution of the transaction, then f2 will not be executed; instead, the program terminates.
+
+<p/>
+This simple form of cancellation will cancel the nearest enclosing transaction (in terms of transaction nesting levels) that is cancellable (i.e., has a cancellation handler attached).  Outside of any transaction, trying to cancel will terminate the program.  In the following example adapted from the previous one, the program will not terminate even if flag is true:
+
+<blockquote><pre>
+__transaction_atomic ([]() { std::terminate() })
+{
+  f1();
+  if (flag)
+    __transaction_atomic ([]() { /* Ignore cancellation. */ })
+    {
+      __transaction_atomic { // Non-cancellable transaction.
+        std::transaction_cancel(); // Cancels the 2nd transaction.
+      }
+    }
+  f2();
+}
+</pre></blockquote>
+
+A program can also select which transaction to cancel by providing a pointer to a cancellation handler as argument to transaction_cancel().  In this case, the nearest enclosing transaction that uses a cancellation handler with the same address is canceled.  In the following example, the program would again terminate if flag is true:
+
+<blockquote><pre>
+std::function&lt;void()> outermost_ch = []() { std::terminate() };
+__transaction_atomic (&outermost_ch)
+{
+  f1();
+  if (flag)
+    __transaction_atomic ([]() { /* Ignore cancellation. */ })
+    {
+      __transaction_atomic { // Non-cancellable transaction.
+        // Cancels the outermost transaction.
+        std::transaction_cancel(&outermost_ch);
+      }
+    }
+  f2();
+}
+</pre></blockquote>
+
+This should allow for both using cancellable transactions in recursive functions and generic cancellation handlers that are used to specify certain kinds of cancellation behavior (see below for further examples).
+
+<p/>
+If the program needs to let data escape from a canceled transaction (e.g., to describe an error, as discussed previously), it can use the escape mechanism directly:
+
+<blockquote><pre>
+bool canceled = false;
+__transaction_atomic ([]() { /* Ignore cancellation. */ })
+{
+  bool f = true;
+  std::escaping_memcpy(&canceled, &f, sizeof(bool));
+  std::transaction_cancel(&outermost_ch);
+}
+if (canceled)
+  ...;
+</pre></blockquote>
+
+However, we can also provide a more convenient cancellation variant that creates a copy of a lambda supplied by the programmer, makes the copy escape from the transaction, and executes this lambda as a wrapper of the cancellation handler of the escape transaction:  
+
+<blockquote><pre>
+int i = 0;
+__transaction_atomic ([&]() { i += 1; })
+{
+  std::transaction_cancel([&](std::function&lt;void()>& ch)
+    {
+      i = 2;
+      ch(); // Calls the cancellation handler, which increments i.
+    });
+}
+</pre></blockquote>
+
+In this example, the value of <var>i</var> will end up being 3: The lambda supplied to the transaction escapes, the transaction rolls back, then the escaped lambda sets <var>i</var> to 2 and calls the cancellation handler, which increments <var>i</var> by 1.
+
+<p/>
+This allows the part of the transaction that cancels it to customize or replace the cancellation handler; also, it is a convenient way to let data escape and have this data drive what happens after cancellation (e.g., compared to the prior example, no external variable such as <var>canceled</var> is required; <var>i</var> is just used for illustrative purposes).  Note that other variants would be possible too (e.g., the cancellation handler could get the opportunity to call a lambda provided during cancellation); nonetheless, I hope that this shows the basic idea.
+
+<p/>
+Finally, we can offer a variant of cancellation that allows the escaping lambda to communicate directly with the cancellation handler, thus allowing for customizable communication across cancellation:
+
+<blockquote><pre>
+template &lt;class R, class... ArgTypes>
+void transaction_cancel(
+  function&lt;void(function&lt;R(ArgTypes...)>& ch)> cancel_lambda,
+  function&lt;R(ArgTypes...)>& transaction // The cancellation handler that
+                                        // identifies the transaction.
+);
+</pre></blockquote>
+
+cancel_lambda is the escaping lambda, which now gets a cancellation handler of arbitrary type that it can call.  By requiring the transaction to be identified explicitly, we can check type safety.  Thus, this can be used to directly pass data to the cancellation handler:
+
+<blockquote><pre>
+std::function<void(int)> handler = [&](int input) { i = input + 1; };
+__transaction_atomic (&handler)
+{
+  std::transaction_cancel([&](std::function&lt;void(int)>& ch)
+    {
+      ch(2); // Calls the cancellation handler with input.
+    },
+    &handler ); // Select transaction explicitly.
+}
+</pre></blockquote>
+
+
+<h3>Alternatives for expressing cancellation</h3>
+
+There are other ways to potentially express cancellation, some of which have already been discussed in SG5.
+
+<p/>
+First, programmers can use simple flags to check whether a transaction was canceled or not:
+
+<blockquote><pre>
+bool canceled = true;
+__transaction_atomic
+{
+  canceled = false;
+  ...;
+}
+if (canceled) 
+  std::terminate();
+</pre></blockquote>
+
+<p/>
+While this works in principle, it seems like too much of a low-level mechanism, and is probably error-prone (e.g., it's easy to forget to check <var>canceled</var>, and transactions without this checking can be canceled too, leading to silent errors).
+
+Second, cancelled transactions could throw special exceptions to signal that they have been canceled, instead of executing a cancellation handler:
+<blockquote><pre>
+try {
+  __transaction_atomic
+  {
+    f1();
+    __transaction_atomic {
+      if (flag1) std::transaction_cancel();
+    }
+    if (flag2) std::transaction_cancel();
+  }
+}
+catch (transaction_canceled_exception ex) {
+  // One of the two transactions was canceled.
+  std::terminate();
+}
+</pre></blockquote>
+
+However, in the case of nested exceptions, programmers would likely have to handle or transform those exceptions directly (e.g., in the example above, it is not clear from the exception whether <var>flag1</var> or <var>flag2</var> lead to cancellation.
+
+<p/>
+Furthermore, because this does not use cancellation handlers anymore, this also does not allow for selecting which transaction to cancel using the handlers.  Nor can the implementation easily detect at compile time when it could use flat nesting.
+
+<p/>
+Finally, one drawback of using exceptions is that it does not allow compatibility with C.  In contrast, the cancellation handler approach can also be extended to function pointers and perhaps additional arguments, which would allow C code to make use of this feature and would make this C code usable in a C++ context too.
+
+<p/>
+Third, the cancellation handler could be set using a library call instead of as an argument to the transaction.  However, this seems to be an inferior approach because it makes it less clear which transaction can be cancelled, and has to rely on some concept of the "next" transaction.
+
+
+<h2 id="Examples"><b>Example uses</b></h2>
+
+<h3>Cancellation when exceptions escape from transactions</h3>
+
+Some members of SG5 would like to see all transactions being canceled whenever an exception is about to be thrown out of a transaction (called "cancel-on-escape", see N3589 for more background).  The idea behind this is that exceptions signal violations of invariants or the like, so we better should enforce atomicity of the transaction and cancel it.  Cancel-on-escape can be expressed with the cancellation mechanism I described previously:
+
+<blockquote><pre>
+__transaction_atomic (std::cancel_on_escape()) {
+  try {
+    ...; // Transaction body, might throw an exception.
+  }
+  catch(...) {
+    std::transaction_cancel([](std::function&lt;void()>& ch) {
+      // After rollback of the transaction, a special exception will be thrown.
+      // (N3589 does not provide a general data escape mechanism.)
+      throw canceled_transaction_exception;
+    },
+    std::cancel_on_escape()); // Picks the nearest enclosing cancel-on-escape
+                              // transaction.
+  }
+}
+</pre></blockquote>
+
+In contrast, in the current draft specification, transactions are simply committed whenever an exception escapes a transaction ("commit-on-escape").  The examples in this paper assume commit-on-escape to be the default.
+
+<h3>Composable recovery mechanisms</h3>
+
+One advantage of the cancellation mechanism presented here is the flexibility regarding which transaction is to be canceled.  This makes cancellation independent of a particular error handling scheme (e.g., a particular order or propagation like with exception).  Given that transactions provide the rollback automatically, cancellation can be used just for expressing failures.  How forward progress is then ensured after failures is completely customizable, and opens up possibilities to use composable and/or generic recovery schemes: For example, transactions could be retried a few times before we let a transaction really fail, alternative execution paths could be tried, different permutations of alternatives could be tried, etc.  Recovery is often not a local problem but instead global in the sense that there might be different options for how to handle a failure, and that those options don't necessarily know about each other. For example, if a network connection drops frequently in a nested transaction, then it perhaps shouldn't just retry if an enclosing transaction could just use a different connection to get the job done.
+
+<p/>
+One could implement something similar with exceptions, but it would probably require strong exception guarantees everywhere and quite a bit of extra program logic.  In the end, we would probably end up with something similar to transactions anyway (without the concurrency control).  Thus, while composable error recovery mechanism based on transactional language constructs are clearly future work (see pages 113--141 of <a href="http://www.eatcs.org/images/bulletin/beatcs99.pdf">this PDF</a> for further details), I think that the cancellation mechanisms I presented should be a viable foundation for such more advanced uses.
+
+
+<h2>Acknowledgements</h2>
+
+Several members of SG5 and Jason Merrill gave feedback and/or contributed to this paper.
+
+</body>
+</html>

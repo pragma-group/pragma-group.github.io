@@ -1,0 +1,1716 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+
+<style type="text/css">
+
+body { color: #000000; background-color: #FFFFFF; max-width: 60em}
+del { text-decoration: line-through; color: #8B0040; }
+ins { text-decoration: underline; color: #005100; }
+
+p.example { margin-left: 2em; }
+pre.example { margin-left: 2em; }
+div.example { margin-left: 2em; }
+
+code.extract { background-color: #F5F6A2; }
+pre.extract { margin-left: 2em; background-color: #F5F6A2;
+  border: 1px solid #E1E28E; }
+
+p.function { }
+.attribute { margin-left: 2em; }
+.attribute dt { float: left; font-style: italic;
+  padding-right: 1ex; }
+.attribute dd { margin-left: 0em; }
+
+blockquote.std { color: #000000; background-color: #F1F1F1;
+  border: 1px solid #D1D1D1;
+  padding-left: 0.5em; padding-right: 0.5em; }
+blockquote.stddel { text-decoration: line-through;
+  color: #000000; background-color: #FFEBFF;
+  border: 1px solid #ECD7EC;
+  padding-left: 0.5empadding-right: 0.5em; ; }
+
+blockquote.stdins { text-decoration: underline;
+  color: #000000; background-color: #C8FFC8;
+  border: 1px solid #B3EBB3; padding: 0.5em; }
+
+blockquote pre em { font-family: normal }
+
+table { border: 1px solid black; border-spacing: 0px;
+  margin-left: auto; margin-right: auto; }
+th { text-align: left; vertical-align: top;
+  padding-left: 0.8em; border: none; }
+th.multicol { text-align: center; vertical-align:top;
+  padding-left: 0.8em; border: none; }
+td { text-align: left; vertical-align: top;
+  padding-left: 0.8em; border: none; border-top: 1px solid black; }
+
+ul.function { list-style-type: none; margin-top: 0.5ex }
+ul.function > li { padding-top:0.25ex; padding-bottom:0.25ex }
+
+pre.function { margin-bottom:0.5ex }
+
+pre span.comment { font-family: serif; font-style: italic }
+
+caption { font-size: 1.25em; font-weight: bold; padding-bottom: 3px;}
+</style>
+
+<title>A Unified Proposal for Composable Hashing</title>
+</head>
+
+<body>
+
+<p><b>Document number:</b> P0029R0
+<br><b>Date:</b> 2015-09-21
+<br><b>Project:</b> Programming Language C++, Library Evolution Working Group
+<br><b>Reply to:</b>
+Geoff Romer &lt;<a href="mailto:gromer@google.com">gromer@google.com</a>&gt;,
+Chandler Carruth &lt;<a href="mailto:chandlerc@google.com">chandlerc@google.com</a>&gt;
+</p>
+
+<h1>A Unified Proposal for Composable Hashing</h1>
+
+<ol>
+<li><a href="#background">Background</a>
+<li><a href="#overview">Design Overview</a>
+<li><a href="#comparison">Comparison with Prior Proposals</a>
+<li><a href="#notes">Notes on Wording</a>
+<li><a href="#wording">Proposed Wording</a>
+</ol>
+
+<h2 id="background">Background</h2>
+
+<p>Currently, if you want your type to be natively usable as a key type in a
+standard hash container, the only option C++ offers is to specialize
+<code>std::hash</code>. This mechanism suffers from a number of drawbacks:</p>
+
+<ul>
+<li>It does not support composition efficiently or conveniently: if you want
+    to implement your <code>std::hash</code> specialization in terms of
+    the specializations of your members, you'll have to invent your own way
+    of combining their hash values, and the result will be inefficient
+    because it repeats the costly step of reducing the temporary
+    hashing state to a <code>size_t</code> (notably, this is the reason
+    <code>std::hash</code> is not specialized for <code>std::pair</code>,
+    <code>std::tuple</code>, or containers).</li>
+<li>It requires type authors to design and implement their own hash
+    algorithms from scratch. This is a recipe for disaster: designing
+    and implementing a hash algorithm well requires substantial
+    expertise, and the consequences of doing it poorly are severe,
+    since hash tables tend to be used in the most
+    performance-sensitive parts of an application. Furthermore, with
+    the advent
+    of <a href="http://emboss.github.io/blog/2012/12/14/breaking-murmur-hash-flooding-dos-reloaded">hash
+    flooding attacks</a>, every hash table's hash algorithm is now
+    part of the attack surface of every application that's exposed to
+    untrusted input. In this environment, asking users to roll their
+    own hash algorithm is nearly as reckless as asking them to roll
+    their own cryptography.</li>
+<li>User specializations cannot be disabled with SFINAE, so you can't
+    e.g. say that <code>hash&lt;Wrapper&lt;T&gt;&gt;</code> is defined only if
+    <code>hash&lt;T&gt;</code> is defined.</li>
+<li>It is quite awkward and verbose, particularly due to the need to switch
+    from the type's namespace to the <code>std</code> namespace.</li>
+</ul>
+
+<p>LEWG has received two proposals for addressing this situation,
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3333.html">N3333</a>
+and <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n3980.html">N3980</a>,
+which share the same basic structure, but differ in many details
+because the respective authors were focusing on different
+requirements.  This paper proposes a unified design which builds on
+both proposals, preserving their common structure and extending it to
+satisfy most if not all of their requirements.</p>
+
+<h2 id="overview">Design Overview</h2>
+
+<p>For clarity, we will begin by presenting our design on its own terms,
+assuming no prior knowledge of N3333 or N3980. Comparisons with those
+proposals will be deferred to the next section. A sample implementation
+of this proposal can be found at
+<a href="https://github.com/google/hashing-demo/tree/N0029R0">https://github.com/google/hashing-demo/tree/N0029R0</a>.</p>
+
+<p>One of the primary goals of this design is to decouple the hash algorithm
+from the per-type hash customization logic. To do that, we must define
+an algorithm-independent way for types to expose themselves to the hash
+algorithm. Nearly all hash algorithms fundamentally operate on bytes, so
+bytes are what we'll use: you specify how to hash a type by specifying
+its <dfn>hash representation</dfn>, which is a sequence of zero or
+more <code>unsigned char</code> values that represents the original
+value.</p>
+
+<p>If two values of the same type are equal, they must not have different hash
+representations, because otherwise they will have unequal hash values,
+and hash table lookups will fail when they should succeed. If unequal
+values have equal hash representations, then we have a hash
+collision. Now, collisions introduced by the <em>hash algorithm</em> are
+inevitable, but they are also manageable: the algorithm's job is to
+trade off collision frequency and predictability against run time, and
+the risks can be managed by an appropriate choice of hash algorithm (or even
+by making the hash table bigger). Collisions introduced by the <em>type</em>,
+on the other hand, are not controllable in those ways; the type author is
+essentially forcing the user to accept a certain rate of collisions
+(and worse, collisions that are usually predictable by an attacker).
+Nonetheless, in some cases it will be a necessary optimization for an
+object to cache its own hash value, and treat that as its hash representation.
+Consequently, we require only that with high probability, different values
+of the same type should have different hash representations. We emphasize that
+it should be quite rare for that probability to be less than 1.</p>
+
+<p>This makes the hash representation ideal for the hash algorithm author, but
+not very well-suited for the type author. In fact, in most cases it
+won't be possible for the type author to specify their hash representation
+directly: if my equality comparison is implemented in terms of the equality
+comparisons of other types, my hashing logic must similarly be implemented
+in terms of the hashing logic of those types. In most cases, the most natural
+way to specify my hash representation will be as the concatenation of the hash representations of some list of other
+values.  For example, the hash representation of a
+<code>tuple&lt;A,B,C&gt;</code> should be the hash representations
+of <code>A</code>, <code>B</code>, and <code>C</code>, one after another.
+We will call this sequence of values the <dfn>hash expansion</dfn> of
+the value.</p>
+
+<p>There's a risk that this concatenation will produce collisions. For
+example, if the hash representation of a container is just
+the hash representations of its elements, then
+<code>vector&lt;string&gt;{"a", "b", "c"}</code> and
+<code>vector&lt;string&gt;{"abc"}</code> have the same hash representation.
+To avoid this problem, we introduce another requirement: the hash
+representation of a value must not be a suffix of the hash representation
+of any other value of the same type (in other words, the type's hash
+representation must form a
+<a href="https://en.wikipedia.org/wiki/Prefix_code">suffix code</a>).</p>
+
+<p>With that restriction in place, it's easy to specify the hash expansion of
+almost any value type:</p>
+<ul>
+<li>The hash expansion of a fundamental type can be just its hash
+representation, which is implementation-defined (usually but not always as
+its object representation).</li>
+<li>The hash expansion of a struct or tuple can be just the concatenation of
+its field values.</li>
+<li>The hash expansion of a sequence container can be just the
+concatenation of its elements, followed by a size_t representing the
+length of the sequence<a href="#f1" id="r1">[1]</a>.</li>
+<li>The hash expansion of a variant or discriminated union can be just its
+value, followed by the type discriminator.</li>
+</ul>
+<p>More complex types can be represented using combinations of those basic
+operations<a href="#f2" id="r2">[2]</a>.</p>
+
+<p>Thus, rather than expect each type to compute its hash value, or
+even its hash representation, we require it only to compute its hash
+expansion. The hash algorithm is then responsible for mechanically
+reducing the hash expansion to the hash representation, and then
+consuming that hash representation to produce a final hash value.</p>
+
+<h3><code>hash_value()</code> and <code>hash_combine()</code></h3>
+
+<p>This design is implemented as a mutual recursion between two
+overloaded functions: <code>hash_value()</code>, which is overloaded
+by hashable types, and <code>hash_combine()</code>, which is
+overloaded by the hash algorithm. The use of overloading avoids the
+tedious scoping issues associated with specializing a template in
+namespace <code>std</code>. Here's how a typical
+<code>hash_value()</code> overload might look in this framework:</p>
+
+<pre class="example">
+class Foo {
+  int i;
+  string str;
+  bool b;
+  …
+  friend bool operator==(const Foo& lhs, const Foo& rhs) {
+    return lhs.i == rhs.i && lhs.str == rhs.str && lhs.b == rhs.b;
+  }
+
+  friend std::hash_code hash_value(std::hash_code h, const Foo& foo) {
+    return hash_combine(std::move(h), foo.i, foo.str, foo.b);
+  }
+};
+</pre>
+
+<p><code>hash_value()</code>'s responsibility is to take the initial
+state of the hash algorithm (represented by <code>h</code>), and
+combine it with the hash expansion of <code>foo</code> to produce a
+new state, which it returns. To do that, it invokes
+<code>hash_combine()</code>, which is responsible for performing that
+combining operation for an arbitrary number of
+arguments. <code>hash_combine()</code>, in turn, will usually
+invoke <code>hash_value()</code> on those arguments, although it must
+handle <code>unsigned char</code> directly, and may choose to do so
+for other types as well.</p>
+
+<p>Both functions are designed to be called via ADL (i.e. without
+namespace qualification). <code>hash_value()</code> is intended to be
+found in the namespace of the value to be hashed, so as with
+<code>swap()</code>, calls to <code>hash_value()</code> must be preceded by
+<code>using std::hash_value</code> in order to look up the overloads for
+built-in types. <code>hash_combine()</code> is intended to be found
+in the namespace of the hash algorithm, and hash algorithms are always
+library types, so no <code>using</code> declaration is necessary.</p>
+
+<p>A crucial special case occurs when hashing strings, containers, and
+similar dynamically-sized structures: the hash representation contains
+an arbitrary number of values of the same type. With the API we've
+described so far, it would be necessary for <code>hash_value()</code>
+to iterate over those values, passing them to <code>hash_combine()</code>
+incrementally. However, a variety of critical optimizations require
+that we expose that entire range to the hash algorithm in a single
+function call (this is also much more convenient for the type
+author). We expect to eventually have a standard type akin to
+<a href="http://www.boost.org/doc/libs/1_58_0/libs/range/doc/html/range/reference/utilities/iterator_range.html"><code>boost::iterator_range</code></a>,
+which will let us handle those cases cleanly by passing an
+<code>iterator_range</code> to <code>hash_combine()</code>. In the
+meantime, we propose a second function <code>hash_combine_range()</code>
+as a transitional measure, such that
+<code>hash_combine_range(h, begin, end)</code> behaves the way
+<code>hash_combine(h, iterator_range{begin, end})</code> eventually will.</p>
+
+<p>The most important optimization
+that <code>hash_combine_range()</code> can apply is to avoid further
+recursion and hash the input range as a range of bytes. This requires
+that the input range is contiguous<a href="#f3" id="r3">[3]</a>, and
+that the optimization itself is correct. For
+example, it's not correct if the data contains internal padding, or if
+the data has multiple distinct representations for equal values
+(e.g. positive and negative zero for IEEE floating-point). More
+precisely, this optimization is correct if and only if the type
+has the property that two objects are equal if and only if their
+object representations ([basic.types]/p4) are equal. When that's true,
+the object representation is also a valid hash representation, so it
+can be used as such.</p>
+
+<p>We propose a new trait class called <code>is_uniquely_represented</code>
+to represent this property. It will be false by default, but can be
+specialized by the type owner to assert that the type has that property.</p>
+
+<h3>Hash codes</h3>
+
+<p>As noted above, <code>std::hash_code</code> represents an
+intermediate state in the computation of the underlying hash
+algorithm. It is passed by value rather than by reference, for reasons
+that we will discuss in the next section. It is move-only because
+copying would likely be inefficient, and also because it would likely
+indicate a logic bug:</p>
+
+<pre class="example">
+// User erroneously expects h to be passed by reference
+std::hash_code& hash_value(std::hash_code& h, const Foo& foo) {
+  hash_combine(h, foo.i);
+  hash_combine(h, foo.str);
+  return hash_combine(h, foo.b);
+}
+</pre>
+
+<p>In the above code, only the final line has any effect on the final hash
+value, which obviously was not the user's intent. In general,
+<code>hash_code</code> values cannot be used more than once: every use
+produces a new <code>hash_code</code> which must be used instead, or its state
+will be forgotten. Making <code>hash_code</code> move-only makes this
+requirement explicit.</p>
+
+<p><code>std::hash_code</code> represents the default hash algorithm,
+which will be used by <code>std::hash</code> and anywhere else that
+the standard library needs to choose a hash algorithm. We expect most
+users to never need any algorithm other than the default, and we expect
+vendors to make every effort to ensure that's the case by providing
+a robust and high-quality default. In particular, it is <em>critical</em>
+that the default hash algorithm be randomized at program startup, so
+that its behavior is not consistent across runs. Otherwise, experience
+has repeatedly shown that users will rely on the exact behavior
+of the algorithm (e.g. for golden test outputs), and it will be all but
+impossible to change it when a better algorithm becomes available.
+For the foreseeable future, hash designers will be locked in an arms race
+with the authors of hash-flooding attacks, so we must plan for
+hash algorithms that have a finite (and probably short) operational
+life.</p>
+
+<p>All that being said, there are important use cases that would
+benefit from user control of the hash algorithm. This design
+supports those usages: the type author need only make
+<code>hash_value()</code>'s first argument a template parameter:</p>
+
+<pre class="example">
+template &lt;typename H&gt;
+H hash_value(H h, const Foo& foo) {
+  return hash_combine(std::move(h), foo.i, foo.str, foo.b);
+}
+</pre>
+
+<p>This will automatically support any type that is a model of
+<code>HashCode</code> (which basically just requires it to
+have a suitable set of <code>hash_combine()</code> overloads). We
+propose that all <code>hash_value()</code> overloads in the standard
+library be templated in this way.</p>
+
+<p>It is important to note that <code>hash_value()</code>'s contract is
+not strong enough to support use cases like fingerprinting or
+serialization, which require consistency across runs of the program,
+and even across builds. However, in principle users could extend this
+framework to accommodate such use cases, by overloading
+<code>hash_value()</code> to provide different behavior for different
+hash algorithms.</p>
+
+<h3><code>std::hash</code> Integration</h3>
+
+<p>In our experience, users are extremely reluctant to explicitly
+specify a hash functor when declaring a hash table; if the default
+compiles, that's what they'll use, and if the default doesn't compile,
+they will define a specialization (even at risk of ODR violations) to
+make it compile. Consequently, barring a breaking change to the hash
+containers, any hashing mechanism that does not integrate
+with <code>std::hash</code> will be stillborn.</p>
+
+<p>We therefore propose extending the <code>std::hash&lt;T&gt;</code>
+primary template to provide an <code>operator()(const T& t)</code> that's
+implemented in terms of
+<code>hash_value(h, t)</code><a href="#f4" id="r4">[4]</a>, where
+<code>h</code> is an rvalue of type <code>std::hash_code</code>. Note that
+there is precedent for extending the primary template in this way: we
+already do it in C++14 to support hashing enums
+(<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/lwg-defects.html#2148">LWG
+2148</a>). There have been some concerns raised about how that extension
+affected code that SFINAEs on <code>std::hash</code>, but any fix for the enum
+extension should be equally applicable to our proposed extension.</p>
+
+<p>Under this scheme, existing <code>std::hash</code> specializations would
+continue to work normally, but it would no longer be necessary to create
+new ones, and users would have the option to remove existing specializations
+at their discretion.</p>
+
+<h3>Heterogeneous Lookup</h3>
+
+<p>C++14 added support for <dfn>heterogeneous lookup</dfn> in associative
+containers, which allows users to look up entries in the container using
+a type that doesn't match the container key type (e.g. looking up a plain
+pointer in a <code>set</code> of <code>unique_ptr</code>s). This is enabled
+by comparators that can compare elements of the different types. To support
+similar functionality in hash containers, users will need to be able to extend
+the hash representation guarantee across types, and guarantee that equal
+values of two different types will have the same hash representation. This
+paper does not propose full support for heterogeneous lookup, but it does
+try to provide the functionality that a heterogeneous lookup proposal will
+need (see the following section).</p>
+
+<h2 id="comparison">Comparison with Prior Proposals</h2>
+
+<h3>By-value vs. By-reference</h3>
+
+<p>Perhaps the most fundamental difference between N3333 and N3980 is
+that in N3333, the intermediate hash state is passed by value, whereas
+in N3980 it is passed by reference and updated in place. These choices
+depend on subtle performance tradeoffs: on the one hand passing by
+reference may save the cost of some copy/move operations, but on the
+other hand optimizers generally find it much easier to deal with
+values on the stack (i.e. values that can be reduced to SSA variables
+rather than memory locations). Optimizer-friendliness matters because
+modern hash algorithms often have a drastically simpler "fast path"
+for small inputs, and pruning out the "slow path" code for known-small
+inputs can not only reduce code size, but also enable further
+optimizations.</p>
+
+<p>The deciding factor for us is that pass-by-value subsumes pass-by-reference:
+if pass-by-reference is found to be the most efficient approach, it can be
+implemented in this framework by making <code>std::hash_code</code> a pointer
+to some state on the stack of the outermost <code>hash_value()</code>
+caller. By contrast, if pass-by-value is found to be the most efficient
+approach, we see no way to emulate it in a pass-by-reference framework.
+Our design appears to maximize implementation flexibility.</p>
+
+<p>In practice, we expect most implementations will be a hybrid, with
+<code>std::hash_code</code> consisting of a small amount of state that's
+relevant to the optimizer, and a pointer to everything else. For example,
+in the
+<a href="https://github.com/google/hashing-demo/blob/N0029R0/farmhash.h">prototype
+implementation of farmhash</a> in this framework,
+the movable <code>HashCode</code> consists of a <code>bool</code> and two
+pointers, one of which points to roughly 128 bytes of buffer and
+mixing state.</p>
+
+<h3>Multiple Hash Algorithms</h3>
+
+<p>The other fundamental difference between N3333 and N3980 is that
+N3333 permits only a single hash algorithm, whereas N3980 makes the
+algorithm a template parameter, explicitly providing for user choice
+of the hash algorithm. As a middle ground, we propose a framework that
+permits multiple hash algorithms, but defines a very clear default,
+so that users never have to explicitly choose a hash algorithm unless
+they want to. We are concerned that the ability to customize the hash
+algorithm will prove to be a foot-gun in many cases, but there are
+legitimate uses for it, so we follow C++ tradition by giving users
+the choice and hoping they choose well.</p>
+
+<h3>Single vs. Multiple Initialization</h3>
+
+<p>N3980 has the property that the hash algorithm is initialized
+exactly once, and then incrementally processes the entire hash
+representation in order. N3333 lacks that property:
+every <code>hash_combine()</code> call initializes a new hash state,
+which may subsequently be mixed into another ongoing computation. The
+performance consequences of this are debatable, but the semantic
+consequences are not: without unbounded amounts of buffering, N3333
+cannot behave as if the hash algorithm were processing the hash
+representation in order.</p>
+
+<p>This could matter for supporting use cases like heterogeneous
+lookup, where we need to guarantee that structurally very different
+types nonetheless produce identical hash values. In those cases it's
+necessary that the hash value have a clear logical structure, and not
+"leak" implementation details like the recursion structure of
+<code>hash_combine()</code> calls. Consequently, this proposal follows
+N3980 in ensuring that the hash algorithm processes the entire hash
+representation in order.</p>
+
+<h3>Hash Algorithm API</h3>
+
+<p>N3333 gives the hash algorithm a broad, high-level API, consisting of
+both <code>hash_combine()</code> and <code>hash_combine_range()</code>.
+Both take as input an arbitrary number of objects of arbitrary hashable
+types. By contrast, N3980's API for hash algorithms consists of a single
+<code>operator()</code> that takes raw bytes, specified as a
+<code>void*</code> and a length. In effect, this provides a counterpart for
+<code>hash_combine_range(hash_code, unsigned char*, unsigned char*)</code>,
+but N3980 provides no counterpart for <code>hash_combine()</code> or any of
+the other forms of <code>hash_combine_range()</code>. It does describe a
+variadic form of <code>hash_append</code> as an optional extension, which
+would provide a counterpart for <code>hash_combine()</code> from the
+user's perspective. However, it seems to be intended as a third-party utility,
+not an extension point that the hash algorithm can overload.</p>
+
+<p>N3980's approach has the virtue of simplicity, and makes it easy to
+define new hash algorithms, but the narrowness of that API gives the
+algorithm author no flexibility to do things like implement the
+optimizations for contiguous-layout types described earlier; if anywhere,
+they must be implemented by the type authors, in their
+<code>hash_append()</code> overloads. This seems like the wrong tradeoff:
+optimization and the attendant code complexity should go in the
+hash algorithm, because hash algorithms will be written rarely, and by experts,
+whereas <code>hash_append()</code> overloads will be written frequently,
+and by everybody. Furthermore the hash algorithm, unlike the hashable type,
+is in a position to know which optimizations are appropriate to apply.
+For example, for heterogeneous lookup we have to ensure that different
+types use the same hash representation for the same value, <em>and</em>
+we must ensure that we actually use the hash representation for hashing.
+This means we cannot apply the contiguous-layout optimization in this case,
+because we can't use the value representation instead of the hash
+representation. If the type itself is responsible for these optimizations,
+then it has no choice but to avoid that optimization unconditionally,
+penalizing use cases that have nothing to do with heterogeneous lookup.
+On the other hand if the algorithm is responsible for optimization,
+we can have a separate algorithm for heterogeneous lookup, and continue
+to get that optimization in ordinary use cases.</p>
+
+<p>The variadic form of <code>hash_combine()</code> is also important for
+optimization. Exposing all the function arguments in a single scope provides
+valuable optimization opportunities to both the optimizer and the author
+of <code>hash_combine()</code>.</p>
+
+<p>For all of these reasons, we have adopted N3333's approach of giving
+the hash algorithm a broad, high-level API.</p>
+
+<h3>Contiguous-layout optimizations</h3>
+
+<p>All three proposals have some mechanism for directly hashing the
+underlying bytes of an object. In N3333, this takes the form of a
+<code>hash_as_bytes()</code> function, which is ill-formed unless its
+argument is trivially-copyable, standard-layout, and has no internal
+padding (as indicated by a proposed <code>is_contiguous_layout</code> trait).
+However, this has numerous drawbacks. It is too narrow, because it has
+no support for arrays, and excludes many user-defined types that could
+usefully benefit from this optimization. At the same time it is too broad,
+because it accepts argument types like IEEE <code>float</code> and
+<code>double</code>, for which this optimization is not safe. It is also
+awkward to use, since it requires the caller to implement the static
+conditional logic necessary to call either <code>hash_as_bytes()</code> or
+<code>hash_value()</code>, depending on the result of
+<code>is_contiguous_layout</code>. Finally, it places responsibility for
+optimization in the wrong place: as discussed earlier, these optimizations
+should be implementation details of the hash algorithm, not the responsibility
+of user-level code.</p>
+
+<p>N3980 corrected most of these problems by introducing an
+alternative trait, <code>is_contiguously_hashable</code>, and specializing
+<code>hash_append()</code> for all types where that trait is true. Unlike
+<code>is_contiguous_layout</code>, <code>is_contiguously_hashable</code>
+must be explicitly specialized for individual types, which ensures that
+it's neither too broad nor too narrow (barring user error).</p>
+
+<p>Our proposed <code>is_uniquely_represented</code> is identical to N3980's
+<code>is_contiguously_hashable</code>. The new name makes the underlying
+generality of the concept more explicit, and draws on existing literature
+(<i>Elements of Programming</i> by Stepanov and McJones) rather than coining
+a new term. In any event, it was LEWG's preferred bikeshed color as of
+Rapperswil.</p>
+
+<p>There may still be a place for N3333's <code>is_contiguous_layout</code>,
+as an implementation detail of user specializations of
+<code>is_uniquely_represented</code>. Without it, users are forced to
+do <code>sizeof</code> arithmetic on all their members to determine if their
+types contain internal padding, which is inconvenient and error-prone.
+We do not propose that here, in order to keep this a "pure library"
+proposal (<code>is_contiguous_layout</code> requires compiler support),
+but we are open to pursuing it in a follow-up proposal.</p>
+
+<h2 id="notes">Notes on Wording</h2>
+
+<p>The proposed wording below provides <code>hash_value</code> overloads
+for every type in the standard library that has a <code>std::hash</code>
+specialization (as well as providing overloads for many new types). In
+principle we could remove the existing <code>std::hash</code>
+specializations, and let their functionality be provided by the primary
+template. However, this would require the primary template to be
+provided by every header that currently contains a <code>std::hash</code>
+specialization. This seems excessive, so we've left the specializations
+in place, with the exception of the specializations for fundamental
+types, where this issue does not arise.</p>
+
+<p>We've introduced a new header <code>&lt;hash&gt;</code>, because no
+existing header seemed suitable. We've specified that <code>std::hash</code>
+is available via <code>&lt;hash&gt;</code> (in addition to
+<code>&lt;functional&gt;</code>) because the alternative would be an endless
+source of user confusion.</p>
+
+<p>We have specified the exact hash expansions of <code>unique_ptr</code>
+and <code>shared_ptr</code>, in order to match their existing <code>hash</code>
+specializations. However, we have not specified the exact hash expansions
+of <code>pair</code>, <code>tuple</code>, or the containers, nor constrained
+them to be equivalent to each other. It is likely that a future proposal for
+heterogeneous lookup support will need to do this, but we prefer not to
+prejudge the issue.</p>
+
+<p>We have tentatively omitted <code>noexcept</code> specifications from our
+proposal, in order to support potentially-throwing use cases without
+resorting to elaborate conditional <code>noexcept</code> expressions.
+However, a plausible case could be made for blanket use of noexcept, or
+even for complex conditionals, since the overwhelmingly common use cases
+should not be throwing, and may benefit from exposing that fact at compile
+time. We are especially open to feedback on this aspect of the proposal.</p>
+
+<h2 id="wording">Proposed Wording</h2>
+
+<p>Changes are relative to N4527.</p>
+
+<h3>Primary wording</h3>
+
+<p>Add a new subclause, following [hash.requirements]:</p>
+<blockquote class="stdins">
+<h4>17.6.3.X Requirements for Composable Hashing
+[composable.hashing.requirements]</h4>
+
+<p>A <dfn>hash representation</dfn> of a type <code>T</code> is a mapping
+<i>R</i> from values of type <code>T</code> to sequences of zero or more
+<code>unsigned char</code> values that has the following properties (where
+<code>t1</code> and <code>t2</code> are rvalues of type (possibly cv-qualified)
+<code>T</code>):</p>
+<ul>
+<li>If <code>t1 == t2</code> then <i>R</i>(<code>t1</code>) =
+<i>R</i>(<code>t2</code>).</li>
+<li>If <code>!(t1 == t2)</code>, then with high probability,
+<i>R</i>(<code>t1</code>) &ne; <i>R</i>(<code>t2</code>).[<i>Note:</i>
+implementations are strongly encouraged to make this probability 1
+wherever possible; "with high probability" is intended to accommodate
+unusual types such as those that hold a cached hash value. &mdash;
+<i>end note</i>]</li>
+<li> <i>R</i>(<code>t1</code>) must not be a suffix of
+<i>R</i>(<code>t2</code>).</li>
+</ul>
+
+<p>A type <code>H</code> meets the requirements of <code>HashCode</code> if
+it meets the requirements of <code>MoveConstructible</code>,
+<code>MoveAssignable</code>, and <code>Destructible</code>, and if the
+expressions shown in Table X are valid and have the indicated semantics.
+In Table X, <code>hr</code> denotes an rvalue of type <code>H</code>,
+<code>hl</code> denotes an lvalue of type <code>H</code>,
+[<code>i</code>, <code>j</code>) denotes a valid range whose element type
+is <code>Hashable</code> by <code>H</code>, and <code>args</code>
+denotes a sequence of zero or more rvalues of types that are
+<code>Hashable</code> by <code>H</code>. An object <code>h</code> of type
+<code>H</code> must behave as if it owns a sequence of zero or more
+<code>unsigned char</code> values, referred to below as the "internal state"
+of <code>h</code>.</p>
+
+<table>
+<caption>Table X: <code>HashCode</code> requirements</caption>
+<tr><th>Expression</th><th>Return type</th><th>Operational semantics</th></tr>
+<tr><td><code>H hl(hr)</code></br><code>H hl = hr</code></td><td></td>
+  <td>post: the internal state of <code>hl</code> is the same as
+  the internal state of <code>hr</code> before the initialization.</td></tr>
+<tr><td><code>hl = hr</code></td><td><code>H&</code></td>
+  <td>post: the internal state of <code>hl</code> is the same as
+  the internal state of <code>hr</code> before the assignment.</td></tr>
+<tr><td><code>hash_combine(hr, args)</code></td><td><code>H</code></td>
+  <td>Returns a value of type <code>H</code> whose internal state consists
+    of the internal state of <code>hr</code>, followed by a hash
+    representation of each argument in <code>args</code>, in order.
+  </td></tr>
+<tr><td><code>hash_combine_range(hr, i, j)</code></td><td><code>H</code></td>
+  <td>Returns a value of type <code>H</code> whose internal state consists
+    of the internal state of <code>hr</code>, followed by a hash
+    representation of each element of [<code>i</code>, <code>j</code>),
+    in order.</td></tr>
+</table>
+
+<p>Let <code>t</code> be an rvalue of type (possibly cv-qualified)
+<code>T</code>, <code>H</code> be a type that meets the requirements of
+<code>HashCode</code>, and <code>h</code> be an rvalue of type (possibly
+cv-qualified) <code>H</code>. A type <code>T</code> is
+<dfn><code>Hashable</code> by <code>H</code></dfn> if the expression
+<code>hash_value(h, t)</code> is well-formed when treated as an unevaluated
+operand, and returns a value of type <code>H</code>. The returned value's
+internal state must consist of the internal state of <code>h</code>, followed
+by a hash representation of <code>t</code>.</p>
+
+<p>For the duration of program execution, a given overload of
+<code>hash_combine</code>, <code>hash_combine_range</code>, or
+<code>hash_value</code> must always use the same hash representation for
+a given type.</p>
+</blockquote>
+
+<p>Remove the following from the <code>&lt;functional&gt;</code> synopsis
+in [function.objects]:</p>
+<blockquote class="stddel">
+<pre>
+<span class="comment">// Hash function specializations</span>
+template &lt;&gt; struct hash&lt;bool&gt;;
+template &lt;&gt; struct hash&lt;char&gt;;
+template &lt;&gt; struct hash&lt;signed char&gt;;
+template &lt;&gt; struct hash&lt;unsigned char&gt;;
+template &lt;&gt; struct hash&lt;char16_t&gt;;
+template &lt;&gt; struct hash&lt;char32_t&gt;;
+template &lt;&gt; struct hash&lt;wchar_t&gt;;
+template &lt;&gt; struct hash&lt;short&gt;;
+template &lt;&gt; struct hash&lt;unsigned short&gt;;
+template &lt;&gt; struct hash&lt;int&gt;;
+template &lt;&gt; struct hash&lt;unsigned int&gt;;
+template &lt;&gt; struct hash&lt;long&gt;;
+template &lt;&gt; struct hash&lt;long long&gt;;
+template &lt;&gt; struct hash&lt;unsigned long&gt;;
+template &lt;&gt; struct hash&lt;unsigned long long&gt;;
+
+template &lt;&gt; struct hash&lt;float&gt;;
+template &lt;&gt; struct hash&lt;double&gt;;
+template &lt;&gt; struct hash&lt;long double&gt;;
+
+template&lt;class T&gt; struct hash&lt;T*&gt;;
+</pre>
+</blockquote>
+
+Revise [unord.hash] as follows:
+
+<blockquote class="std">
+<p>The unordered associative containers defined in 23.5 use specializations of
+the class template <code>hash</code> as the default hash function. For all
+object types <code>Key</code> for which there exists a specialization
+<code>hash&lt;Key&gt;</code>, <ins>or for which <code>Key</code> is
+<code>Hashable</code> (17.6.3.X) by <code>hash_code</code> (20.X.2)</ins>
+<del>and for all enumeration types (7.2) <code>Key</code></del>,
+the instantiation <code>hash&lt;Key&gt;</code> shall:</p>
+<ul>
+<li>satisfy the <code>Hash</code> requirements (17.6.3.4), with
+<code>Key</code> as the function call argument type, the
+<code>DefaultConstructible</code> requirements (Table 19), the
+<code>CopyAssignable</code> requirements (Table 23),</li>
+<li>be swappable (17.6.3.2) for lvalues</li>
+<li>provide two nested types <code>result_type</code> and
+</code>argument_type</code> which shall be synonyms for <code>size_t</code> and
+<code>Key</code>, respectively,</li>
+<li>satisfy the requirement that if <code>k1 == k2</code> is true,
+<code>h(k1) == h(k2)</code> is also true, where <code>h</code> is an object of
+type <code>hash&lt;Key&gt;</code> and <code>k1</code> and <code>k2</code> are
+objects of type <code>Key</code>;</li>
+<li>satisfy the requirement that the expression <code>h(k)</code>, where
+<code>h</code> is an object of type <code>hash&lt;Key&gt;</code> and
+<code>k</code> is an object of type <code>Key</code>, shall not throw an
+exception unless <code>hash&lt;Key&gt;</code> is a user-defined specialization
+that depends on at least one user-defined type.</li>
+</ul>
+<ins><p>In addition to being available via inclusion of the
+<code>&lt;functional&gt;</code> header, the <code>hash</code> template shall
+be available when the header <code>&lt;hash&gt;</code> is included.</p></ins>
+<del>
+<pre>
+template &lt;&gt; struct hash&lt;bool&gt;;
+template &lt;&gt; struct hash&lt;char&gt;;
+template &lt;&gt; struct hash&lt;signed char&gt;;
+template &lt;&gt; struct hash&lt;unsigned char&gt;;
+template &lt;&gt; struct hash&lt;char16_t&gt;;
+template &lt;&gt; struct hash&lt;char32_t&gt;;
+template &lt;&gt; struct hash&lt;wchar_t&gt;;
+template &lt;&gt; struct hash&lt;short&gt;;
+template &lt;&gt; struct hash&lt;unsigned short&gt;;
+template &lt;&gt; struct hash&lt;int&gt;;
+template &lt;&gt; struct hash&lt;unsigned int&gt;;
+template &lt;&gt; struct hash&lt;long&gt;;
+template &lt;&gt; struct hash&lt;unsigned long&gt;;
+template &lt;&gt; struct hash&lt;long long&gt;;
+template &lt;&gt; struct hash&lt;unsigned long long&gt;;
+template &lt;&gt; struct hash&lt;float&gt;;
+template &lt;&gt; struct hash&lt;double&gt;;
+template &lt;&gt; struct hash&lt;long double&gt;;
+template &lt;class T&gt; struct hash&lt;T*&gt;;
+</pre>
+<p>The template specializations shall meet the requirements of class template
+<code>hash</code> (20.9.13).</p></del>
+</blockquote>
+
+Add a new subclause, following [type.index]:
+<blockquote class="stdins">
+<h2>20.X Hashing support [hashing]</h2>
+<h3>20.X.1 Header <code>&lt;hash&gt;</code> synopsis [hash.header]</h3>
+<pre>
+namespace std {
+  template &lt;class T&gt; struct hash;
+
+  <span class="comment">// 20.X.2, hash_code</span>
+  class hash_code;
+
+  <span class="comment">// 20.X.3, hash_value for core language types</span>
+  template &lt;class H, class T&gt; H hash_value(H h, T val);
+  template &lt;class H, class T, size_t N&gt; H hash_value(H h, T (&amp;arr)[N]);
+
+  <span class="comment">// 20.X.4, is_uniquely_represented</span>
+  template &lt;class T&gt; struct is_uniquely_represented;
+}
+</pre>
+
+<h3>20.X.2 Class <code>hash_code</code> [hash.code]</h3>
+<pre>
+namespace std {
+  class hash_code {
+  public:
+    <span class="comment">// 20.X.2.1 move operations</span>
+    hash_code(hash_code&& h);
+    hash_code& operator=(hash_code&& h);
+
+    <span class="comment">// disable copy from lvalue</span>
+    hash_code(const hash_code&) = delete;
+    hash_code& operator=(const hash_code&) = delete;
+  };
+
+  <span class="comment">// 20.X.2.2 hash combining functions</span>
+  template &lt;class... Ts&gt;
+    hash_code hash_combine(hash_code h, const Ts...& ts);
+  template &lt;class InputIterator&gt;
+    hash_code hash_combine_range(
+      hash_code h, InputIterator first, InputIterator last);
+}
+</pre>
+
+<p><code>hash_code</code> is the default model of <code>HashCode</code>.
+Types will be usable with <code>std::hash</code> if they are
+<code>Hashable</code> by <code>hash_code</code>.</p>
+
+<p><code>hash_code</code> is specified as if it owns a sequence of
+<code>unsigned char</code> values, which is referred to as its
+"internal state". It is unspecified how this state is initialized
+or accessed.</p>
+
+<p><code>hash_code</code> shall satisfy the requirements of
+<code>HashCode</code> (17.6.3.X).</p>
+
+<h4>20.X.2.1 move operations [hash.code.move]</h4>
+<pre class="function">
+hash_code(hash_code&& h);
+</pre>
+<ul class="function">
+<li><i>Effects:</i> Constructs a <code>hash_code</code> whose internal
+state is equal to the internal state of <code>h</code> before the
+construction.</li>
+</ul>
+
+<pre class="function">
+hash_code& operator=(hash_code&& h);
+</pre>
+<ul class="function">
+<li><i>Effects:</i> Sets the internal state of <code>*this</code> to
+be equal to the internal state of <code>h</code> before the assignment.</li>
+<li><i>Returns:</i> <code>*this</code>.
+</ul>
+
+<h4>20.X.2.2 hash combining functions [hash.code.combine]</h4>
+<pre class="function">
+template &lt;class... Ts&gt;
+hash_code hash_combine(hash_code h, const Ts...& ts);
+</pre>
+<ul class="function">
+<li><i>Requires:</i> Every type in <code>Ts...</code> is <code>Hashable</code>
+  by <code>hash_code</code>.</li>
+<li><i>Returns:</i> A <code>hash_code</code> whose internal state consists
+  of the internal state of <code>h</code>, followed by the hash representations
+  (17.6.3.X) of the arguments in <code>ts</code>, in order.</li>
+</ul>
+
+<pre class="function">
+template &lt;class InputIterator&gt;
+hash_code hash_combine_range(
+  hash_code h, InputIterator first, InputIterator last);
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>InputIterator</code> is an input iterator
+  whose value type is <code>Hashable</code> by <code>hash_code</code>,
+  and [<code>first</code>, <code>last</code>) is a valid range.</li>
+<li><i>Returns:</i> A <code>hash_code</code> whose internal state consists
+  of the internal state of <code>h</code>, followed by the hash
+  representations of the elements of [<code>first</code>, <code>last</code>),
+  in order.</li>
+</ul>
+
+<h3>20.X.3 <code>hash_value</code> for core language types [hash.value]</h3>
+
+<pre class="function">
+template &lt;class H, class T&gt;
+H hash_value(H h, T val);
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>H</code> meets the requirements of
+  <code>HashCode</code></li>
+<li><i>Remarks:</i> This function shall not participate in overload resolution
+  unless <code>T</code> is an integral, enumeration, floating-point, or
+  pointer type.</li>
+<li><i>Returns:</i> An object of type <code>H</code> whose internal state
+  consists of the internal state of <code>h</code>, followed by a hash
+  representation of <code>val</code>.</li>
+</ul>
+
+<pre class="function">
+template &lt;class H, class T, size_t N&gt;
+H hash_value(H h, T (&amp;arr)[N]);
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>H</code> meets the requirements of
+  <code>HashCode</code>.</li>
+<li><i>Remarks:</i> This function shall not participate in overload
+  resolution unless <code>T</code> is <code>Hashable</code> by
+  <code>H</code>.</li>
+<li><i>Effects:</i> Equivalent to
+  <code>hash_combine_range(std::move(h), begin(arr), end(arr))</code>.
+</ul>
+
+<h3>20.X.4 <code>is_uniquely_represented</code> [hash.uniquely.represented]</h3>
+
+<pre class="function">
+template &lt;class T&gt; struct is_uniquely_represented;
+</pre>
+<p><code>is_uniquely_represented</code> shall meet the requirements of
+<code>UnaryTypeTrait</code> (20.10.1), with a <code>BaseCharacteristic</code>
+of either <code>true_type</code> or <code>false_type</code>. The
+<code>BaseCharacteristic</code> shall be <code>true_type</code> only if
+<code>T</code> is <dfn>uniquely represented</dfn>, meaning that for any
+values <code>t1</code> and <code>t2</code> of type <code>T</code>,
+<code>t1 == t2</code> if and only if <code>t1</code> and <code>t2</code>
+have equal object representations (3.9).</p>
+
+<p>[<i>Note:</i> If a type is uniquely represented, then its object
+representation is also a hash representation. &mdash; <i>end note</i>]</p>
+
+<p>A program may specialize <code>is_uniquely_represented</code> for
+user-defined types that are not enumerated types. Such specializations
+must meet the requirements of the primary template.</p>
+</blockquote>
+
+<h3><code>hash_value</code> overloads for standard library types</h3>
+
+<h4><code>initializer_list</code></h4>
+
+<p>Insert the following in the <code>&lt;initializer_list&gt;</code>
+synopsis in [support.initlist]:</p>
+
+<blockquote class="std">
+<pre>
+  <span class="comment">&hellip;</span>
+  <span class="comment">// 18.9.3 initializer list range access</span>
+  template&lt;class E&gt; constexpr const E* begin(initializer_list&lt;E&gt; il) noexcept;
+  template&lt;class E&gt; constexpr const E* end(initializer_list&lt;E&gt; il) noexcept;<ins>
+
+  <span class="comment">// 18.9.X hash support</span>
+  template&lt;class H, class E&gt; H hash_value(H h, initializer_list&ltE&gt; il);</ins>
+}
+</pre>
+</blockquote>
+
+<p>Add a new section following [support.initlist.access]:</p>
+
+<blockquote class="stdins">
+<h3>18.9.X Initializer list hash support [support.initlist.hash]</h3>
+<pre class="function">
+template&lt;class H, class E&gt; H hash_value(H h, initializer_list&ltE&gt; il);
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>H</code> meets the requirements of
+  <code>HashCode</code>.</li>
+<li><i>Remarks:</i> This function shall not participate in overload resolution
+  unless <code>E</code> is <code>Hashable</code> by <code>H</code>
+  (17.6.3.X).</li>
+<li><i>Returns:</i> An object of type <code>H</code> whose internal state
+  consists of the internal state of <code>h</code>, followed by a hash
+  representation (17.6.3.X) of <code>il</code>.</li>
+</ul>
+</blockquote>
+
+<h4><code>error_code</code></h4>
+
+<p>Revise the synopsis of <code>&lt;system_error&gt;</code> in [syserr]
+as follows:</p>
+
+<blockquote class="std">
+<pre>
+  <span class="comment">&hellip;</span>
+  <span class="comment">// 19.5.5 Hash support</span>
+  template &lt;class T&gt; struct hash;
+  template &lt;&gt; struct hash&lt;error_code&gt;;
+
+  <ins>template &lt;class H&gt; H hash_value(H h, const error_code& e);</ins>
+}
+</pre>
+</blockquote>
+
+<p>Revise [syserr.hash] as follows:</p>
+
+<blockquote class="std">
+<h3>19.5.5 System error hash support [syserr.hash]</h3>
+<pre class="function">
+template &lt;&gt; struct hash&lt;error_code&gt;;
+</pre>
+<ul class="function">
+<li>The template specialization shall meet the requirements of class template
+<code>hash</code> (20.9.13).</li>
+</ul>
+<ins>
+<pre class="function">
+template &lt;class H&gt; H hash_value(H h, const error_code& e);
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>H</code> meets the requirements of
+  <code>HashCode</code>.</li>
+<li><i>Returns:</i> An object of type <code>H</code> whose internal state
+  consists of the internal state of <code>h</code>, followed by a hash
+  representation (17.6.3.X) of <code>e</code>.</li>
+</ul>
+</blockquote>
+
+<h4><code>pair</code></h4>
+
+<p>Revise the synopsis of <code>&lt;utility&gt;</code> in [utility] as
+follows:</p>
+
+<blockquote class="std">
+<pre>
+  <span class="comment">&hellip;</span>
+  <span class="comment">// 20.3.5, pair piecewise construction</span>
+  struct piecewise_construct_t { };
+  constexpr piecewise_construct_t piecewise_construct{};
+  template &lt;class... Types&gt; class tuple; // defined in &lt;tuple&gt;
+<ins>
+  <span class="comment">// 20.3.X, pair hash support</span>
+  template &lt;class H, class T1, class T2&gt;
+    H hash_value(H h, const pair&lt;T1, T2&gt;&amp; p);
+</ins>
+  <span class="comment">// 20.5, Compile-time integer sequences</span>
+  template&lt;class T, T...&gt; struct integer_sequence;
+  </pre>
+  <span class="comment">&hellip;</span>
+</blockquote>
+
+<p>Insert a new subclause, following [pair.piecewise]:</p>
+
+<blockquote class="stdins">
+<h3>20.3.X Hash support [pair.hash]</h3>
+<pre class="function">
+template &lt;class H, class T1, class T2&gt;
+  H hash_value(H h, const pair&lt;T1, T2&gt;&amp; p);
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>H</code> meets the requirements of
+  <code>HashCode</code>.</li>
+<li><i>Remarks:</i> This function shall not participate in overload
+  resolution unless <code>T1</code> and <code>T2</code> are
+  <code>Hashable</code> by <code>H</code>.</li>
+<li><i>Returns:</i> An object of type <code>H</code> whose internal state
+  consists of the internal state of <code>h</code>, followed by a hash
+  representation (17.6.3.X) of <code>p</code>.</li>
+</blockquote>
+
+<h4><code>tuple</code></h4>
+
+<p>Revise the synopsis of <code>&lt;tuple&gt;</code> in [tuple.general]
+as follows:</p>
+
+<blockquote class="std">
+<pre>
+  <span class="comment">&hellip;</span>
+  <span class="comment">// 20.4.2.9, specialized algorithms:</span>
+  template &lt;class... Types&gt;
+    void swap(tuple&lt;Types...&gt;& x, tuple&lt;Types...&gt;& y) noexcept(<span style="font-style: Italic">see below</span>);
+<ins>
+  <span class="comment">// 20.4.2.X, hash support</span>
+  template &lt;class H, class... Types&gt; H hash_value(H h, const tuple&lt;Types...&gt;&amp;);</ins>
+}
+</pre>
+</blockquote>
+
+<p>Insert a new subclause following [tuple.special]:</p>
+
+<blockquote class="stdins">
+<h4>20.4.2.X Tuple hash support [tuple.hash]</h4>
+<pre class="function">
+template &lt;class H, class... Types&gt; H hash_value(H h, const tuple&lt;Types...&gt;&amp; t);
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>H</code> meets the requirements of
+  <code>HashCode</code>.</li>
+<li><i>Remarks:</i> This function shall not participate in overload
+  resolution unless every type in <code>Types</code> is
+  <code>Hashable</code> by <code>H</code>.</li>
+<li><i>Returns:</i> An object of type <code>H</code> whose internal state
+  consists of the internal state of <code>h</code>, followed by a hash
+  representation (17.6.3.X) of <code>t</code>.</li>
+</ul>
+</blockquote>
+
+<h4><code>bitset</code></h4>
+
+<p>Revise the synopsis of class <code>bitset</code> in [template.bitset]/p1
+as follows:</p>
+
+<blockquote class="std">
+<pre>
+  <span class="comment">&hellip;</span>
+  <span class="comment">// 20.6.3 hash support</span>
+  template &lt;class T&gt; struct hash;
+  template &lt;size_t N&gt; struct hash&lt;bitset&lt;N&gt; &gt;;
+  <ins>
+  template &lt;class H, size_t N&gt; H hash_value(H h, const bitset&lt;N&gt;&amp;);</ins>
+}
+</pre>
+</blockquote>
+
+<p>Revise [bitset.hash] as follows:</p>
+
+<blockquote class="std">
+<h3>20.6.3 <code>bitset</code> hash support [bitset.hash]</h3>
+<pre class="function">
+template &lt;size_t N&gt; struct hash&lt;bitset&lt;N&gt; &gt;;
+</pre>
+<ul class="function">
+<li>The template specialization shall meet the requirements of class template
+<code>hash</code> (20.9.13).</li>
+</ul>
+<ins>
+<pre class="function">
+template &lt;class H, size_t N&gt; H hash_value(H h, const bitset&lt;N&gt;&amp; x);
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>H</code> meets the requirements of
+  <code>HashCode</code>.</li>
+<li><i>Returns:</i> An object of type <code>H</code> whose internal state
+  consists of the internal state of <code>h</code>, followed by a hash
+  representation (17.6.3.X) of <code>x</code>.</li>
+</ul>
+</blockquote>
+
+<h4>Smart pointers</h4>
+
+<p>Revise the synopsis of <code>&lt;memory&gt;</code> in [memory.syn] as
+follows:</p>
+
+<blockquote class="std">
+<pre>
+  <span class="comment">&hellip;</span>
+  <span class="comment">// 20.8.2.7 hash support</span>
+  template &lt;class T&gt; struct hash;
+  template &lt;class T, class D&gt; struct hash&lt;unique_ptr&lt;T, D&gt; &gt;;
+  template &lt;class T&gt; struct hash&lt;shared_ptr&lt;T&gt; &gt;;
+<ins>
+  template &lt;class H, class T, class D&gt;
+    H hash_value(H h, const unique_ptr&lt;T, D&gt;&amp; x);
+  template &lt;class H, class T&gt;
+    H hash_value(H h, const shared_ptr&lt;T&gt;&amp; x);</ins>
+}
+</pre>
+</blockquote>
+
+<p>Add the following to the end of [util.smartptr.hash]:</p>
+<blockquote class="stdins">
+<pre class="function">
+template &lt;class H, class T, class D&gt;
+  H hash_value(H h, const unique_ptr&lt;T, D&gt;&amp; x);
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>H</code> meets the requirements of
+  <code>HashCode</code>.</li>
+<li><i>Effects:</i> Equivalent to
+  <code>hash_combine(std::move(h), x.get())</code>.
+</ul>
+<pre class="function">
+template &lt;class H, class T&gt;
+  H hash_value(H h, const shared_ptr&lt;T&gt;&amp; x);
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>H</code> meets the requirements of
+  <code>HashCode</code>.</li>
+<li><i>Effects:</i> Equivalent to
+  <code>hash_combine(std::move(h), x.get())</code>.
+</ul>
+</blockquote>
+
+<h4><code>chrono</code> types</h4>
+
+<p>Revise the synopsis of <code>&lt;chrono&gt;</code> in [time.syn] as
+follows:</p>
+
+<blockquote class="std">
+<pre>
+  <span class="comment">&hellip;</span>
+  <span class="comment">// 20.12.5.7, duration_cast</span>
+  template &lt;class ToDuration, class Rep, class Period&gt;
+  constexpr ToDuration duration_cast(const duration&lt;Rep, Period&gt;&amp; d);
+<ins>
+  <span class="comment">// 20.12.5.X, duration hash support</span>
+  template &lt;class H, class Rep, class Period&gt;
+    H hash_value(H h, const duration&lt;Rep, Period&gt;&amp; d);</ins>
+
+  <span class="comment">// convenience typedefs</span>
+  <span class="comment">&hellip;</span>
+
+  <span class="comment">// 20.12.6.7, time_point_cast</span>
+  template &lt;class ToDuration, class Clock, class Duration&gt;
+    constexpr time_point&lt;Clock, ToDuration&gt;
+    time_point_cast(const time_point&lt;Clock, Duration&gt;&amp; t);
+<ins>
+  <span class="comment">// 20.12.6.X, time_point hash support</span>
+  template &lt;class H, class Clock, class Duration&gt;
+    H hash_value(H h, const time_point&lt;Clock, Duration&gt;&amp; t);</ins>
+
+  <span class="comment">// 20.12.7, clocks</span>
+  <span class="comment">&hellip;</span>
+</pre>
+</blockquote>
+
+<p>Insert a new subclause following [time.duration.cast], and renumber following
+subclauses:</p>
+
+<blockquote class="stdins">
+<h4>20.12.5.X <code>duration</code> hash support [time.duration.hash]</h4>
+<pre class="function">
+template &lt;class H, class Rep, class Period&gt;
+  H hash_value(H h, const duration&lt;Rep, Period&gt;&amp; d);
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>H</code> meets the requirements of
+  <code>HashCode</code>.</li>
+<li><i>Remarks:</i> This function shall not participate in overload resolution
+  unless <code>Rep</code> is <code>Hashable</code> by <code>H</code>.</li>
+<li><i>Returns:</i> An object of type <code>H</code> whose internal state
+  consists of the internal state of <code>h</code>, followed by a hash
+  representation (17.6.3.X) of <code>d</code>.</li>
+</ul>
+</blockquote>
+
+<p>Insert a new subclause following [time.point.cast]:</p>
+
+<blockquote class="stdins">
+<h4>20.12.6.X <code>time_point</code> hash support [time.point.hash]</h4>
+<pre class="function">
+template &lt;class H, class Clock, class Duration&gt;
+  H hash_value(H h, const time_point&lt;Clock, Duration&gt;&amp; t);</ins>
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>H</code> meets the requirements of
+  <code>HashCode</code>.</li>
+<li><i>Remarks:</i> This function shall not participate in overload resolution
+  unless <code>Duration</code> is <code>Hashable</code> by <code>H</code>.</li>
+<li><i>Returns:</i> An object of type <code>H</code> whose internal state
+  consists of the internal state of <code>h</code>, followed by a hash
+  representation (17.6.3.X) of <code>t</code>.</li>
+</ul>
+</blockquote>
+
+<h4><code>type_index</code></h4>
+
+<p>Revise [type.index.synopsis] as follows:</p>
+
+<blockquote class="std">
+<h3>20.14.1 Header <code>&lt;typeindex&gt;</code> synopsis
+[type.index.synopsis]</h3>
+<pre>
+namespace std {
+  class type_index;
+  template &lt;class T&gt; struct hash;
+  template&lt;&gt; struct hash&lt;type_index&gt;;
+<ins>
+  template &lt;class H&gt; H hash_value(H h, const type_index& x);</ins>
+}
+</pre>
+</blockquote>
+
+<p>Add the following to the end of [type.index.hash]:</p>
+
+<blockquote class="stdins">
+<pre class="function">
+template &lt;class H&gt; H hash_value(H h, const type_index& x);
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>H</code> meets the requirements of
+  <code>HashCode</code>.</li>
+<li><i>Returns:</i> An object of type <code>H</code> whose internal state
+  consists of the internal state of <code>h</code>, followed by a hash
+  representation (17.6.3.X) of <code>x</code>.</li>
+</ul>
+</blockquote>
+
+<h4><code>basic_string</code></h4>
+
+<p>Revise [char.traits.require]/p1 as follows:</p>
+<blockquote class="std">
+<p>In <ins>this subclause</ins><del>Table 62</del>, <code>X</code> denotes a
+Traits class defining types and functions for the character container type
+<code>CharT</code>; <code>c</code> and <code>d</code> denote values of type
+<code>CharT</code>; <code>p</code> and <code>q</code> denote values of type
+<code>const CharT*</code>; <code>s</code> denotes a value of type
+<code>CharT*</code>; <code>n</code>, <code>i</code> and <code>j</code> denote
+values of type <code>std::size_t</code>; <code>e</code> and <code>f</code>
+denote values of type <code>X::int_type</code>; <code>pos</code> denotes a
+value of type <code>X::pos_type</code>; state denotes a value of type
+<code>X::state_type</code>; <del>and</del> <code>r</code> denotes an lvalue
+of type <code>CharT</code><ins>, <code>H</code> denotes a type that meets the
+requirements of <code>HashCode</code>, and <code>h</code> denotes an rvalue
+of type <code>H</code></ins>. Operations on Traits shall not throw
+exceptions.</p>
+</blockquote>
+
+<p>Insert the following after Table 62 in [char.traits.require], and
+renumber following paragraphs:</p>
+<blockquote class="stdins">
+<p>In addition, if the expression <code>X::hash(h, c)</code> is
+well-formed when treated as an unevaluated operand, it shall have constant
+complexity, and shall evaluate to a value of type <code>H</code>, whose
+internal state consists of the internal state of <code>h</code>, followed
+by a sequence of zero or more <code>unsigned char</code> values which meets
+the following requirements. Let C denote the sequence for
+<code>X::hash(h, c)</code>, and D denote the sequence for
+<code>X::hash(h, d)</code>. Then, </p>
+<ul>
+<li>if <code>X::eq(c,d)</code>, then C = D,</li>
+<li>if <code>!X::eq(c,d)</code>, then with high probability, C &ne; D, and</li>
+<li>C is not a suffix of D.</li>
+</ul>
+
+<p>[<i>Note:</i> this parallels the requirements for <code>hash_value</code>,
+but using <code>X::eq()</code> in place of the <code>==</code> operator.
+&mdash; <i>end note</i>]</p>
+</blockquote>
+
+<p>Revise the synopses of <code>char_traits&lt;char&gt;</code>,
+<code>char_traits&lt;char16_t&gt;</code>,
+<code>char_traits&lt;char32_t&gt;</code>,
+and <code>char_traits&lt;wchar_t&gt;</code> (in
+[char.traits.specializations.char], [char.traits.specializations.char16_t],
+[char.traits.specializations.char32_t], and
+[char.traits.specializations.wchar_t], respectively), applying this
+change to each:</p>
+<blockquote class="std">
+<pre>
+    <span class="comment">&hellip;</span>
+    static int compare(const char_type* s1, const char_type* s2, size_t n);
+    static size_t length(const char_type* s);
+    static const char_type* find(const char_type* s, size_t n,
+                                 const char_type& a);
+    <ins>template &lt;class H&gt; static H hash(H h, char_type c);</ins>
+    static char_type* move(char_type* s1, const char_type* s2, size_t n);
+    static char_type* copy(char_type* s1, const char_type* s2, size_t n);
+    static char_type* assign(char_type* s, size_t n, char_type a);
+    <span class="comment">&hellip;</span>
+</pre>
+</blockquote>
+
+<p>Add the following to the end of [char.traits.specializations.char],
+[char.traits.specializations.char16_t], [char.traits.specializations.char32_t],
+and [char.traits.specializations.wchar_t]:</p>
+
+<blockquote class="stdins">
+<pre class="function">
+template &lt;class H&gt; static H hash(H h, char_type c);
+</pre>
+<ul class="function">
+<li><i>Effects:</i> Equivalent to <code>hash_value(std::move(h), c)</code>.
+</ul>
+</blockquote>
+
+<p>Revise the synopsis of <code>&lt;string&gt;</code> in [string.classes]
+as follows:</p>
+<blockquote class="std">
+<pre>
+  <span class="comment">&hellip;</span>
+  <span class="comment">// 21.6, hash support:</span>
+  template &lt;class T&gt; struct hash;
+  template &lt;&gt; struct hash&lt;string&gt;;
+  template &lt;&gt; struct hash&lt;u16string&gt;;
+  template &lt;&gt; struct hash&lt;u32string&gt;;
+  template &lt;&gt; struct hash&lt;wstring&gt;;
+<ins>
+  template &lt;class H, class charT, class traits, class Allocator&gt;
+    H hash_value(H h, const basic_string&lt;charT,traits,Allocator&gt;&amp);</ins>
+
+inline namespace literals {
+<span class="comment">&hellip;</span>
+</pre>
+</blockquote>
+
+<p>Add the following to the end of [basic.string.hash]:</p>
+<blockquote class="stdins">
+<pre class="function">
+template &lt;class H, class charT, class traits, class Allocator&gt;
+  H hash_value(H h, const basic_string&lt;charT,traits,Allocator&gt;&amp s);
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>H</code> meets the requirements of
+  <code>HashCode</code>.</li>
+<li><i>Remarks:</i> This function shall not participate in overload resolution
+  unless <code>traits::hash(std::move(h), charT{})</code> is well-formed
+  when treated as an unevaluated operand.</li>
+<li><i>Returns:</i> An object of type <code>H</code> whose internal state
+  consists of the internal state of <code>h</code>, followed by a hash
+  representation (17.6.3.X) of <code>s</code>.
+</ul>
+</blockquote>
+
+<h4>Sequence containers</h4>
+
+<p>Revise the synopsis of <code>&lt;array&gt;</code> in [sequences.general]
+as follows:</p>
+
+<blockquote class="std">
+<pre>
+  <span class="comment">&hellip;</span>
+  template &lt;class T, size_t N&gt;
+    void swap(array&lt;T, N&gt;&amp x, array&lt;T, N&gt;&amp y) noexcept(noexcept(x.swap(y)));
+<ins>  template &lt;class H, class T, size_t N&gt;
+    H hash_value(H h, const array&lt;T, N&gt;&amp x);</ins>
+
+  template &lt;class T&gt; class tuple_size;
+  <span class="comment">&hellip;</span>
+</pre>
+</blockquote>
+
+<p>Revise the synopsis of <code>&lt;deque&gt;</code> in [sequences.general]
+as follows:</p>
+<blockquote class="std">
+<pre>
+  <span class="comment">&hellip;</span>
+  template &lt;class T, class Allocator&gt;
+    void swap(deque&lt;T, Allocator&gt;&amp; x, deque&lt;T, Allocator&gt;&amp; y)
+      noexcept(noexcept(x.swap(y)));
+<ins>  template &lt;class H, class T, class Allocator&gt;
+    H hash_value(H h, const deque&lt;T, Allocator&gt;&amp;);</ins>
+}
+</pre>
+</blockquote>
+
+<p>Revise the synopsis of <code>&lt;forward_list&gt;</code> in
+[sequences.general] as follows:</p>
+<blockquote class="std">
+<pre>
+  <span class="comment">&hellip;</span>
+  template &lt;class T, class Allocator&gt;
+    void swap(forward_list&lt;T, Allocator&gt;&amp; x, forward_list&lt;T, Allocator&gt;&amp; y)
+      noexcept(noexcept(x.swap(y)));
+<ins>  template &lt;class H, class T, class Allocator&gt;
+    H hash_value(H h, const forward_list&lt;T, Allocator&gt;&amp; x);</ins>
+}
+</pre>
+</blockquote>
+
+<p>Revise the synopsis of <code>&lt;list&gt;</code> in [sequences.general]
+as follows:</p>
+<blockquote class="std">
+<pre>
+  <span class="comment">&hellip;</span>
+  template &lt;class T, class Allocator&gt;
+    void swap(list&lt;T, Allocator&gt;&amp; x, list&lt;T, Allocator&gt;&amp; y)
+      noexcept(noexcept(x.swap(y)));
+<ins>  template &lt;class H, class T, class Allocator&gt;
+    H hash_value(H h, const list&lt;T, Allocator&gt;&amp; x);</ins>
+}
+</pre>
+</blockquote>
+
+<p>Revise the synopsis of <code>&lt;vector&gt;</code> in [sequences.general]
+as follows:</p>
+<blockquote class="std">
+<pre>
+  <span class="comment">&hellip;</span>
+  template &lt;class T, class Allocator&gt;
+    void swap(vector&lt;T, Allocator&gt;& x, vector&lt;T, Allocator&gt;& y)
+      noexcept(noexcept(x.swap(y)));
+<ins>  template &lt;class H, class T, class Allocator&gt;
+    H hash_value(H h, const vector&lt;T, Allocator&gt;&amp; x);</ins>
+
+  template &lt;class Allocator&gt; class vector&lt;bool,Allocator&gt;;
+
+  <span class="comment">// <ins>vector&lt;bool&gt; </ins>hash support</span>
+  template &lt;class T&gt; struct hash;
+  template &lt;class Allocator&gt; struct hash&lt;vector&lt;bool, Allocator&gt; &gt;;
+}
+</pre>
+</blockquote>
+
+<p>Add the following to the end of [array.special]:</p>
+<blockquote class="stdins">
+<pre class="function">
+template &lt;class H, class T, size_t N&gt;
+  H hash_value(H h, const array&lt;T, N&gt;&amp x);
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>H</code> meets the requirements of
+  <code>HashCode</code>.</li>
+<li><i>Remarks:</i> This function shall not participate in overload resolution
+  unless <code>T</code> is <code>Hashable</code> by <code>H</code>.</li>
+<li><i>Returns:</i> An object of type <code>H</code> whose internal state
+  consists of the internal state of <code>h</code>, followed by a hash
+  representation (17.6.3.X) of <code>x</code>.</li>
+</ul>
+</blockquote>
+
+<p>Add the following to the end of [deque.special]:</p>
+<blockquote class="stdins">
+<pre class="function">
+template &lt;class H, class T, class Allocator&gt;
+  H hash_value(H h, const deque&lt;T, Allocator&gt;&amp; x);
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>H</code> meets the requirements of
+  <code>HashCode</code>.</li>
+<li><i>Remarks:</i> This function shall not participate in overload resolution
+  unless <code>T</code> is <code>Hashable</code> by <code>H</code>.</li>
+<li><i>Returns:</i> An object of type <code>H</code> whose internal state
+  consists of the internal state of <code>h</code>, followed by a hash
+  representation (17.6.3.X) of <code>x</code>.</li>
+</ul>
+</blockquote>
+
+<p>Add the following to the end of [forwardlist.spec]:</p>
+<blockquote class="stdins">
+<pre class="function">
+template &lt;class H, class T, class Allocator&gt;
+  H hash_value(H h, const forward_list&lt;T, Allocator&gt;&amp; x);
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>H</code> meets the requirements of
+  <code>HashCode</code>.</li>
+<li><i>Remarks:</i> This function shall not participate in overload resolution
+  unless <code>T</code> is <code>Hashable</code> by <code>H</code>.</li>
+<li><i>Returns:</i> An object of type <code>H</code> whose internal state
+  consists of the internal state of <code>h</code>, followed by a hash
+  representation (17.6.3.X) of <code>x</code>.</li>
+</ul>
+</blockquote>
+
+<p>Add the following to the end of [list.special]:</p>
+<blockquote class="stdins">
+<pre class="function">
+template &lt;class H, class T, class Allocator&gt;
+  H hash_value(H h, const list&lt;T, Allocator&gt;&amp; x);
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>H</code> meets the requirements of
+  <code>HashCode</code>.</li>
+<li><i>Remarks:</i> This function shall not participate in overload resolution
+  unless <code>T</code> is <code>Hashable</code> by <code>H</code>.</li>
+<li><i>Returns:</i> An object of type <code>H</code> whose internal state
+  consists of the internal state of <code>h</code>, followed by a hash
+  representation (17.6.3.X) of <code>x</code>.</li>
+</ul>
+</blockquote>
+
+<p>Add the following to the end of [vector.special]:</p>
+<blockquote class="stdins">
+<pre class="function">
+template &lt;class H, class T, class Allocator&gt;
+  H hash_value(H h, const vector&lt;T, Allocator&gt;&amp; x);
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>H</code> meets the requirements of
+  <code>HashCode</code>.</li>
+<li><i>Remarks:</i> This function shall not participate in overload resolution
+  unless <code>T</code> is <code>Hashable</code> by <code>H</code>.</li>
+<li><i>Returns:</i> An object of type <code>H</code> whose internal state
+  consists of the internal state of <code>h</code>, followed by a hash
+  representation (17.6.3.X) of <code>x</code>.</li>
+</ul>
+</blockquote>
+
+<h4>Associative containers</h4>
+
+<p>Revise the synopsis of &lt;map&gt; in [associative.map.syn] as follows:</p>
+
+<blockquote class="std">
+<pre>
+  <span class="comment">&hellip;</span>
+  template &lt;class Key, class T, class Compare, class Allocator&gt;
+    void swap(map&lt;Key, T, Compare, Allocator&gt;&amp;
+              map&lt;Key, T, Compare, Allocator&gt;&amp;
+      noexcept(noexcept(x.swap(y)));
+<ins>  template&lt;class H, class Key, class T, class Compare, class Allocator&gt;
+    H hash_value(H h, const map&lt;Key, T, Compare, Allocator&gt;&amp; x);</ins>
+
+  <span class="comment">&hellip;</span>
+  template &lt;class Key, class T, class Compare, class Allocator&gt;
+    void swap(multimap&lt;Key, T, Compare, Allocator&gt;&amp; x,
+              multimap&lt;Key, T, Compare, Allocator&gt;&amp; y)
+      noexcept(noexcept(x.swap(y)));
+<ins>  template&lt;class H, class Key, class T, class Compare, class Allocator&gt;
+    H hash_value(H h, const multimap&lt;Key, T, Compare, Allocator&gt;&amp; x);</ins>
+}
+</pre>
+</blockquote>
+
+<p>Revise the synopsis of &lt;set&gt; in [associative.set.syn] as follows:</p>
+
+<blockquote class="std">
+<pre>
+  <span class="comment">&hellip;</span>
+  template &lt;class Key, class Compare, class Allocator&gt;
+    void swap(set&lt;Key, Compare, Allocator&gt;&amp; x
+              set&lt;Key, Compare, Allocator&gt;&amp; y)
+      noexcept(noexcept(x.swap(y)));
+<ins>  template&lt;class H, class Key, class Compare, class Allocator&gt;
+    H hash_value(H h, const set&lt;Key, Compare, Allocator&gt;&amp; x);</ins>
+
+  <span class="comment">&hellip;</span>
+  template &lt;class Key, class Compare, class Allocator&gt;
+    void swap(multiset&lt;Key, Compare, Allocator&gt;&amp; x,
+              multiset&lt;Key, Compare, Allocator&gt;&amp; y)
+      noexcept(noexcept(x.swap(y)));
+<ins>  template&lt;class H, class Key, class Compare, class Allocator&gt;
+    H hash_value(H h, const multiset&lt;Key, Compare, Allocator&gt;&amp; x);</ins>
+}
+</pre>
+</blockquote>
+
+<p>Add the following to the end of [map.special]:</p>
+<blockquote class="stdins">
+<pre class="function">
+template&lt;class H, class Key, class T, class Compare, class Allocator&gt;
+  H hash_value(H h, const map&lt;Key, T, Compare, Allocator&gt;&amp; x);
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>H</code> meets the requirements of
+  <code>HashCode</code>.</li>
+<li><i>Remarks:</i> This function shall not participate in overload resolution
+  unless <code>T</code> is <code>Hashable</code> by <code>H</code>.</li>
+<li><i>Returns:</i> An object of type <code>H</code> whose internal state
+  consists of the internal state of <code>h</code>, followed by a hash
+  representation (17.6.3.X) of <code>x</code>.</li>
+</ul>
+</blockquote>
+
+<p>Add the following to the end of [multimap.special]:</p>
+<blockquote class="stdins">
+<pre class="function">
+template&lt;class H, class Key, class T, class Compare, class Allocator&gt;
+  H hash_value(H h, const multimap&lt;Key, T, Compare, Allocator&gt;&amp; x);
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>H</code> meets the requirements of
+  <code>HashCode</code>.</li>
+<li><i>Remarks:</i> This function shall not participate in overload resolution
+  unless <code>T</code> is <code>Hashable</code> by <code>H</code>.</li>
+<li><i>Returns:</i> An object of type <code>H</code> whose internal state
+  consists of the internal state of <code>h</code>, followed by a hash
+  representation (17.6.3.X) of <code>x</code>.</li>
+</ul>
+</blockquote>
+
+<p>Add the following to the end of [set.special]:</p>
+<blockquote class="stdins">
+<pre class="function">
+template&lt;class H, class Key, class Compare, class Allocator&gt;
+  H hash_value(H h, const set&lt;Key, Compare, Allocator&gt;&amp; x);
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>H</code> meets the requirements of
+  <code>HashCode</code>.</li>
+<li><i>Remarks:</i> This function shall not participate in overload resolution
+  unless <code>T</code> is <code>Hashable</code> by <code>H</code>.</li>
+<li><i>Returns:</i> An object of type <code>H</code> whose internal state
+  consists of the internal state of <code>h</code>, followed by a hash
+  representation (17.6.3.X) of <code>x</code>.</li>
+</ul>
+</blockquote>
+
+<p>Add the following to the end of [multiset.special]:</p>
+<blockquote class="stdins">
+<pre class="function">
+template&lt;class H, class Key, class Compare, class Allocator&gt;
+  H hash_value(H h, const multiset&lt;Key, Compare, Allocator&gt;&amp; x);
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>H</code> meets the requirements of
+  <code>HashCode</code>.</li>
+<li><i>Remarks:</i> This function shall not participate in overload resolution
+  unless <code>T</code> is <code>Hashable</code> by <code>H</code>.</li>
+<li><i>Returns:</i> An object of type <code>H</code> whose internal state
+  consists of the internal state of <code>h</code>, followed by a hash
+  representation (17.6.3.X) of <code>x</code>.</li>
+</ul>
+</blockquote>
+
+<h4><code>thread::id</code></h4>
+
+<p>Revise the synopsis of <code>&lt;thread::id&gt;</code> in [thread.thread.id]
+as follows:</p>
+
+<blockquote class="std">
+<pre>
+  <span class="comment">&hellip;</span>
+  <span class="comment">// Hash support</span>
+  template &lt;class T&gt; struct hash;
+  template &lt;&gt; struct hash&lt;thread::id&gt;;
+<ins>
+  template &lt;class H&gt; H hash_value(H h, thread::id x);</ins>
+}
+</pre>
+</blockquote>
+
+<p>Add the following to the end of [thread.thread.id]:</p>
+
+<blockquote class="stdins">
+<pre class="function">
+template &lt;class H&gt; H hash_value(H h, thread::id x);
+</pre>
+<ul class="function">
+<li><i>Requires:</i> <code>H</code> meets the requirements of
+  <code>HashCode</code>.</li>
+<li><i>Returns:</i> An object of type <code>H</code> whose internal state
+  consists of the internal state of <code>h</code>, followed by a hash
+  representation (17.6.3.X) of <code>x</code>.</li>
+</ul>
+</blockquote>
+
+<hr/>
+
+<p><a href="#r1" id="f1">[1]</a> The trailing length ensures that the
+hash representation is suffix-free. This explains why we require it to
+be suffix-free rather than prefix-free: to make it prefix-free, we would
+have to put the length before the list of elements, and that would require
+two traversals for containers that don't store an explicit length.</p>
+
+<p><a href="#r2" id="f2">[2]</a> <code>std::array</code> does face a
+difficult choice, though: heretofore it has managed to be both a
+sequence container and a tuple-like type, but this framework forces it
+to choose a side. In other words, <code>std::array&lt;int, 3&gt;</code>
+can have the same hash representation as
+<code>std::tuple&lt;int, int, int&gt;</code>, or it can have the same hash
+representation as <code>std::vector&lt;int&gt;</code>, but not both
+(unless we want to tack an otherwise-useless <code>size_t</code> onto
+the hash representations of <code>tuple</code> and <code>pair</code>).</p>
+
+<p><a href="#r3" id="f3">[3]</a> Consequently, this optimization would benefit
+from the availability of contiguous iterator support, as proposed
+by <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n4183.pdf">N4183</a>. Failing that, it would work only for pointer ranges.</p>
+
+<p><a href="#r4" id="f4">[4]</a> But note that it may not actually invoke
+<code>hash_value()</code>: if the value is uniquely represented, it may
+hash the bytes directly, without ever invoking user code.</p>
+
+</body></html>

@@ -1,0 +1,569 @@
+<html>
+<head>
+<title>P0067R0: Elementary string conversions</title>
+
+<style type="text/css">
+  ins { text-decoration:none; font-weight:bold; background-color:#A0FFA0 }
+  del { text-decoration:line-through; background-color:#FFA0A0 }  
+  table, td, th { border: 1px solid black; border-collapse:collapse; padding: 5px }
+</style>
+</head>
+
+<body>
+ISO/IEC JTC1 SC22 WG21 P0067R0<br/>
+Jens Maurer &lt;Jens.Maurer@gmx.net><br/>
+2015-09-25<br/>
+
+<h1>P0067R0: Elementary string conversions</h1>
+
+<h2>Introduction</h2>
+
+Following up on
+<a href="http://open-std.org/JTC1/SC22/WG21/docs/papers/2015/n4412.html">N4412</a>
+"Shortcomings of iostreams", this paper presents
+low-level, locale-independent functions for conversions between
+integers and strings and between floating-point numbers and strings.
+<p>
+Use cases include the increasing number of text-based interchange
+formats such as JSON or XML that do not require internationalization
+support, but do require high throughput when produced by a server.
+<p>
+There are a lot of existing functions in C++ to perform such
+conversions, but none offers a high-performance solution.  At a
+minimum, an implementation by an ordinary user of the language using
+an elementary textbook algorithm should not be able to outperform a
+quality standard library implementation.  The requirements are thus:
+
+<ul>
+<li>no runtime parsing of format strings
+<li>no dynamic memory allcoation inherently required by the interface</li>
+<li>no consideration of locales</li>
+<li>no indirection through function pointers required</li>
+<li>prevention of buffer overruns</li>
+<li>when parsing a string, errors are distinguishable from valid numbers</li>
+<li>when parsing a string, whitespace or decorations are not silently ignored</li>
+</ul>
+
+For floating-point numbers, there should be a facility to output a
+floating-point number with a minimum number of decimal digits where
+input from the digits is guaranteed to reproduce the original
+floating-point value.
+
+
+<h2>Existing approaches</h2>
+
+<p>
+C++ already provides at least the facilities in the following table,
+each with shortcomings highlighted in the second column.
+</p>
+
+<table align="center">
+<tr><th>facility</th> <th>shortcomings</th></tr>
+
+<tr><td>sprintf</td>  <td>format string, locale, buffer overrun</td></tr>
+
+<tr><td>snprintf</td> <td>format string, locale</td></tr>
+
+<tr><td>sscanf</td>   <td>format string, locale</td></tr>
+
+<tr><td>atol</td>     <td>locale, does not signal errors</td></tr>
+
+<tr><td>strtol</td>   <td>locale, ignores whitespace and 0x prefix</td></tr>
+
+<tr><td>strstream</td>  <td>locale, ignores whitespace</td></tr>
+
+<tr><td>stringstream</td> <td>locale, ignores whitespace, memory allocation</td></tr>
+
+<tr><td>num_put / num_get facets</td> <td>locale, virtual function</td></tr>
+
+<tr><td>to_string</td>  <td>locale, memory allocation</td></tr>
+
+<tr><td>stoi etc.</td>  <td>locale, memory allocation, ignores whitespace and 0x prefix, exception on error</td></tr>
+
+</table>
+
+<p>
+As a rough performance comparison, the following simple numeric
+formatting task was implemented: Output the integer numbers 0 ... 1
+million, separated by a single space character, into a contiguous
+array buffer of 10 MB.  This task was executed 10 times.  The
+execution environment was gcc 4.9 on Intel Core i5 M450.
+</p>
+
+<table align="center">
+
+<tr>
+<td>strstream</td>   <td>864 ms</td>
+<td>uses <code>std::strstream</code> with application-provided buffer</td></tr>
+
+<tr><td>streambuf</td>  <td>540 ms</td>
+<td>uses simple custom streambuf with <code>std::num_put&lt;></code> facet</td></tr>
+
+<tr><td>direct</td>  <td>285 ms</td> <td>open-coded "divide by 10" algorithm, using the interface described below</td></tr>
+
+<tr><td>fixed-point</td>  <td>125 ms</td>  <td>fixed-point algorithm found in an older AMD optimization guide, using the interface described below</td></tr>
+
+</table>
+
+<p>
+There are various approaches for even more efficient algorithms;
+see, for example, https://gist.github.com/anonymous/7700052 .
+</p>
+
+
+<h2>Interface discussion</h2>
+
+<p>
+The following discussion assumes that a common interface style should
+be established that covers (built-in) integer and floating-point
+types.  The type <code>T</code> designates such an arithmetic type.
+Note that given these restrictions, output of T to a string has a
+small maximum length in all cases.  The styles for input vs. output
+will differ due to the differing functionality.
+</p>
+
+<p>
+The fundamental interface for a string is that it is caller-allocated,
+contiguous in memory, and not necessarily 0-terminated.  That means,
+it can be represented by a range [<code>begin</code>,<code>end</code>)
+where <code>begin</code> and <code>end</code> are of type <code>char
+*</code>.
+</p>
+
+<p>
+Given this framework, the following subsections discuss various
+specific interface styles for both output and input. In each case, the
+signature of an integer output or input function is shown.  Criteria
+for comparison include impact on compiler optimizations, indication of
+output buffer overflow, and composability (as a measure of
+ease-of-use).
+</p>
+
+<h3>Output</h3>
+
+<p>
+This subsection discusses various specific interface styles for
+output. In each case, the signature of an integer output function is
+shown.  There is one failure mode for output: overflow of the provided
+output buffer.  Criteria for comparison include impact on compiler
+optimizations, indication of output buffer overflow, and composability
+(as a measure of ease-of-use).  For exposition of the latter,
+consecutive output of two numbers is shown, without any separator.
+</p>
+
+<p>
+Conceptually, an output function has four parameters and two
+results. The parameters are the <code>begin</code> and
+<code>end</code> pointers of the buffer, the value, and the desired
+base. The results are the updated <code>begin</code> pointer and an
+overflow indication.
+</p>
+
+
+<h4>Iterator</h4>
+
+<pre>
+  char * to_string(char * begin, char * end, T value, int base = 10);
+</pre>
+
+<p>
+This interface style returns the updated <code>begin</code> pointer.
+That is, the resulting string is in [<code>begin</code>,
+<em>return-value</em>) and [<em>return-value</em>, <code>end</code>)
+is unused space in the string.  Such an interface style is used for
+many standard library algorithms, e.g. <code>find</code> [alg.find].
+All parameters are passed by value which helps the optimizer.
+Overflow is indicated by <em>return-value</em> == <code>end</code>.
+The situation that the output exactly fits into the provided buffer
+cannot be distinguished from overflow.  Two consecutive outputs can be
+produced trivially using:
+
+<pre>
+  p = to_string(p, end, value1);
+  p = to_string(p, end, value2);
+</pre>
+
+
+
+<h4>Iterator with in-situ update</h4>
+
+<pre>
+  void to_string(char *& begin, char * end, T value, int base = 10);
+</pre>
+
+<p>
+This interface style updates the <code>begin</code> pointer in place.
+That is, the resulting string is in [<code>old-begin</code>,
+<code>begin</code>) and [<code>begin</code>,<code>end</code>) is
+unused space in the string.  Aliasing rules allow that updates to
+<code>begin</code> change the data where begin points.  To avoid
+redundant updates, the implementation can copy <code>begin</code> to a
+local variable.  Overflow is indicated by <code>begin</code> reaching
+<code>end</code>.  The situation that the output exactly fits into the
+provided buffer cannot be distinguished from overflow.  Two
+consecutive outputs can be produced trivially using:
+
+<pre>
+  to_string(p, end, value1);
+  to_string(p, end, value2);
+</pre>
+
+
+<h4>string_view</h4>
+
+<pre>
+  void to_string(std::string_view& s, T value, int base = 10);
+</pre>
+
+This interface style groups the <code>begin</code> and
+<code>end</code> pointers into a <code>string_view</code> which is
+updated in-place.  Comments on "iterator with in-situ update" apply
+analogously.
+
+<h4>Iterator with in-situ update and overflow indication</h4>
+
+Adding a boolean return value allows to indicate overflow:
+
+<pre>
+  bool to_string(char *& begin, char * end, T value, int base = 10);
+</pre>
+
+Comments on "iterator with in-situ update" apply analogously, except
+that the return value indicates whether overflow occurred.
+
+<h4>snprintf</h4>
+
+<pre>
+  int to_string(char * begin, char * end, T value, int base = 10);
+</pre>
+
+This interface style always returns the number of characters required
+to output T, regardless of whether sufficient space was provided.
+That is, an overflow occurred if the return value is larger than
+<code>end</code>-<code>begin</code>, otherwise the resulting string is
+in [<code>begin</code>, <code>begin + <em>return-value</em></code>).
+Such an interface style is used for <code>snprintf</code>, except that
+the proposed function never 0-terminates the output.  All parameters
+are passed by value which helps the optimizer.  Overflow is indicated
+by a return value strictly larger than the distance between
+<code>begin</code> and <code>end</code>.  Two consecutive outputs
+require attention at the caller site to avoid buffer overflow:
+
+<pre>
+  int n = 0;
+  n += to_string(begin, end, value1);
+  n += to_string(begin + std::min(n, end-begin), end, value2);
+</pre>
+
+
+<h4>Conclusion</h4>
+
+For me, the "iterator" approach seems to blend in best with the rest
+of the standard library.  Loss of exact overflow indication seems not
+too important.  If "total result size" is an important information,
+the "snprintf" interface delivers that plus an exact overflow
+indication.
+
+
+<h3>Input</h3>
+
+<p>
+An input function conceptually operates in two steps: First, it
+consumes characters from the input string matching a pattern until the
+first non-matching character or the end of the string is encountered.
+Second, the matched characters are translated into a value of type
+<code>T</code>.  There are two failure modes: no characters match, or
+the pattern translates to a value that is not in the range
+representable by <code>T</code>.
+</p>
+
+<p>
+Conceptually, an input function has three parameters and three
+results. The parameters are the <code>begin</code> and
+<code>end</code> pointers of the string and the desired base.  The
+results are the updated <code>begin</code> pointer, a
+<code>std::error_code</code> and the parsed value.
+</p>
+
+<p>
+This subsection discusses various specific interface styles for
+input. Failure is indicated by <code>std::error_code</code> with the
+appropriate value.  In each case, the signature of an integer input
+function is shown.  Criteria for comparison include impact on compiler
+optimizations and composability (as a measure of ease-of-use).  For
+exposition of the latter, parsing of two consecutive values is shown,
+without skipping of any separator.
+</p>
+
+<h4>Iterator</h4>
+
+<pre>
+  const char * from_string(const char * begin, const char * end, T& value, std::error_code& ec, int base = 10);
+</pre>
+
+This interface style returns the updated <code>begin</code> pointer.
+That is, the returned pointer points to the first character not
+matching the pattern.  Such an interface style is used for many
+standard library algorithms.  All parameters are passed by value which
+helps the optimizer. Two consecutive inputs can be performed like this:
+<pre>
+  T value1, value2;
+  std::error_code ec;
+  p = from_string(p, end, value1, ec);
+  if (ec)
+    /* parse error */;
+  p = from_string(p, end, value2, ec);
+  if (ec)
+    /* parse error */;
+</pre>
+
+
+<h4>Iterator with in-situ update</h4>
+
+<pre>
+  void from_string(const char *& begin, const char * end, T& value, std::error_code& ec, int base = 10);
+</pre>
+
+This interface style updates the <code>begin</code> pointer in place.
+Two consecutive inputs can be performed like this:
+<pre>
+  T value1, value2;
+  std::error_code ec;
+  from_string(p, end, value1, ec);
+  if (ec)
+    /* parse error */;
+  from_string(p, end, value2, ec);
+  if (ec)
+    /* parse error */;
+</pre>
+
+
+<h4>Iterator with in-situ update and error return</h4>
+
+<pre>
+  std::error_code from_string(const char *& begin, const char * end, T& value, int base = 10);
+</pre>
+
+Returning the error code allows for more compact code at the call site:
+
+<pre>
+  T value1, value2;
+  if (std::error_code ec = from_string(p, end, value1))
+    /* parse error */;
+  if (std::error_code ec = from_string(p, end, value2))
+    /* parse error */;
+</pre>
+
+
+<h4>Return a std::pair or std::tuple</h4>
+
+Two of the three results of an input function could be represented by
+a pair.  All three results could be represented by a tuple.  However,
+experience with <code>std::map</code> shows that the naming of the
+parts (<code>first</code> and <code>second</code>) carries no semantic
+meaning which would help reading the resulting code.  If the result
+value moves to the return value, its type <code>T</code> needs to be
+passed explicitly (e.g. as a template parameter).  The composition
+example would be:
+
+<pre>
+  std::pair&lt;T, std::error_code> res;
+  res = from_string&lt;T>(p, end);
+  if (res.second)
+    /* parse error */;
+  T value1 = res.first;
+  res = from_string&lt;T>(p, end);
+  if (res.second)
+    /* parse error */;
+  T value2 = res.second;
+</pre>
+
+
+<h4>Conclusion</h4>
+
+The "iterator" style seems to blend in best with the rest of the
+standard library.  The "iterator with in-situ update and error return"
+allows for the most compact code at the call site.  Returning a pair
+or tuple seems least attractive.
+
+
+<h3>Naming</h3>
+
+This paper proposes <code>to_string</code> (overloaded from its
+existing usage in the standard library) for the output function and
+<code>from_string</code> for the input (parse) function.  I'm open for
+other suggestions.
+
+
+<h2>Details</h2>
+
+<h3>Output</h3>
+
+<blockquote>
+An <em>output function</em> is a function with the declaration pattern
+
+<pre>
+  char * to_string(char * begin, char * end, T value /* possibly more parameters */);
+</pre>
+
+for some type T, converting <code>value</code> into a character string
+by successively filling the range
+[<code>begin</code>,<code>end</code>) and returning the
+one-past-the-end pointer where the conversion was complete.  [ Note:
+The resulting string is not null-terminated. ]  If the provided space
+is insufficiently large, returns <code>end</code>; the contents of the
+range [<code>begin</code>,<code>end</code>) are unspecified.
+
+<p>
+For each integer type (including extended integer types)
+<code>T</code> except <code>char</code> and <code>bool</code>, the
+following output function is provided:
+</p>
+
+<pre>
+  char * to_string(char * begin, char * end, T value, int base = 10);
+</pre>
+
+<p>
+Valid values for <code>base</code> are between 2 and 36 (inclusive).
+Digits in the range 10..36 are represented as lowercase characters
+a..z.  The value in <code>value</code> is converted to a string of
+digits in the given <code>base</code> (with no redundant leading
+zeroes). If T is a signed integral type, the representation starts
+with a minus sign if <code>value</code> is negative.
+</p>
+
+<p>
+For each floating-point type <code>T</code>, the following output
+function is provided:
+</p>
+
+<pre>
+  char * to_string(char * begin, char * end, T value);
+</pre>
+
+<p>
+A finite <code>value</code> is converted to a leading minus sign if
+<code>value</code> is negative, a string of decimal digits with at
+most one decimal point, and an optional trailing exponent introduced
+by a lowercase "<code>e</code>" followed by an optional minus sign
+followed by decimal digits.  The representation requires a minimal
+number of characters, yet parsing the representation using the
+<code>from_string</code> function recovers <code>value</code> exactly.
+If <code>value</code> is an infinity, it is converted to
+<code>inf</code> or <code>-inf</code>; a NaN is converted to
+<code>nan</code> or <code>-nan</code>.
+</p>
+
+<p>
+For each floating-point type <code>T</code>, the following output
+function is provided:
+</p>
+
+<pre>
+  char * to_string(char * begin, char * end, T value, int precision);
+</pre>
+
+<p>
+A finite <code>value</code> is converted to a leading minus sign if
+<code>value</code> is negative and a string of decimal digits with at
+most one decimal point and exactly <code>precision</code> digits after
+the decimal point.  If <code>precision</code> is 0, no decimal point
+appears, otherwise at least one digit appears before the decimal
+point.  The result is correctly rounded, i.e. it yields the same
+result as an infinite-precision output rounded to the desired
+precision.
+</p>
+
+
+</blockquote>
+
+
+<h3>Input</h3>
+
+<blockquote>
+An <em>input function</em> is a function with the declaration pattern
+
+<pre>
+  const char * from_string(const char * begin, const char * end, T& value, std::error_code& ec /* possibly more parameters */);
+</pre>
+
+for some type T.  An input function analyzes the string
+[<code>begin</code>, <code>end</code>) for a pattern.  If no
+characters match the pattern, the function retuns <code>begin</code>,
+<code>value</code> is unmodified, and <code>ec</code> is set to
+<code>EINVAL</code>.  Otherwise, the characters matching the pattern
+are interpreted as a representation of a value of type T.  The
+function returns a pointer that points to the first character not
+matching the pattern.  If the parsed value is not in the range
+representable by T, <code>value</code> is unmodified and
+<code>ec</code> is set to <code>ERANGE</code>.  Otherwise,
+<code>ec</code> is set such that conversion to <code>bool</code>
+yields false.
+
+<p>
+For each integer type (including extended integer types)
+<code>T</code> except <code>char</code> and <code>bool</code>, the
+following input function is provided:
+</p>
+
+<pre>
+  const char * from_string(const char * begin, const char * end, T& value, std::error_code& ec, int base = 10);
+</pre>
+
+<p>
+Valid values for base are between 2 and 36 (inclusive).  Digits in the
+range 10..36 are represented as lowercase characters a..z.  If
+<code>T</code> is an unsigned integral type, the pattern is a
+non-empty sequence of digit characters according to <code>base</code>.
+If <code>T</code> is a signed integral type, the pattern is an
+optional minus sign followed by a non-empty sequence of digit
+characters.
+</p>
+
+<p>
+For each floating-point type <code>T</code>, the following input
+function is provided:
+</p>
+
+<pre>
+  const char * from_string(const char * begin, const char * end, T& value, std::error_code& ec);
+</pre>
+
+The pattern is an optional minus sign
+followed by a non-empty sequence of decimal digit characters with at
+most one decimal point, and an optional trailing exponent introduced
+by "<code>e</code>" or "<code>E</code>" followed by an optional minus
+sign followed by a non-empty sequence of decimal digits.  The
+resulting <code>value</code> is one of at most two floating-point
+values closest to the given pattern.  The pattern also matches the
+representations of infinity and NaN described for output.
+
+
+</blockquote>
+
+
+<h2>Open Issues</h2>
+
+<ul>
+<li>review input/output pattern specifications vs. C standard "fprintf"</li>
+<li>discuss naming</li>
+</ul>
+
+<h2>References</h2>
+
+<ul>
+<li>"How to print floating-point numbers accurately" by Guy L. Steele
+Jr. and Jon L White, Proceedings of the ACM SIGPLAN'90 Conference on
+Programming Language Design and Implementation;
+<a href="http://www.kurtstephens.com/files/p372-steele.pdf">http://www.kurtstephens.com/files/p372-steele.pdf</a> (starting at page 4 of the PDF)</li>
+
+<li>"Printing Floating-Point Numbers Quickly and Accurately with
+ Integers" by Florian Loitsch, PLDI'10
+<a href="http://www.cs.tufts.edu/~nr/cs257/archive/florian-loitsch/printf.pdf">http://www.cs.tufts.edu/~nr/cs257/archive/florian-loitsch/printf.pdf</a></li>
+
+<li>"How to Read Floating Point Numbers Accurately" by William D Clinger,
+University of Oregon
+<a href="http://www.cesura17.net/~will/professional/research/papers/howtoread.pdf">http://www.cesura17.net/~will/professional/research/papers/howtoread.pdf</a></li>
+
+</ul>

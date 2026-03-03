@@ -1,0 +1,1504 @@
+<html><head>
+<style>
+body { font-family: "Book Antiqua", "Times New Roman", "Times", serif; padding: 2em; }
+.programlisting, .computeroutput, .literal { font-family: "Consolas", monospace; font-size: 90%; }
+blockquote pre.programlisting { margin-left: 1em; padding-left: 1em; }
+div.table { text-align: center; }
+.sidebar { background-color: #e0e0e0; font-style: italic; }
+p { text-align: justify; }
+p.tablecaption { font-weight: bold; text-align: center; }
+p.title { font-weight: bold; text-align: center; }
+div.section { position: relative; }
+span.xrefid { position: absolute; right: 0em; top: 0em; }
+table { margin: auto; border: 1px solid gray; border-collapse: collapse; }
+th { border: 1px solid gray; padding: 0.5em; }
+td { border: 1px solid gray; padding: 0.5em; }
+h1, h2, h3, h4, h5, div.titlepage { page-break-after: avoid; }
+dl { margin-top: 0px; margin-bottom: 0px; }
+</style>
+<meta http-equiv="Content-Type" content="text/html; charset=US-ASCII"><title>Using customization points to unify executors</title><meta name="generator" content="DocBook XSL Stylesheets V1.75.2"></head><body bgcolor="white" text="black" link="#0000FF" vlink="#840084" alink="#0000FF">
+<pre>Doc. no:  P0285R0 
+Date:     2016-02-14
+Audience: Concurrency
+Reply-To: Christopher Kohlhoff &lt;chris@kohlhoff.com&gt;
+</pre>
+<div class="chapter" title="Using customization points to unify executors"><div class="titlepage"><div><div><h2 class="title"><a name="executors"></a>Using customization points to unify executors</h2></div></div></div><div class="section" title="1.&#160;Introduction"><div class="titlepage"><div><div><h2 class="title" style="clear: both"><a name="executors.introduction"></a>1.&#160;Introduction</h2></div></div></div><p>
+      The concept of an executor exists in a number of use cases, including:
+    </p><div class="itemizedlist"><ul class="itemizedlist" type="disc"><li class="listitem">
+          Submitting parcels of work to a background thread pool.
+        </li><li class="listitem">
+          Event-driven and asynchronous programming models, like those used in low
+          latency networking.
+        </li><li class="listitem">
+          Parallel algorithms.
+        </li></ul></div><p>
+      The <span class="emphasis"><em>requirements</em></span> on executors in these use cases differ,
+      as evidenced by the divergence between the proposals before the committee.
+      However, there is also a clear area of commonality: the underlying execution
+      context, such as a thread pool, may apply to all use cases. As users, we want
+      to be able to have a single thread pool object that can be used for all of
+      the above use cases. In real world applications, the use cases do not always
+      exist in isolation.
+    </p><p>
+      This paper proposes a design to reconcile the executor models where:
+    </p><div class="itemizedlist"><ul class="itemizedlist" type="disc"><li class="listitem">
+          We can have a single definition for each kind of execution context (such
+          as a thread pool).
+        </li><li class="listitem">
+          We use a customization point mechanism (as proposed in N4381 <span class="emphasis"><em>Customization
+          Points</em></span> and utilised in the draft Ranges Technical Specification)
+          as a means to associate the distinct executor types with each execution
+          context. This mechanism can also be used to detect whether a particular
+          kind of executor is supported.
+        </li></ul></div><p>
+      In this paper we will introduce a trivial executor concept, for background
+      work management, and an event executor concept, designed to meet the needs
+      of event-driven and asynchronous programming such as networking. We will also
+      illustrate how additional executor type requirements (like those needed to
+      support parallel algorithms) can be added in an extensible fashion using customization
+      points. The paper also includes an executor-aware <code class="computeroutput"><span class="identifier">async</span></code>
+      function as an example of customization point use.
+    </p></div><div class="section" title="2.&#160;Design discussion"><div class="titlepage"><div><div><h2 class="title" style="clear: both"><a name="executors.design_discussion"></a>2.&#160;Design discussion</h2></div></div></div><div class="section" title="2.1.&#160;Library vocabulary"><div class="titlepage"><div><div><h3 class="title"><a name="executors.library_vocabulary"></a>2.1.&#160;Library vocabulary</h3></div></div></div><p>
+        The central concept of this library is the <span class="emphasis"><em>executor</em></span>
+        as a policy. An executor embodies a set of rules about where, when and how
+        to run a submitted function object. Executors are intended to be lightweight,
+        copyable, and with interfaces defined by type requirements, similar to the
+        other <span class="emphasis"><em>-ors</em></span> of the standard library, iterators and allocators.
+      </p><p>
+        An <span class="emphasis"><em>execution context</em></span> is the venue where the submitted
+        function objects are executed. Where executors are lightweight and cheap
+        to copy, an execution context is typically long-lived and non-copyable. It
+        may contain additional state such as timer queues, socket reactors, or hidden
+        threads to emulate asynchronous functionality.
+      </p><p>
+        For example, we say that a <code class="computeroutput"><span class="identifier">thread_pool</span></code>
+        <span class="emphasis"><em>is</em></span> an execution context, and that it <span class="emphasis"><em>has</em></span>
+        an executor. The thread pool contains long-lived state, namely the threads
+        that persist until the pool is shut down. The thread pool's executor embodies
+        the rule: <span class="emphasis"><em>run functions in the pool and nowhere else</em></span>.
+      </p></div><div class="section" title="2.2.&#160;Granularity of executor type requirements"><div class="titlepage"><div><div><h3 class="title"><a name="executors.granularity_of_executor_type_requirements"></a>2.2.&#160;Granularity of executor type requirements</h3></div></div></div><p>
+        The proposed text included in this paper defines type requirements for two
+        different kinds of executor:
+      </p><div class="itemizedlist"><ul class="itemizedlist" type="disc"><li class="listitem">
+            Trivial executors, intended for simple use cases such as submitted parcels
+            of work to a background thread pool.
+          </li><li class="listitem">
+            Event executors, designed to meet the needs of event-driven designs and
+            asynchronous operations as used in network programming. It is specifically
+            intended to meet the execution needs of the draft Networking Technical
+            Specification.
+          </li></ul></div><p>
+        A concrete execution context, such as the proposed text's <code class="computeroutput"><span class="identifier">thread_pool</span></code>,
+        can support both kinds of executor. The precise design of these executors
+        is beyond the scope of this particular discussion, and readers are invited
+        to read papers such as P0008R0, P0112R1, and P0113R0 for more information.
+      </p><p>
+        This approach breaks down executor type requirements into small, coherent
+        units that focus on the intended use cases. This offers a simpler design
+        and better extensibility than a monolithic <code class="computeroutput"><span class="identifier">Executor</span></code>
+        concept, such as the <code class="computeroutput"><span class="identifier">executor_traits</span></code>
+        approach of P0058. Additional executor type requirements may be non-intrusively
+        added, and we will illustrate this extensibility below by showing how parallel
+        algorithm executors might be introduced.
+      </p></div><div class="section" title="2.3.&#160;Customization points"><div class="titlepage"><div><div><h3 class="title"><a name="executors.customization_points"></a>2.3.&#160;Customization points</h3></div></div></div><p>
+        To obtain a trivial executor for an execution context we use <code class="computeroutput"><span class="identifier">get_trivial_executor</span></code>:
+      </p><pre class="programlisting"><span class="identifier">std</span><span class="special">::</span><span class="identifier">experimental</span><span class="special">::</span><span class="identifier">thread_pool</span> <span class="identifier">pool</span><span class="special">;</span>
+<span class="keyword">auto</span> <span class="identifier">ex</span> <span class="special">=</span> <span class="identifier">std</span><span class="special">::</span><span class="identifier">experimental</span><span class="special">::</span><span class="identifier">get_trivial_executor</span><span class="special">(</span><span class="identifier">pool</span><span class="special">);</span>
+</pre><p>
+        Similarly, to obtain an event executor we use <code class="computeroutput"><span class="identifier">get_event_executor</span></code>:
+      </p><pre class="programlisting"><span class="identifier">std</span><span class="special">::</span><span class="identifier">experimental</span><span class="special">::</span><span class="identifier">thread_pool</span> <span class="identifier">pool</span><span class="special">;</span>
+<span class="keyword">auto</span> <span class="identifier">ex</span> <span class="special">=</span> <span class="identifier">std</span><span class="special">::</span><span class="identifier">experimental</span><span class="special">::</span><span class="identifier">get_event_executor</span><span class="special">(</span><span class="identifier">pool</span><span class="special">);</span>
+</pre><p>
+        Both <code class="computeroutput"><span class="identifier">get_trivial_executor</span></code>
+        and <code class="computeroutput"><span class="identifier">get_event_executor</span></code> are
+        customization points, which are function objects as described in N4381. This
+        pattern is extensively utilised by the draft Ranges Technical Specification.
+      </p><p>
+        Users may hook the customization point non-intrusively by providing a free
+        function of the same name in their namespace:
+      </p><pre class="programlisting"><span class="keyword">namespace</span> <span class="identifier">my_namespace</span> <span class="special">{</span>
+  <span class="keyword">class</span> <span class="identifier">my_thread_pool</span> <span class="special">{</span> <span class="special">...</span> <span class="special">};</span>
+  <span class="keyword">class</span> <span class="identifier">my_trivial_executor</span> <span class="special">{</span> <span class="special">...</span> <span class="special">};</span>
+  <span class="identifier">my_trivial_executor</span> <span class="identifier">get_trivial_executor</span><span class="special">(</span><span class="identifier">my_thread_pool</span><span class="special">&amp;);</span>
+<span class="special">}</span>
+</pre><p>
+        or intrusively as a friend function:
+      </p><pre class="programlisting"><span class="keyword">namespace</span> <span class="identifier">my_namespace</span> <span class="special">{</span>
+  <span class="keyword">class</span> <span class="identifier">my_trivial_executor</span> <span class="special">{</span> <span class="special">...</span> <span class="special">};</span>
+  <span class="keyword">class</span> <span class="identifier">my_thread_pool</span> <span class="special">{</span>
+    <span class="keyword">friend</span> <span class="identifier">my_trivial_executor</span> <span class="identifier">get_trivial_executor</span><span class="special">(</span><span class="identifier">my_thread_pool</span><span class="special">&amp;);</span>
+  <span class="special">};</span>
+<span class="special">}</span>
+</pre><p>
+        Alternatively, the default <code class="computeroutput"><span class="identifier">get_trivial_executor</span></code>
+        implementation may be used, which automatically calls a <code class="computeroutput"><span class="identifier">get_trivial_executor</span></code>
+        member function if one is present:
+      </p><pre class="programlisting"><span class="keyword">namespace</span> <span class="identifier">my_namespace</span> <span class="special">{</span>
+  <span class="keyword">class</span> <span class="identifier">my_trivial_executor</span> <span class="special">{</span> <span class="special">...</span> <span class="special">};</span>
+  <span class="keyword">class</span> <span class="identifier">my_thread_pool</span> <span class="special">{</span>
+    <span class="identifier">my_trivial_executor</span> <span class="identifier">get_trivial_executor</span><span class="special">();</span>
+  <span class="special">};</span>
+<span class="special">}</span>
+</pre><p>
+        The expression <code class="computeroutput"><span class="identifier">std</span><span class="special">::</span><span class="identifier">experimental</span><span class="special">::</span><span class="identifier">get_trivial_executor</span><span class="special">(</span><span class="identifier">E</span><span class="special">)</span></code> is a
+        valid expression if, and only if, it produces a syntactically valid trivial
+        executor. This means we can use it in conjunction with SFINAE to detect at
+        compile time whether a given execution context supports a particular kind
+        of executor.
+      </p></div><div class="section" title="2.4.&#160;Supporting new executor type requirements"><div class="titlepage"><div><div><h3 class="title"><a name="executors.supporting_new_executor_type_requirements"></a>2.4.&#160;Supporting new executor type requirements</h3></div></div></div><p>
+        To introduce a new kind of executor we follow the steps below. For the sake
+        of exposition, let us assume we are adding a new parallel executor.
+      </p><p>
+        <span class="bold"><strong>Step 1: Define the type requirements</strong></span>
+      </p><p>
+        We begin by defining the new <code class="computeroutput"><span class="identifier">ParallelExecutor</span></code>
+        type requirements. These requirements refine the <code class="computeroutput"><span class="identifier">Executor</span></code>
+        type requirements by adding member functions such as <code class="computeroutput"><span class="identifier">execute</span></code>,
+        and <code class="computeroutput"><span class="identifier">async_execute</span></code>. A type
+        that satisfies the <code class="computeroutput"><span class="identifier">ParallelExecutor</span></code>
+        requirements represents an execution model for determining how parallel algorithms
+        are performed. For example, we might implement the type requirements to utilise
+        a work stealing thread pool. (Note: This example is not intended to prescribe
+        how these type requirements will look. It is expected that this analysis
+        and design would be done by experts in this field.)
+      </p><p>
+        <span class="bold"><strong>Step 2: Define the trait</strong></span>
+      </p><p>
+        Next we define a helper trait that lets us determine whether some type <code class="computeroutput"><span class="identifier">T</span></code> satisfies the syntactic requirements
+        of a <code class="computeroutput"><span class="identifier">ParallelExecutor</span></code>.
+      </p><pre class="programlisting"><span class="keyword">namespace</span> <span class="identifier">parallel</span> <span class="special">{</span>
+  <span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">T</span><span class="special">&gt;</span> <span class="keyword">struct</span> <span class="identifier">is_parallel_executor</span><span class="special">;</span>
+<span class="special">}</span> <span class="comment">// namespace parallel</span>
+</pre><p>
+        <span class="bold"><strong>Step 3: Define the customization point</strong></span>
+      </p><p>
+        Then we define a <code class="computeroutput"><span class="identifier">get_parallel_executor</span></code>
+        customization point. The customization point is implemented using the mechanism
+        described in N4381.
+      </p><pre class="programlisting"><span class="keyword">namespace</span> <span class="identifier">parallel</span> <span class="special">{</span>
+  <span class="keyword">namespace</span> <span class="special">{</span>
+    <span class="keyword">constexpr</span> <span class="emphasis"><em>unspecified</em></span> <span class="identifier">get_parallel_executor</span> <span class="special">=</span> <span class="emphasis"><em>unspecified</em></span><span class="special">;</span>
+  <span class="special">}</span>
+<span class="special">}</span> <span class="comment">// namespace parallel</span>
+</pre><p>
+        The effect of the expression <code class="computeroutput"><span class="identifier">parallel</span><span class="special">::</span><span class="identifier">get_parallel_executor</span><span class="special">(</span><span class="identifier">E</span><span class="special">)</span></code>
+        for some expression <code class="computeroutput"><span class="identifier">E</span></code> is
+        equivalent to:
+      </p><p>
+        &#8212; <code class="computeroutput"><span class="special">(</span><span class="identifier">E</span><span class="special">).</span><span class="identifier">get_parallel_executor</span><span class="special">()</span></code> if, for its type <code class="computeroutput"><span class="identifier">X</span></code>,
+        <code class="computeroutput"><span class="identifier">is_parallel_executor</span><span class="special">&lt;</span><span class="identifier">X</span><span class="special">&gt;::</span><span class="identifier">value</span></code> is true. If <code class="computeroutput"><span class="identifier">is_parallel_executor</span><span class="special">&lt;</span><span class="identifier">X</span><span class="special">&gt;::</span><span class="identifier">value</span></code> is false, the program is ill-formed
+        with no diagnostic required.
+      </p><p>
+        &#8212; Otherwise, <code class="computeroutput"><span class="identifier">get_parallel_executor</span><span class="special">(</span><span class="identifier">E</span><span class="special">)</span></code>
+        if, for its type <code class="computeroutput"><span class="identifier">X</span></code>, <code class="computeroutput"><span class="identifier">is_parallel_executor</span><span class="special">&lt;</span><span class="identifier">X</span><span class="special">&gt;::</span><span class="identifier">value</span></code> is true, with overload resolution
+        performed in a context that includes the declaration <code class="computeroutput"><span class="keyword">void</span>
+        <span class="identifier">get_parallel_executor</span><span class="special">(</span><span class="keyword">auto</span><span class="special">&amp;)</span> <span class="special">=</span> <span class="keyword">delete</span><span class="special">;</span></code>
+        and does not include a declaration of <code class="computeroutput"><span class="identifier">parallel</span><span class="special">::</span><span class="identifier">get_parallel_executor</span></code>.
+        If <code class="computeroutput"><span class="identifier">is_parallel_executor</span><span class="special">&lt;</span><span class="identifier">X</span><span class="special">&gt;::</span><span class="identifier">value</span></code> is false, the program is ill-formed
+        with no diagnostic required.
+      </p><p>
+        &#8212; Otherwise, <code class="computeroutput"><span class="identifier">parallel</span><span class="special">::</span><span class="identifier">get_parallel_executor</span><span class="special">(</span><span class="identifier">E</span><span class="special">)</span></code> is ill-formed.
+      </p><p>
+        Whenever <code class="computeroutput"><span class="identifier">parallel</span><span class="special">::</span><span class="identifier">get_parallel_executor</span><span class="special">(</span><span class="identifier">E</span><span class="special">)</span></code> is a
+        valid expression, the type of <code class="computeroutput"><span class="identifier">parallel</span><span class="special">::</span><span class="identifier">get_parallel_executor</span><span class="special">(</span><span class="identifier">E</span><span class="special">)</span></code>
+        satisfies the requirements for <code class="computeroutput"><span class="identifier">ParallelExecutor</span></code>.
+        This allows us to use SFINAE to detect whether a parallel executor is supported.
+      </p><p>
+        Since it is possible to implement our parallel executor in terms of a trivial
+        executor, we may also wish to introduce a new, penultimate case above, that
+        automatically adapts trivial executors to the <code class="computeroutput"><span class="identifier">ParallelExecutor</span></code>
+        requirements:
+      </p><p>
+        &#8212; Otherwise, <code class="computeroutput"><span class="identifier">make_parallel_executor_adapter</span><span class="special">(</span><span class="identifier">std</span><span class="special">::</span><span class="identifier">experimental</span><span class="special">::</span><span class="identifier">get_trivial_executor</span><span class="special">(</span><span class="identifier">E</span><span class="special">))</span></code> if
+        <code class="computeroutput"><span class="identifier">std</span><span class="special">::</span><span class="identifier">experimental</span><span class="special">::</span><span class="identifier">get_trivial_executor</span><span class="special">(</span><span class="identifier">E</span><span class="special">)</span></code> is a
+        valid expression.
+      </p><p>
+        <span class="bold"><strong>Step 4: Define a template alias</strong></span>
+      </p><p>
+        To make it easier for users to name the executor type, we provide a template
+        alias:
+      </p><pre class="programlisting"><span class="keyword">namespace</span> <span class="identifier">parallel</span> <span class="special">{</span>
+  <span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">T</span><span class="special">&gt;</span> <span class="keyword">using</span> <span class="identifier">parallel_executor_t</span>
+    <span class="special">=</span> <span class="keyword">decltype</span><span class="special">(</span><span class="identifier">get_parallel_executor</span><span class="special">(</span><span class="identifier">declval</span><span class="special">&lt;</span><span class="identifier">T</span><span class="special">&amp;&gt;()));</span>
+<span class="special">}</span> <span class="comment">// namespace parallel</span>
+</pre><p>
+        <span class="bold"><strong>Step 5: Use the customization point</strong></span>
+      </p><p>
+        Finally, we use the new customization point when implementing our parallel
+        algorithms. For example:
+      </p><pre class="programlisting"><span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">E</span><span class="special">,</span> <span class="keyword">class</span> <span class="identifier">RandomAccessIterator</span><span class="special">&gt;</span>
+<span class="keyword">auto</span> <span class="identifier">parallel_sort</span><span class="special">(</span><span class="identifier">E</span><span class="special">&amp;</span> <span class="identifier">e</span><span class="special">,</span> <span class="identifier">RandomAccessIterator</span> <span class="identifier">begin</span><span class="special">,</span> <span class="identifier">RandomAccessIterator</span> <span class="identifier">end</span><span class="special">)</span>
+  <span class="special">-&gt;</span> <span class="keyword">decltype</span><span class="special">(</span><span class="identifier">parallel</span><span class="special">::</span><span class="identifier">get_parallel_executor</span><span class="special">(</span><span class="identifier">e</span><span class="special">),</span> <span class="keyword">void</span><span class="special">())</span>
+<span class="special">{</span>
+  <span class="identifier">parallel_executor_t</span><span class="special">&lt;</span><span class="identifier">E</span><span class="special">&gt;</span> <span class="identifier">ex</span> <span class="special">=</span> <span class="identifier">get_parallel_executor</span><span class="special">(</span><span class="identifier">e</span><span class="special">);</span>
+  <span class="special">...</span>
+<span class="special">}</span>
+</pre><p>
+        This algorithm can then be used with the <code class="computeroutput"><span class="identifier">thread_pool</span></code>
+        class defined in this proposal:
+      </p><pre class="programlisting"><span class="identifier">std</span><span class="special">::</span><span class="identifier">experimental</span><span class="special">::</span><span class="identifier">thread_pool</span> <span class="identifier">pool</span><span class="special">;</span>
+<span class="identifier">parallel_sort</span><span class="special">(</span><span class="identifier">pool</span><span class="special">,</span> <span class="identifier">big_vector</span><span class="special">.</span><span class="identifier">begin</span><span class="special">(),</span> <span class="identifier">big_vector</span><span class="special">.</span><span class="identifier">end</span><span class="special">());</span>
+</pre></div><div class="section" title="2.5.&#160;Defining core executor requirements to support composition"><div class="titlepage"><div><div><h3 class="title"><a name="executors.defining_core_executor_requirements_to_support_composition"></a>2.5.&#160;Defining core executor requirements to support composition</h3></div></div></div><p>
+        One of the motivations for having lightweight, copyable executors is to allow
+        us to encapsulate all sorts of additional information and behaviour on a
+        fine-grained basis, such as:
+      </p><div class="itemizedlist"><ul class="itemizedlist" type="disc"><li class="listitem">
+            Priority.
+          </li><li class="listitem">
+            Preferred CPU affinity.
+          </li><li class="listitem">
+            Security credentials or impersonation context.
+          </li><li class="listitem">
+            How exceptions should be handled.
+          </li></ul></div><p>
+        Sometimes, however, we will need to store information for longer than the
+        lifetime of an individual executor object. As an example, let us say we want
+        to implement a <code class="computeroutput"><span class="identifier">delayed_trivial_executor</span><span class="special">&lt;&gt;</span></code> adapter which delays execution of
+        a function object until some time has been reached. This would likely be
+        implemented in terms of a timer queue, and we need this timer queue to live
+        for as long as the underlying execution context (such as a thread pool).
+      </p><p>
+        For this reason, the core <code class="computeroutput"><span class="identifier">Executor</span></code>
+        requirements specify that all executors have an associated <code class="computeroutput"><span class="identifier">execution_context</span></code> object. The <code class="computeroutput"><span class="identifier">execution_context</span></code> is a polymorphic set
+        that is indexed by type, and allows us to:
+      </p><p>
+        &#8212; store long-lived data; and
+      </p><p>
+        &#8212; register a callback to be notified when execution context shuts down.
+      </p><p>
+        Thus, to implement our <code class="computeroutput"><span class="identifier">delayed_trivial_executor</span><span class="special">&lt;&gt;</span></code> adapter we begin by defining our
+        timer queue as an <code class="computeroutput"><span class="identifier">execution_context</span></code>'s
+        service:
+      </p><pre class="programlisting"><span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">Clock</span><span class="special">&gt;</span>
+<span class="keyword">class</span> <span class="identifier">timer_queue</span> <span class="special">:</span> <span class="identifier">std</span><span class="special">::</span><span class="identifier">experimental</span><span class="special">::</span><span class="identifier">execution_context</span><span class="special">::</span><span class="identifier">service</span>
+<span class="special">{</span>
+<span class="keyword">public</span><span class="special">:</span>
+  <span class="identifier">timer_queue</span><span class="special">(</span><span class="identifier">std</span><span class="special">::</span><span class="identifier">experimental</span><span class="special">::</span><span class="identifier">execution_context</span><span class="special">&amp;</span> <span class="identifier">owner</span><span class="special">)</span>
+  <span class="special">{</span>
+    <span class="comment">// launch a new background thread to wait for timers to expire</span>
+  <span class="special">}</span>
+
+  <span class="keyword">void</span> <span class="identifier">shutdown</span><span class="special">()</span> <span class="keyword">noexcept</span> <span class="identifier">override</span>
+  <span class="special">{</span>
+    <span class="comment">// Join the thread and discard any unexecuted functions from the queue.</span>
+  <span class="special">}</span>
+
+  <span class="keyword">void</span> <span class="identifier">enqueue</span><span class="special">(</span><span class="keyword">typename</span> <span class="identifier">Clock</span><span class="special">::</span><span class="identifier">time_point</span> <span class="identifier">expiry</span><span class="special">,</span> <span class="identifier">std</span><span class="special">::</span><span class="identifier">function</span><span class="special">&lt;</span><span class="keyword">void</span><span class="special">()&gt;</span> <span class="identifier">f</span><span class="special">)</span>
+  <span class="special">{</span>
+    <span class="comment">// Add the function to the queue with the specified expiry time.</span>
+  <span class="special">}</span>
+
+<span class="keyword">private</span><span class="special">:</span>
+  <span class="comment">// Timer queue state</span>
+  <span class="comment">// ...</span>
+<span class="special">};</span>
+</pre><p>
+        Our lightweight executor adapter is then implemented in terms of this timer
+        queue:
+      </p><pre class="programlisting"><span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">InnerExecutor</span><span class="special">,</span> <span class="keyword">class</span> <span class="identifier">Clock</span><span class="special">&gt;</span>
+<span class="keyword">class</span> <span class="identifier">delayed_trivial_executor</span>
+<span class="special">{</span>
+<span class="keyword">public</span><span class="special">:</span>
+  <span class="keyword">explicit</span> <span class="identifier">delayed_trivial_executor</span><span class="special">(</span>
+      <span class="keyword">const</span> <span class="identifier">InnerExecutor</span><span class="special">&amp;</span> <span class="identifier">inner_executor</span><span class="special">,</span>
+      <span class="keyword">typename</span> <span class="identifier">Clock</span><span class="special">::</span><span class="identifier">duration</span> <span class="identifier">delay</span><span class="special">)</span>
+    <span class="special">:</span> <span class="identifier">inner_executor_</span><span class="special">(</span><span class="identifier">inner_executor</span><span class="special">),</span> <span class="identifier">delay_</span><span class="special">(</span><span class="identifier">delay</span><span class="special">)</span>
+  <span class="special">{</span>
+  <span class="special">}</span>
+
+  <span class="keyword">auto</span> <span class="identifier">context</span><span class="special">()</span> <span class="keyword">const</span> <span class="keyword">noexcept</span> <span class="special">{</span> <span class="keyword">return</span> <span class="identifier">inner_executor_</span><span class="special">.</span><span class="identifier">context</span><span class="special">();</span> <span class="special">}</span>
+
+  <span class="keyword">bool</span> <span class="keyword">operator</span><span class="special">==(</span><span class="keyword">const</span> <span class="identifier">delayed_trivial_executor</span><span class="special">&amp;</span> <span class="identifier">other</span><span class="special">)</span> <span class="keyword">const</span> <span class="keyword">noexcept</span>
+  <span class="special">{</span>
+    <span class="keyword">return</span> <span class="identifier">inner_executor_</span> <span class="special">==</span> <span class="identifier">other</span><span class="special">.</span><span class="identifier">inner_executor_</span> <span class="special">&amp;&amp;</span> <span class="identifier">delay_</span> <span class="special">==</span> <span class="identifier">other</span><span class="special">.</span><span class="identifier">delay_</span><span class="special">;</span>
+  <span class="special">}</span>
+
+  <span class="keyword">bool</span> <span class="keyword">operator</span><span class="special">!=(</span><span class="keyword">const</span> <span class="identifier">trivial_executor</span><span class="special">&amp;</span> <span class="identifier">other</span><span class="special">)</span> <span class="keyword">const</span> <span class="keyword">noexcept</span>
+  <span class="special">{</span>
+    <span class="keyword">return</span> <span class="special">!(*</span><span class="keyword">this</span> <span class="special">==</span> <span class="identifier">other</span><span class="special">);</span>
+  <span class="special">}</span>
+
+  <span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">F</span><span class="special">&gt;</span> <span class="keyword">void</span> <span class="identifier">execute</span><span class="special">(</span><span class="identifier">F</span> <span class="identifier">f</span><span class="special">)</span>
+  <span class="special">{</span>
+    <span class="keyword">auto</span><span class="special">&amp;</span> <span class="identifier">timer_q</span> <span class="special">=</span>
+      <span class="identifier">std</span><span class="special">::</span><span class="identifier">experimental</span><span class="special">::</span><span class="identifier">use_service</span><span class="special">&lt;</span><span class="identifier">timer_queue</span><span class="special">&lt;</span><span class="identifier">Clock</span><span class="special">&gt;&gt;(</span>
+        <span class="identifier">inner_executor_</span><span class="special">.</span><span class="identifier">context</span><span class="special">()):</span>
+
+    <span class="identifier">timer_q</span><span class="special">.</span><span class="identifier">enqueue</span><span class="special">(</span><span class="identifier">Clock</span><span class="special">::</span><span class="identifier">now</span><span class="special">()</span> <span class="special">+</span> <span class="identifier">delay_</span><span class="special">,</span>
+        <span class="special">[</span><span class="identifier">inner_executor_</span><span class="special">,</span> <span class="identifier">f</span><span class="special">=</span><span class="identifier">std</span><span class="special">::</span><span class="identifier">move</span><span class="special">(</span><span class="identifier">f</span><span class="special">)]</span> <span class="keyword">mutable</span>
+        <span class="special">{</span>
+          <span class="identifier">inner_executor</span><span class="special">.</span><span class="identifier">executor</span><span class="special">(</span><span class="identifier">std</span><span class="special">::</span><span class="identifier">move</span><span class="special">(</span><span class="identifier">f</span><span class="special">));</span>
+        <span class="special">});</span>
+  <span class="special">}</span>
+
+<span class="keyword">private</span><span class="special">:</span>
+  <span class="identifier">InnerExecutor</span> <span class="identifier">inner_executor_</span><span class="special">;</span>
+  <span class="keyword">typename</span> <span class="identifier">Clock</span><span class="special">::</span><span class="identifier">duration</span> <span class="identifier">delay_</span><span class="special">;</span>
+<span class="special">};</span>
+</pre></div></div><div class="section" title="3.&#160;Proposed text"><div class="titlepage"><div><div><h2 class="title" style="clear: both"><a name="executors.proposed_text"></a>3.&#160;Proposed text</h2></div></div></div><div class="sidebar"><p class="title"><b></b></p><p>
+      Grey-shaded italic text is commentary on the proposal. It is not to be added
+      to the TS.
+    </p></div><div class="section" title="3.1.&#160;Library summary"><div class="titlepage"><div><div><h3 class="title"><a name="executors.library_summary"></a>3.1.&#160;Library summary</h3></div></div></div><div class="table"><a name="executors.proposed_text.library_summary.t0"></a><p class="title"><b>Table&#160;1.&#160;Library summary</b></p><div class="table-contents"><table class="table" summary="Library summary"><colgroup><col><col></colgroup><thead><tr><th>
+                <p>
+                  Clause
+                </p>
+              </th><th>
+                <p>
+                  Header(s)
+                </p>
+              </th></tr></thead><tbody><tr><td>
+                <p>
+                  <a class="link" href="#headers.executor" title="3.2.&#160;Header &lt;experimental/executor&gt; synopsis">Executors</a>
+                </p>
+              </td><td>
+                <p>
+                  <code class="computeroutput"><span class="special">&lt;</span><span class="identifier">experimental</span><span class="special">/</span><span class="identifier">executor</span><span class="special">&gt;</span></code>
+                </p>
+              </td></tr><tr><td>
+                <p>
+                  <a class="link" href="#headers.thread_pool" title="3.11.&#160;Header &lt;experimental/thread_pool&gt; synopsis">A fixed-size thread pool</a>
+                </p>
+              </td><td>
+                <p>
+                  <code class="computeroutput"><span class="special">&lt;</span><span class="identifier">experimental</span><span class="special">/</span><span class="identifier">thread_pool</span><span class="special">&gt;</span></code>
+                </p>
+              </td></tr></tbody></table></div></div><br class="table-break"><p>
+        Throughout this Technical Specification, the names of the template parameters
+        are used to express type requirements, as listed in the table below.
+      </p><div class="table"><a name="executors.proposed_text.library_summary.t1"></a><p class="title"><b>Table&#160;2.&#160;Template parameters and type requirements</b></p><div class="table-contents"><table class="table" summary="Template parameters and type requirements"><colgroup><col><col></colgroup><thead><tr><th>
+                <p>
+                  template parameter name
+                </p>
+              </th><th>
+                <p>
+                  type requirements
+                </p>
+              </th></tr></thead><tbody><tr><td>
+                <p>
+                  <code class="computeroutput"><span class="identifier">ExecutionContext</span></code>
+                </p>
+              </td><td>
+                <p>
+                  <a class="link" href="#requirements.execution_context" title="3.3.3.&#160;Execution context requirements">execution context</a>
+                </p>
+              </td></tr><tr><td>
+                <p>
+                  <code class="computeroutput"><span class="identifier">EventExecutor</span></code>
+                </p>
+              </td><td>
+                <p>
+                  <a class="link" href="#requirements.event_executor" title="3.3.7.&#160;Event executor requirements">event executor</a>
+                </p>
+              </td></tr><tr><td>
+                <p>
+                  <code class="computeroutput"><span class="identifier">Executor</span></code>
+                </p>
+              </td><td>
+                <p>
+                  <a class="link" href="#requirements.executor" title="3.3.5.&#160;Executor requirements">executor</a>
+                </p>
+              </td></tr><tr><td>
+                <p>
+                  <code class="computeroutput"><span class="identifier">ProtoAllocator</span></code>
+                </p>
+              </td><td>
+                <p>
+                  <a class="link" href="#requirements.proto_allocator" title="3.3.2.&#160;Proto-allocator requirements">proto-allocator</a>
+                </p>
+              </td></tr><tr><td>
+                <p>
+                  <code class="computeroutput"><span class="identifier">Service</span></code>
+                </p>
+              </td><td>
+                <p>
+                  <a class="link" href="#requirements.service" title="3.3.4.&#160;Service requirements">service</a>
+                </p>
+              </td></tr><tr><td>
+                <p>
+                  <code class="computeroutput"><span class="identifier">TrivialExecutor</span></code>
+                </p>
+              </td><td>
+                <p>
+                  <a class="link" href="#requirements.trivial_executor" title="3.3.6.&#160;Trivial executor requirements">trivial executor</a>
+                </p>
+              </td></tr></tbody></table></div></div><br class="table-break"></div><div class="section" title="3.2.&#160;Header &lt;experimental/executor&gt; synopsis"><div class="titlepage"><div><div><h3 class="title"><a name="headers.executor"></a>3.2.&#160;Header <code class="literal">&lt;experimental/executor&gt;</code> synopsis</h3></div></div></div><pre class="programlisting"><span class="keyword">namespace</span> <span class="identifier">std</span> <span class="special">{</span>
+<span class="keyword">namespace</span> <span class="identifier">experimental</span> <span class="special">{</span>
+<span class="keyword">inline namespace</span> <span class="identifier">concurrency_v2</span> <span class="special">{</span>
+
+  <span class="keyword">enum</span> <span class="keyword">class</span> <span class="identifier">fork_event</span> <span class="special">{</span>
+    <span class="identifier">prepare</span><span class="special">,</span>
+    <span class="identifier">parent</span><span class="special">,</span>
+    <span class="identifier">child</span>
+  <span class="special">};</span>
+
+  <span class="keyword">class</span> <a class="link" href="#classes.execution_context" title="3.4.&#160;Class execution_context">execution_context</a><span class="special">;</span>
+
+  <span class="keyword">class</span> <span class="identifier">service_already_exists</span><span class="special">;</span>
+
+  <span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">Service</span><span class="special">&gt;</span> <span class="identifier">Service</span><span class="special">&amp;</span> <span class="identifier">use_service</span><span class="special">(</span><span class="identifier">execution_context</span><span class="special">&amp;</span> <span class="identifier">ctx</span><span class="special">);</span>
+  <span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">Service</span><span class="special">,</span> <span class="keyword">class</span><span class="special">...</span> <span class="identifier">Args</span><span class="special">&gt;</span> <span class="identifier">Service</span><span class="special">&amp;</span>
+    <span class="identifier">make_service</span><span class="special">(</span><span class="identifier">execution_context</span><span class="special">&amp;</span> <span class="identifier">ctx</span><span class="special">,</span> <span class="identifier">Args</span><span class="special">&amp;&amp;...</span> <span class="identifier">args</span><span class="special">);</span>
+  <span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">Service</span><span class="special">&gt;</span> <span class="keyword">bool</span> <span class="identifier">has_service</span><span class="special">(</span><span class="identifier">execution_context</span><span class="special">&amp;</span> <span class="identifier">ctx</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+
+  <span class="keyword">namespace</span> <span class="special">{</span>
+    <span class="keyword">constexpr</span> <span class="emphasis"><em>unspecified</em></span> <a class="link" href="#functions.get_trivial_executor" title="3.7.&#160;get_trivial_executor">get_trivial_executor</a> <span class="special">=</span> <span class="emphasis"><em>unspecified</em></span><span class="special">;</span>
+  <span class="special">}</span>
+
+  <span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">T</span><span class="special">&gt;</span> <span class="keyword">using</span> <span class="identifier">trivial_executor_t</span>
+    <span class="special">=</span> <span class="keyword">decltype</span><span class="special">(</span><span class="identifier">get_trivial_executor</span><span class="special">(</span><span class="identifier">declval</span><span class="special">&lt;</span><span class="identifier">T</span><span class="special">&amp;&gt;()));</span>
+
+  <span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">T</span><span class="special">&gt;</span> <span class="keyword">struct</span> <a class="link" href="#classes.is_trivial_executor" title="3.6.&#160;Class template is_trivial_executor">is_trivial_executor</a><span class="special">;</span>
+
+  <span class="keyword">namespace</span> <span class="special">{</span>
+    <span class="keyword">constexpr</span> <span class="emphasis"><em>unspecified</em></span> <a class="link" href="#functions.get_event_executor" title="3.9.&#160;get_event_executor">get_event_executor</a> <span class="special">=</span> <span class="emphasis"><em>unspecified</em></span><span class="special">;</span>
+  <span class="special">}</span>
+
+  <span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">T</span><span class="special">&gt;</span> <span class="keyword">using</span> <span class="identifier">event_executor_t</span>
+    <span class="special">=</span> <span class="keyword">decltype</span><span class="special">(</span><span class="identifier">get_event_executor</span><span class="special">(</span><span class="identifier">declval</span><span class="special">&lt;</span><span class="identifier">T</span><span class="special">&amp;&gt;()));</span>
+
+  <span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">T</span><span class="special">&gt;</span> <span class="keyword">struct</span> <a class="link" href="#classes.is_event_executor" title="3.8.&#160;Class template is_event_executor">is_event_executor</a><span class="special">;</span>
+
+  // <a class="link" href="#functions.async" title="3.10.&#160;Function async">async</a>:
+
+  <span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">TrivialExecutor</span><span class="special">,</span> <span class="keyword">class</span> <span class="identifier">F</span><span class="special">,</span> <span class="keyword">class</span><span class="special">...</span> <span class="identifier">Args</span><span class="special">&gt;</span>
+    <span class="identifier">future</span><span class="special">&lt;</span><span class="identifier">result_of_t</span><span class="special">&lt;</span><span class="identifier">decay_t</span><span class="special">&lt;</span><span class="identifier">F</span><span class="special">&gt;(</span><span class="identifier">decay_t</span><span class="special">&lt;</span><span class="identifier">Args</span><span class="special">&gt;...)&gt;&gt;</span>
+       <span class="identifier">async</span><span class="special">(</span><span class="keyword">const</span> <span class="identifier">TrivialExecutor</span><span class="special">&amp;</span> <span class="identifier">ex</span><span class="special">,</span> <span class="identifier">F</span><span class="special">&amp;&amp;</span> <span class="identifier">f</span><span class="special">,</span> <span class="identifier">Args</span><span class="special">&amp;&amp;...</span> <span class="identifier">args</span><span class="special">);</span>
+  <span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">EventExecutor</span><span class="special">,</span> <span class="keyword">class</span> <span class="identifier">F</span><span class="special">,</span> <span class="keyword">class</span><span class="special">...</span> <span class="identifier">Args</span><span class="special">&gt;</span>
+    <span class="identifier">future</span><span class="special">&lt;</span><span class="identifier">result_of_t</span><span class="special">&lt;</span><span class="identifier">decay_t</span><span class="special">&lt;</span><span class="identifier">F</span><span class="special">&gt;(</span><span class="identifier">decay_t</span><span class="special">&lt;</span><span class="identifier">Args</span><span class="special">&gt;...)&gt;&gt;</span>
+       <span class="identifier">async</span><span class="special">(</span><span class="keyword">const</span> <span class="identifier">EventExecutor</span><span class="special">&amp;</span> <span class="identifier">ex</span><span class="special">,</span> <span class="identifier">F</span><span class="special">&amp;&amp;</span> <span class="identifier">f</span><span class="special">,</span> <span class="identifier">Args</span><span class="special">&amp;&amp;...</span> <span class="identifier">args</span><span class="special">);</span>
+  <span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">E</span><span class="special">,</span> <span class="keyword">class</span> <span class="identifier">F</span><span class="special">,</span> <span class="keyword">class</span><span class="special">...</span> <span class="identifier">Args</span><span class="special">&gt;</span>
+    <span class="identifier">future</span><span class="special">&lt;</span><span class="identifier">result_of_t</span><span class="special">&lt;</span><span class="identifier">decay_t</span><span class="special">&lt;</span><span class="identifier">F</span><span class="special">&gt;(</span><span class="identifier">decay_t</span><span class="special">&lt;</span><span class="identifier">Args</span><span class="special">&gt;...)&gt;&gt;</span>
+       <span class="identifier">async</span><span class="special">(</span><span class="identifier">E</span><span class="special">&amp;</span> <span class="identifier">e</span><span class="special">,</span> <span class="identifier">F</span><span class="special">&amp;&amp;</span> <span class="identifier">f</span><span class="special">,</span> <span class="identifier">Args</span><span class="special">&amp;&amp;...</span> <span class="identifier">args</span><span class="special">);</span>
+
+<span class="special">}</span> <span class="comment">// inline namespace concurrency_v2</span>
+<span class="special">}</span> <span class="comment">// namespace experimental</span>
+<span class="special">}</span> <span class="comment">// namespace std</span>
+</pre></div><div class="section" title="3.3.&#160;Requirements"><div class="titlepage"><div><div><h3 class="title"><a name="executors.async_requirements"></a>3.3.&#160;Requirements</h3></div></div></div><div class="section" title="3.3.1.&#160;Customization point objects"><div class="titlepage"><div><div><h4 class="title"><a name="requirements.customization_point"></a>3.3.1.&#160;Customization point objects</h4></div></div></div><div class="sidebar"><p class="title"><b></b></p><p>
+          The following text has been adapted from the draft Ranges Technical Specification.
+        </p></div><p>
+          A <span class="emphasis"><em>customization point object</em></span> is a function object
+          (C++ Std, [function.objects]) with a literal class type that interacts
+          with user-defined types while enforcing semantic requirements on that interaction.
+        </p><p>
+          The type of a customization point object shall satisfy the requirements
+          of <code class="computeroutput"><span class="identifier">CopyConstructible</span></code> (C++Std
+          [copyconstructible]) and <code class="computeroutput"><span class="identifier">Destructible</span></code>
+          (C++Std [destructible]).
+        </p><p>
+          All instances of a specific customization point object type shall be equal.
+        </p><p>
+          Let <code class="computeroutput"><span class="identifier">t</span></code> be a (possibly const)
+          customization point object of type <code class="computeroutput"><span class="identifier">T</span></code>,
+          and <code class="computeroutput"><span class="identifier">args</span><span class="special">...</span></code>
+          be a parameter pack expansion of some parameter pack <code class="computeroutput"><span class="identifier">Args</span><span class="special">...</span></code>. The customization point object <code class="computeroutput"><span class="identifier">t</span></code> shall be callable as <code class="computeroutput"><span class="identifier">t</span><span class="special">(</span><span class="identifier">args</span><span class="special">...)</span></code> when the types of <code class="computeroutput"><span class="identifier">Args</span><span class="special">...</span></code> meet the requirements specified in that
+          customization point object's definition. Otherwise, <code class="computeroutput"><span class="identifier">T</span></code>
+          shall not have a function call operator that participates in overload resolution.
+        </p><p>
+          Each customization point object type constrains its return type to satisfy
+          some particular type requirements.
+        </p><p>
+          The library defines several named customization point objects. In every
+          translation unit where such a name is defined, it shall refer to the same
+          instance of the customization point object.
+        </p><p>
+          [<span class="emphasis"><em>Note:</em></span> Many of the customization points objects in
+          the library evaluate function call expressions with an unqualified name
+          which results in a call to a user-defined function found by argument dependent
+          name lookup (C++Std [basic.lookup.argdep]). To preclude such an expression
+          resulting in a call to unconstrained functions with the same name in namespace
+          <code class="computeroutput"><span class="identifier">std</span></code>, customization point
+          objects specify that lookup for these expressions is performed in a context
+          that includes deleted overloads matching the signatures of overloads defined
+          in namespace <code class="computeroutput"><span class="identifier">std</span></code>. When
+          the deleted overloads are viable, user-defined overloads must be more specialized
+          (C++Std [temp.func.order]) to be used by a customization point object.
+          &#8212;<span class="emphasis"><em>end note</em></span>]
+        </p></div><div class="section" title="3.3.2.&#160;Proto-allocator requirements"><div class="titlepage"><div><div><h4 class="title"><a name="requirements.proto_allocator"></a>3.3.2.&#160;Proto-allocator requirements</h4></div></div></div><p>
+          A type <code class="computeroutput"><span class="identifier">A</span></code> meets the proto-allocator
+          requirements if <code class="computeroutput"><span class="identifier">A</span></code> is <code class="computeroutput"><span class="identifier">CopyConstructible</span></code> (C++Std [copyconstructible]),
+          <code class="computeroutput"><span class="identifier">Destructible</span></code> (C++Std [destructible]),
+          and <code class="computeroutput"><span class="identifier">allocator_traits</span><span class="special">&lt;</span><span class="identifier">A</span><span class="special">&gt;::</span><span class="identifier">rebind_alloc</span><span class="special">&lt;</span><span class="identifier">U</span><span class="special">&gt;</span></code>
+          meets the allocator requirements (C++Std [allocator.requirements]), where
+          <code class="computeroutput"><span class="identifier">U</span></code> is an object type. [<span class="emphasis"><em>Note:</em></span>
+          For example, <code class="computeroutput"><span class="identifier">std</span><span class="special">::</span><span class="identifier">allocator</span><span class="special">&lt;</span><span class="keyword">void</span><span class="special">&gt;</span></code>
+          meets the proto-allocator requirements but not the allocator requirements.
+          &#8212;<span class="emphasis"><em>end note</em></span>] No constructor, comparison operator, copy
+          operation, move operation, or swap operation on these types shall exit
+          via an exception.
+        </p></div><div class="section" title="3.3.3.&#160;Execution context requirements"><div class="titlepage"><div><div><h4 class="title"><a name="requirements.execution_context"></a>3.3.3.&#160;Execution context requirements</h4></div></div></div><p>
+          A type <code class="computeroutput"><span class="identifier">X</span></code> meets the <code class="computeroutput"><span class="identifier">ExecutionContext</span></code> requirements if it is
+          publicly and unambiguously derived from <code class="computeroutput"><span class="identifier">execution_context</span></code>,
+          and satisfies the additional requirements listed below.
+        </p><p>
+          In the table below, <code class="computeroutput"><span class="identifier">x</span></code> denotes
+          a value of type <code class="computeroutput"><span class="identifier">X</span></code>.
+        </p><div class="table"><a name="requirements.proposed_text.async_requirements.execution_context.t0"></a><p class="title"><b>Table&#160;3.&#160;ExecutionContext requirements</b></p><div class="table-contents"><table class="table" summary="ExecutionContext requirements"><colgroup><col><col><col></colgroup><thead><tr><th>
+                  <p>
+                    expression
+                  </p>
+                </th><th>
+                  <p>
+                    return type
+                  </p>
+                </th><th>
+                  <p>
+                    assertion/note<br> pre/post-condition
+                  </p>
+                </th></tr></thead><tbody><tr><td>
+                  <p>
+                    <code class="computeroutput"><span class="identifier">x</span><span class="special">.~</span><span class="identifier">X</span><span class="special">()</span></code>
+                  </p>
+                </td><td>
+                </td><td>
+                  <p>
+                    Destroys all unexecuted function objects that were submitted
+                    via an executor object that is associated with the execution
+                    context.
+                  </p>
+                </td></tr></tbody></table></div></div><br class="table-break"></div><div class="section" title="3.3.4.&#160;Service requirements"><div class="titlepage"><div><div><h4 class="title"><a name="requirements.service"></a>3.3.4.&#160;Service requirements</h4></div></div></div><p>
+          A class is a <span class="emphasis"><em>service</em></span> if it is publicly and unambiguously
+          derived from <code class="computeroutput"><span class="identifier">execution_context</span><span class="special">::</span><span class="identifier">service</span></code>,
+          or if it is publicly and unambiguously derived from another service. For
+          a service <code class="computeroutput"><span class="identifier">S</span></code>, <code class="computeroutput"><span class="identifier">S</span><span class="special">::</span><span class="identifier">key_type</span></code>
+          shall be valid and denote a type (C++Std [temp.deduct]), <code class="computeroutput"><span class="identifier">is_base_of_v</span><span class="special">&lt;</span><span class="keyword">typename</span> <span class="identifier">S</span><span class="special">::</span><span class="identifier">key_type</span><span class="special">,</span> <span class="identifier">S</span><span class="special">&gt;</span></code>
+          shall be <code class="computeroutput"><span class="keyword">true</span></code>, and <code class="computeroutput"><span class="identifier">S</span></code> shall satisfy the <code class="computeroutput"><span class="identifier">Destructible</span></code>
+          requirements (C++Std [destructible]).
+        </p><p>
+          The first parameter of all service constructors shall be an lvalue reference
+          to <code class="computeroutput"><span class="identifier">execution_context</span></code>. This
+          parameter denotes the <code class="computeroutput"><span class="identifier">execution_context</span></code>
+          object that represents a set of services, of which the service object will
+          be a member. [<span class="emphasis"><em>Note:</em></span> These constructors may be called
+          by the <code class="computeroutput"><span class="identifier">make_service</span></code> function.
+          &#8212;<span class="emphasis"><em>end note</em></span>]
+        </p><p>
+          A service shall provide an explicit constructor with a single parameter
+          of lvalue reference to <code class="computeroutput"><span class="identifier">execution_context</span></code>.
+          [<span class="emphasis"><em>Note:</em></span> This constructor may be called by the <code class="computeroutput"><span class="identifier">use_service</span></code> function. &#8212;<span class="emphasis"><em>end note</em></span>]
+        </p><p>
+          [<span class="emphasis"><em>Example:</em></span> <br>
+        </p><p>
+</p><pre class="programlisting"><span class="keyword">class</span> <span class="identifier">my_service</span> <span class="special">:</span> <span class="keyword">public</span> <span class="identifier">execution_context</span><span class="special">::</span><span class="identifier">service</span>
+<span class="special">{</span>
+<span class="keyword">public</span><span class="special">:</span>
+  <span class="keyword">typedef</span> <span class="identifier">my_service</span> <span class="identifier">key_type</span><span class="special">;</span>
+  <span class="keyword">explicit</span> <span class="identifier">my_service</span><span class="special">(</span><span class="identifier">execution_context</span><span class="special">&amp;</span> <span class="identifier">ctx</span><span class="special">);</span>
+  <span class="identifier">my_service</span><span class="special">(</span><span class="identifier">execution_context</span><span class="special">&amp;</span> <span class="identifier">ctx</span><span class="special">,</span> <span class="keyword">int</span> <span class="identifier">some_value</span><span class="special">);</span>
+<span class="keyword">private</span><span class="special">:</span>
+  <span class="keyword">virtual</span> <span class="keyword">void</span> <span class="identifier">shutdown</span><span class="special">()</span> <span class="keyword">noexcept</span> <span class="identifier">override</span><span class="special">;</span>
+  ...
+<span class="special">};</span>
+</pre><p>
+        </p><p>
+          &#8212;<span class="emphasis"><em>end example</em></span>]
+        </p><p>
+          A service's <code class="computeroutput"><span class="identifier">shutdown</span></code> member
+          function shall destroy all copies of user-defined function objects that
+          are held by the service.
+        </p></div><div class="section" title="3.3.5.&#160;Executor requirements"><div class="titlepage"><div><div><h4 class="title"><a name="requirements.executor"></a>3.3.5.&#160;Executor requirements</h4></div></div></div><p>
+          The library describes a standard set of requirements for <span class="emphasis"><em>executors</em></span>.
+          A type meeting the <code class="computeroutput"><span class="identifier">Executor</span></code>
+          requirements embodies a set of rules for determining how submitted function
+          objects are to be executed.
+        </p><p>
+          A type <code class="computeroutput"><span class="identifier">X</span></code> meets the <code class="computeroutput"><span class="identifier">Executor</span></code> requirements if it satisfies
+          the requirements of <code class="computeroutput"><span class="identifier">CopyConstructible</span></code>
+          (C++Std [copyconstructible]) and <code class="computeroutput"><span class="identifier">Destructible</span></code>
+          (C++Std [destructible]), as well as the additional requirements listed
+          below.
+        </p><p>
+          No constructor, comparison operator, copy operation, move operation, swap
+          operation, or member function <code class="computeroutput"><span class="identifier">context</span></code>
+          on these types shall exit via an exception.
+        </p><p>
+          The executor copy constructor, comparison operators, and other member functions
+          defined in these requirements shall not introduce data races as a result
+          of concurrent calls to those functions from different threads.
+        </p><p>
+          Let <code class="computeroutput"><span class="identifier">ctx</span></code> be the execution
+          context returned by the executor's <code class="computeroutput"><span class="identifier">context</span><span class="special">()</span></code> member function. An executor becomes
+          <span class="emphasis"><em>invalid</em></span> when the first call to <code class="computeroutput"><span class="identifier">ctx</span><span class="special">.</span><span class="identifier">shutdown</span><span class="special">()</span></code> returns.
+        </p><p>
+          In the table below, <code class="computeroutput"><span class="identifier">x1</span></code>
+          and <code class="computeroutput"><span class="identifier">x2</span></code> denote (possibly
+          const) values of type <code class="computeroutput"><span class="identifier">X</span></code>,
+          <code class="computeroutput"><span class="identifier">mx1</span></code> denotes an xvalue of
+          type <code class="computeroutput"><span class="identifier">X</span></code>, and <code class="computeroutput"><span class="identifier">u</span></code> denotes an identifier.
+        </p><div class="table"><a name="requirements.proposed_text.async_requirements.executor.t0"></a><p class="title"><b>Table&#160;4.&#160;Executor requirements</b></p><div class="table-contents"><table class="table" summary="Executor requirements"><colgroup><col><col><col></colgroup><thead><tr><th>
+                  <p>
+                    expression
+                  </p>
+                </th><th>
+                  <p>
+                    type
+                  </p>
+                </th><th>
+                  <p>
+                    assertion/note<br> pre/post-conditions
+                  </p>
+                </th></tr></thead><tbody><tr><td>
+                  <p>
+                    <code class="computeroutput"><span class="identifier">X</span> <span class="identifier">u</span><span class="special">(</span><span class="identifier">x1</span><span class="special">);</span></code>
+                  </p>
+                </td><td>
+                </td><td>
+                  <p>
+                    Shall not exit via an exception.<br> <br> post: <code class="computeroutput"><span class="identifier">u</span> <span class="special">==</span>
+                    <span class="identifier">x1</span></code> and <code class="computeroutput"><span class="identifier">std</span><span class="special">::</span><span class="identifier">addressof</span><span class="special">(</span><span class="identifier">u</span><span class="special">.</span><span class="identifier">context</span><span class="special">())</span>
+                    <span class="special">==</span> <span class="identifier">std</span><span class="special">::</span><span class="identifier">addressof</span><span class="special">(</span><span class="identifier">x1</span><span class="special">.</span><span class="identifier">context</span><span class="special">()).</span></code>
+                  </p>
+                </td></tr><tr><td>
+                  <p>
+                    <code class="computeroutput"><span class="identifier">X</span> <span class="identifier">u</span><span class="special">(</span><span class="identifier">mx1</span><span class="special">);</span></code>
+                  </p>
+                </td><td>
+                </td><td>
+                  <p>
+                    Shall not exit via an exception.<br> <br> post: <code class="computeroutput"><span class="identifier">u</span></code> equals the prior value of
+                    <code class="computeroutput"><span class="identifier">mx1</span></code> and <code class="computeroutput"><span class="identifier">std</span><span class="special">::</span><span class="identifier">addressof</span><span class="special">(</span><span class="identifier">u</span><span class="special">.</span><span class="identifier">context</span><span class="special">())</span></code>
+                    equals the prior value of <code class="computeroutput"><span class="identifier">std</span><span class="special">::</span><span class="identifier">addressof</span><span class="special">(</span><span class="identifier">mx1</span><span class="special">.</span><span class="identifier">context</span><span class="special">())</span></code>.
+                  </p>
+                </td></tr><tr><td>
+                  <p>
+                    <code class="computeroutput"><span class="identifier">x1</span> <span class="special">==</span>
+                    <span class="identifier">x2</span></code>
+                  </p>
+                </td><td>
+                  <p>
+                    <code class="computeroutput"><span class="keyword">bool</span></code>
+                  </p>
+                </td><td>
+                  <p>
+                    Returns <code class="computeroutput"><span class="keyword">true</span></code> only
+                    if <code class="computeroutput"><span class="identifier">x1</span></code> and <code class="computeroutput"><span class="identifier">x2</span></code> can be interchanged with
+                    identical effects in any of the expressions defined in these
+                    type requirements. [<span class="emphasis"><em>Note:</em></span> Returning <code class="computeroutput"><span class="keyword">false</span></code> does not necessarily imply
+                    that the effects are not identical. &#8212;<span class="emphasis"><em>end note</em></span>]
+                    <br> <br> <code class="computeroutput"><span class="keyword">operator</span><span class="special">==</span></code> shall be reflexive, symmetric,
+                    and transitive, and shall not exit via an exception.
+                  </p>
+                </td></tr><tr><td>
+                  <p>
+                    <code class="computeroutput"><span class="identifier">x1</span> <span class="special">!=</span>
+                    <span class="identifier">x2</span></code>
+                  </p>
+                </td><td>
+                  <p>
+                    <code class="computeroutput"><span class="keyword">bool</span></code>
+                  </p>
+                </td><td>
+                  <p>
+                    Same as <code class="computeroutput"><span class="special">!(</span><span class="identifier">x1</span>
+                    <span class="special">==</span> <span class="identifier">x2</span><span class="special">)</span></code>.
+                  </p>
+                </td></tr><tr><td>
+                  <p>
+                    <code class="computeroutput"><span class="identifier">x1</span><span class="special">.</span><span class="identifier">context</span><span class="special">()</span></code>
+                  </p>
+                </td><td>
+                  <p>
+                    <code class="computeroutput"><span class="identifier">execution_context</span><span class="special">&amp;</span></code>, or <code class="computeroutput"><span class="identifier">E</span><span class="special">&amp;</span></code> where <code class="computeroutput"><span class="identifier">E</span></code>
+                    is a type that satifisfies the <a class="link" href="#requirements.execution_context" title="3.3.3.&#160;Execution context requirements"><code class="computeroutput"><span class="identifier">ExecutionContext</span></code></a> requirements.
+                  </p>
+                </td><td>
+                  <p>
+                    Shall not exit via an exception.<br> <br> The comparison
+                    operators and member functions defined in these requirements
+                    shall not alter the reference returned by this function.
+                  </p>
+                </td></tr></tbody></table></div></div><br class="table-break"></div><div class="section" title="3.3.6.&#160;Trivial executor requirements"><div class="titlepage"><div><div><h4 class="title"><a name="requirements.trivial_executor"></a>3.3.6.&#160;Trivial executor requirements</h4></div></div></div><p>
+          A <span class="emphasis"><em>trivial executor</em></span> provides a simple interface for
+          submitting function objects for later execution.
+        </p><p>
+          A type <code class="computeroutput"><span class="identifier">X</span></code> meets the <code class="computeroutput"><span class="identifier">TrivialExecutor</span></code> requirements if it satisfies
+          the requirements of <a class="link" href="#requirements.executor" title="3.3.5.&#160;Executor requirements"><code class="computeroutput"><span class="identifier">Executor</span></code></a>, as well as the additional
+          requirements listed below.
+        </p><p>
+          The trivial executor copy constructor, comparison operators, and other
+          member functions defined in these requirements shall not introduce data
+          races as a result of concurrent calls to those functions from different
+          threads.
+        </p><p>
+          The effect of calling <code class="computeroutput"><span class="identifier">execute</span></code>
+          on an invalid executor is undefined. [<span class="emphasis"><em>Note:</em></span> The copy
+          constructor, comparison operators, and <code class="computeroutput"><span class="identifier">context</span><span class="special">()</span></code> member function continue to remain valid
+          until <code class="computeroutput"><span class="identifier">ctx</span></code> is destroyed.
+          &#8212;<span class="emphasis"><em>end note</em></span>]
+        </p><p>
+          In the table below, <code class="computeroutput"><span class="identifier">x1</span></code>
+          denotes a (possibly const) value of type <code class="computeroutput"><span class="identifier">X</span></code>,
+          and <code class="computeroutput"><span class="identifier">f</span></code> denotes a <code class="computeroutput"><span class="identifier">MoveConstructible</span></code> (C++Std [moveconstructible])
+          function object callable with zero arguments.
+        </p><div class="table"><a name="requirements.proposed_text.async_requirements.trivial_executor.t0"></a><p class="title"><b>Table&#160;5.&#160;Trivial executor requirements</b></p><div class="table-contents"><table class="table" summary="Trivial executor requirements"><colgroup><col><col><col></colgroup><thead><tr><th>
+                  <p>
+                    expression
+                  </p>
+                </th><th>
+                  <p>
+                    type
+                  </p>
+                </th><th>
+                  <p>
+                    assertion/note<br> pre/post-conditions
+                  </p>
+                </th></tr></thead><tbody><tr><td>
+                  <p>
+                    <code class="computeroutput"><span class="identifier">x1</span><span class="special">.</span><span class="identifier">execute</span><span class="special">(</span><span class="identifier">std</span><span class="special">::</span><span class="identifier">move</span><span class="special">(</span><span class="identifier">f</span><span class="special">))</span></code>
+                  </p>
+                </td><td>
+                </td><td>
+                  <p>
+                    Effects: Creates an object <code class="computeroutput"><span class="identifier">f1</span></code>
+                    initialized with <code class="literal"><span class="emphasis"><em>DECAY_COPY</em></span></code><code class="computeroutput"><span class="special">(</span><span class="identifier">forward</span><span class="special">&lt;</span><span class="identifier">Func</span><span class="special">&gt;(</span><span class="identifier">f</span><span class="special">))</span></code> in the current thread of execution.
+                    Calls <code class="computeroutput"><span class="identifier">f1</span><span class="special">()</span></code>
+                    at most once. The executor shall not block forward progress of
+                    the caller pending completion of <code class="computeroutput"><span class="identifier">f1</span><span class="special">()</span></code>.<br> <br> Synchronization:
+                    The invocation of <code class="computeroutput"><span class="identifier">execute</span></code>
+                    synchronizes with (C++Std [intro.multithread]) the invocation
+                    of <code class="computeroutput"><span class="identifier">f1</span></code>.
+                  </p>
+                </td></tr></tbody></table></div></div><br class="table-break"></div><div class="section" title="3.3.7.&#160;Event executor requirements"><div class="titlepage"><div><div><h4 class="title"><a name="requirements.event_executor"></a>3.3.7.&#160;Event executor requirements</h4></div></div></div><p>
+          An <span class="emphasis"><em>event executor</em></span> implements a set of operations for
+          the tracking and submission of function objects for execution, and represents
+          a set of rules required to support event-driven programs and composable
+          asynchronous operations.
+        </p><p>
+          A type <code class="computeroutput"><span class="identifier">X</span></code> meets the <code class="computeroutput"><span class="identifier">EventExecutor</span></code> requirements if it satisfies
+          the requirements of <a class="link" href="#requirements.executor" title="3.3.5.&#160;Executor requirements"><code class="computeroutput"><span class="identifier">Executor</span></code></a>, as well as the additional
+          requirements listed below.
+        </p><p>
+          The event executor copy constructor, comparison operators, and other member
+          functions defined in these requirements shall not introduce data races
+          as a result of concurrent calls to those functions from different threads.
+        </p><p>
+          The effect of calling <code class="computeroutput"><span class="identifier">on_work_started</span></code>,
+          <code class="computeroutput"><span class="identifier">on_work_finished</span></code>, <code class="computeroutput"><span class="identifier">dispatch</span></code>, <code class="computeroutput"><span class="identifier">post</span></code>,
+          or <code class="computeroutput"><span class="identifier">defer</span></code> on an invalid
+          executor is undefined. [<span class="emphasis"><em>Note:</em></span> The copy constructor,
+          comparison operators, and <code class="computeroutput"><span class="identifier">context</span><span class="special">()</span></code> member function continue to remain valid
+          until <code class="computeroutput"><span class="identifier">ctx</span></code> is destroyed.
+          &#8212;<span class="emphasis"><em>end note</em></span>]
+        </p><p>
+          In the table below, <code class="computeroutput"><span class="identifier">x1</span></code>
+          and <code class="computeroutput"><span class="identifier">x2</span></code> denote (possibly
+          const) values of type <code class="computeroutput"><span class="identifier">X</span></code>,
+          <code class="computeroutput"><span class="identifier">mx1</span></code> denotes an xvalue of
+          type <code class="computeroutput"><span class="identifier">X</span></code>, <code class="computeroutput"><span class="identifier">f</span></code>
+          denotes a <code class="computeroutput"><span class="identifier">MoveConstructible</span></code>
+          (C++Std [moveconstructible]) function object callable with zero arguments,
+          <code class="computeroutput"><span class="identifier">a</span></code> denotes a (possibly const)
+          value of type <code class="computeroutput"><span class="identifier">A</span></code> meeting
+          the <a class="link" href="#requirements.proto_allocator" title="3.3.2.&#160;Proto-allocator requirements"><code class="computeroutput"><span class="identifier">ProtoAllocator</span></code>
+          requirements</a>, and <code class="computeroutput"><span class="identifier">u</span></code>
+          denotes an identifier.
+        </p><div class="table"><a name="requirements.proposed_text.async_requirements.event_executor.t0"></a><p class="title"><b>Table&#160;6.&#160;Event executor requirements</b></p><div class="table-contents"><table class="table" summary="Event executor requirements"><colgroup><col><col><col></colgroup><thead><tr><th>
+                  <p>
+                    expression
+                  </p>
+                </th><th>
+                  <p>
+                    type
+                  </p>
+                </th><th>
+                  <p>
+                    assertion/note<br> pre/post-conditions
+                  </p>
+                </th></tr></thead><tbody><tr><td>
+                  <p>
+                    <code class="computeroutput"><span class="identifier">x1</span><span class="special">.</span><span class="identifier">on_work_started</span><span class="special">()</span></code>
+                  </p>
+                </td><td>
+                </td><td>
+                  <p>
+                    Shall not exit via an exception.
+                  </p>
+                </td></tr><tr><td>
+                  <p>
+                    <code class="computeroutput"><span class="identifier">x1</span><span class="special">.</span><span class="identifier">on_work_finished</span><span class="special">()</span></code>
+                  </p>
+                </td><td>
+                </td><td>
+                  <p>
+                    Shall not exit via an exception.<br> <br> Precondition: A
+                    preceding call <code class="computeroutput"><span class="identifier">x2</span><span class="special">.</span><span class="identifier">on_work_started</span><span class="special">()</span></code> where <code class="computeroutput"><span class="identifier">x1</span>
+                    <span class="special">==</span> <span class="identifier">x2</span></code>.
+                  </p>
+                </td></tr><tr><td>
+                  <p>
+                    <code class="computeroutput"><span class="identifier">x1</span><span class="special">.</span><span class="identifier">dispatch</span><span class="special">(</span><span class="identifier">std</span><span class="special">::</span><span class="identifier">move</span><span class="special">(</span><span class="identifier">f</span><span class="special">),</span><span class="identifier">a</span><span class="special">)</span></code>
+                  </p>
+                </td><td>
+                </td><td>
+                  <p>
+                    Effects: Creates an object <code class="computeroutput"><span class="identifier">f1</span></code>
+                    initialized with <code class="literal"><span class="emphasis"><em>DECAY_COPY</em></span></code><code class="computeroutput"><span class="special">(</span><span class="identifier">forward</span><span class="special">&lt;</span><span class="identifier">Func</span><span class="special">&gt;(</span><span class="identifier">f</span><span class="special">))</span></code> (C++Std [thread.decaycopy])
+                    in the current thread of execution . Calls <code class="computeroutput"><span class="identifier">f1</span><span class="special">()</span></code> at most once. The event executor
+                    may block forward progress of the caller until <code class="computeroutput"><span class="identifier">f1</span><span class="special">()</span></code>
+                    finishes execution.<br> <br> Event executor implementations
+                    should use the supplied allocator to allocate any memory required
+                    to store the function object. Prior to invoking the function
+                    object, the event executor shall deallocate any memory allocated.
+                    [<span class="emphasis"><em>Note:</em></span> Event executors defined in this Technical
+                    Specification always use the supplied allocator unless otherwise
+                    specified. &#8212;<span class="emphasis"><em>end note</em></span>] <br> <br> Synchronization:
+                    The invocation of <code class="computeroutput"><span class="identifier">dispatch</span></code>
+                    synchronizes with (C++Std [intro.multithread]) the invocation
+                    of <code class="computeroutput"><span class="identifier">f1</span></code>.
+                  </p>
+                </td></tr><tr><td>
+                  <p>
+                    <code class="computeroutput"><span class="identifier">x1</span><span class="special">.</span><span class="identifier">post</span><span class="special">(</span><span class="identifier">std</span><span class="special">::</span><span class="identifier">move</span><span class="special">(</span><span class="identifier">f</span><span class="special">),</span><span class="identifier">a</span><span class="special">)</span></code><br>
+                    <code class="computeroutput"><span class="identifier">x1</span><span class="special">.</span><span class="identifier">defer</span><span class="special">(</span><span class="identifier">std</span><span class="special">::</span><span class="identifier">move</span><span class="special">(</span><span class="identifier">f</span><span class="special">),</span><span class="identifier">a</span><span class="special">)</span></code>
+                  </p>
+                </td><td>
+                </td><td>
+                  <p>
+                    Effects: Creates an object <code class="computeroutput"><span class="identifier">f1</span></code>
+                    initialized with <code class="literal"><span class="emphasis"><em>DECAY_COPY</em></span></code><code class="computeroutput"><span class="special">(</span><span class="identifier">forward</span><span class="special">&lt;</span><span class="identifier">Func</span><span class="special">&gt;(</span><span class="identifier">f</span><span class="special">))</span></code> in the current thread of execution.
+                    Calls <code class="computeroutput"><span class="identifier">f1</span><span class="special">()</span></code>
+                    at most once. The executor shall not block forward progress of
+                    the caller pending completion of <code class="computeroutput"><span class="identifier">f1</span><span class="special">()</span></code>.<br> <br> Event executor
+                    implementations should use the supplied allocator to allocate
+                    any memory required to store the function object. Prior to invoking
+                    the function object, the event executor shall deallocate any
+                    memory allocated. [<span class="emphasis"><em>Note:</em></span> Event executors
+                    defined in this Technical Specification always use the supplied
+                    allocator unless otherwise specified. &#8212;<span class="emphasis"><em>end note</em></span>]
+                    <br> <br> Synchronization: The invocation of <code class="computeroutput"><span class="identifier">post</span></code> or <code class="computeroutput"><span class="identifier">defer</span></code>
+                    synchronizes with (C++Std [intro.multithread]) the invocation
+                    of <code class="computeroutput"><span class="identifier">f1</span></code>.<br>
+                    <br> [<span class="emphasis"><em>Note:</em></span> Although the requirements
+                    placed on <code class="computeroutput"><span class="identifier">defer</span></code>
+                    are identical to <code class="computeroutput"><span class="identifier">post</span></code>,
+                    the use of <code class="computeroutput"><span class="identifier">post</span></code>
+                    conveys a preference that the caller <span class="emphasis"><em>does not</em></span>
+                    block the first step of <code class="literal">f1</code>'s progress, whereas
+                    <code class="computeroutput"><span class="identifier">defer</span></code> conveys
+                    a preference that the caller <span class="emphasis"><em>does</em></span> block
+                    the first step of <code class="literal">f1</code>. One use of <code class="computeroutput"><span class="identifier">defer</span></code> is to convey the intention
+                    of the caller that <code class="literal">f1</code> is a continuation of
+                    the current call context. The event executor may use this information
+                    to optimize or otherwise adjust the way in which <code class="computeroutput"><span class="identifier">f1</span></code> is invoked. &#8212;<span class="emphasis"><em>end
+                    note</em></span>]
+                  </p>
+                </td></tr></tbody></table></div></div><br class="table-break"></div></div><div class="section" title="3.4.&#160;Class execution_context"><div class="titlepage"><div><div><h3 class="title"><a name="classes.execution_context"></a>3.4.&#160;Class <code class="literal">execution_context</code></h3></div></div></div><p>
+        Class <code class="computeroutput"><span class="identifier">execution_context</span></code> implements
+        an extensible, type-safe, polymorphic set of services, indexed by service
+        type.
+      </p><pre class="programlisting"><span class="keyword">namespace</span> <span class="identifier">std</span> <span class="special">{</span>
+<span class="keyword">namespace</span> <span class="identifier">experimental</span> <span class="special">{</span>
+<span class="keyword">inline namespace</span> <span class="identifier">concurrency_v2</span> <span class="special">{</span>
+
+  <span class="keyword">class</span> <span class="identifier">execution_context</span>
+  <span class="special">{</span>
+  <span class="keyword">public</span><span class="special">:</span>
+    <span class="keyword">class</span> <a class="link" href="#classes.execution_context__service" title="3.5.&#160;Class execution_context::service">service</a><span class="special">;</span>
+
+    <span class="comment">// construct / copy / destroy:</span>
+
+    <span class="identifier">execution_context</span><span class="special">();</span>
+    <span class="identifier">execution_context</span><span class="special">(</span><span class="keyword">const</span> <span class="identifier">execution_context</span><span class="special">&amp;)</span> <span class="special">=</span> <span class="keyword">delete</span><span class="special">;</span>
+    <span class="identifier">execution_context</span><span class="special">&amp;</span> <span class="keyword">operator</span><span class="special">=(</span><span class="keyword">const</span> <span class="identifier">execution_context</span><span class="special">&amp;)</span> <span class="special">=</span> <span class="keyword">delete</span><span class="special">;</span>
+    <span class="keyword">virtual</span> <span class="special">~</span><span class="identifier">execution_context</span><span class="special">();</span>
+
+    <span class="comment">// execution context operations:</span>
+
+    <span class="keyword">void</span> <span class="identifier">notify_fork</span><span class="special">(</span><span class="identifier">fork_event</span> <span class="identifier">e</span><span class="special">);</span>
+
+  <span class="keyword">protected</span><span class="special">:</span>
+
+    <span class="comment">// execution context protected operations:</span>
+
+    <span class="keyword">void</span> <span class="identifier">shutdown</span><span class="special">()</span> <span class="keyword">noexcept</span><span class="special">;</span>
+    <span class="keyword">void</span> <span class="identifier">destroy</span><span class="special">()</span> <span class="keyword">noexcept</span><span class="special">;</span>
+  <span class="special">};</span>
+
+  <span class="comment">// service access:</span>
+  <span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">Service</span><span class="special">&gt;</span> <span class="keyword">typename</span> <span class="identifier">Service</span><span class="special">::</span><span class="identifier">key_type</span><span class="special">&amp;</span>
+    <span class="identifier">use_service</span><span class="special">(</span><span class="identifier">execution_context</span><span class="special">&amp;</span> <span class="identifier">ctx</span><span class="special">);</span>
+  <span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">Service</span><span class="special">,</span> <span class="keyword">class</span><span class="special">...</span> <span class="identifier">Args</span><span class="special">&gt;</span> <span class="identifier">Service</span><span class="special">&amp;</span>
+    <span class="identifier">make_service</span><span class="special">(</span><span class="identifier">execution_context</span><span class="special">&amp;</span> <span class="identifier">ctx</span><span class="special">,</span> <span class="identifier">Args</span><span class="special">&amp;&amp;...</span> <span class="identifier">args</span><span class="special">);</span>
+  <span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">Service</span><span class="special">&gt;</span> <span class="keyword">bool</span> <span class="identifier">has_service</span><span class="special">(</span><span class="keyword">const</span> <span class="identifier">execution_context</span><span class="special">&amp;</span> <span class="identifier">ctx</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+  <span class="keyword">class</span> <span class="identifier">service_already_exists</span> <span class="special">:</span> <span class="keyword">public</span> <span class="identifier">logic_error</span> <span class="special">{</span> <span class="special">};</span>
+
+<span class="special">}</span> <span class="comment">// inline namespace concurrency_v2</span>
+<span class="special">}</span> <span class="comment">// namespace experimental</span>
+<span class="special">}</span> <span class="comment">// namespace std</span>
+</pre><p>
+        Access to the services of an <code class="computeroutput"><span class="identifier">execution_context</span></code>
+        is via three function templates, <code class="computeroutput"><span class="identifier">use_service</span><span class="special">&lt;&gt;</span></code>, <code class="computeroutput"><span class="identifier">make_service</span><span class="special">&lt;&gt;</span></code> and <code class="computeroutput"><span class="identifier">has_service</span><span class="special">&lt;&gt;</span></code>.
+      </p><p>
+        In a call to <code class="computeroutput"><span class="identifier">use_service</span><span class="special">&lt;</span><span class="identifier">Service</span><span class="special">&gt;()</span></code>, the type argument chooses a service.
+        If the service is not present in an <code class="computeroutput"><span class="identifier">execution_context</span></code>,
+        an object of type <code class="computeroutput"><span class="identifier">Service</span></code>
+        is created and added to the <code class="computeroutput"><span class="identifier">execution_context</span></code>.
+        A program can check if an <code class="computeroutput"><span class="identifier">execution_context</span></code>
+        implements a particular service with the function template <code class="computeroutput"><span class="identifier">has_service</span><span class="special">&lt;</span><span class="identifier">Service</span><span class="special">&gt;()</span></code>.
+      </p><p>
+        Service objects may be explicitly added to an <code class="computeroutput"><span class="identifier">execution_context</span></code>
+        using the function template <code class="computeroutput"><span class="identifier">make_service</span><span class="special">&lt;</span><span class="identifier">Service</span><span class="special">&gt;()</span></code>. If the service is already present,
+        <code class="computeroutput"><span class="identifier">make_service</span></code> exits via an
+        exception of type <code class="computeroutput"><span class="identifier">service_already_exists</span></code>.
+      </p><p>
+        Once a service reference is obtained from an <code class="computeroutput"><span class="identifier">execution_context</span></code>
+        object by calling <code class="computeroutput"><span class="identifier">use_service</span><span class="special">&lt;&gt;</span></code>, that reference remains usable until
+        a call to <code class="computeroutput"><span class="identifier">destroy</span><span class="special">()</span></code>.
+      </p><div class="section" title="3.4.1.&#160;execution_context constructor"><div class="titlepage"><div><div><h4 class="title"><a name="classes.__execution_context__constructor"></a>3.4.1.&#160;<code class="literal">execution_context</code> constructor</h4></div></div></div><pre class="programlisting"><span class="identifier">execution_context</span><span class="special">();</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Effects:</em></span> Creates an object of class <code class="computeroutput"><span class="identifier">execution_context</span></code> which contains no
+            services. [<span class="emphasis"><em>Note:</em></span> An implementation might preload
+            services of internal service types for its own use. &#8212;<span class="emphasis"><em>end note</em></span>]
+          </p></blockquote></div></div><div class="section" title="3.4.2.&#160;execution_context destructor"><div class="titlepage"><div><div><h4 class="title"><a name="classes.__execution_context__destructor"></a>3.4.2.&#160;<code class="literal">execution_context</code> destructor</h4></div></div></div><pre class="programlisting"><span class="special">~</span><span class="identifier">execution_context</span><span class="special">();</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Effects:</em></span> Destroys an object of class <code class="computeroutput"><span class="identifier">execution_context</span></code>. Performs <code class="computeroutput"><span class="identifier">shutdown</span><span class="special">()</span></code>
+            followed by <code class="computeroutput"><span class="identifier">destroy</span><span class="special">()</span></code>.
+          </p></blockquote></div></div><div class="section" title="3.4.3.&#160;execution_context operations"><div class="titlepage"><div><div><h4 class="title"><a name="classes.__execution_context__operations"></a>3.4.3.&#160;<code class="literal">execution_context</code> operations</h4></div></div></div><pre class="programlisting"><span class="keyword">void</span> <span class="identifier">notify_fork</span><span class="special">(</span><span class="identifier">fork_event</span> <span class="identifier">e</span><span class="special">);</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Effects:</em></span> For each service object <code class="computeroutput"><span class="identifier">svc</span></code>
+            in the set:<br> &#8212; If <code class="computeroutput"><span class="identifier">e</span> <span class="special">==</span> <span class="identifier">fork_event</span><span class="special">::</span><span class="identifier">prepare</span></code>,
+            performs <code class="computeroutput"><span class="identifier">svc</span><span class="special">-&gt;</span><span class="identifier">notify_fork</span><span class="special">(</span><span class="identifier">e</span><span class="special">)</span></code>
+            in reverse order of addition to the set.<br> &#8212; Otherwise, performs <code class="computeroutput"><span class="identifier">svc</span><span class="special">-&gt;</span><span class="identifier">notify_fork</span><span class="special">(</span><span class="identifier">e</span><span class="special">)</span></code>
+            in order of addition to the set.
+          </p></blockquote></div></div><div class="section" title="3.4.4.&#160;execution_context protected operations"><div class="titlepage"><div><div><h4 class="title"><a name="classes.__execution_context__protected_operations"></a>3.4.4.&#160;<code class="literal">execution_context</code> protected operations</h4></div></div></div><pre class="programlisting"><span class="keyword">void</span> <span class="identifier">shutdown</span><span class="special">()</span> <span class="keyword">noexcept</span><span class="special">;</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Effects:</em></span> For each service object <code class="computeroutput"><span class="identifier">svc</span></code>
+            in the <code class="computeroutput"><span class="identifier">execution_context</span></code>
+            set, in reverse order of addition to the set, performs <code class="computeroutput"><span class="identifier">svc</span><span class="special">-&gt;</span><span class="identifier">shutdown</span><span class="special">()</span></code>.
+            For each service in the set, <code class="computeroutput"><span class="identifier">svc</span><span class="special">-&gt;</span><span class="identifier">shutdown</span><span class="special">()</span></code> is called only once irrespective of
+            the number of calls to <code class="computeroutput"><span class="identifier">shutdown</span></code>
+            on the <code class="computeroutput"><span class="identifier">execution_context</span></code>.
+          </p></blockquote></div><pre class="programlisting"><span class="keyword">void</span> <span class="identifier">destroy</span><span class="special">()</span> <span class="keyword">noexcept</span><span class="special">;</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Effects:</em></span> Destroys each service object in the <code class="computeroutput"><span class="identifier">execution_context</span></code> set, and removes
+            it from the set, in reverse order of addition to the set.
+          </p></blockquote></div></div><div class="section" title="3.4.5.&#160;execution_context globals"><div class="titlepage"><div><div><h4 class="title"><a name="classes.__execution_context__globals"></a>3.4.5.&#160;<code class="literal">execution_context</code> globals</h4></div></div></div><p>
+          The functions <code class="computeroutput"><span class="identifier">use_service</span></code>,
+          <code class="computeroutput"><span class="identifier">make_service</span></code>, and <code class="computeroutput"><span class="identifier">has_service</span></code> do not introduce data races
+          as a result of concurrent calls to those functions from different threads.
+        </p><pre class="programlisting"><span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">Service</span><span class="special">&gt;</span> <span class="keyword">typename</span> <span class="identifier">Service</span><span class="special">::</span><span class="identifier">key_type</span><span class="special">&amp;</span>
+  <span class="identifier">use_service</span><span class="special">(</span><span class="identifier">execution_context</span><span class="special">&amp;</span> <span class="identifier">ctx</span><span class="special">);</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Effects:</em></span> If an object of type <code class="computeroutput"><span class="identifier">Service</span><span class="special">::</span><span class="identifier">key_type</span></code>
+            does not already exist in the <code class="computeroutput"><span class="identifier">execution_context</span></code>
+            set identified by <code class="computeroutput"><span class="identifier">ctx</span></code>,
+            creates an object of type <code class="computeroutput"><span class="identifier">Service</span></code>,
+            initialized as <code class="computeroutput"><span class="identifier">Service</span><span class="special">(</span><span class="identifier">ctx</span><span class="special">)</span></code>, and adds it to the set.
+          </p></blockquote></div><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Returns:</em></span> A reference to the corresponding service
+            of <code class="computeroutput"><span class="identifier">ctx</span></code>.
+          </p></blockquote></div><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Notes:</em></span> The reference returned remains valid until
+            a call to <code class="computeroutput"><span class="identifier">destroy</span></code>.
+          </p></blockquote></div><pre class="programlisting"><span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">Service</span><span class="special">,</span> <span class="keyword">class</span><span class="special">...</span> <span class="identifier">Args</span><span class="special">&gt;</span> <span class="identifier">Service</span><span class="special">&amp;</span>
+  <span class="identifier">make_service</span><span class="special">(</span><span class="identifier">execution_context</span><span class="special">&amp;</span> <span class="identifier">ctx</span><span class="special">,</span> <span class="identifier">Args</span><span class="special">&amp;&amp;...</span> <span class="identifier">args</span><span class="special">);</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Requires:</em></span> A service object of type <code class="computeroutput"><span class="identifier">Service</span><span class="special">::</span><span class="identifier">key_type</span></code> does not already exist in
+            the <code class="computeroutput"><span class="identifier">execution_context</span></code>
+            set identified by <code class="computeroutput"><span class="identifier">ctx</span></code>.
+          </p></blockquote></div><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Effects:</em></span> Creates an object of type <code class="computeroutput"><span class="identifier">Service</span></code>, initialized as <code class="computeroutput"><span class="identifier">Service</span><span class="special">(</span><span class="identifier">ctx</span><span class="special">,</span> <span class="identifier">forward</span><span class="special">&lt;</span><span class="identifier">Args</span><span class="special">&gt;(</span><span class="identifier">args</span><span class="special">)</span>...<span class="special">)</span></code>, and adds it to the <code class="computeroutput"><span class="identifier">execution_context</span></code>
+            set identified by <code class="computeroutput"><span class="identifier">ctx</span></code>.
+          </p></blockquote></div><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Throws:</em></span> <code class="computeroutput"><span class="identifier">service_already_exists</span></code>
+            if a corresponding service object of type <code class="computeroutput"><span class="identifier">Key</span></code>
+            is already present in the set.
+          </p></blockquote></div><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Notes:</em></span> The reference returned remains valid until
+            a call to <code class="computeroutput"><span class="identifier">destroy</span></code>.
+          </p></blockquote></div><pre class="programlisting"><span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">Service</span><span class="special">&gt;</span> <span class="keyword">bool</span> <span class="identifier">has_service</span><span class="special">(</span><span class="keyword">const</span> <span class="identifier">execution_context</span><span class="special">&amp;</span> <span class="identifier">ctx</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Returns:</em></span> <code class="computeroutput"><span class="keyword">true</span></code>
+            if an object of type <code class="computeroutput"><span class="identifier">Service</span><span class="special">::</span><span class="identifier">key_type</span></code>
+            is present in <code class="computeroutput"><span class="identifier">ctx</span></code>, otherwise
+            <code class="computeroutput"><span class="keyword">false</span></code>.
+          </p></blockquote></div></div></div><div class="section" title="3.5.&#160;Class execution_context::service"><div class="titlepage"><div><div><h3 class="title"><a name="classes.execution_context__service"></a>3.5.&#160;Class <code class="literal">execution_context::service</code></h3></div></div></div><pre class="programlisting"><span class="keyword">namespace</span> <span class="identifier">std</span> <span class="special">{</span>
+<span class="keyword">namespace</span> <span class="identifier">experimental</span> <span class="special">{</span>
+<span class="keyword">inline namespace</span> <span class="identifier">concurrency_v2</span> <span class="special">{</span>
+
+  <span class="keyword">class</span> <span class="identifier">execution_context</span><span class="special">::</span><span class="identifier">service</span>
+  <span class="special">{</span>
+  <span class="keyword">protected</span><span class="special">:</span>
+    <span class="comment">// construct / copy / destroy:</span>
+
+    <span class="keyword">explicit</span> <span class="identifier">service</span><span class="special">(</span><span class="identifier">execution_context</span><span class="special">&amp;</span> <span class="identifier">owner</span><span class="special">);</span>
+    <span class="identifier">service</span><span class="special">(</span><span class="keyword">const</span> <span class="identifier">service</span><span class="special">&amp;)</span> <span class="special">=</span> <span class="keyword">delete</span><span class="special">;</span>
+    <span class="identifier">service</span><span class="special">&amp;</span> <span class="keyword">operator</span><span class="special">=(</span><span class="keyword">const</span> <span class="identifier">service</span><span class="special">&amp;)</span> <span class="special">=</span> <span class="keyword">delete</span><span class="special">;</span>
+    <span class="keyword">virtual</span> <span class="special">~</span><span class="identifier">service</span><span class="special">();</span>
+
+    <span class="comment">// service observers:</span>
+
+    <span class="identifier">execution_context</span><span class="special">&amp;</span> <span class="identifier">context</span><span class="special">()</span> <span class="keyword">noexcept</span><span class="special">;</span>
+
+  <span class="keyword">private</span><span class="special">:</span>
+    <span class="comment">// service operations:</span>
+
+    <span class="keyword">virtual</span> <span class="keyword">void</span> <span class="identifier">shutdown</span><span class="special">()</span> <span class="keyword">noexcept</span> <span class="special">=</span> <span class="number">0</span><span class="special">;</span>
+    <span class="keyword">virtual</span> <span class="keyword">void</span> <span class="identifier">notify_fork</span><span class="special">(</span><span class="identifier">fork_event</span> <span class="identifier">e</span><span class="special">)</span> <span class="special">{}</span>
+
+    <span class="identifier">execution_context</span><span class="special">&amp;</span> <span class="identifier">context_</span><span class="special">;</span> <span class="comment">// <span class="emphasis"><em>exposition only</em></span></span>
+  <span class="special">};</span>
+
+<span class="special">}</span> <span class="comment">// inline namespace concurrency_v2</span>
+<span class="special">}</span> <span class="comment">// namespace experimental</span>
+<span class="special">}</span> <span class="comment">// namespace std</span>
+
+<span class="keyword">explicit</span> <span class="identifier">service</span><span class="special">(</span><span class="identifier">execution_context</span><span class="special">&amp;</span> <span class="identifier">owner</span><span class="special">);</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+          <span class="emphasis"><em>Postconditions:</em></span> <code class="computeroutput"><span class="identifier">std</span><span class="special">::</span><span class="identifier">addressof</span><span class="special">(</span><span class="identifier">context_</span><span class="special">)</span> <span class="special">==</span> <span class="identifier">std</span><span class="special">::</span><span class="identifier">addressof</span><span class="special">(</span><span class="identifier">owner</span><span class="special">)</span></code>.
+        </p></blockquote></div><pre class="programlisting"><span class="identifier">execution_context</span><span class="special">&amp;</span> <span class="identifier">context</span><span class="special">()</span> <span class="keyword">noexcept</span><span class="special">;</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+          <span class="emphasis"><em>Returns:</em></span> <code class="computeroutput"><span class="identifier">context_</span></code>.
+        </p></blockquote></div></div><div class="section" title="3.6.&#160;Class template is_trivial_executor"><div class="titlepage"><div><div><h3 class="title"><a name="classes.is_trivial_executor"></a>3.6.&#160;Class template <code class="literal">is_trivial_executor</code></h3></div></div></div><p>
+        The class template <code class="computeroutput"><span class="identifier">is_trivial_executor</span></code>
+        can be used to detect executor types satisfying the <a class="link" href="#requirements.event_executor" title="3.3.7.&#160;Event executor requirements"><code class="computeroutput"><span class="identifier">TrivialExecutor</span></code></a> type requirements.
+      </p><pre class="programlisting"><span class="keyword">namespace</span> <span class="identifier">std</span> <span class="special">{</span>
+<span class="keyword">namespace</span> <span class="identifier">experimental</span> <span class="special">{</span>
+<span class="keyword">inline namespace</span> <span class="identifier">concurrency_v2</span> <span class="special">{</span>
+
+  <span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">T</span><span class="special">&gt;</span> <span class="keyword">struct</span> <span class="identifier">is_trivial_executor</span><span class="special">;</span>
+
+<span class="special">}</span> <span class="comment">// inline namespace concurrency_v2</span>
+<span class="special">}</span> <span class="comment">// namespace experimental</span>
+<span class="special">}</span> <span class="comment">// namespace std</span>
+</pre><p>
+        <code class="computeroutput"><span class="identifier">T</span></code> shall be a complete type.
+      </p><p>
+        Class template <code class="computeroutput"><span class="identifier">is_trivial_executor</span></code>
+        is a UnaryTypeTrait (C++Std [meta.rqmts]) with a BaseCharacteristic of <code class="computeroutput"><span class="identifier">true_type</span></code> if the type <code class="computeroutput"><span class="identifier">T</span></code>
+        meets the syntactic requirements for <a class="link" href="#requirements.event_executor" title="3.3.7.&#160;Event executor requirements"><code class="computeroutput"><span class="identifier">TrivialExecutor</span></code></a>, otherwise <code class="computeroutput"><span class="identifier">false_type</span></code>.
+      </p></div><div class="section" title="3.7.&#160;get_trivial_executor"><div class="titlepage"><div><div><h3 class="title"><a name="functions.get_trivial_executor"></a>3.7.&#160;<code class="literal">get_trivial_executor</code></h3></div></div></div><pre class="programlisting"><span class="keyword">namespace</span> <span class="identifier">std</span> <span class="special">{</span>
+<span class="keyword">namespace</span> <span class="identifier">experimental</span> <span class="special">{</span>
+<span class="keyword">inline namespace</span> <span class="identifier">concurrency_v2</span> <span class="special">{</span>
+
+  <span class="keyword">namespace</span> <span class="special">{</span>
+    <span class="keyword">constexpr</span> <span class="emphasis"><em>unspecified</em></span> <a class="link" href="#functions.get_trivial_executor" title="3.7.&#160;get_trivial_executor">get_trivial_executor</a> <span class="special">=</span> <span class="emphasis"><em>unspecified</em></span><span class="special">;</span>
+  <span class="special">}</span>
+
+<span class="special">}</span> <span class="comment">// inline namespace concurrency_v2</span>
+<span class="special">}</span> <span class="comment">// namespace experimental</span>
+<span class="special">}</span> <span class="comment">// namespace std</span>
+</pre><p>
+        The name <code class="computeroutput"><span class="identifier">get_trivial_executor</span></code>
+        denotes a <a class="link" href="#requirements.customization_point" title="3.3.1.&#160;Customization point objects">customization
+        point</a>. The effect of the expression <code class="computeroutput">concurrency_v2<span class="special">::</span><span class="identifier">get_trivial_executor</span><span class="special">(</span><span class="identifier">E</span><span class="special">)</span></code> for
+        some expression <code class="computeroutput"><span class="identifier">E</span></code> is equivalent
+        to:
+      </p><p>
+        &#8212; <code class="computeroutput"><span class="special">(</span><span class="identifier">E</span><span class="special">).</span><span class="identifier">get_trivial_executor</span><span class="special">()</span></code> if, for its type <code class="computeroutput"><span class="identifier">X</span></code>,
+        <code class="computeroutput"><span class="identifier">is_trivial_executor</span><span class="special">&lt;</span><span class="identifier">X</span><span class="special">&gt;::</span><span class="identifier">value</span></code> is true. [<span class="emphasis"><em>Note:</em></span>
+        This means that <code class="computeroutput"><span class="identifier">X</span></code> meets the
+        syntactic requirements for <a class="link" href="#requirements.trivial_executor" title="3.3.6.&#160;Trivial executor requirements"><code class="computeroutput"><span class="identifier">TrivialExecutor</span></code></a>. &#8212;<span class="emphasis"><em>end note</em></span>]
+        If <code class="computeroutput"><span class="identifier">is_trivial_executor</span><span class="special">&lt;</span><span class="identifier">X</span><span class="special">&gt;::</span><span class="identifier">value</span></code> is false, the program is ill-formed
+        with no diagnostic required.
+      </p><p>
+        &#8212; Otherwise, <code class="computeroutput"><span class="identifier">get_trivial_executor</span><span class="special">(</span><span class="identifier">E</span><span class="special">)</span></code>
+        if, for its type <code class="computeroutput"><span class="identifier">X</span></code>, <code class="computeroutput"><span class="identifier">is_trivial_executor</span><span class="special">&lt;</span><span class="identifier">X</span><span class="special">&gt;::</span><span class="identifier">value</span></code> is true, with overload resolution
+        performed in a context that includes the declaration <code class="computeroutput"><span class="keyword">void</span>
+        <span class="identifier">get_trivial_executor</span><span class="special">(</span><span class="keyword">auto</span><span class="special">&amp;)</span> <span class="special">=</span> <span class="keyword">delete</span><span class="special">;</span></code>
+        and does not include a declaration of <code class="computeroutput">concurrency_v2<span class="special">::</span><span class="identifier">get_trivial_executor</span></code>. If <code class="computeroutput"><span class="identifier">is_trivial_executor</span><span class="special">&lt;</span><span class="identifier">X</span><span class="special">&gt;::</span><span class="identifier">value</span></code> is false, the program is ill-formed
+        with no diagnostic required.
+      </p><p>
+        &#8212; Otherwise, <code class="computeroutput">concurrency_v2<span class="special">::</span><span class="identifier">get_trivial_executor</span><span class="special">(</span><span class="identifier">E</span><span class="special">)</span></code> is ill-formed.
+      </p><p>
+        <span class="emphasis"><em>Remark:</em></span> Whenever <code class="computeroutput">concurrency_v2<span class="special">::</span><span class="identifier">get_trivial_executor</span><span class="special">(</span><span class="identifier">E</span><span class="special">)</span></code> is a
+        valid expression, the type of <code class="computeroutput">concurrency_v2<span class="special">::</span><span class="identifier">get_trivial_executor</span><span class="special">(</span><span class="identifier">E</span><span class="special">)</span></code> satisfies
+        the requirements for <a class="link" href="#requirements.trivial_executor" title="3.3.6.&#160;Trivial executor requirements"><code class="computeroutput"><span class="identifier">TrivialExecutor</span></code></a>.
+      </p></div><div class="section" title="3.8.&#160;Class template is_event_executor"><div class="titlepage"><div><div><h3 class="title"><a name="classes.is_event_executor"></a>3.8.&#160;Class template <code class="literal">is_event_executor</code></h3></div></div></div><p>
+        The class template <code class="computeroutput"><span class="identifier">is_event_executor</span></code>
+        can be used to detect executor types satisfying the <a class="link" href="#requirements.event_executor" title="3.3.7.&#160;Event executor requirements"><code class="computeroutput"><span class="identifier">EventExecutor</span></code></a> type requirements.
+      </p><pre class="programlisting"><span class="keyword">namespace</span> <span class="identifier">std</span> <span class="special">{</span>
+<span class="keyword">namespace</span> <span class="identifier">experimental</span> <span class="special">{</span>
+<span class="keyword">inline namespace</span> <span class="identifier">concurrency_v2</span> <span class="special">{</span>
+
+  <span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">T</span><span class="special">&gt;</span> <span class="keyword">struct</span> <span class="identifier">is_event_executor</span><span class="special">;</span>
+
+<span class="special">}</span> <span class="comment">// inline namespace concurrency_v2</span>
+<span class="special">}</span> <span class="comment">// namespace experimental</span>
+<span class="special">}</span> <span class="comment">// namespace std</span>
+</pre><p>
+        <code class="computeroutput"><span class="identifier">T</span></code> shall be a complete type.
+      </p><p>
+        Class template <code class="computeroutput"><span class="identifier">is_event_executor</span></code>
+        is a UnaryTypeTrait (C++Std [meta.rqmts]) with a BaseCharacteristic of <code class="computeroutput"><span class="identifier">true_type</span></code> if the type <code class="computeroutput"><span class="identifier">T</span></code>
+        meets the syntactic requirements for <a class="link" href="#requirements.event_executor" title="3.3.7.&#160;Event executor requirements"><code class="computeroutput"><span class="identifier">EventExecutor</span></code></a>, otherwise <code class="computeroutput"><span class="identifier">false_type</span></code>.
+      </p></div><div class="section" title="3.9.&#160;get_event_executor"><div class="titlepage"><div><div><h3 class="title"><a name="functions.get_event_executor"></a>3.9.&#160;<code class="literal">get_event_executor</code></h3></div></div></div><pre class="programlisting"><span class="keyword">namespace</span> <span class="identifier">std</span> <span class="special">{</span>
+<span class="keyword">namespace</span> <span class="identifier">experimental</span> <span class="special">{</span>
+<span class="keyword">inline namespace</span> <span class="identifier">concurrency_v2</span> <span class="special">{</span>
+
+  <span class="keyword">namespace</span> <span class="special">{</span>
+    <span class="keyword">constexpr</span> <span class="emphasis"><em>unspecified</em></span> <a class="link" href="#functions.get_event_executor" title="3.9.&#160;get_event_executor">get_event_executor</a> <span class="special">=</span> <span class="emphasis"><em>unspecified</em></span><span class="special">;</span>
+  <span class="special">}</span>
+
+<span class="special">}</span> <span class="comment">// inline namespace concurrency_v2</span>
+<span class="special">}</span> <span class="comment">// namespace experimental</span>
+<span class="special">}</span> <span class="comment">// namespace std</span>
+</pre><p>
+        The name <code class="computeroutput"><span class="identifier">get_event_executor</span></code>
+        denotes a <a class="link" href="#requirements.customization_point" title="3.3.1.&#160;Customization point objects">customization
+        point</a>. The effect of the expression <code class="computeroutput">concurrency_v2<span class="special">::</span><span class="identifier">get_event_executor</span><span class="special">(</span><span class="identifier">E</span><span class="special">)</span></code> for
+        some expression <code class="computeroutput"><span class="identifier">E</span></code> is equivalent
+        to:
+      </p><p>
+        &#8212; <code class="computeroutput"><span class="special">(</span><span class="identifier">E</span><span class="special">).</span><span class="identifier">get_event_executor</span><span class="special">()</span></code> if, for its type <code class="computeroutput"><span class="identifier">X</span></code>,
+        <code class="computeroutput"><span class="identifier">is_event_executor</span><span class="special">&lt;</span><span class="identifier">X</span><span class="special">&gt;::</span><span class="identifier">value</span></code> is true. [<span class="emphasis"><em>Note:</em></span>
+        This means that <code class="computeroutput"><span class="identifier">X</span></code> meets the
+        syntactic requirements for <a class="link" href="#requirements.event_executor" title="3.3.7.&#160;Event executor requirements"><code class="computeroutput"><span class="identifier">EventExecutor</span></code></a>. &#8212;<span class="emphasis"><em>end note</em></span>]
+        If <code class="computeroutput"><span class="identifier">is_event_executor</span><span class="special">&lt;</span><span class="identifier">X</span><span class="special">&gt;::</span><span class="identifier">value</span></code> is false, the program is ill-formed
+        with no diagnostic required.
+      </p><p>
+        &#8212; Otherwise, <code class="computeroutput"><span class="identifier">get_event_executor</span><span class="special">(</span><span class="identifier">E</span><span class="special">)</span></code>
+        if, for its type <code class="computeroutput"><span class="identifier">X</span></code>, <code class="computeroutput"><span class="identifier">is_event_executor</span><span class="special">&lt;</span><span class="identifier">X</span><span class="special">&gt;::</span><span class="identifier">value</span></code> is true, with overload resolution
+        performed in a context that includes the declaration <code class="computeroutput"><span class="keyword">void</span>
+        <span class="identifier">get_event_executor</span><span class="special">(</span><span class="keyword">auto</span><span class="special">&amp;)</span> <span class="special">=</span> <span class="keyword">delete</span><span class="special">;</span></code>
+        and does not include a declaration of <code class="computeroutput">concurrency_v2<span class="special">::</span><span class="identifier">get_event_executor</span></code>. If <code class="computeroutput"><span class="identifier">is_event_executor</span><span class="special">&lt;</span><span class="identifier">X</span><span class="special">&gt;::</span><span class="identifier">value</span></code> is false, the program is ill-formed
+        with no diagnostic required.
+      </p><p>
+        &#8212; Otherwise, <code class="computeroutput">concurrency_v2<span class="special">::</span><span class="identifier">get_event_executor</span><span class="special">(</span><span class="identifier">E</span><span class="special">)</span></code> is ill-formed.
+      </p><p>
+        <span class="emphasis"><em>Remark:</em></span> Whenever <code class="computeroutput">concurrency_v2<span class="special">::</span><span class="identifier">get_event_executor</span><span class="special">(</span><span class="identifier">E</span><span class="special">)</span></code> is a
+        valid expression, the type of <code class="computeroutput">concurrency_v2<span class="special">::</span><span class="identifier">get_event_executor</span><span class="special">(</span><span class="identifier">E</span><span class="special">)</span></code> satisfies
+        the requirements for <a class="link" href="#requirements.event_executor" title="3.3.7.&#160;Event executor requirements"><code class="computeroutput"><span class="identifier">EventExecutor</span></code></a>.
+      </p></div><div class="section" title="3.10.&#160;Function async"><div class="titlepage"><div><div><h3 class="title"><a name="functions.async"></a>3.10.&#160;Function <code class="literal">async</code></h3></div></div></div><p>
+        The function template async provides a mechanism to submit a function to
+        an executor, and provides the result of the function in a future object with
+        which it shares a shared state (C++Std [futures.state]).
+      </p><pre class="programlisting"><span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">TrivialExecutor</span><span class="special">,</span> <span class="keyword">class</span> <span class="identifier">F</span><span class="special">,</span> <span class="keyword">class</span><span class="special">...</span> <span class="identifier">Args</span><span class="special">&gt;</span>
+  <span class="identifier">future</span><span class="special">&lt;</span><span class="identifier">result_of_t</span><span class="special">&lt;</span><span class="identifier">decay_t</span><span class="special">&lt;</span><span class="identifier">F</span><span class="special">&gt;(</span><span class="identifier">decay_t</span><span class="special">&lt;</span><span class="identifier">Args</span><span class="special">&gt;...)&gt;&gt;</span>
+    <span class="identifier">async</span><span class="special">(</span><span class="keyword">const</span> <span class="identifier">TrivialExecutor</span><span class="special">&amp;</span> <span class="identifier">ex</span><span class="special">,</span> <span class="identifier">F</span><span class="special">&amp;&amp;</span> <span class="identifier">f</span><span class="special">,</span> <span class="identifier">Args</span><span class="special">&amp;&amp;...</span> <span class="identifier">args</span><span class="special">);</span>
+<span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">EventExecutor</span><span class="special">,</span> <span class="keyword">class</span> <span class="identifier">F</span><span class="special">,</span> <span class="keyword">class</span><span class="special">...</span> <span class="identifier">Args</span><span class="special">&gt;</span>
+  <span class="identifier">future</span><span class="special">&lt;</span><span class="identifier">result_of_t</span><span class="special">&lt;</span><span class="identifier">decay_t</span><span class="special">&lt;</span><span class="identifier">F</span><span class="special">&gt;(</span><span class="identifier">decay_t</span><span class="special">&lt;</span><span class="identifier">Args</span><span class="special">&gt;...)&gt;&gt;</span>
+    <span class="identifier">async</span><span class="special">(</span><span class="keyword">const</span> <span class="identifier">EventExecutor</span><span class="special">&amp;</span> <span class="identifier">ex</span><span class="special">,</span> <span class="identifier">F</span><span class="special">&amp;&amp;</span> <span class="identifier">f</span><span class="special">,</span> <span class="identifier">Args</span><span class="special">&amp;&amp;...</span> <span class="identifier">args</span><span class="special">);</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+          <span class="emphasis"><em>Requires:</em></span> <code class="computeroutput"><span class="identifier">F</span></code>
+          and each <code class="computeroutput"><span class="identifier">Ti</span></code> in <code class="computeroutput"><span class="identifier">Args</span></code> shall satisfy the <code class="computeroutput"><span class="identifier">MoveConstructible</span></code> requirements (C++Std
+          [moveconstructible]). <code class="literal"><span class="emphasis"><em>INVOKE</em></span>(<span class="emphasis"><em>DECAY_COPY</em></span>(std::forward&lt;F&gt;(f)),
+          <span class="emphasis"><em>DECAY_COPY</em></span>(std::forward&lt;Args&gt;(args))...)</code>
+          (C++Std [func.require], [thread.decaycopy]) shall be a valid expression.
+        </p></blockquote></div><div class="blockquote"><blockquote class="blockquote"><p>
+          <span class="emphasis"><em>Effects:</em></span> Let <code class="computeroutput"><span class="identifier">f</span></code>
+          be a function object that, when called as <code class="computeroutput"><span class="identifier">f</span><span class="special">()</span></code>, calls <code class="literal"><span class="emphasis"><em>INVOKE</em></span>(<span class="emphasis"><em>DECAY_COPY</em></span>(std::forward&lt;F&gt;(f)),
+          <span class="emphasis"><em>DECAY_COPY</em></span>(std::forward&lt;Args&gt;(args))...)</code>,
+          with the calls to <code class="literal"><span class="emphasis"><em>DECAY_COPY</em></span>()</code>
+          being evaluated in the thread that called <code class="computeroutput"><span class="identifier">async</span></code>.
+          Any return value is stored as the result in the shared state. Any exception
+          propagated from the execution of <code class="literal"><span class="emphasis"><em>INVOKE</em></span>(<span class="emphasis"><em>DECAY_COPY</em></span>(std::forward&lt;F&gt;(f)),
+          <span class="emphasis"><em>DECAY_COPY</em></span>(std::forward&lt;Args&gt;(args))...)</code>
+          is stored as the exceptional result in the shared state.
+        </p></blockquote></div><div class="blockquote"><blockquote class="blockquote"><p>
+          In the first overload, performs <code class="computeroutput"><span class="identifier">ex</span><span class="special">.</span><span class="identifier">execute</span><span class="special">(</span><span class="identifier">std</span><span class="special">::</span><span class="identifier">move</span><span class="special">(</span><span class="identifier">f</span><span class="special">))</span></code>.
+          In the last overload, performs <code class="computeroutput"><span class="identifier">ex</span><span class="special">.</span><span class="identifier">post</span><span class="special">(</span><span class="identifier">std</span><span class="special">::</span><span class="identifier">move</span><span class="special">(</span><span class="identifier">f</span><span class="special">),</span>
+          <span class="identifier">std</span><span class="special">::</span><span class="identifier">allocator</span><span class="special">&lt;</span><span class="keyword">void</span><span class="special">&gt;())</span></code>
+        </p></blockquote></div><div class="blockquote"><blockquote class="blockquote"><p>
+          <span class="emphasis"><em>Returns:</em></span> An object of type <code class="computeroutput"><span class="identifier">future</span><span class="special">&lt;</span><span class="identifier">result_of_t</span><span class="special">&lt;</span><span class="identifier">decay_t</span><span class="special">&lt;</span><span class="identifier">F</span><span class="special">&gt;(</span><span class="identifier">decay_t</span><span class="special">&lt;</span><span class="identifier">Args</span><span class="special">&gt;</span>...<span class="special">)&gt;&gt;</span></code>
+          that refers to the shared state created by this call to <code class="computeroutput"><span class="identifier">async</span></code>.
+        </p></blockquote></div><div class="blockquote"><blockquote class="blockquote"><p>
+          <span class="emphasis"><em>Remarks:</em></span> This first overload shall not participate
+          in overload resolution unless <code class="computeroutput"><span class="identifier">is_trivial_executor</span><span class="special">&lt;</span><span class="identifier">TrivialExecutor</span><span class="special">&gt;::</span><span class="identifier">value</span></code>
+          is true. The last overload shall not participate in overload resolution
+          unless <code class="computeroutput"><span class="identifier">is_event_executor</span><span class="special">&lt;</span><span class="identifier">EventExecutor</span><span class="special">&gt;::</span><span class="identifier">value</span></code>
+          is true.
+        </p></blockquote></div><pre class="programlisting"><span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">E</span><span class="special">,</span> <span class="keyword">class</span> <span class="identifier">F</span><span class="special">,</span> <span class="keyword">class</span><span class="special">...</span> <span class="identifier">Args</span><span class="special">&gt;</span>
+  <span class="identifier">future</span><span class="special">&lt;</span><span class="identifier">result_of_t</span><span class="special">&lt;</span><span class="identifier">decay_t</span><span class="special">&lt;</span><span class="identifier">F</span><span class="special">&gt;(</span><span class="identifier">decay_t</span><span class="special">&lt;</span><span class="identifier">Args</span><span class="special">&gt;...)&gt;&gt;</span>
+    <span class="identifier">async</span><span class="special">(</span><span class="identifier">E</span><span class="special">&amp;</span> <span class="identifier">e</span><span class="special">,</span> <span class="identifier">F</span><span class="special">&amp;&amp;</span> <span class="identifier">f</span><span class="special">,</span> <span class="identifier">Args</span><span class="special">&amp;&amp;...</span> <span class="identifier">args</span><span class="special">);</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+          <span class="emphasis"><em>Returns:</em></span> <code class="computeroutput"><span class="identifier">async</span><span class="special">(</span>concurrency_v2<span class="special">::</span><span class="identifier">get_trivial_executor</span><span class="special">(</span><span class="identifier">e</span><span class="special">),</span> <span class="identifier">forward</span><span class="special">&lt;</span><span class="identifier">F</span><span class="special">&gt;(</span><span class="identifier">f</span><span class="special">),</span> <span class="identifier">forward</span><span class="special">&lt;</span><span class="identifier">Args</span><span class="special">&gt;(</span><span class="identifier">args</span><span class="special">)</span>...<span class="special">)</span></code>.
+        </p></blockquote></div><div class="blockquote"><blockquote class="blockquote"><p>
+          <span class="emphasis"><em>Remarks:</em></span> This function shall not participate in overload
+          resolution unless <code class="computeroutput">concurrency_v2<span class="special">::</span><span class="identifier">get_trivial_executor</span><span class="special">(</span><span class="identifier">e</span><span class="special">)</span></code> is
+          a valid expression.
+        </p></blockquote></div></div><div class="section" title="3.11.&#160;Header &lt;experimental/thread_pool&gt; synopsis"><div class="titlepage"><div><div><h3 class="title"><a name="headers.thread_pool"></a>3.11.&#160;Header <code class="literal">&lt;experimental/thread_pool&gt;</code> synopsis</h3></div></div></div><pre class="programlisting"><span class="keyword">namespace</span> <span class="identifier">std</span> <span class="special">{</span>
+<span class="keyword">namespace</span> <span class="identifier">experimental</span> <span class="special">{</span>
+<span class="keyword">inline namespace</span> <span class="identifier">concurrency_v2</span> <span class="special">{</span>
+
+  <span class="keyword">class</span> <a class="link" href="#classes.thread_pool" title="3.12.&#160;Class thread_pool">thread_pool</a><span class="special">;</span>
+
+<span class="special">}</span> <span class="comment">// inline namespace concurrency_v2</span>
+<span class="special">}</span> <span class="comment">// namespace experimental</span>
+<span class="special">}</span> <span class="comment">// namespace std</span>
+</pre></div><div class="section" title="3.12.&#160;Class thread_pool"><div class="titlepage"><div><div><h3 class="title"><a name="classes.thread_pool"></a>3.12.&#160;Class <code class="literal">thread_pool</code></h3></div></div></div><p>
+        Class <code class="computeroutput"><span class="identifier">thread_pool</span></code> implements
+        a fixed-size pool of threads.
+      </p><pre class="programlisting"><span class="keyword">namespace</span> <span class="identifier">std</span> <span class="special">{</span>
+<span class="keyword">namespace</span> <span class="identifier">experimental</span> <span class="special">{</span>
+<span class="keyword">inline namespace</span> <span class="identifier">concurrency_v2</span> <span class="special">{</span>
+
+  <span class="keyword">class</span> <span class="identifier">thread_pool</span> <span class="special">:</span> <span class="keyword">public</span> <span class="identifier">execution_context</span>
+  <span class="special">{</span>
+  <span class="keyword">public</span><span class="special">:</span>
+    <span class="comment">// types:</span>
+
+    <span class="keyword">class</span> <a class="link" href="#classes.thread_pool__trivial_executor" title="3.13.&#160;Class thread_pool::trivial_executor">trivial_executor</a><span class="special">;</span>
+    <span class="keyword">class</span> <a class="link" href="#classes.thread_pool__event_executor" title="3.14.&#160;Class thread_pool::event_executor">event_executor</a><span class="special">;</span>
+
+    <span class="comment">// construct / copy / destroy:</span>
+
+    <span class="identifier">thread_pool</span><span class="special">();</span>
+    <span class="keyword">explicit</span> <span class="identifier">thread_pool</span><span class="special">(</span><span class="identifier">std</span><span class="special">::</span><span class="identifier">size_t</span> <span class="identifier">num_threads</span><span class="special">);</span>
+    <span class="identifier">thread_pool</span><span class="special">(</span><span class="keyword">const</span> <span class="identifier">thread_pool</span><span class="special">&amp;)</span> <span class="special">=</span> <span class="keyword">delete</span><span class="special">;</span>
+    <span class="identifier">thread_pool</span><span class="special">&amp;</span> <span class="keyword">operator</span><span class="special">=(</span><span class="keyword">const</span> <span class="identifier">thread_pool</span><span class="special">&amp;)</span> <span class="special">=</span> <span class="keyword">delete</span><span class="special">;</span>
+    <span class="special">~</span><span class="identifier">thread_pool</span><span class="special">();</span>
+
+    <span class="comment">// thread_pool operations:</span>
+
+    <span class="identifier">trivial_executor</span> <span class="identifier">get_trivial_executor</span><span class="special">()</span> <span class="keyword">noexcept</span><span class="special">;</span>
+    <span class="identifier">event_executor</span> <span class="identifier">get_event_executor</span><span class="special">()</span> <span class="keyword">noexcept</span><span class="special">;</span>
+
+    <span class="keyword">void</span> <span class="identifier">stop</span><span class="special">();</span>
+
+    <span class="keyword">void</span> <span class="identifier">join</span><span class="special">();</span>
+  <span class="special">};</span>
+
+<span class="special">}</span> <span class="comment">// inline namespace concurrency_v2</span>
+<span class="special">}</span> <span class="comment">// namespace experimental</span>
+<span class="special">}</span> <span class="comment">// namespace std</span>
+</pre><p>
+        The class <code class="computeroutput"><span class="identifier">thread_pool</span></code> satisfies
+        the <a class="link" href="#requirements.execution_context" title="3.3.3.&#160;Execution context requirements"><code class="computeroutput"><span class="identifier">ExecutionContext</span></code></a>
+        requirements.
+      </p><p>
+        For an object of type <code class="computeroutput"><span class="identifier">thread_pool</span></code>,
+        <span class="emphasis"><em>outstanding work</em></span> is defined as the sum of:
+      </p><p>
+        &#8212; the total number of calls to the <code class="computeroutput"><span class="identifier">on_work_started</span></code>
+        function, less the total number of calls to the <code class="computeroutput"><span class="identifier">on_work_finished</span></code>
+        function, to any event executor of the <code class="computeroutput"><span class="identifier">thread_pool</span></code>.
+      </p><p>
+        &#8212; the number of function objects that have been added to the <code class="computeroutput"><span class="identifier">thread_pool</span></code> via the <code class="computeroutput"><span class="identifier">thread_pool</span></code>
+        trivial executor or event executor, but not yet executed; and
+      </p><p>
+        &#8212; the number of function objects that are currently being executed by the
+        <code class="computeroutput"><span class="identifier">thread_pool</span></code>.
+      </p><p>
+        The <code class="computeroutput"><span class="identifier">thread_pool</span></code> member functions
+        <code class="computeroutput"><span class="identifier">get_trivial_executor</span></code>, <code class="computeroutput"><span class="identifier">get_event_executor</span></code>, <code class="computeroutput"><span class="identifier">stop</span></code>,
+        and <code class="computeroutput"><span class="identifier">join</span></code>, the <code class="computeroutput"><span class="identifier">thread_pool</span><span class="special">::</span><span class="identifier">trivial_executor</span></code> copy constructors, member
+        functions and comparison operators, and the <code class="computeroutput"><span class="identifier">thread_pool</span><span class="special">::</span><span class="identifier">event_executor</span></code>
+        copy constructors, member functions and comparison operators, do not introduce
+        data races as a result of concurrent calls to those functions from different
+        threads of execution.
+      </p><div class="section" title="3.12.1.&#160;thread_pool members"><div class="titlepage"><div><div><h4 class="title"><a name="classes.__thread_pool__members"></a>3.12.1.&#160;<code class="literal">thread_pool</code> members</h4></div></div></div><pre class="programlisting"><span class="identifier">thread_pool</span><span class="special">();</span>
+<span class="keyword">explicit</span> <span class="identifier">thread_pool</span><span class="special">(</span><span class="identifier">std</span><span class="special">::</span><span class="identifier">size_t</span> <span class="identifier">num_threads</span><span class="special">);</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Effects:</em></span> Creates an object of class <code class="computeroutput"><span class="identifier">thread_pool</span></code> containing a number of
+            threads of execution, each represented by a <code class="computeroutput"><span class="identifier">thread</span></code>
+            object. If specified, the number of threads in the pool is <code class="computeroutput"><span class="identifier">num_threads</span></code>. Otherwise, the number
+            of threads in the pool is implementation-defined. [<span class="emphasis"><em>Note:</em></span>
+            A suggested value for the implementation-defined number of threads is
+            <code class="computeroutput"><span class="identifier">std</span><span class="special">::</span><span class="identifier">thread</span><span class="special">::</span><span class="identifier">hardware_concurrency</span><span class="special">()</span>
+            <span class="special">*</span> <span class="number">2</span></code>.
+            &#8212;<span class="emphasis"><em>end note</em></span>]
+          </p></blockquote></div><pre class="programlisting"><span class="special">~</span><span class="identifier">thread_pool</span><span class="special">();</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Effects:</em></span> Destroys an object of class <code class="computeroutput"><span class="identifier">thread_pool</span></code>. Performs <code class="computeroutput"><span class="identifier">stop</span><span class="special">()</span></code>
+            followed by <code class="computeroutput"><span class="identifier">join</span><span class="special">()</span></code>.
+          </p></blockquote></div><pre class="programlisting"><span class="identifier">trivial_executor</span> <span class="identifier">get_trivial_executor</span><span class="special">()</span> <span class="keyword">noexcept</span><span class="special">;</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Returns:</em></span> A trivial executor that may be used for
+            submitting function objects to the <code class="computeroutput"><span class="identifier">thread_pool</span></code>.
+          </p></blockquote></div><pre class="programlisting"><span class="identifier">event_executor</span> <span class="identifier">get_event_executor</span><span class="special">()</span> <span class="keyword">noexcept</span><span class="special">;</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Returns:</em></span> An event executor that may be used for
+            submitting function objects to the <code class="computeroutput"><span class="identifier">thread_pool</span></code>.
+          </p></blockquote></div><pre class="programlisting"><span class="keyword">void</span> <span class="identifier">stop</span><span class="special">();</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Effects:</em></span> Signals the threads in the pool to complete
+            as soon as possible. If a thread is currently executing a function object,
+            the thread will exit only after completion of that function object. The
+            call to <code class="computeroutput"><span class="identifier">stop</span><span class="special">()</span></code>
+            returns without waiting for the threads to complete.
+          </p></blockquote></div><pre class="programlisting"><span class="keyword">void</span> <span class="identifier">join</span><span class="special">();</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Effects:</em></span> If not already stopped, signals the threads
+            in the pool to exit once the outstanding work is <code class="computeroutput"><span class="number">0</span></code>.
+            Blocks the calling thread (C++Std [defns.block]) until all threads in
+            the pool have completed.
+          </p></blockquote></div><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Synchronization:</em></span> The completion of each thread in
+            the pool synchronizes with (C++Std [intro.multithread]) the corresponding
+            successful <code class="computeroutput"><span class="identifier">join</span><span class="special">()</span></code>
+            return.
+          </p></blockquote></div></div></div><div class="section" title="3.13.&#160;Class thread_pool::trivial_executor"><div class="titlepage"><div><div><h3 class="title"><a name="classes.thread_pool__trivial_executor"></a>3.13.&#160;Class <code class="literal">thread_pool::trivial_executor</code></h3></div></div></div><pre class="programlisting"><span class="keyword">namespace</span> <span class="identifier">std</span> <span class="special">{</span>
+<span class="keyword">namespace</span> <span class="identifier">experimental</span> <span class="special">{</span>
+<span class="keyword">inline namespace</span> <span class="identifier">concurrency_v2</span> <span class="special">{</span>
+
+  <span class="keyword">class</span> <span class="identifier">thread_pool</span><span class="special">::</span><span class="identifier">trivial_executor</span>
+  <span class="special">{</span>
+  <span class="keyword">public</span><span class="special">:</span>
+    <span class="comment">// construct / copy / destroy:</span>
+
+    <span class="identifier">trivial_executor</span><span class="special">(</span><span class="keyword">const</span> <span class="identifier">trivial_executor</span><span class="special">&amp;</span> <span class="identifier">other</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+    <span class="identifier">trivial_executor</span><span class="special">(</span><span class="identifier">trivial_executor</span><span class="special">&amp;&amp;</span> <span class="identifier">other</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+
+    <span class="identifier">trivial_executor</span><span class="special">&amp;</span> <span class="keyword">operator</span><span class="special">=(</span><span class="keyword">const</span> <span class="identifier">trivial_executor</span><span class="special">&amp;</span> <span class="identifier">other</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+    <span class="identifier">trivial_executor</span><span class="special">&amp;</span> <span class="keyword">operator</span><span class="special">=(</span><span class="identifier">trivial_executor</span><span class="special">&amp;&amp;</span> <span class="identifier">other</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+
+    <span class="comment">// executor operations:</span>
+
+    <span class="identifier">thread_pool</span><span class="special">&amp;</span> <span class="identifier">context</span><span class="special">()</span> <span class="keyword">noexcept</span><span class="special">;</span>
+    <span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">Func</span><span class="special">&gt;</span> <span class="keyword">void</span> <span class="identifier">execute</span><span class="special">(</span><span class="identifier">Func</span><span class="special">&amp;&amp;</span> <span class="identifier">f</span><span class="special">);</span>
+  <span class="special">};</span>
+
+  <span class="keyword">bool</span> <span class="keyword">operator</span><span class="special">==(</span><span class="keyword">const</span> <span class="identifier">thread_pool</span><span class="special">::</span><span class="identifier">trivial_executor</span><span class="special">&amp;</span> <span class="identifier">a</span><span class="special">,</span>
+                  <span class="keyword">const</span> <span class="identifier">thread_pool</span><span class="special">::</span><span class="identifier">trivial_executor</span><span class="special">&amp;</span> <span class="identifier">b</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+  <span class="keyword">bool</span> <span class="keyword">operator</span><span class="special">!=(</span><span class="keyword">const</span> <span class="identifier">thread_pool</span><span class="special">::</span><span class="identifier">trivial_executor</span><span class="special">&amp;</span> <span class="identifier">a</span><span class="special">,</span>
+                  <span class="keyword">const</span> <span class="identifier">thread_pool</span><span class="special">::</span><span class="identifier">trivial_executor</span><span class="special">&amp;</span> <span class="identifier">b</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+
+<span class="special">}</span> <span class="comment">// inline namespace concurrency_v2</span>
+<span class="special">}</span> <span class="comment">// namespace experimental</span>
+<span class="special">}</span> <span class="comment">// namespace std</span>
+</pre><p>
+        <code class="computeroutput"><span class="identifier">thread_pool</span><span class="special">::</span><span class="identifier">trivial_executor</span></code> is a type satisfying
+        <a class="link" href="#requirements.trivial_executor" title="3.3.6.&#160;Trivial executor requirements"><code class="computeroutput"><span class="identifier">TrivialExecutor</span></code></a>
+        requirements. Objects of type <code class="computeroutput"><span class="identifier">thread_pool</span><span class="special">::</span><span class="identifier">trivial_executor</span></code>
+        are associated with a <code class="computeroutput"><span class="identifier">thread_pool</span></code>,
+        and function objects submitted using the <code class="computeroutput"><span class="identifier">dispatch</span></code>,
+        <code class="computeroutput"><span class="identifier">post</span></code>, or <code class="computeroutput"><span class="identifier">defer</span></code>
+        member functions will be executed by the <code class="computeroutput"><span class="identifier">thread_pool</span></code>.]
+      </p><div class="section" title="3.13.1.&#160;thread_pool::trivial_executor constructors"><div class="titlepage"><div><div><h4 class="title"><a name="classes.__thread_pool__trivial_executor__constructors"></a>3.13.1.&#160;<code class="literal">thread_pool::trivial_executor</code> constructors</h4></div></div></div><pre class="programlisting"><span class="identifier">trivial_executor</span><span class="special">(</span><span class="keyword">const</span> <span class="identifier">trivial_executor</span><span class="special">&amp;</span> <span class="identifier">other</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Postconditions:</em></span> <code class="computeroutput"><span class="special">*</span><span class="keyword">this</span> <span class="special">==</span> <span class="identifier">other</span></code>.
+          </p></blockquote></div><pre class="programlisting"><span class="identifier">trivial_executor</span><span class="special">(</span><span class="identifier">trivial_executor</span><span class="special">&amp;&amp;</span> <span class="identifier">other</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Postconditions:</em></span> <code class="computeroutput"><span class="special">*</span><span class="keyword">this</span></code> is equal to the prior value of <code class="computeroutput"><span class="identifier">other</span></code>.
+          </p></blockquote></div></div><div class="section" title="3.13.2.&#160;thread_pool::trivial_executor assignment"><div class="titlepage"><div><div><h4 class="title"><a name="classes.__thread_pool__trivial_executor__assignment"></a>3.13.2.&#160;<code class="literal">thread_pool::trivial_executor</code> assignment</h4></div></div></div><pre class="programlisting"><span class="identifier">trivial_executor</span><span class="special">&amp;</span> <span class="keyword">operator</span><span class="special">=(</span><span class="keyword">const</span> <span class="identifier">trivial_executor</span><span class="special">&amp;</span> <span class="identifier">other</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Postconditions:</em></span> <code class="computeroutput"><span class="special">*</span><span class="keyword">this</span> <span class="special">==</span> <span class="identifier">other</span></code>.
+          </p></blockquote></div><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Returns:</em></span> <code class="computeroutput"><span class="special">*</span><span class="keyword">this</span></code>.
+          </p></blockquote></div><pre class="programlisting"><span class="identifier">trivial_executor</span><span class="special">&amp;</span> <span class="keyword">operator</span><span class="special">=(</span><span class="identifier">trivial_executor</span><span class="special">&amp;&amp;</span> <span class="identifier">other</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Postconditions:</em></span> <code class="computeroutput"><span class="special">*</span><span class="keyword">this</span></code> is equal to the prior value of <code class="computeroutput"><span class="identifier">other</span></code>.
+          </p></blockquote></div><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Returns:</em></span> <code class="computeroutput"><span class="special">*</span><span class="keyword">this</span></code>.
+          </p></blockquote></div></div><div class="section" title="3.13.3.&#160;thread_pool::trivial_executor operations"><div class="titlepage"><div><div><h4 class="title"><a name="classes.__thread_pool__trivial_executor__operations"></a>3.13.3.&#160;<code class="literal">thread_pool::trivial_executor</code> operations</h4></div></div></div><pre class="programlisting"><span class="identifier">thread_pool</span><span class="special">&amp;</span> <span class="identifier">context</span><span class="special">()</span> <span class="keyword">noexcept</span><span class="special">;</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Returns:</em></span> A reference to the associated <code class="computeroutput"><span class="identifier">thread_pool</span></code> object.
+          </p></blockquote></div><pre class="programlisting"><span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">Func</span><span class="special">&gt;</span> <span class="keyword">void</span> <span class="identifier">execute</span><span class="special">(</span><span class="identifier">Func</span><span class="special">&amp;&amp;</span> <span class="identifier">f</span><span class="special">);</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Effects:</em></span> Adds <code class="computeroutput"><span class="identifier">f</span></code>
+            to the <code class="computeroutput"><span class="identifier">thread_pool</span></code>.
+          </p></blockquote></div></div><div class="section" title="3.13.4.&#160;thread_pool::trivial_executor comparisons"><div class="titlepage"><div><div><h4 class="title"><a name="classes.__thread_pool__trivial_executor__comparisons"></a>3.13.4.&#160;<code class="literal">thread_pool::trivial_executor</code> comparisons</h4></div></div></div><pre class="programlisting"><span class="keyword">bool</span> <span class="keyword">operator</span><span class="special">==(</span><span class="keyword">const</span> <span class="identifier">thread_pool</span><span class="special">::</span><span class="identifier">trivial_executor</span><span class="special">&amp;</span> <span class="identifier">a</span><span class="special">,</span>
+                <span class="keyword">const</span> <span class="identifier">thread_pool</span><span class="special">::</span><span class="identifier">trivial_executor</span><span class="special">&amp;</span> <span class="identifier">b</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Returns:</em></span> <code class="computeroutput"><span class="identifier">addressof</span><span class="special">(</span><span class="identifier">a</span><span class="special">.</span><span class="identifier">context</span><span class="special">())</span> <span class="special">==</span> <span class="identifier">addressof</span><span class="special">(</span><span class="identifier">b</span><span class="special">.</span><span class="identifier">context</span><span class="special">())</span></code>.
+          </p></blockquote></div><pre class="programlisting"><span class="keyword">bool</span> <span class="keyword">operator</span><span class="special">!=(</span><span class="keyword">const</span> <span class="identifier">thread_pool</span><span class="special">::</span><span class="identifier">trivial_executor</span><span class="special">&amp;</span> <span class="identifier">a</span><span class="special">,</span>
+                <span class="keyword">const</span> <span class="identifier">thread_pool</span><span class="special">::</span><span class="identifier">trivial_executor</span><span class="special">&amp;</span> <span class="identifier">b</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Returns:</em></span> <code class="computeroutput"><span class="special">!(</span><span class="identifier">a</span> <span class="special">==</span> <span class="identifier">b</span><span class="special">)</span></code>.
+          </p></blockquote></div></div></div><div class="section" title="3.14.&#160;Class thread_pool::event_executor"><div class="titlepage"><div><div><h3 class="title"><a name="classes.thread_pool__event_executor"></a>3.14.&#160;Class <code class="literal">thread_pool::event_executor</code></h3></div></div></div><pre class="programlisting"><span class="keyword">namespace</span> <span class="identifier">std</span> <span class="special">{</span>
+<span class="keyword">namespace</span> <span class="identifier">experimental</span> <span class="special">{</span>
+<span class="keyword">inline namespace</span> <span class="identifier">concurrency_v2</span> <span class="special">{</span>
+
+  <span class="keyword">class</span> <span class="identifier">thread_pool</span><span class="special">::</span><span class="identifier">event_executor</span>
+  <span class="special">{</span>
+  <span class="keyword">public</span><span class="special">:</span>
+    <span class="comment">// construct / copy / destroy:</span>
+
+    <span class="identifier">event_executor</span><span class="special">(</span><span class="keyword">const</span> <span class="identifier">event_executor</span><span class="special">&amp;</span> <span class="identifier">other</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+    <span class="identifier">event_executor</span><span class="special">(</span><span class="identifier">event_executor</span><span class="special">&amp;&amp;</span> <span class="identifier">other</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+
+    <span class="identifier">event_executor</span><span class="special">&amp;</span> <span class="keyword">operator</span><span class="special">=(</span><span class="keyword">const</span> <span class="identifier">event_executor</span><span class="special">&amp;</span> <span class="identifier">other</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+    <span class="identifier">event_executor</span><span class="special">&amp;</span> <span class="keyword">operator</span><span class="special">=(</span><span class="identifier">event_executor</span><span class="special">&amp;&amp;</span> <span class="identifier">other</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+
+    <span class="comment">// executor operations:</span>
+
+    <span class="keyword">bool</span> <span class="identifier">running_in_this_thread</span><span class="special">()</span> <span class="keyword">const</span> <span class="keyword">noexcept</span><span class="special">;</span>
+
+    <span class="identifier">thread_pool</span><span class="special">&amp;</span> <span class="identifier">context</span><span class="special">()</span> <span class="keyword">noexcept</span><span class="special">;</span>
+
+    <span class="keyword">void</span> <span class="identifier">on_work_started</span><span class="special">()</span> <span class="keyword">noexcept</span><span class="special">;</span>
+    <span class="keyword">void</span> <span class="identifier">on_work_finished</span><span class="special">()</span> <span class="keyword">noexcept</span><span class="special">;</span>
+
+    <span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">Func</span><span class="special">,</span> <span class="keyword">class</span> <span class="identifier">ProtoAllocator</span><span class="special">&gt;</span>
+      <span class="keyword">void</span> <span class="identifier">dispatch</span><span class="special">(</span><span class="identifier">Func</span><span class="special">&amp;&amp;</span> <span class="identifier">f</span><span class="special">,</span> <span class="keyword">const</span> <span class="identifier">ProtoAllocator</span><span class="special">&amp;</span> <span class="identifier">a</span><span class="special">);</span>
+    <span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">Func</span><span class="special">,</span> <span class="keyword">class</span> <span class="identifier">ProtoAllocator</span><span class="special">&gt;</span>
+      <span class="keyword">void</span> <span class="identifier">post</span><span class="special">(</span><span class="identifier">Func</span><span class="special">&amp;&amp;</span> <span class="identifier">f</span><span class="special">,</span> <span class="keyword">const</span> <span class="identifier">ProtoAllocator</span><span class="special">&amp;</span> <span class="identifier">a</span><span class="special">);</span>
+    <span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">Func</span><span class="special">,</span> <span class="keyword">class</span> <span class="identifier">ProtoAllocator</span><span class="special">&gt;</span>
+      <span class="keyword">void</span> <span class="identifier">defer</span><span class="special">(</span><span class="identifier">Func</span><span class="special">&amp;&amp;</span> <span class="identifier">f</span><span class="special">,</span> <span class="keyword">const</span> <span class="identifier">ProtoAllocator</span><span class="special">&amp;</span> <span class="identifier">a</span><span class="special">);</span>
+  <span class="special">};</span>
+
+  <span class="keyword">bool</span> <span class="keyword">operator</span><span class="special">==(</span><span class="keyword">const</span> <span class="identifier">thread_pool</span><span class="special">::</span><span class="identifier">event_executor</span><span class="special">&amp;</span> <span class="identifier">a</span><span class="special">,</span>
+                  <span class="keyword">const</span> <span class="identifier">thread_pool</span><span class="special">::</span><span class="identifier">event_executor</span><span class="special">&amp;</span> <span class="identifier">b</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+  <span class="keyword">bool</span> <span class="keyword">operator</span><span class="special">!=(</span><span class="keyword">const</span> <span class="identifier">thread_pool</span><span class="special">::</span><span class="identifier">event_executor</span><span class="special">&amp;</span> <span class="identifier">a</span><span class="special">,</span>
+                  <span class="keyword">const</span> <span class="identifier">thread_pool</span><span class="special">::</span><span class="identifier">event_executor</span><span class="special">&amp;</span> <span class="identifier">b</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+
+<span class="special">}</span> <span class="comment">// inline namespace concurrency_v2</span>
+<span class="special">}</span> <span class="comment">// namespace experimental</span>
+<span class="special">}</span> <span class="comment">// namespace std</span>
+</pre><p>
+        <code class="computeroutput"><span class="identifier">thread_pool</span><span class="special">::</span><span class="identifier">event_executor</span></code> is a type satisfying <a class="link" href="#requirements.event_executor" title="3.3.7.&#160;Event executor requirements"><code class="computeroutput"><span class="identifier">EventExecutor</span></code></a>
+        requirements. Objects of type <code class="computeroutput"><span class="identifier">thread_pool</span><span class="special">::</span><span class="identifier">event_executor</span></code>
+        are associated with a <code class="computeroutput"><span class="identifier">thread_pool</span></code>,
+        and function objects submitted using the <code class="computeroutput"><span class="identifier">dispatch</span></code>,
+        <code class="computeroutput"><span class="identifier">post</span></code>, or <code class="computeroutput"><span class="identifier">defer</span></code>
+        member functions will be executed by the <code class="computeroutput"><span class="identifier">thread_pool</span></code>.]
+      </p><div class="section" title="3.14.1.&#160;thread_pool::event_executor constructors"><div class="titlepage"><div><div><h4 class="title"><a name="classes.__thread_pool__event_executor__constructors"></a>3.14.1.&#160;<code class="literal">thread_pool::event_executor</code> constructors</h4></div></div></div><pre class="programlisting"><span class="identifier">event_executor</span><span class="special">(</span><span class="keyword">const</span> <span class="identifier">event_executor</span><span class="special">&amp;</span> <span class="identifier">other</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Postconditions:</em></span> <code class="computeroutput"><span class="special">*</span><span class="keyword">this</span> <span class="special">==</span> <span class="identifier">other</span></code>.
+          </p></blockquote></div><pre class="programlisting"><span class="identifier">event_executor</span><span class="special">(</span><span class="identifier">event_executor</span><span class="special">&amp;&amp;</span> <span class="identifier">other</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Postconditions:</em></span> <code class="computeroutput"><span class="special">*</span><span class="keyword">this</span></code> is equal to the prior value of <code class="computeroutput"><span class="identifier">other</span></code>.
+          </p></blockquote></div></div><div class="section" title="3.14.2.&#160;thread_pool::event_executor assignment"><div class="titlepage"><div><div><h4 class="title"><a name="classes.__thread_pool__event_executor__assignment"></a>3.14.2.&#160;<code class="literal">thread_pool::event_executor</code> assignment</h4></div></div></div><pre class="programlisting"><span class="identifier">event_executor</span><span class="special">&amp;</span> <span class="keyword">operator</span><span class="special">=(</span><span class="keyword">const</span> <span class="identifier">event_executor</span><span class="special">&amp;</span> <span class="identifier">other</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Postconditions:</em></span> <code class="computeroutput"><span class="special">*</span><span class="keyword">this</span> <span class="special">==</span> <span class="identifier">other</span></code>.
+          </p></blockquote></div><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Returns:</em></span> <code class="computeroutput"><span class="special">*</span><span class="keyword">this</span></code>.
+          </p></blockquote></div><pre class="programlisting"><span class="identifier">event_executor</span><span class="special">&amp;</span> <span class="keyword">operator</span><span class="special">=(</span><span class="identifier">event_executor</span><span class="special">&amp;&amp;</span> <span class="identifier">other</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Postconditions:</em></span> <code class="computeroutput"><span class="special">*</span><span class="keyword">this</span></code> is equal to the prior value of <code class="computeroutput"><span class="identifier">other</span></code>.
+          </p></blockquote></div><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Returns:</em></span> <code class="computeroutput"><span class="special">*</span><span class="keyword">this</span></code>.
+          </p></blockquote></div></div><div class="section" title="3.14.3.&#160;thread_pool::event_executor operations"><div class="titlepage"><div><div><h4 class="title"><a name="classes.__thread_pool__event_executor__operations"></a>3.14.3.&#160;<code class="literal">thread_pool::event_executor</code> operations</h4></div></div></div><pre class="programlisting"><span class="keyword">bool</span> <span class="identifier">running_in_this_thread</span><span class="special">()</span> <span class="keyword">const</span> <span class="keyword">noexcept</span><span class="special">;</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Returns:</em></span> <code class="computeroutput"><span class="keyword">true</span></code>
+            if the current thread of execution is calling a run function of the associated
+            <code class="computeroutput"><span class="identifier">thread_pool</span></code> object. [<span class="emphasis"><em>Note:</em></span>
+            That is, the current thread of execution's call chain includes a run
+            function. &#8212;<span class="emphasis"><em>end note</em></span>]
+          </p></blockquote></div><pre class="programlisting"><span class="identifier">thread_pool</span><span class="special">&amp;</span> <span class="identifier">context</span><span class="special">()</span> <span class="keyword">noexcept</span><span class="special">;</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Returns:</em></span> A reference to the associated <code class="computeroutput"><span class="identifier">thread_pool</span></code> object.
+          </p></blockquote></div><pre class="programlisting"><span class="keyword">void</span> <span class="identifier">on_work_started</span><span class="special">()</span> <span class="keyword">noexcept</span><span class="special">;</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Effects:</em></span> Increment the count of outstanding work
+            associated with the <code class="computeroutput"><span class="identifier">thread_pool</span></code>.
+          </p></blockquote></div><pre class="programlisting"><span class="keyword">void</span> <span class="identifier">on_work_finished</span><span class="special">()</span> <span class="keyword">noexcept</span><span class="special">;</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Effects:</em></span> Decrement the count of outstanding work
+            associated with the <code class="computeroutput"><span class="identifier">thread_pool</span></code>.
+          </p></blockquote></div><pre class="programlisting"><span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">Func</span><span class="special">,</span> <span class="keyword">class</span> <span class="identifier">ProtoAllocator</span><span class="special">&gt;</span>
+  <span class="keyword">void</span> <span class="identifier">dispatch</span><span class="special">(</span><span class="identifier">Func</span><span class="special">&amp;&amp;</span> <span class="identifier">f</span><span class="special">,</span> <span class="keyword">const</span> <span class="identifier">ProtoAllocator</span><span class="special">&amp;</span> <span class="identifier">a</span><span class="special">);</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Effects:</em></span> If <code class="computeroutput"><span class="identifier">running_in_this_thread</span><span class="special">()</span></code> is <code class="computeroutput"><span class="keyword">true</span></code>,
+            calls <code class="literal"><span class="emphasis"><em>DECAY_COPY</em></span></code><code class="computeroutput"><span class="special">(</span><span class="identifier">forward</span><span class="special">&lt;</span><span class="identifier">Func</span><span class="special">&gt;(</span><span class="identifier">f</span><span class="special">))()</span></code> (C++Std [thread.decaycopy]). [<span class="emphasis"><em>Note:</em></span>
+            If <code class="computeroutput"><span class="identifier">f</span></code> exits via an exception,
+            the exception propagates to the caller of <code class="computeroutput"><span class="identifier">dispatch</span><span class="special">()</span></code>. &#8212;<span class="emphasis"><em>end note</em></span>] Otherwise,
+            calls <code class="computeroutput"><span class="identifier">post</span><span class="special">(</span><span class="identifier">forward</span><span class="special">&lt;</span><span class="identifier">Func</span><span class="special">&gt;(</span><span class="identifier">f</span><span class="special">),</span> <span class="identifier">a</span><span class="special">)</span></code>.
+          </p></blockquote></div><pre class="programlisting"><span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">Func</span><span class="special">,</span> <span class="keyword">class</span> <span class="identifier">ProtoAllocator</span><span class="special">&gt;</span>
+  <span class="keyword">void</span> <span class="identifier">post</span><span class="special">(</span><span class="identifier">Func</span><span class="special">&amp;&amp;</span> <span class="identifier">f</span><span class="special">,</span> <span class="keyword">const</span> <span class="identifier">ProtoAllocator</span><span class="special">&amp;</span> <span class="identifier">a</span><span class="special">);</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Effects:</em></span> Adds <code class="computeroutput"><span class="identifier">f</span></code>
+            to the <code class="computeroutput"><span class="identifier">thread_pool</span></code>.
+          </p></blockquote></div><pre class="programlisting"><span class="keyword">template</span><span class="special">&lt;</span><span class="keyword">class</span> <span class="identifier">Func</span><span class="special">,</span> <span class="keyword">class</span> <span class="identifier">ProtoAllocator</span><span class="special">&gt;</span>
+  <span class="keyword">void</span> <span class="identifier">defer</span><span class="special">(</span><span class="identifier">Func</span><span class="special">&amp;&amp;</span> <span class="identifier">f</span><span class="special">,</span> <span class="keyword">const</span> <span class="identifier">ProtoAllocator</span><span class="special">&amp;</span> <span class="identifier">a</span><span class="special">);</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Effects:</em></span> Adds <code class="computeroutput"><span class="identifier">f</span></code>
+            to the <code class="computeroutput"><span class="identifier">thread_pool</span></code>.
+          </p></blockquote></div></div><div class="section" title="3.14.4.&#160;thread_pool::event_executor comparisons"><div class="titlepage"><div><div><h4 class="title"><a name="classes.__thread_pool__event_executor__comparisons"></a>3.14.4.&#160;<code class="literal">thread_pool::event_executor</code> comparisons</h4></div></div></div><pre class="programlisting"><span class="keyword">bool</span> <span class="keyword">operator</span><span class="special">==(</span><span class="keyword">const</span> <span class="identifier">thread_pool</span><span class="special">::</span><span class="identifier">event_executor</span><span class="special">&amp;</span> <span class="identifier">a</span><span class="special">,</span>
+                <span class="keyword">const</span> <span class="identifier">thread_pool</span><span class="special">::</span><span class="identifier">event_executor</span><span class="special">&amp;</span> <span class="identifier">b</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Returns:</em></span> <code class="computeroutput"><span class="identifier">addressof</span><span class="special">(</span><span class="identifier">a</span><span class="special">.</span><span class="identifier">context</span><span class="special">())</span> <span class="special">==</span> <span class="identifier">addressof</span><span class="special">(</span><span class="identifier">b</span><span class="special">.</span><span class="identifier">context</span><span class="special">())</span></code>.
+          </p></blockquote></div><pre class="programlisting"><span class="keyword">bool</span> <span class="keyword">operator</span><span class="special">!=(</span><span class="keyword">const</span> <span class="identifier">thread_pool</span><span class="special">::</span><span class="identifier">event_executor</span><span class="special">&amp;</span> <span class="identifier">a</span><span class="special">,</span>
+                <span class="keyword">const</span> <span class="identifier">thread_pool</span><span class="special">::</span><span class="identifier">event_executor</span><span class="special">&amp;</span> <span class="identifier">b</span><span class="special">)</span> <span class="keyword">noexcept</span><span class="special">;</span>
+</pre><div class="blockquote"><blockquote class="blockquote"><p>
+            <span class="emphasis"><em>Returns:</em></span> <code class="computeroutput"><span class="special">!(</span><span class="identifier">a</span> <span class="special">==</span> <span class="identifier">b</span><span class="special">)</span></code>.
+          </p></blockquote></div></div></div></div><div class="section" title="4.&#160;Acknowledgements"><div class="titlepage"><div><div><h2 class="title" style="clear: both"><a name="executors.acknowledgements"></a>4.&#160;Acknowledgements</h2></div></div></div><p>
+      The author would like to thank Chris Mysen and Arash Partow for an extensive
+      and insightful discussion of the similarities and differences of the various
+      executor proposals. This paper aims to distill the ideas that were the outcome
+      of that discussion into a concrete form.
+    </p><p>
+      The author would also like to thank Eric Niebler for producing the recommendations
+      of N4381 and for providing some pointers on how to integrate this customization
+      point design into proposed wording.
+    </p></div></div></body></html>

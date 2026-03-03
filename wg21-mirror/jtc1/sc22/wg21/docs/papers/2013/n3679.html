@@ -1,0 +1,181 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+ "http://www.w3.org/TR/html4/strict.dtd">
+<html><head>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8">
+<title>N3679: Async future destructors must wait</title>
+</head>
+<body>
+<table summary="Identifying information for this document.">
+	<tr>
+                <th>Doc. No.:</th>
+                <td>WG21/N3679</td>
+        </tr>
+        <tr>
+                <th>Date:</th>
+                <td>2013-5-05</td>
+        </tr>
+        <tr>
+                <th>Reply to:</th>
+                <td>Hans-J. Boehm</td>
+        </tr>
+        <tr>
+                <th>Phone:</th>
+                <td>+1-650-857-3406</td>
+        </tr>
+        <tr>
+                <th>Email:</th>
+                <td><a href="mailto:Hans.Boehm@hp.com">Hans.Boehm@hp.com</a></td>
+        </tr>
+</table>
+<H1>N3679: Async() future destructors must wait</h1>
+<P>
+We've had repeated debates about the desirability of having futures
+returned by <code>async()</code> wait in their destructor for the underlying
+task to complete.  See for example, N3630, and it's predecessor
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3451.pdf">
+N3451</a>.  This had turned into a particularly sensitive issue,
+since future destructors do not block consistently, but only when returned from
+<code>async()</code>, potentially making them difficult to use in general
+purpose code.
+<P>
+A number of the older papers, e.g. N3630, argued that future destructors
+should not block at all.  Here we argue that such a change would be too
+much: It would introduce subtle program bugs, which are likely to be
+exploitable as security holes.  A very similar argument was presented,
+in slide form, at the Bristol SG1 meeting.  It contributed to an alternate
+proposal, N3637, which was almost voted into the working paper.
+<P>
+The only point of this paper is to document more of the discussion leading
+to N3637 in the interest of avoiding future repetition.
+<H2>The basic issue</h2>
+<P>
+Futures returned by <code>async()</code> with <code>async</code> launch policy
+wait in their destructor for the
+associated shared state to become ready.  This prevents a situation in which
+the associated thread continues to run, and there is no longer a means
+to wait for it to complete because the associated future has been destroyed.
+Without heroic efforts to otherwise wait for completion,
+such a "run-away" thread can continue to run past the
+lifetime of the objects on which it depends.
+<P>
+As an example, consider the following pair of functions:
+<pre>
+void f() {
+  vector&lt;int&gt; v;
+  ...
+  do_parallel_foo(v);
+  ...
+}
+
+void do_parallel_foo(vector&lt;int&gt;&amp; v) {
+  auto fut = no_join_async([&amp;] {...  foo(v); return ...; });
+  a: ...
+  fut.get();
+  ...
+}
+</pre>
+<P>
+If <code>no_join_async()</code> returns a future whose destructor
+does not wait for async completion, everything may work well until
+the code at <code>a</code> throws an exception.  At that point
+nothing waits for the async to complete, and it may continue to
+run past the exit from both <code>do_parallel_foo()</code>
+and <code>f()</code>, causing the async task to access and
+overwite memory previously allocated to <code>v</code> way past it's
+lifetime.
+<P>
+The end result is likely to be a cross-thread "memory smash" similar
+to that described in <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2008/n2802.html">N2802</a> under similar conditions.
+<P>
+This problem is of course avoided if <code>get()</code>
+or <code>wait()</code> is called on <code>no_join_async()</code>-generated
+futures before they
+are destroyed.  The difficulty, as in N2802, is that an unexpected exception
+may cause that code to be bypassed.  Thus some sort of scope guard is usually
+needed to ensure safety.  If the programmer forgets to add the scope guard,
+it appears likely that an attacker could generate e.g. a bad_alloc exception
+at an opportune point to take advantage of the oversight, and cause a
+stack to be overwritten.  It may be possible to also control the data used
+to overwrite the stack, and thus gain control over the process.  This is
+a sufficiently subtle error that, in our experience, it is likely to be
+overlooked in real code.
+
+<H2>Not all dangling pointers are created equal</h2>
+<P>
+It has repeatedly been argued that this is no worse than existing dangling
+pointer issues, such as those introduced by lambda expressions with
+reference captures.  Here we argue that it is in fact worse, by
+contrasting the two corresponding examples in the following table.
+Both examples operate on a vector <code>v</code> passed in as a parameter.
+In both cases, the function <code>foo</code> should normally ensure that
+there are no references to <code>v</code> once <code>foo()</code>
+returns, since there is no reason to expect that <code>v</code> will
+still be around.  On the left side, we assume a hypothetical
+<code>no_join_async()</code> whose returned future does not block
+in its destructor, as above.
+<table border="1">
+<tr>
+<th>Async-induced dangling reference</th>
+<th>Lambda-induced dangling reference</th>
+<tr>
+<td><pre>
+void foo(vector&lt;int&gt; &amp;v)
+{
+  auto f = no_join_async([&amp;] {...
+    sort(v); return v.size(); });
+  a: ...
+  // drop f
+}
+</pre></td>
+<td><pre>
+function&lt;int&gt; foo(vector&lt;int&gt; &amp;v) {
+  function&lt;int&gt; f = [&amp;] {... sort(v); return v.size(); })
+  a: ...
+  return f;
+}
+</pre></td>
+</tr>
+</table>
+<P>
+Both pieces of code are buggy, or at least very brittle.  On the left,
+<code>v</code> may be accessed after the return of <code>foo()</code>
+because the asynchronous task continues run.  On the right side,
+the returned lambda expression has captured <code>v</code> by reference.
+There is no guarantee that <code>v</code> still exists when the lambda
+expression is invoked.
+<P>
+But there are several reasons to consider the version of the left
+significantly more hazardous:
+<ul>
+	<li>On the right side an explicit action is required to let
+	<code>f</code> escape.  On the left side, the bug is introduced,
+	and <code>v</code> escapes, by <i>omission</i> of the code to
+	wait for the async to complete.  That is at the root of the
+	other problems as well.
+	<li>On the right side, the problem is <i>removed</i> by an
+	unexpected exception at <code>a</code>.  On the left side
+	exceptions greatly aggravate the problem.  If the code is "corrected"
+	by explicitly calling <code>f.wait()</code> just before the
+	end of <code>foo()</code>, an unexpected exception at <code>a</code>
+	will still cause the <code>get()</code> call to be skipped,
+	reintroducing the runaway task that accesses <code>v</code> after
+	the end of its lifetime.
+	<li>Since real instances of the problem on the left are often
+	introduced by an unexpected exception at the wrong point, it is far
+	less likely to be caught during testing.  It nonetheless seems plausible
+	that such an exception could be introduced by an attacker, e.g.
+	by limiting memory and providing input that requires a large
+	memory allocation.
+	<li>The code on the right can still be used correctly by not
+	calling the returned function after <code>v</code>'s lifetime.
+	The code on the left is <i>impossible</i> to use correctly,
+	and thus useless, since there is no way to ensure that <code>v</code>
+	won't be accessed past it's lifetime, even if <code>v</code>
+	has static duration.
+	<li>The left side should generally also be avoided for performance
+	reasons, since it leaves a thread running, consuming hardware
+	resources and power, in spite of the fact that
+	it is performing useless computation.
+</ul>
+</body>
+</html>

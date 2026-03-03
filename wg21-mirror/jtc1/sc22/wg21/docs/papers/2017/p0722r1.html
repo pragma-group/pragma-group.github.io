@@ -1,0 +1,363 @@
+<p>Document Number: P0722R1 <br />
+Date: 2017-10-12 <br />
+Reply to: Andrew Hunter <a href="m&#97;&#x69;&#x6C;&#x74;o:a&#x68;&#104;&#64;&#103;&#111;o&#x67;&#x6C;&#x65;&#46;&#x63;&#x6F;&#x6D;">a&#x68;&#104;&#64;&#103;&#111;o&#x67;&#x6C;&#x65;&#46;&#x63;&#x6F;&#x6D;</a>, Richard Smith <a href="&#x6D;&#97;&#105;&#x6C;&#x74;&#x6F;:&#114;i&#x63;h&#x61;&#x72;&#x64;&#115;&#109;&#x69;&#x74;&#x68;&#64;&#103;&#111;&#x6F;&#x67;&#x6C;&#x65;&#46;&#99;&#111;&#109;">&#114;i&#x63;h&#x61;&#x72;&#x64;&#115;&#109;&#x69;&#x74;&#x68;&#64;&#103;&#111;&#x6F;&#x67;&#x6C;&#x65;&#46;&#99;&#111;&#109;</a> <br />
+Audience: Evolution  </p>
+
+<h1>Motivation</h1>
+
+<h2>Efficient sized delete for variable sized classes</h2>
+
+<p>Consider the following class:</p>
+
+<pre><code>class inlined_fixed_string {
+  public:
+   inlined_fixed_string() = delete;
+   const size_t size() const { return size_; }
+
+   const char *data() const {
+     return static_cast&lt;const char *&gt;(this + 1);
+   }
+
+   // operator[], etc, with obvious implementations
+
+   inlined_fixed_string *Make(const std::string &amp;data) {
+     size_t full_size = sizeof(inlined_fixed_string) + data.size();
+     return new(::operator new(full_size))
+                  inlined_fixed_string(data.size(), data.c_str());
+   }
+
+  private:
+   inlined_fixed_string(size_t size, const char *data) : size_(size) {
+     memcpy(data(), data, size);
+   }
+   size_t size_;
+};
+</code></pre>
+
+<p>This defines what is (effectively) a variable-sized object, using that to
+implement an array of size determined at runtime while saving a pointer
+indirection. (Note: this pattern is simpler (and generally written) with
+flexible array members, despite their being nonstandard.)</p>
+
+<p>However, what happens when we delete such a string <code>s</code> in the presence of
+sized-delete?  Until core issue 2248, the compiler was required to emit
+a call (equivalent to):</p>
+
+<pre><code>::operator delete(s, full_size);
+</code></pre>
+
+<p>which (in reasonable implementations) it has no easy way to do!  With that
+defect resolution, it instead emits:</p>
+
+<pre><code>::operator delete(s, sizeof(inlined_fixed_string));
+</code></pre>
+
+<p>which, while a much saner implementation, is in fact incorrect (and will lead
+to critical failures on any memory allocator which makes use of sized delete
+information.)  The correct fix is to declare an implementation of <code>operator
+delete</code> for the class:</p>
+
+<pre><code>static void operator delete(void* ptr) {
+  ::operator delete(ptr);
+}
+</code></pre>
+
+<p>This allows the class to be safely used in the presence of sized-delete... but
+gives up any performance advantages of sized delete! Ideally, what we'd like to
+do is rely on our knowledge of the class's implementation:</p>
+
+<pre><code>static void operator delete(void* ptr) {
+  inlined_fixed_string *s = reinterpret_cast&lt;inlined_fixed_string *&gt;(ptr);
+  size_t full_size = sizeof(inlined_fixed_string) + s-&gt;size();
+  ::operator delete(ptr, full_size);
+}
+</code></pre>
+
+<p>But this is undefined behavior--the destructor has run by the time this
+operator is invoked, and we can no longer touch any class members. (This
+despite knowing, since we wrote both, that the destructor did not damage
+the <code>size_</code> member.)</p>
+
+<p>This paper proposes a modification to <code>operator delete</code> making the (moral)
+equivalent of the above code safe.</p>
+
+<h2>Delete for objects with extra preceding storage</h2>
+
+<p>Consider this class, used to model a use-list for values in a compiler:</p>
+
+<pre><code>class User {
+  unsigned NumUses;
+public:
+  User(unsigned NumUses) : NumUses(NumUses) { /*construct Uses*/ }
+  virtual ~User();
+
+  void *operator new(size_t Size, unsigned NumUses) {
+    size_t ExtraStorage = NumUses * sizeof(Use);
+    return static_cast&lt;char*&gt;(::operator new(ExtraStorage + Size))
+               + ExtraStorage;
+  }
+
+  void operator delete(void *p, size_t size) {
+    User *user = static_cast&lt;User*&gt;(p);
+    unsigned uses = user-&gt;NumUses; // undefined behavior
+    ::operator delete(static_cast&lt;char*&gt;(user) - uses * sizeof(Use),
+                      size + uses * sizeof(Use));
+  }
+
+  Use *use_begin() { return reinterpret_cast&lt;Use*&gt;(this) - NumUses; }
+  Use *use_end() { return reinterpret_cast&lt;Use*&gt;(this); }
+};
+</code></pre>
+
+<p>Here, a list of <code>Use</code> objects are allocated prior to each <code>User</code> object, in
+order to reduce the number of allocations performed to allocate a <code>User</code>.
+The extra <code>Use</code> objects must precede the <code>User</code> object, not follow it, because
+<code>User</code> is the base class in a class hierarchy.</p>
+
+<p>The problem is that <code>operator delete</code> must subtract off the size of the front
+storage before deallocation, but determining the size of that storage would
+require loading a member of the class, whose lifetime has already ended,
+resulting in undefined behavior.</p>
+
+<h2>Dynamic dispatch without vptrs</h2>
+
+<p>Systems with large numbers of objects cannot always afford a vptr for each
+object, and can spare only a few bits per object to describe the most-derived
+type.</p>
+
+<p>For such systems, a hand-rolled dynamic dispatch solution may be used instead
+of virtual functions:</p>
+
+<pre><code>class Widget {
+  unsigned Kind : 4;
+  unsigned OtherThings : 28;
+  // ...
+
+public:
+  void foo() {
+    // (generated by metaprogramming)
+    switch (Kind) {
+    case WidgetKind::Grommet:
+      return static_cast&lt;Grommet*&gt;(this)-&gt;foo();
+    case WidgetKind::Wingnut:
+      return static_cast&lt;Wingnut*&gt;(this)-&gt;foo();
+    // ...
+    }
+  }
+};
+
+class Grommet : Widget {
+  // ...
+  void foo();
+};
+</code></pre>
+
+<p>This technique works well, with lower storage costs and lower per-call
+overhead than traditional virtual dispatch, and is used in several production
+systems, but cannot be applied to the destructor, so the delete operator cannot
+be safely applied to a <code>Widget</code> pointer (because the wrong destructor would be
+invoked).</p>
+
+<h1>Proposed solution</h1>
+
+<p>A delete operator must currently have a function type of the form:</p>
+
+<pre><code>void operator delete(void *p, &lt;optionally more params&gt;);
+</code></pre>
+
+<p>We propose supporting a second form for a class-specific operator delete in
+class <code>X</code>, which we call a <em>destroying operator delete</em>:</p>
+
+<pre><code>void operator delete(X *p, std::destroying_delete_t, &lt;optionally more params&gt;);
+</code></pre>
+
+<p>... where <code>std::destroying_delete_t</code> is a standard library tag type whose sole
+purpose is to identify such overloads:</p>
+
+<pre><code>namespace std {
+  struct destroying_delete_t { /*see below*/ };
+  inline constexpr destroying_delete_t destroying_delete(unspecified);
+}
+</code></pre>
+
+<p>(Like <code>std::nullopt_t</code>, <code>destroying_delete_t</code> has neither a default constructor
+nor an initializer list constructor.)</p>
+
+<p>The only difference between this form and the preceding form is that the
+destructor for <code>*p</code> is not run before <code>operator delete(p, std::destroying_delete)</code>
+is invoked; invocation of the destructor becomes the responsibility of the
+<code>operator delete</code> function.</p>
+
+<h2>How this helps</h2>
+
+<p>In the <code>inlined_fixed_string</code> example, we can add a sized delete operator that
+does not encounter undefined behavior, by requesting the size prior to
+destroying the object:</p>
+
+<pre><code>void inlined_fixed_string::operator delete(inlined_fixed_string *s,
+                                           std::destroying_delete_t) {
+  size_t full_size = sizeof(inlined_fixed_string) + s-&gt;size();
+  s-&gt;~inlined_fixed_string();
+  ::operator delete(ptr, full_size);
+}
+</code></pre>
+
+<p>We can use a similar technique in the <code>User</code> example:</p>
+
+<pre><code>void User::operator delete(User *user, std::destroying_delete_t,
+                           std::size_t derived_size) {
+  unsigned uses = user-&gt;NumUses; // undefined behavior
+  user-&gt;~User();
+  ::operator delete(static_cast&lt;char*&gt;(user) - uses * sizeof(Use),
+                    uses * sizeof(Use) + derived_size);
+}
+</code></pre>
+
+<p>Note that we support the size and alignment of the class being implicitly passed
+into this form of <code>operator delete</code>. A destroying operator delete that takes a
+size or alignment parameter has the same semantics as a regular operator delete
+for these parameters: the passed size and alignment are those of the
+most-derived class (only) if the class has a virtual destructor; if the
+destructor is not virtual and the destroying operator delete takes a size or
+alignment parameter, the static type of the deleted object is assumed to be
+equal to its dynamic type, and the size and alignment of that type are provided.</p>
+
+<p>In the <code>Widget</code> example, we can use the <code>Kind</code> field to pick the correct destructor
+to run:</p>
+
+<pre><code>void Widget::operator delete(Widget *widget, std::destroying_delete_t) {
+  switch (widget-&gt;Kind) {
+  case WidgetKind::Grommet:
+    static_cast&lt;Grommet*&gt;(widget)-&gt;~Grommet();
+    ::operator delete(widget, sizeof(Grommet);
+    return;
+  case WidgetKind::Wingnut:
+    static_cast&lt;Wingnut*&gt;(widget)-&gt;~Wingnut();
+    ::operator delete(widget, sizeof(Wingnut);
+    return;
+  // ...
+  }
+}
+</code></pre>
+
+<h2>Implementation details</h2>
+
+<p>An implementation of this proposal is available for both the Itanium C++ ABI
+and the Microsoft C++ ABI in Clang trunk. (The standard library portion is not
+included; the type <code>std::destroying_delete_t</code> must be defined by the user
+before a destroying operator delete can be declared.)</p>
+
+<p>When the destructor of the class is non-virtual, there is no particular
+implementation complexity: the destructor call is simply not invoked prior
+to calling <code>operator delete</code>. However, when the class has a virtual destructor,
+the <code>operator delete</code> is selected dynamically, as if it were looked up in the
+context of the dynamic type.</p>
+
+<p>There are two main C++ ABIs in common use (the "Itanium ABI" and the
+"Microsoft ABI"), and they make different choices in how this is implemented.
+In both cases, this proposal can be implemented with no change in the ABI for
+any existing base class.</p>
+
+<h3>Itanium ABI</h3>
+
+<p>When a class has a virtual destructor, it gains an additional vtable slot for
+a "deleting destructor", which performs the complete operation of a <code>delete p;</code>
+expression: invoking the destructor and then invoking the appropriate <code>operator
+delete</code> function for the most-derived type.</p>
+
+<p>Under this proposal, the member <code>operator delete</code> function itself (or a thunk
+to call it with the appropriate calling convention, if necessary) would simply
+be placed into the "deleting destructor" vtable slot. The use of an empty,
+trivially-copyable struct type for <code>destroying_delete_t</code> is recommended, as it
+allows ABIs in common usage to avoid the need for a thunk.</p>
+
+<h3>Microsoft ABI</h3>
+
+<p>When a class has a virtual destructor, it gains an implicit boolean parameter
+indicating whether the object should be implicitly deleted after the usual
+destruction code runs (by invoking the suitable <code>operator delete</code> function).</p>
+
+<p>Under this proposal, if the selected <code>operator delete</code> function is a
+destroying operator delete, the branch on the implicit boolean parameter
+would instead be performed at the start of the destructor, and in the
+deleting case, the destructor would jump to the <code>operator delete</code> function.</p>
+
+<h1>Possible future extensions</h1>
+
+<p>Array deletion would benefit from an approach similar to that described in
+this paper. Specifically, array delete of a class type with a non-trivial
+destructor requires that the implementation can infer the array length (in
+order to run the right number of destructors). This is typically implemented
+by injecting an "array cookie" specifying the array length at the start of
+the allocated storage.</p>
+
+<p>Due to the requirement that the implementation implicitly run the destructors
+for the array elements, an overloaded class-specific allocator has no
+opportunity to control the storage and representation of the array length
+information, even when it could do so from the contents of the array or from
+extrinsic information (for instance, querying the allocator itself).</p>
+
+<p>We believe that a destroying form of array delete could enable users to take
+control of this aspect of array destruction (and others), but further design
+work is required. In particular, there would need to be a mechanism to enable
+or disable the introduction of an implicit "array cookie" when invoking an
+array new. We propose to support a destroying operator delete only for the
+non-array case for now, in order to leave maximal design freedom for a future
+destroying array delete extension.</p>
+
+<h1>Alternatives considered</h1>
+
+<h2>Use a mechanism other than <code>delete p;</code> to delete objects</h2>
+
+<p>The obvious and natural alternative to this proposal is to destroy and delete
+objects with custom deletion semantics by using special-case logic, instead
+of using <code>operator delete</code>. This has a number of disadvantages:</p>
+
+<ul>
+<li><p>It violates the principle that user-defined types are used like built-in
+types: as soon as you use more advanced allocation techniques, you don't
+get to use delete expressions any more.</p></li>
+<li><p>Existing class hierarchies with virtual destructors cannot be transparently
+extended with derived classes that allocate dynamic leading or trailing
+storage.</p></li>
+<li><p>The local choice of deallocation strategy leaks out to clients of the code.
+For example, a custom deleter must be specified when using unique<em>ptr<T>,
+and make</em>unique and make_shared can't be used any more.</p></li>
+</ul>
+
+<p>Note that the standard requires specializations of <code>default_delete&lt;T&gt;</code> to have
+the same effect as calling <code>delete p;</code>, so specializing <code>default_delete</code> is not
+a correct alternative in C++17. We could lift that restriction, but that would
+not help for other (perhaps user-defined) resource management types that use
+<code>new</code> and <code>delete</code> to manage objects.</p>
+
+<h2>Use a different syntax for a destroying operator delete</h2>
+
+<p>We have considered a number of different syntaxes, and consider the proposed
+syntax to be the simplest, cleanest, and most readable. Other considered options
+include:</p>
+
+<h3><code>void operator delete(T *)</code></h3>
+
+<p>Here, the use of <code>T *</code> rather than <code>void *</code> would indicate that this is a
+destroying operator delete. Feedback from EWG review of a prior revision of
+this proposal was that this is too subtle; the authors of this proposal agree.</p>
+
+<h3><code>void operator ~delete(T *)</code></h3>
+
+<p>This syntax is still relatively subtle, and adds a new readability problem, as
+there is no <code>~delete</code> operator in C++. Further, the purpose of a destroying
+operator delete is to (fully) override the behavior of the <code>delete</code> operator,
+so using a different operator name seems counterintuitive.</p>
+
+<h3><code>~T delete()</code></h3>
+
+<p>Spelling a destroying operator delete as a kind of destructor is tempting, but
+doing so risks creating a false intuition that destructors for subobjects will
+be implicitly run. This alternative also suffers from the criticism directed at
+the <code>operator ~delete</code> option.</p>
+
+<h1>Acknowledgements</h1>
+
+<p>Thanks to David Blaikie for the suggestion of using a tag type to identify that
+an <code>operator delete</code> overload is a destroying operator delete.</p>

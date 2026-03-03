@@ -1,0 +1,151 @@
+<html>
+<head>
+	<title>Forward without forward</title>
+
+	<style>
+	p {text-align:justify}
+	li {text-align:justify}
+    html {
+        position: relative;
+        max-width: 1024px;
+        height: 100%;
+    }
+	blockquote.note
+	{
+		background-color:#E0E0E0;
+		padding-left: 15px;
+		padding-right: 15px;
+		padding-top: 1px;
+		padding-bottom: 1px;
+	}
+    code.codeblock {
+        border: 2px solid #d0d0d0;
+        background-color: LightYellow;
+        padding: 2px;
+        padding-left: 10px;
+        width: 100%;
+        display:table;
+        white-space:pre;
+        margin:2px;
+        margin-bottom:10px;
+    }
+    code.inline {
+        border: 2px solid #d0d0d0;
+        background-color: LightYellow;
+        padding-left: 5px;
+        padding-right: 5px;
+    }
+	ins {color:#00A000}
+	del {color:#A00000}
+	</style>
+</head>
+<body>
+
+<address align=right>
+Document number: P0644R0 <br />
+Date: 2017-06-11 <br />
+Audience: Evolution Working Group <br />
+Reply-To: Barry Revzin &lt;barry.revzin@gmail.com>
+</address>
+<hr/>
+<h1 align=center>Forward without <code>forward</code></h1>
+
+<h2>Contents</h2>
+
+<ul>
+<li><a href="#Motivation">Motivation</a></li>
+<li><a href="#Proposal">Proposal</a></li>
+</ul>
+
+<a name="Motivation" /><h2>Motivation</h2>
+
+Consider the following example:
+
+<code class="codeblock">template &lt;class X, class Y>
+decltype(auto) foo(X&& x, Y&& y) {
+    return std::forward&lt;X>(x)(std::forward&lt;Y>(y));
+}</code>
+
+It's a simple function, but it takes some time to figure out what's actually going on. It's even more awkward when we consider the same function in lambda form:
+
+<code class="codeblock">auto bar = [](auto&& x, auto&& y) {
+    return std::forward&lt;decltype(x)>(x)(std::forward&lt;decltype(y)>(y));
+};</code>
+
+This verbosity and lack of clarity lead many people to actually use a <i>macro</i> to make forwarding shorter:
+
+<code class="codeblock">#define FWD(x) std::forward&lt;decltype(x)>(x)
+
+template &lt;class X, class Y>
+decltype(auto) foo(X&& x, Y&& y) {
+    return FWD(x)(FWD(y));
+}
+
+auto bar = [](auto&& x, auto&& y) {
+    return FWD(x)(FWD(y));
+};</code>
+
+<p>That is substantially clearer, but are we really going to suggest that people use a macro?! Let's not. Forwarding references even got their name from the fact that they are intended to be <code class="inline">std::forward()</code>-ed, so it's awkward when the expected and typical usage is just so very verbose. The body of the lambda with <code>std::forward</code> is 73 characters, the body with <code>FWD</code> is 23. Do those extra 50 characters add any value to anybody?
+
+<p>A second problem with forwarding is its lack of nice interaction with lambda capture. We have a simple way of capturing by copy and by reference. But we do not have a simple way of capturing by decay-copy, which is quite common when we want the lambda to acquire ownership of the relevant objects. Consider trying to write a function that delays invoking a particular function. Currently, that might be:
+
+<code class="codeblock">template &lt;class F, class... Args>
+auto delay_invoke(F&& f, Args&&... args) {
+    return [f=std::forward&lt;F>(f), tup=std::make_tuple(std::forward&lt;Args>(args)...)] {
+        return std::apply(std::forward&lt;F>(f), std::move(tup));
+    };
+}</code>
+
+There's just no simple way to capture <code class="inline">f</code> or <code class="inline">args...</code> in this example, so almost everything in this function is fighting with the language to express a simple idea. Compare this to an example where we don't care about forwarding, the kind of example that might appear in talks or slides:
+
+<code class="codeblock">template &lt;class F, class... Args>
+auto delay_invoke(F f, Args... args) {
+    return [=]() { return std::invoke(f, args...); };
+}</code>
+
+Code that forwards is just so much more verbose than code that doesn't. But forwarding in itself doesn't justify the verbosity or resulting complexity. Unlike <code>std::move</code> and <code>std::ref</code> which are used to do non-typical things and deserve to be visible markers for code readability and understading, <code>std::forward</code> is much more typical in these contexts and does not need as much of a sign post.We can do better.
+
+<a name="Proposal"></a><h2>Proposal</h2>
+
+<p>This paper would like to see a shorter way to forward arguments and proposes non-overloadable unary <code class="inline">operator>></code>, where <code class="inline">>>expr</code> is defined as <code class="inline">static_cast&lt;decltype(expr)&&>(expr)</code>. Furthermore, the symbol <code class="inline">>></code> is to be usable as another form of capture in lambda expressions to decay-copy.
+
+<p>This addition would make it easier to write and read code that uses forwarding:
+
+<table>
+<tr><th>C++17</th><th>This proposal</th></tr>
+<tr><td><code class="codeblock">template &lt;class X, class Y>
+decltype(auto) foo(X&& x, Y&& y) {
+    return std::forward&lt;X>(x)(std::forward&lt;Y>(y));
+}
+
+auto bar = [](auto&& x, auto&& y) {
+    return std::forward&lt;decltype(x)>(x)(std::forward&lt;decltype(y)>(y));
+};</code></td>
+<td><code class="codeblock">template &lt;class X, class Y>
+decltype(auto) foo(X&& x, Y&& y) {
+    return >>x(>>y);
+}
+
+auto bar = [](auto&& x, auto&& y) {
+    return >>x(>>y);
+};</code></td></tr>
+<tr><td><code class="codeblock">template &lt;class F, class... Args>
+auto delay_invoke(F&& f, Args&&... args) {
+    return [f=std::forward&lt;F>(f),
+            tup=std::make_tuple(std::forward&lt;Args>(args)...)] {
+        return std::apply(std::forward&lt;F>(f), std::move(tup));
+    };
+}</code></td>
+<td><code class="codeblock">template &lt;class F, class... Args>
+auto delay_invoke(F&& f, Args&&... args) {
+    return [>>] { return std::invoke(>>f, >>args...); };
+}</code></td>
+</tr>
+</table>
+
+<p>This proposal will not deprecate <code class="inline">std::forward()</code>, as there is another functionality of this function template that is quite important: forwarding expressions to a <i>different</i> type. This isn't common, but is more important to highlight as different for simple forwarding. This extension allows for making simple forwarding look simple, while making complex forwarding look complex.
+
+<p>Unary <code>>></code> is ill-formed today, and that token cannot appear in lambda capture in this way, so this is purely a language extension.
+
+</body>
+</html>

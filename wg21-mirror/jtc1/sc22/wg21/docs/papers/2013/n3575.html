@@ -1,0 +1,167 @@
+﻿<html>
+<head>
+<title>Additional Standard allocation schemes</title>
+</head>
+<body>
+<p>Document Number: N3575</p>
+<p>Date: 2013-03-10</p>
+<p>Project: Programming Language C++, Library Working Group</p>
+<p>Reply-to: Mark Boyall wolfeinstein@gmail.com</p>
+<h1>Additional Standard allocation schemes</h1>
+<h2>Motivation</h2>
+<p>The Standard provides an allocator abstraction, but does not provide any useful allocators beyond the default. This means that every user must roll their own memory allocators for non-trivial allocation schemes. Many 
+    of these schemes are common and are quite suitable for Standardization. They are also prone to subtle errors, especially where those supporting concurrent use, are concerned. Shipping these allocators in the Standard 
+    would significantly increase the ability of users to improve the performance of their programs with minimal effort. In addition, a more suitable choice of default allocator for some containers could provide a 
+    substantial speedup for existing user programs with no effort on their behalf. Finally, synchronization is an issue. Hidden synchronization inside allocators can result in unnecessary performance drains. Now that the 
+    Standard includes concurrency, it is necessary to deal with its costs in Standard mechanisms. Code which runs on one thread, either because that program simply does not use concurrency or because that specific subset 
+    is single-threaded, must unnecessarily pay the costs of synchronizing calls to the default allocator.
+</p>
+<h2>Design Decisions</h2>
+<p>Most custom allocators differ not in their interface, but in their performance. This is typically an implementation detail, not an interface, so it can be difficult to specify the differences between allocators 
+    when the intended difference is not typically considered observable.
+</p>
+<p>Secondly, the primitives offered by the non-allocator classes are intended to be just that- primitive. They have essentially the same interface as malloc and free, and are intended for users to construct their 
+    own allocators on top of, not for allocation and deallocation directly. This is why they have many primitive behaviours, like returning nullptr on failure, rather than throwing an exception- it is down to the 
+    allocator code to translate that into std::bad_alloc, for all allocators defined here, or something more appropriate for custom allocators.
+</p>
+<h2>Technical Specification</h2>
+<p>For simplicity, members which are directly modelled by concepts already existing in the Standard, such as allocator requirements, or copyable/movable/default-constructible, are ommitted. An exact specification 
+    of these members is available on request.
+</p>
+<pre>
+namespace std {
+    namespace memory {
+        class heap {
+        public:
+            heap();
+            heap(heap&&);
+            heap& operator=(heap&&);
+
+            void* alloc(std::size_t size);
+            void free(void*);
+
+            ~heap();
+        };
+        template&lt;typename T&gt; class unserialized_heap_allocator {
+        public:
+            unserialized_heap_allocator(heap&);
+
+</pre>
+<p>The unserialized_heap_allocator is copyable and movable but not default-constructible. It meets the allocator requirements. For brevity, these members have been ommitted. It does not synchronize access to the 
+    heap passed in to it's constructor- if more than one thread uses an unserialized_heap_allocator with the same heap concurrently, the behaviour is undefined. Heaps expose unique ownership semantics over all 
+    memory that they have allocated- when a heap is destroyed, all memory that it owns shall be freed. Two unserialized_heap_allocators are equal if they allocate from the same heap. The heap's alloc member returns
+    nullptr on failed allocation. 
+</p>
+<pre>
+        };
+
+        template&lt;typename Alloc = std::allocator&lt;char&gt;&gt; class object_pool {
+        public:
+            object_pool();
+            object_pool(object_pool&&);
+            object_pool& operator=(object_pool&&);
+            object_pool(Alloc);
+
+            struct pool {
+                void* alloc();
+                void* alloc(std::size_t num); // Number of elements, not size in bytes.
+                void free(void*);
+            };
+            pool& get_sized_pool(std::size_t size);
+        };
+</pre>
+<p>An object pool is optimized for many allocations and deallocations which are all of the same, relatively small, size- for example, the allocation pattern which might be seen from a node based container. The 
+    performance of allocating arrays is expected to be poor. As with a heap, object_pool uniquely owns all memory allocated. The object_pool's members are not protected in any way against unsafe concurrent use.
+</p>
+<pre>    
+        template&lt;typename T, typename Alloc&gt; class unserialized_pool_allocator {
+        public:
+            unserialized_pool_allocator(object_pool&lt;Alloc&gt;&);
+</pre>
+<p>The unserialized_pool_allocator is essentially similar to the unserialized_heap_allocator. It offers a non-concurrency-safe interface to an object_pool. It is copyable and movable, but not default-constructible, 
+    and two of them are equal if they allocate from the same object_pool. 
+</p>
+<pre>
+        };
+
+        template&lt;typename T&gt; class serialized_pool_allocator {
+</pre>
+<p>The serialized pool allocator allocates memory from one single global object pool, in a fashion such that it is safe to do so from multiple threads concurrently. It is default-constructible, movable, and copyable,
+    and all instances are equal. 
+</p>
+<pre>
+        };
+        class arena {
+</pre>
+<p>The memory arena class takes advantage of temporal coherency, rather than spatial. A memory arena can allocate objects of any size in any order, but may only free them in discrete groups, and those groups only in a LIFO
+    order. Memory arenas are mostly useful for working memory. A global memory arena makes little sense, but one task may be split into multiple threads which may require safe concurrent access. This is provided for 
+    separately.
+</p>
+<pre>
+            arena();
+            arena(arena&&);
+            arena& operator=(arena&&);
+
+            ~arena();
+            void* alloc(std::size_t);
+            void free(void*);
+
+            class gate {
+            public:
+                gate(arena&);
+                ~gate();
+                gate(const gate&) = delete;
+                gate(gate&&) = delete;
+            };
+</pre>
+<p>An arena gate serves to delimit memory regions within the same arena. When the gate is destroyed, all memory allocated after it is made available for re-use. If gates are not destroyed in exactly the reverse order of 
+    creation, the behaviour is undefined. The free member is no-op, and only provided for a more uniform interface.
+</p>
+<pre>
+        };        
+        template&lt;typename T&gt; class arena_allocator {
+        public:
+            arena_allocator(arena&);
+</pre>
+<p>The arena allocator allocates from the passed-in arena. It does not ever free memory or create a gate. The arena allocator is copyable and movable but not default-constructible. Two arena allocators are equal 
+    if they allocate from the same arena.
+</p>
+<pre>
+        };
+        class concurrent_arena {
+        public:
+            static const bool lock_free = undefined;
+</pre>
+<p>The lock_free member shall be set if the concurrent_arena has a lock-free implementation.</p>
+<pre>
+            void* alloc(std::size_t);
+            void free(void*);
+
+            class gate {
+            public:
+                gate(arena&);
+                ~gate();
+                gate(const gate&) = delete;
+                gate(gate&&) = delete;
+            };
+</pre>
+<p>It shall be safe to call alloc() and free() from multiple threads concurrently. It shall be safe to use a single concurrent_arena_allocator concurrently; and it shall be safe to use multiple concurrent_arena_allocators 
+    concurrently, regardless of whether they are equal. It does not have to be safe to create gates from multiple threads concurrently, nor destroy them.
+</p>
+<pre>
+        };
+        template&lt;typename T&gt; class concurrent_arena_allocator {
+        public:
+            concurrent_arena_allocator(concurrent_arena&);
+</pre>
+<p>The concurrent_arena_allocator is identical to the arena_allocator, except for the concurrency guarantees specified above.
+</p>
+<pre>
+        };
+    }
+}
+</pre>
+<p>It is also worth considering removing the explicit defaults on many Standard containers, and instead permitting them to be implementation-defined. Some containers, such as std::list, would be substantially more 
+    performant with an appropriate allocator. Removing the requirement for the default allocator to be std::allocator would permit implementations to produce a better result. The only downside is that in principle, code 
+    which unnecessarily specified the default could be broken by such a change.
+</p></body></html>

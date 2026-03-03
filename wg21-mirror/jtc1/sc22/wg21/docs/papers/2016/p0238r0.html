@@ -1,0 +1,386 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head>
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+
+<style type="text/css">
+pre {margin-left:20pt; }
+pre > i {
+  font-family: "OCR A Extended", "Consolas", "Lucida Console", monospace;
+  font-style:italic;
+}
+code > i {
+  font-family: "OCR A Extended", "Consolas", "Lucida Console", monospace;
+  font-style:italic;
+}
+pre > em {
+  font-family: "OCR A Extended", "Consolas", "Lucida Console", monospace;
+  font-style:italic;
+}
+code > em {
+  font-family: "OCR A Extended", "Consolas", "Lucida Console", monospace;
+  font-style:italic;
+}
+body { color: #000000; background-color: #FFFFFF; }
+del { text-decoration: line-through; color: #8B0040; }
+ins { text-decoration: underline; color: #005100; }
+
+p.example { margin-left: 2em; }
+pre.example { margin-left: 2em; }
+div.example { margin-left: 2em; }
+
+code.extract { background-color: #F5F6A2; }
+pre.extract { margin-left: 2em; background-color: #F5F6A2;
+  border: 1px solid #E1E28E; }
+
+p.function { }
+.attribute { margin-left: 2em; }
+.attribute dt { float: left; font-style: italic;
+  padding-right: 1ex; }
+.attribute dd { margin-left: 0em; }
+
+blockquote.std { color: #000000; background-color: #F1F1F1;
+  border: 1px solid #D1D1D1;
+  padding-left: 0.5em; padding-right: 0.5em; }
+blockquote.stddel { text-decoration: line-through;
+  color: #000000; background-color: #FFEBFF;
+  border: 1px solid #ECD7EC;
+  padding-left: 0.5empadding-right: 0.5em; ; }
+
+blockquote.stdins { text-decoration: underline;
+  color: #000000; background-color: #C8FFC8;
+  border: 1px solid #B3EBB3; padding: 0.5em; }
+
+table.header { border: 0px; border-spacing: 0;
+  margin-left: 0px; font-style: normal; }
+
+table { border: 1px solid black; border-spacing: 0px;
+  margin-left: auto; margin-right: auto; }
+th { text-align: left; vertical-align: top;
+  padding-left: 0.4em; border: none; 
+  padding-right: 0.4em; border: none; }
+td { text-align: left; vertical-align: top;
+  padding-left: 0.4em; border: none;
+  padding-right: 0.4em; border: none; }
+</style>
+
+<title>Return type deduction and SFINAE</title>
+</head>
+
+<body>
+
+<table class="header"><tbody>
+  <tr>
+    <th>Document number:&nbsp;&nbsp;</th><th> </th><td>P0238R0</td>
+  </tr>
+  <tr>
+    <th>Date:&nbsp;&nbsp;</th><th> </th><td>2016-02-07</td>
+  </tr>
+  <tr>
+    <th>Project:&nbsp;&nbsp;</th><th> </th><td>Programming Language C++, Evolution Working Group</td>
+  </tr>
+  <tr>
+    <th>Reply-to:&nbsp;&nbsp;</th><th> </th><td><address>Tomasz Kamiński &lt;tomaszkam at gmail dot com&gt;</address></td>
+  </tr>
+</tbody></table>
+
+<h1><a name="title">Return type deduction and SFINAE</a></h1>
+
+<h2><a name="intro">Introduction</a></h2>
+
+<p>This paper proposes to make return type deduction failure a SFINAEable error instead of a hard error.</p>
+
+<!--h2><a name="toc">Table of contents</a></h2-->
+
+<!--h2><a name="revision">Revision history</a></h2-->
+
+
+<h2><a name="motivation">Motivation and Scope</a></h2>
+
+<p>For an example, let's consider the following implementation of <code>variadic_negator</code>:</p>
+<pre>
+template&lt;typename F&gt;
+class variadic_negator_functor
+{
+  F f_;
+
+public:
+  explicit variadic_negator_functor(F a_f) : f_(a_f) {}
+
+  template&lt;typename... Args&gt;
+  auto operator()(Args&amp;&amp;... args)
+    -&gt; decltype(!this->f_(std::forward&lt;Args&gt;(args)...))
+  { return !this->f_(std::forward&lt;Args&gt;(args)...); }
+};
+
+template&lt;typename F&gt;
+variadic_negator_functor&lt;F&gt; variadic_negator(F f) 
+{
+  return variadic_negator_functor&lt;F&gt;(std::move(f));
+}
+</pre>
+
+<p>In the implementation we can see an obvious repetition of the function invocation that is placed both in the return type
+declaration and in the return statement. We could avoid this necessary repetition by using return type deduction for the 
+normal function and declare return type as <code>decltype(auto)</code>. As consequence of this change we would affect the overload
+resolution for calls of the <code>operator()</code>: in case of <code>decltype(expr)</code> this candidate was not considered to be
+viable in case when the <code>f</code> was is not callable with <code>args...</code> or result of the invocation cannot
+be negated, while in case of use of <code>decltype(auto)</code> this candidate is always viable.</p>
+
+<p>In the context of the discussed class for every invocation <code>variadic_negator(f)(args...)</code> there is only one function candidate, and
+at first glance we may consider this change to be acceptable, as it will only change the error messages caused by invalid invocations of
+the functor. However, such reasoning omits situations when the availability of other functions depends on the validity of the call to <code>variadic_negator</code>.
+As an example, we may consider the following:</p>
+<pre>
+template&lt;typename F&gt;
+auto invoke(F f) -&gt; decltype(f(0));             //1
+
+template&lt;typename F&gt;
+auto invoke(F f) -&gt; decltype(f(std::string())); //2
+
+bool test(int);
+</pre>
+
+<p>For above declarations the expression <code>invoke(&amp;test)</code> is valid and selects the first overload, the same
+applies for <code>invoke(variadic_negator(&amp;test))</code> if <code>decltype(expr)</code> is used as return type. However
+in case of <code>decltype(auto)</code> implementation the code will emit hard error about lack of conversion from <code>std::string</code>
+to <code>int</code>.</p> 
+
+<p>To understand this situation we need to realize that expression in the form <code>decltype(foo(args...))</code> requires
+compiler to determine return type of selected overload of <code>foo</code> which in case of function template that uses return type
+deduction leads to its instantiation and according to current wording, any error occurring in such instantiation is considered to be 
+hard-error. In case of our example the expression <code>invoke(variadic_negator(&amp;test))</code> leads to instantiation of 
+<code>operator()</code> with <code>std::string&amp;&amp;</code>, that is invalid as <code>&amp;test</code> accepts only integers.</p>
+
+<p>This paper proposes to address above issue by requiring that any error occurring during the instantiation of function template triggered
+by return type deduction in unevaluated context should lead to substitution failure. As a result, programmers will be allowed to check
+the validity of the call to any function even if it happens to use the return type deduction feature.</p>
+
+<h3><a name="motivation.std_function">Functions accepting <code>std::function</code> as parameter</a></h3>
+
+<p>In may be pointed out that presented example of the <code>invoke</code> function is artificial and such situations will not
+normally occur in the code. However as result of resolution of <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/n4485.html#2132">LWG issue #2132</a> 
+similiar mechanism is used to eliminate <code>std::function</code> constructor in case when object is not callable. As consequence
+same problem would occur in case when <code>invoke</code> would be defined as:</p>
+<pre>
+bool invoke(std::function&lt;bool(int)&gt; f);         //1
+bool invoke(std::function&lt;bool(std::string)&gt; f); //2
+</pre>
+
+<h3><a name="motivation.lambda">Interoperation with lambda functions</a></h3>
+
+<p>Problem that is intended to be addressed by this paper occurs only in situations when functor with template <code>operator()</code>
+that uses return type deduction  is passed to the function. As writing such classes is rarely involved in day-to-day programing, it's
+implact may be neglected as affecting only experts, that should be aware of above SFINAE nuances and design their code
+accordingly.</p>
+
+<p>However with generic lambdas in C++14 provides we have introduced short syntax for declaration of such classes, for example
+the expression <code>[](auto x) { return x == 2 }</code> creates an unnamed class with template <code>operator()</code> that
+uses <code>auto</code> return type deduction. As consequence programmers are exposed to quirks of design of return type 
+deduction even for simple code.</p>
+
+<p>If we consider following declarations:</p>
+<pre>
+bool invoke(std::function&lt;bool(int)&gt; f);         //1
+bool invoke(std::function&lt;bool(std::string)&gt; f); //2
+</pre>
+<p>The expression in the form <code>[](int x) { return x == 2; }</code> is well formed an selects first overload, while seemingly
+identical expression that uses new generic lambda <code>[](auto x) { return x == 2; }</code> produces hard error.</p>
+
+<p>In the light of advancement of the development of concept for C++ language, it may be argued that such problem will not 
+exists, as instead of use of unconstrained (<code>auto</code>) template argument user will use short concept syntax.
+Considering the fact that main motivation behind introduction lambda expression was simplification of creation of at-hoc functors
+that are used locally, then we can expect that in such cases lambda will be only constrained by ad-hoc requirements.
+However in contrast to lambda expression, such constrains cannot be declared locally and pursue to constrain every
+generic lambda in the code will lead to creation of small syntactic constrains (like <code>has_operator_plus&lt;T, U&gt;</code>)
+mimicking failed C++11 concept design.</p>
+
+<p>Furthermore I it worth noticing that in above example created closure is not used in polymorphic way and we could use <code>int</code>
+parameter. However we may still argue that use of <code>auto</code> lambda parameter leads to better code, in the same way as use of <code>auto</code>
+instead of specific type in variable declaration (no unintended conversion, better maintainability).</p>
+
+<h3><a name="motivation.concept">Error messages with Concepts</a></h3>
+
+<p>Return type deduction (and function instantiation) may be also triggered as part of the constrain check and
+also in this case any failure occuring during this instatation will lead to hard error and unreadable compiler
+message produced by compiler.</p>
+
+<p>For example in case of following declarations:</p>
+<pre>
+template&lt;typename F, typename... T&gt;
+concept bool Predicate = requires(F f, T... t) {
+    { f(t...) } -&gt; bool;
+};
+
+bool invoke(Predicate&lt;std::string&gt;);
+bool is_even(int x) { return x == 2; }
+</pre>
+<p>The expression <code>invoke(&amp;is_even)</code> produces short and concise message on GCC 6.0 branch:</p>
+<pre>
+prog.cc: In function 'int main()':
+prog.cc:17:19: error: cannot call function 'bool invoke(auto:1) [with auto:1 = bool (*)(int)]'
+     invoke(is_even);
+                   ^
+prog.cc:12:6: note:   constraints not satisfied
+ bool invoke(Predicate&lt;std::string&gt;);
+      ^~~~~~
+prog.cc:12:6: note:   concept 'Predicate&lt;bool (*)(int), std::__cxx11::string&gt;' was not satisfied
+</pre>
+<p>However equivalent code written using generic lambda <code>invoke([](auto x) { return x == 2; })</code> produces 795 lines of error meessage.</p>
+
+<p>In addition similiar error would be produced for invocation of STL algorithm, e.g. <code>std::all_of(begin(v), end(b), [](auto x) { return x == 2; })</code> 
+with <code>v</code> being declared as <code>std::vector&lt;std::string&gt;</code>.</p> 
+
+<h2><a name="design">Design Decisions</a></h2>
+
+<p>This paper proposes that any error occurring in function template instantiation required be return
+type deduction triggered in unevaluated context should lead to substitution failure instead of hard error.</p>
+
+<h3><a name="design.overloading-on-function-body">Overloading on function body</a></h3>
+
+<p>During overload resolution for the call to the function <code>foo</code> no return type deduction is performed
+for the candidate declarations of the function <code>foo</code> that uses return type deduction.</p>
+
+<p>For example in the case of the following declarations:</p>
+<pre>
+template&lt;typename F&gt;
+auto apply(F f, int i) { return f(i); }          // 1
+
+template&lt;typename F&gt;
+auto apply(F f, std::string s) { return f(s); }  // 2
+</pre>
+<p>Overload resolution for the invocation in the form <code>apply([](int x) { return x; }, std::string())</code> will still select
+second candidate and hard error will be produced by its instantiation. In addition the following two declarations will still lead
+to double definition error:</p>
+<pre>
+template&lt;typename T&gt;
+auto foo(T t) { return t == 0; }
+
+template&lt;typename T&gt;
+auto foo(T t) { return t == "0"; }
+</pre>
+
+<p>To summarize this paper does not require the compiler to eliminate the function overload based of validity of their body
+in case when return type deduction is used and, as consequence, does not impose need to support mangling of whole function body
+into signature.</p>
+
+<h3><a name="design.introducing-overload">Introducing new overloads</a></h3>
+
+<p>In some situations the user may still want to eliminate function overload based on the whole function body and
+changed proposed in this paper support such use cases by introducing additional level of indirection. For example
+following function:</p>
+<pre>template&lt;typename T&gt;
+decltype(auto) foo(T&amp;&amp; t) { <i>...</i> }</pre>
+<p>Can be transformed into:</p>
+<pre>template&lt;typename T&gt;
+decltype(auto) foo_impl(T&amp;&amp; t) { <i>...</i> }
+
+template&lt;typename T&gt;
+auto foo(T&amp;&amp; t) -&gt; decltype(foo_impl(std::forward&lt;T&gt;(t)))
+{ return foo_impl(std::forward&lt;T&gt;(t); }</pre>
+
+<p>Example use case of such feature would be implementation of the binary <code>overload</code> function
+(as proposed in <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/p0051r1.pdf">P0051R1: C++ generic overload function (Revision 1)</a>).</p>
+
+<p>If we consider implementation presented in the paper:</p>
+<pre>template&lt;class F1, class F2&gt; struct overloaded : F1, F2
+{
+  overloaded(F1 x1, F2 x2) : F1(x1), F2(x2) {}
+  using F1::operator();
+  using F2::operator();
+};
+
+template&lt;class F1, class F2&gt;
+overloaded&lt;F1, F2&gt; overload(F1 f1, F2 f2)
+{ return overloaded&lt;F1, F2&gt;(f1, f2); 
+</pre>
+<p>For this implementation every call to the functor <code>f = overload([](auto t) { return t == 0; }, [](auto t) { return t.empty(); })</code> will
+be lead to ambiguity error, as each lambda can accept any movable type. However with the proposed change and slight change of the <code>overloaded</code>
+code, we would be able to make such call unambiguous unless passed object is both comparable with <code>0</code> and have <code>empty()</code> method.</p>
+<pre>
+template&lt;class F1, class F2&gt; struct overloaded : F1, F2
+{
+  overloaded(F1 x1, F2 x2) : F1(x1), F2(x2) {}
+
+  template&lt;typename... Args&gt;
+  auto operator()(Args&amp;&amp;... args)
+    -&gt; decltype(this-&gt;F1::operator()(std::forward&lt;Args&gt;(args)...))
+  { return this-&gt;F1::operator()(std::forward&lt;Args&gt;(args)...); }
+
+  template&lt;typename... Args&gt;
+  auto operator()(Args&amp;&amp;... args)
+    -&gt; decltype(this-&gt;F2::operator()(std::forward&lt;Args&gt;(args)...))
+  { return this-&gt;F2::operator()(std::forward&lt;Args&gt;(args)...); }
+};
+</pre>
+
+<h3><a name="design.build-times">Impact on build times</a></h3>
+
+<p>The increase of build times caused by additional failed function template instantiation may be considered as the main argument against
+introduction of proposed change. This section discuss in detail scope of potential impact compared to alternatives.</p>
+
+<p>Firstly lets consider the impact on build time of existing valid programs. By definition every return type deduction preformed in such
+program was successful (otherwise hard-error would be emitted and program would be invalid), so no additional instantiations will be introduced.
+As consequence build time of existing code should not be affected.</p>
+
+<p>Secondly lets out consider the program for which one of return type deduction failed. If failed instantiation was not triggered in unevaluated
+context, such program will remain ill-formed. Lets assume that above deduction failure occurred during overload resolution from the set
+of candidate that contains <i>N</i> function using return type deduction, out of which <i>K</i> would be instantiated without any error. According
+the current rules the hard error will be emitted during the first failed deduction, so depending on the implementation program may already
+perform between <i>1</i> (1st checked candidate failed) and <i>K + 1</i> (all well-formed candidates were checked before failure) template instantiations.
+In case of the proposed change up-to <i>N</i> instantiations may be performed.</p>
+
+<p>As showed above, acceptance of this change will increase the limit of potential functions template instantiations and by consequence increase
+compilation time. However we should also consider the cost of currently existing alternative, that will make such program well-formed. The simplest
+approach would be to change the definition of existing function to use <code>decltype(expr)</code>, where <code>expr</code> would be valid
+if the function body would be well formed. Such transformation may be already done by transforming statement into coma-separated list of expression
+(local lambda should be transformed to functions object declared outside of function scope). It is not unreasonable to assume that the cost of checking
+validity of such expression would be comparable to potential cost of function body instantiations. In addition the use of <code>decltype(expr)</code>
+approach incurs additional cost of mangling of function signature.</p>
+
+<h2><a name="standard">Impact On The Standard</a></h2>
+
+<p>This proposal has no dependencies beyond a C++14 standard.</p>
+
+<p>Nothing depends on this proposal.</p>
+
+<h2><a name="wording">Proposed wording</a></h2>
+
+<p>The proposed wording changes refer to <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/n4567.pdf">N4567</a> (C++ Working Draft, 2015-11-09).</p>
+
+<p>Change the paragraph 7.1.6.4 <code>auto</code> specifier [dcl.spec.auto] p8.</p>
+
+<blockquote class="std"> 
+
+  <dl class="attribute">
+
+   <dd><p>Return type deduction for a function template with a placeholder in its declared type occurs when the
+   definition is instantiated even if the function body contains a <code>return</code> statement with a 
+   non-type-dependent operand. 
+   [ <i>Note:</i> Therefore, any use of a specialization of the function template will cause an implicit instantiation.
+     <del> Any errors that arise from this instantiation are not in the immediate context of the function type and can
+     result in the program being ill-formed.</del> <i>— end note</i> ]
+   <ins>If this instantiation occurs as part of template argument substitution, any errors that arise from it should
+   lead to deduction failure ([temp.deduct] 14.8.2).</ins></p></dd>
+  </dl>
+
+</blockquote>
+
+<h2><a name="implementability">Implementability</a></h2>
+
+<p>This paper requires compiler implementers to be able to turn instantiation error from function body into substitution error. As consequence
+the compiler vendors would be required to implement the ability to backtrack from the errors occurring in expression that are not allowed
+in unevaluated context (like lambda expression), however no mangling support for this expression is required.</p>
+
+<h2><a name="acknowledgements">Acknowledgements</a></h2>
+
+<p>Ville Voutilainen and Andrzej Krzemieński offered many useful suggestions and corrections to the proposal.</p>
+
+<h2><a name="literature">References</a></h2>
+
+<ol>
+  <li>Marshall Clow, "C++ Standard Library Defect Report List (Revision R93)" (N4485, <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/n4485.html">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/n4485.html</a>)</li>
+  <li>Vicente J. Botet Escriba, "C++ generic overload function (Revision 1)" (P0051R1, <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/p0051r1.pdf">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/p0051r1.pdf</a>)</li>
+  <li>Richard Smith, "Working Draft, Standard for Programming Language C++" (N4567, <a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2015/n4567.pdf">http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2015/n4567.pdf</a>)</li>
+</ol>
+
+</body></html>

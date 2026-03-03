@@ -1,0 +1,640 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+
+<meta http-equiv="Content-Type" content="text/html;charset=US-ASCII">
+
+<style type="text/css">
+
+body { color: #000000; background-color: #FFFFFF; }
+del { text-decoration: line-through; color: #8B0040; }
+ins { text-decoration: underline; color: #005100; }
+
+p.example { margin-left: 2em; }
+pre.example { margin-left: 2em; }
+div.example { margin-left: 2em; }
+
+code.extract { background-color: #F5F6A2; }
+pre.extract { margin-left: 2em; background-color: #F5F6A2;
+  border: 1px solid #E1E28E; }
+
+p.function { }
+.attribute { margin-left: 2em; }
+.attribute dt { float: left; font-style: italic;
+  padding-right: 1ex; }
+.attribute dd { margin-left: 0em; }
+
+blockquote.std { color: #000000; background-color: #F1F1F1;
+  border: 1px solid #D1D1D1;
+  padding-left: 0.5em; padding-right: 0.5em; }
+blockquote.stddel { text-decoration: line-through;
+  color: #000000; background-color: #FFEBFF;
+  border: 1px solid #ECD7EC;
+  padding-left: 0.5empadding-right: 0.5em; ; }
+
+blockquote.stdins { text-decoration: underline;
+  color: #000000; background-color: #C8FFC8;
+  border: 1px solid #B3EBB3; padding: 0.5em; }
+
+table { border: 1px solid black; border-spacing: 0px;
+  margin-left: auto; margin-right: auto; }
+th { text-align: left; vertical-align: top;
+  padding-left: 0.8em; border: none; }
+td { text-align: left; vertical-align: top;
+  padding-left: 0.8em; border: none; }
+
+</style>
+
+<title>Compile-time integer sequences</title>
+</head>
+<body>
+
+<h1>Compile-time integer sequences</h1>
+
+<p>
+ISO/IEC JTC1 SC22 WG21 N3658 = 2013-04-18
+</p>
+
+<address>
+Jonathan Wakely,
+<span>cxx</span><span>@</span><span>kayari</span>.<span>org</span>
+</address>
+
+<p>
+<a href="#history">Revision History</a><br>
+<a href="#introduction">Introduction</a><br>
+<a href="#rationale">Rationale and examples of use</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#piecewise">Piecewise construction of <code>std::pair</code>.</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#a2t">Convert array to tuple</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#n3466">N3466 <code>more_perfect_forwarding_async</code> example</a><br>
+<a href="#solution">Solution</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#seqtype">Type of integers in the sequence</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#consecutive">Non-consecutive integer sequences</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#members">Members of integer sequences</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#efficiency">Efficiency considerations</a><br>
+<a href="#changes">Impact on standard</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<a href="#intseq">20.x Compile-time integer sequences [intseq]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<a href="#intseq.general">20.x.1 In general [intseq.general]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<a href="#intseq.intseq">20.x.2 Class template <code>integer_sequence</code> [intseq.intseq]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<a href="#intseq.make">20.x.3 Alias template <code>make_integer_sequence</code> [intseq.make]</a><br>
+<a href="#refs">References</a><br>
+</p>
+
+<h2><a name="history">Revision History</a></h2>
+
+<p>
+N3658 Revision 1 (post-Bristol mailing)
+</p>
+
+<ul>
+<li>Rename all <code>xxx_seq</code> templates to
+<code>xxx_sequence.</code></li>
+<li>Rename <code>to_index_sequence</code> to
+<code>index_sequence_for</code>.</li>
+<li>Add efficiency considerations.</li>
+<li>Remove <code>int</code> and <code>unsigned</code> alias templates.</li>
+<li>Remove <code>next</code> and <code>append</code>, change
+<code>size</code> to function.
+<li>Rename <code>type</code> typedef to <code>value_type</code>.</li>
+<li>Fix typos.</li>
+</ul>
+
+<p>
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2013/n3493.html">N3493</a>
+Initial paper (Spring 2013 mid-term mailing)
+</p>
+
+<h2><a name="introduction">Introduction</a></h2>
+<p>
+In a function template such as
+</p>
+<pre class="example">
+<code>template&lt;class... T&gt;
+  void f(T... t);</code>
+</pre>
+<p>
+performing some operation using every member of the parameter pack is
+as simple as <code>expr(<em>t</em>...)</code>,
+because <code><em>t</em></code> can be used directly in a pack expansion.
+
+When the parameter pack appears as part of another type such as
+<code>std::tuple</code>, the function parameter is not a
+parameter pack so can't be expanded directly.
+For example, in the function template
+</p>
+<pre class="example">
+<code>template&lt;class... T&gt;
+  void foo(std::tuple&lt;T...&gt; t);</code>
+</pre>
+<p>
+performing an operation on every element of the tuple requires additional
+code because <code>t</code> is not a parameter pack and
+<code>expr(t...)</code> is not valid.
+(By comparison, in Python unpacking tuples to pass to variadic functions
+is built in to the language and is as convenient as <code>func(*t)</code>
+<a href="#python">[Python]</a>.)
+</p>
+<p>
+For unpacking a tuple in C++ the brute force alternative to
+<code>expr(t...)</code> is to instantiate a class template with a
+static member function, such as
+</p>
+<pre class="example">
+<code>DoExpr&lt;0&gt;::apply(t);</code>
+</pre>
+<p>
+which calls
+</p>
+<pre class="example">
+<code>DoExpr&lt;1&gt;::apply(t, std::get&lt;0&gt;(t));</code>
+</pre>
+<p>
+which calls
+</p>
+<pre class="example">
+<code>DoExpr&lt;2&gt;::apply(t, t0, std::get&lt;1&gt;(t));</code>
+</pre>
+<p>
+and so on for each element until
+<code>
+DoExpr&lt;sizeof...(T)&gt;
+</code>
+is instantiated and can call <code>expr(t0, t1, ..., tN)</code>.
+
+This requires the user to write a recursive class template (and a
+specialization to terminate the recursion) with a variadic member function
+template and to use perfect forwarding (not shown here) to avoid
+O(N<sup>2</sup>) copies.
+To make a generic, reusable solution that can apply an arbitrary
+function object to each element requires template partial
+specialization and is probably beyond the abilities of many users of
+<code>std::tuple</code>, so the alternative is to write non-generic code
+and then rewrite it slightly differently when a different operation on
+tuples is needed. This is a fairly complicated task and the end result is
+not even a very natural way to write the desired operation.
+The call to
+</p>
+<pre class="example">
+<code>DoExpr&lt;0&gt;::apply(t);</code>
+</pre>
+<p>
+is far less expressive than something like <code>expr(t...)</code>.
+</p>
+<p>
+A simpler and more natural solution is to introduce a new parameter pack,
+<code><em>I</em></code>, consisting of integers [0,N] and then use it in
+a pack expansion such as <code>expr(std::get&lt;I&gt;(t)...)</code>.
+This requires no recursion and no class template specializations.
+This proposal is to standardize a mechanism for creating a parameter
+pack containing an integer sequence.
+</p>
+
+<h2><a name="rationale">Rationale and examples of use</a></h2>
+<p>The proposal is to add a type like</p>
+<pre class="example">
+<code>template&lt;int...&gt; struct index_sequence { };</code>
+</pre>
+<p>
+so that an instantiation like <code>index_sequence&lt;0, 1, 2, 3&gt;</code>
+can be passed to a function template that deduces a parameter
+pack containing the integer sequence 0, 1, 2, 3.
+</p>
+<p>In order to pass an <code>index_sequence</code> to a function it must be
+possible to construct the desired specialization either from the length of
+sequence desired or from a parameter pack from which the length can be
+deduced. This proposal offers both options, so that given the type
+<code>tuple&lt;T...&gt;</code> the sequence <code>[0, sizeof...(T))</code>
+needed to expand the tuple can be created by using the alias
+<code>make_index_sequence&lt;sizeof...(T)&gt;</code> (or equivalently
+<code>make_index_sequence&lt;tuple_size&lt;tuple&lt;T...&gt;&gt;::value&gt;</code>)
+or by using the alias <code>index_sequence_for&lt;T...&gt;</code>.
+</p>
+
+<p>With such a type in your toolbox it is easy to write the generic,
+reusable solution described above for expanding tuple elements as
+arguments to a function object:
+</p>
+<pre class="example">
+<code>template&lt;typename F, typename Tuple, size_t... I&gt;
+  auto
+  apply_(F&amp;&amp; f, Tuple&amp;&amp; args, index_sequence&lt;I...&gt;)
+  -&gt; decltype(std::forward&lt;F&gt;(f)(std::get&lt;I&gt;(std::forward&lt;Tuple&gt;(args))...))
+  {
+    return std::forward&lt;F&gt;(f)(std::get&lt;I&gt;(std::forward&lt;Tuple&gt;(args))...);
+  }
+
+template&lt;typename F, typename Tuple,
+         typename Indices = make_index_sequence&lt;std::tuple_size&lt;Tuple&gt;::value&gt;&gt;
+  auto
+  apply(F&amp;&amp; f, Tuple&amp;&amp; args)
+  -&gt; decltype(apply_(std::forward&lt;F&gt;(f), std::forward&lt;Tuple&gt;(args), Indices()))
+  {
+    return apply_(std::forward&lt;F&gt;(f), std::forward&lt;Tuple&gt;(args), Indices());
+  }</code>
+</pre>
+<p>This solution still uses recursion and template specialization, but
+only in the implementation of <code>make_index_sequence</code>, where users don't
+need to write or understand it.
+Standardizing the components makes it trivial for users to expand
+tuple-like types in any situation, including the examples below.
+A type like <code>index_sequence</code> is a good candidate for standardization,
+as similar types are already used in at least two major standard library
+implementations and have been reinvented often.
+Similar types feature in several answers to questions on sites such as
+Stack Overflow
+<a href="#schaub">[Schaub]</a>
+<a href="#wakely">[Wakely]</a>
+<a href="#kuehl">[K&uuml;hl]</a>,
+where the number of questions about unpacking tuples
+and the number of times types like <code>index_sequence</code> are used in answers
+demonstrates the demand for a solution to the problem.
+</p>
+
+<h3><a name="piecewise">Piecewise construction of <code>std::pair</code>.</a></h3>
+<p>
+Piecewise construction of <code>std::pair</code> requires two
+<code>tuple</code>s of arguments to be expanded to form constructor
+arguments for the pair members. One implementation technique is to
+delegate to a private constructor for <code>pair</code> that takes
+two types like <code>index_sequence</code>, for example
+</p>
+<pre class="example">
+<code>template&lt;class... Args1, class... Args2&gt;
+  pair(piecewise_construct_t, tuple&lt;Args1...&gt; args1, tuple&lt;Args2...&gt; args2)
+    : pair(args1, args2, index_sequence_for&lt;Args1...&gt;{}, index_sequence_for&lt;Args2...&gt;{})
+  { }
+
+private:
+
+template&lt;class... A1, class... A2, size_t... I1, size_t... I2&gt;
+  pair(tuple&lt;A1...&gt;&amp; a1, tuple&lt;A2...&gt;&amp; a2, index_sequence&lt;I1...&gt;, index_sequence&lt;I2...&gt;)
+    : first(std::get&lt;I1&gt;(std::move(a1))...),
+      second(std::get&lt;I2&gt;(std::move(a2))...)
+  { }</code>
+</pre>
+<p>
+</p>
+<h3><a name="a2t">Convert array to tuple</a></h3>
+<p>
+A note in [tuple.creation] says that implementations might support using
+<code>std::tuple_cat</code> with other tuple-like type such as
+<code>std::array</code>, but it's not required.
+Users who need to implement it themselves can do so using a recursive
+template, using <code>tuple_cat</code> to build up a <code>tuple</code>
+element by element, but this creates lots of temporaries and instantiations.
+An implementation is shown here for comparison with the
+<code>index_sequence</code> solution:
+</p>
+<pre class="example">
+<code>template&lt;typename T, std::size_t N, std::size_t I = 0&gt;
+  struct a2t_
+  {
+    static_assert( I &lt; N, "index within array bound" );
+
+    template&lt;typename... Elts&gt;
+      static auto
+      cat(std::tuple&lt;Elts...&gt;&amp;&amp; t, const std::array&lt;T, N&gt;&amp; a)
+      -&gt; decltype(a2t_&lt;T, N, I+1&gt;::cat(std::tuple_cat(t, std::make_tuple(a[I])), a))
+      {
+          return a2t_&lt;T, N, I+1&gt;::cat(std::tuple_cat(t, std::make_tuple(a[I])), a);
+      }
+  };
+
+template&lt;typename T, std::size_t N&gt;
+  struct a2t_&lt;T, N, N&gt;
+  {
+    template&lt;typename... Elts&gt;
+      static std::tuple&lt;Elts...&gt;
+      cat(std::tuple&lt;Elts...&gt;&amp;&amp; t, const std::array&lt;T, N&gt;&amp; a)
+      {
+          return t;
+      }
+  };
+
+template&lt;typename T, std::size_t N&gt;
+  auto
+  a2t(const std::array&lt;T, N&gt;&amp; a)
+  -&gt; decltype(a2t_&lt;T, N&gt;::cat(std::tuple&lt;&gt;(), a))
+  {
+    return a2t_&lt;T, N&gt;::cat(std::tuple&lt;&gt;(), a);
+  }</code>
+</pre>
+<p>
+Using <code>index_sequence</code> the implementation is almost trivial:
+</p>
+<pre class="example">
+<code>template&lt;typename Array, size_t... I&gt;
+  auto
+  a2t_(const Array&amp; a, index_sequence&lt;I...&gt;)
+    -&gt; decltype(std::make_tuple(a[I]...))
+  {
+    return std::make_tuple(a[I]...);
+  }
+
+template&lt;typename T, std::size_t N, typename Indices = make_index_sequence&lt;N&gt;&gt;
+  auto
+  a2t(const std::array&lt;T, N&gt;&amp; a)
+    -&gt; decltype(a2t_(a, Indices()))
+  {
+    return a2t_(a, Indices());
+  }</code>
+</pre>
+
+<h3><a name="n3466">N3466 <code>more_perfect_forwarding_async</code> example</a></h3>
+
+<p>
+The <code>more_perfect_forwarding_async</code> example in
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3466.html">N3466</a>
+refers to a "complicated template metafunction" <a href="drayx">[DRayX]</a>
+which can be replaced with the comparatively simple <code>apply()</code>
+function template defined above.
+</p>
+
+
+<h2><a name="solution">Solution</a></h2>
+
+<p>
+While I hope there will be broad agreement that some form of
+integer sequence template should be standardized there are some
+parts of the solution which might be harder to agree on.
+The changes to the working paper proposed below are my preferred
+solution but the specific details are less important than getting
+some kind of template that makes it easy to solve the problems
+described above.
+</p>
+
+<h3><a name="seqtype">Type of integers in the sequence</a></h3>
+
+<p>
+It's not obvious to me what type of integer should be used in the
+parameter pack of the class template. The natural type for indexing into
+tuples and arrays is <code>std::size_t</code>, but that type has a far
+larger range of values than needed.  I consider it unlikely that any
+compiler will support parameter packs that can accept <var>SIZE_MAX</var>
+arguments for the foreseeable future.
+
+Another question is whether the integer type should be signed or unsigned.
+Indices are naturally unsigned, but there could be other interesting uses
+for integer sequences other than unpacking tuples and arrays which would
+be more difficult if the values cannot be negative.
+Conversely there might be valid use cases where the wrapping behaviour of
+unsigned integers is preferable to worrying about overflow.
+</p>
+
+<p>The proposed solution is to define a generic <code>integer_sequence</code>
+class template which can be instantiated as
+<code>integer_sequence&lt;int&gt;</code>
+or
+<code>integer_sequence&lt;unsigned char&gt;</code>
+or any other integer type.
+By using alias templates to denote specializations for common types it is
+just as convenient to use the generic template as it would be if it wasn't
+parameterized by the integer type, for instance the examples above work
+equally well whether <code>index_sequence&lt;I...&gt;</code> is a specialization
+of a class template or an alias for <code>integer_sequence&lt;size_t,
+I...&gt;</code>.
+</p>
+
+<h3><a name="consecutive">Non-consecutive integer sequences</a></h3>
+
+<p>
+There is no reason to restrict the values in an integer sequence to
+consecutive integers starting from zero.
+It is very simple to transform
+<code>index_sequence&lt;I...&gt;</code>
+to <code>index_sequence&lt;I+n...&gt;</code>
+or <code>index_sequence&lt;I*n...&gt;</code>.
+
+Such sequences would be useful to access only the even elements of an array,
+for example, but such transformations are not necessary for the main
+purpose of unpacking tuples. If the standard provides the
+<code>integer_sequence</code> type and simple metafunctions for generating
+basic sequences users can more easily create custom sequences.
+</p>
+
+<h3><a name="members">Members of integer sequences</a></h3>
+
+<p>
+For most uses
+</p>
+<pre class="example">
+<code>template&lt;int...&gt; struct index_sequence { };</code>
+</pre>
+<p>
+is sufficient, but it's simple to define <code>type</code> and
+<code>size</code> members describing the type and to provide
+<code>append</code> and <code>next</code> members for extending
+sequences, as shown in the proposed changes below.
+</p>
+
+<p>
+These members are not essential to the proposal and the suggestion
+might be due to my own bias as the <code>next</code> member is used
+by my implementation of the proposed changes below
+<a href="#wakely2">[integer_seq]</a>
+i.e. in the unspecified details of how <code>make_integer_sequence</code>
+works.
+</p>
+
+<h3><a name="efficiency">Efficiency considerations</a></h3>
+<p>
+For a sequence of N integers the reference implementation recursively
+instantiates N templates, limiting the length of sequences to (at most)
+the instantiation depth of the compiler.
+It is quite easy to reduce the number of instantiations to
+log<sub>2</sub>(N) by starting at both ends of the sequence and working
+inwards to meet the middle.
+</p>
+<p>
+A compiler intrinisic could be used to instantiate an arbitrary-length
+<code>integer_sequence</code> with no recursion.
+</p>
+<p>There have been suggestions of a core feature that would define
+<code>...3</code> as the parameter pack <code>{0, 1, 2, 3}</code>,
+which would provide an alternative way to solve the problems solved
+by this proposal.
+This language feature will not be in C++14 if accepted at all, so
+should not prevent solving the problem now.
+</p>
+
+
+<h2><a name="changes">Impact on standard</a></h2>
+
+<p>
+This is a pure addition to the library.
+It is expected that implementations would be able to replace existing
+equivalent code with uses of <code>integer_sequence</code> if desired.
+</p>
+
+<p>
+Add to the synopsis in [utility] paragraph 2, after the declaration of
+<code>tuple</code>:
+</p>
+
+<blockquote class="stdins"><pre>
+<code>
+// 20.x Compile-time integer sequences
+
+template&lt;class T, T...&gt; struct integer_sequence;
+template&lt;size_t... I&gt;
+  using index_sequence = integer_sequence&lt;size_t, I...&gt;;
+
+template&lt;class T, T N&gt;
+  using make_integer_sequence = integer_sequence&lt;T, see below&gt;;
+template&lt;size_t N&gt;
+  using make_index_sequence = make_integer_sequence&lt;size_t, N&gt;;
+
+template&lt;class... T&gt;
+  using index_sequence_for = make_index_sequence&lt;sizeof...(T)&gt;;
+</code>
+</pre></blockquote>
+
+<p>
+Add a new subclause after [pairs]:
+</p>
+
+<blockquote class="stdins">
+
+<h4><a name="intseq">20.x Compile-time integer sequences [intseq]</a></h4>
+
+<h4><a name="intseq.general">20.x.1 In general [intseq.general]</a></h4>
+<p>
+The library provides a class template that can represent an integer sequence.
+When used as an argument to a function template the parameter pack
+defining the sequence can be deduced and used in a pack expansion.
+</p>
+<p>
+[<em>Example:</em></p>
+<pre class="example">
+<code>template&lt;class F, class Tuple, std::size_t... I&gt;
+  auto
+  apply_impl(F&amp;&amp; f, Tuple&amp;&amp; t, index_sequence&lt;I...&gt;)
+  -&gt; decltype(std::forward&lt;F&gt;(f)(std::get&lt;I&gt;(std::forward&lt;Tuple&gt;(t))...)
+  {
+    return std::forward&lt;F&gt;(f)(std::get&lt;I&gt;(std::forward&lt;Tuple&gt;(t))...);
+  }
+
+template&lt;class F, class Tuple, class Indices
+         = make_index_sequence&lt;std::tuple_size&lt;Tuple&gt;::value&gt;&gt;
+  auto
+  apply(F&amp;&amp; f, Tuple&amp;&amp; t)
+  -&gt; decltype(apply_impl(std::forward&lt;F&gt;(f), std::forward&lt;Tuple&gt;(t), Indices()))
+  {
+    return apply_impl(std::forward&lt;F&gt;(f), std::forward&lt;Tuple&gt;(t), Indices());
+  }</code>
+</pre>
+<p><em>&mdash; end example</em> ]
+</p>
+
+<h4><a name="intseq.intseq">20.x.2 Class template <code>integer_sequence</code> [intseq.intseq]</a></h4>
+<pre>
+<code>
+namespace std {
+  template&lt;class T, T... I&gt;
+  struct integer_sequence {
+    typedef T value_type;
+
+    static constexpr size_t size() noexcept { return sizeof...(I); }
+  };
+}  // namespace std
+</code>
+</pre>
+<p><var>T</var> shall be an integer type.</p>
+
+<h4><a name="intseq.make">20.x.3 Alias template <code>make_integer_sequence</code> [intseq.make]</a></h4>
+
+<pre>
+<code>
+template&lt;class T, T N&gt;
+  using make_integer_sequence = integer_sequence&lt;T, see below&gt;;
+</code>
+</pre>
+
+<p>If <code>N</code> is negative the program is ill-formed.
+The alias template <code>make_integer_sequence</code> denotes a
+specialization of <code>integer_sequence</code> with <code>N</code>
+template non-type arguments.
+The type <code>make_integer_sequence&lt;T, N&gt;</code> denotes the type
+<code>integer_sequence&lt;T, 0, 1, ..., N-1&gt;</code>.
+[ <em>Note:</em>
+<code>make_integer_sequence&lt;int, 0&gt;</code> denotes the type
+<code>integer_sequence&lt;int&gt;</code>
+<em>&mdash; end note</em> ]
+</p>
+
+</blockquote>
+
+<h2><a name="refs">References</a></h2>
+
+<dl>
+
+<dt><a name="python">[Python]</a></dt>
+<dd>
+<a href="http://python.org/">Python</a>,
+<cite><a href="http://docs.python.org/dev/tutorial/index.html">
+The Python Tutorial</a></cite>,
+10 January 2013,
+<a href="http://docs.python.org/dev/tutorial/controlflow.html#unpacking-argument-lists">
+Unpacking Argument Lists</a>,
+<a href="http://docs.python.org/dev/tutorial/controlflow.html#unpacking-argument-lists">
+http://docs.python.org/dev/tutorial/controlflow.html#unpacking-argument-lists</a>
+</dd>
+
+<dt><a name="schaub">[Schaub]</a></dt>
+<dd>
+<a href="http://bloglitb.blogspot.co.uk/">Johannes Schaub</a>,
+<cite><a href="http://stackoverflow.com/a/7858971">
+"unpacking" a tuple to call a matching function pointer</a></cite>,
+22 October 2011,
+<a href="http://stackoverflow.com/a/7858971">
+http://stackoverflow.com/a/7858971</a>
+</dd>
+
+<dt><a name="wakely">[Wakely]</a></dt>
+<dd>
+<a href="http://advogato.org/person/redi/">Jonathan Wakely</a>,
+<cite><a href="http://stackoverflow.com/a/11196263">
+Variadic templates: iterate over type/template argument</a></cite>,
+27 December 2012,
+<a href="http://stackoverflow.com/a/11196263">
+http://stackoverflow.com/a/11196263</a>
+</dd>
+
+<dt><a name="kuehl">[K&uuml;hl]</a></dt>
+<dd>
+<a href="http://www.dietmar-kuehl.de/">Dietmar K&uuml;hl</a>,
+<cite><a href="http://stackoverflow.com/a/14059084">
+How to guarantee order of argument evaluation when calling a function object?</a></cite>,
+27 December 2012,
+<a href="http://stackoverflow.com/a/14059084">
+http://stackoverflow.com/a/14059084</a>
+</dd>
+
+<dt><a name="drayx">[DRayX]</a></dt>
+<dd>
+<a href="http://stackoverflow.com/users/788624/drayx">DRayX</a>,
+<cite><a href="http://stackoverflow.com/a/12650100">
+How do I expand a tuple into variadic template function's arguments?</a></cite>,
+29 September 2012,
+<a href="http://stackoverflow.com/a/12650100">
+http://stackoverflow.com/a/12650100</a>
+</dd>
+
+<dt><a name="wakely2">[integer_seq]</a></dt>
+<dd>
+<a href="http://advogato.org/person/redi/">Jonathan Wakely</a>,
+<cite><a href="https://gitorious.org/redistd/integer_seq">
+integer_seq</a></cite>,
+10 January 2013,
+<a href="https://gitorious.org/redistd/integer_seq/blobs/master/integer_seq.h">
+&lt;integer_seq.h&gt;</a>,
+<a href="https://gitorious.org/redistd/integer_seq/blobs/master/integer_seq.h">
+https://gitorious.org/redistd/integer_seq/blobs/master/integer_seq.h</a>
+</dd>
+
+</dl>
+
+</body>
+</html>
+<!-- vi: set tw=74: -->

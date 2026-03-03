@@ -1,0 +1,600 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Attributes for Likely and Unlikely Statements</title>
+
+<style type="text/css">
+html {
+  font-family: sans-serif;
+  line-height: 1.25em;
+  -ms-text-size-adjust: 100%;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 10px;
+  padding: 0;
+  counter-reset: end_note_counter;
+}
+
+h1 {
+  font-size: 2em;
+  margin: 0.67em 0;
+}
+
+pre {
+  font-family: monospace, monospace;
+  font-size: .9em;
+  background-color: #f3f3f3;
+  padding: 1em;
+}
+
+code{
+  font-family: monospace, monospace;
+  font-size: 1em;
+  background-color: #f3f3f3;
+}
+
+table {
+  border-collapse: collapse;
+  margin-bottom: 1em;
+}
+
+table, th, td {
+  border: 1px solid #000;
+}
+
+th, td {
+  text-align: left;
+  padding: 0 .4em;
+  font-size: .9em;
+}
+
+tr.stripe {
+  background-color: #f3f3f3;
+}
+
+span.foot:before {
+  font-size: smaller;
+	margin-left: .3em;
+	vertical-align: super;
+	line-height: 0;
+	counter-increment: end_note_counter;
+	content: "[" counter(end_note_counter) "]";	
+}
+
+ins { 
+  text-decoration:none; 
+  background-color:#A0FFA0 
+}
+
+.mono {
+  font-family: monospace, monospace;
+}
+
+</style>
+
+</head>
+<body>
+Document number: P0479R1<br/>
+Date: 2017-02-05<br/>
+Audience: Evolution Working Group, SG14<br/>
+Reply-to: Clay Trychta &lt;clay.trychta@gmail.com&gt;<br/>
+
+<h1>Attributes for Likely and Unlikely Statements (Revision 1)</h1> 
+
+<h2>Revision History</h2>
+<ul>
+  <li> Revision 1:
+    <ul>
+      <li>The attributes now target statements instead of expressions.</li>
+      <li>The attributes may now be used with iteration statements and <code>case</code>/<code>default</code> inside switch statements.</li>
+    </ul>
+  </li>
+</ul>
+
+<h2>I. Table of Contents</h2>
+
+<ul>
+  <li><a href="#intro">Introduction</a></li>
+  <li><a href="#impact">Impact On the Standard</a></li>
+  <li><a href="#design">Design Decisions</a></li>
+  <li><a href="#spec">Technical Specifications</a></li>
+  <li><a href="#acknowledgements">Acknowledgements</a></li>
+  <li><a href="#references">References</a></li>
+</ul>
+
+<h2 id="intro">II. Introduction</h2>
+
+<p>
+Two new attributes <code>[[likely]]</code> and <code>[[unlikely]]</code> are proposed. These attributes will serve as hints on the likelihood that a subsequent statement will be executed.  Compilers may use these hints to improve the code they generate in various ways.  
+</p>
+
+<h2>III. Motivation and Scope</h2>
+
+<p>
+Compiler's optimizers often have no information relating to the probability of particular statements being executed which can lead to suboptimal code generation.  In many cases the excellent dynamic branch predictors on modern processors can make up for this lack of information.  However, in some cases code may execute more slowly than necessary even though the programmer knew the probability of particular branches being executed because they did not have an easy way to communicate this to the compiler.  
+</p>
+
+<p>
+Several existing compilers including GCC and Clang implement <code>__builtin_expect</code> which can be used to communicate branch probability information to the optimizer <span class="foot"></span><span class="foot"></span>.  Looking at usages of <code>__builtin_expect</code> in the wild it seems that by far most common usage is through defining a <code>likely</code> macro (<code>#define likely(x) __builtin_expect(!!(x), 1)</code>) and an <code>unlikely</code> macro (<code>#define unlikely(x) __builtin_expect(!!(x), 0) </code>).  Probably the largest project that makes use of this functionality is the linux kernel which uses <code>likely</code> over 3,000 times and <code>unlikely</code> over 14,000 times <span class="foot"></span>.  Other large projects using this functionality include Mozilla with over 200 usages of <code>MOZ_LIKELY</code> and over 7,000 usages of <code>MOZ_UNLIKELY</code> and  Chromium which has hundreds of instances of <code>LIKELY</code> and <code>UNLIKELY</code><span class="foot"></span><span class="foot"></span>.
+</p>
+
+<p>
+Some of the possible code generation improvements from using branch probability hints include:
+</p>
+
+<ul>
+  <li>
+  Multiple microarchitectures should be able to benefit from reordering basic blocks and branches to improve instruction cache utilization and keep the most common paths in the pipeline<span class="foot"></span>.  These improvements can sometimes be significant.  For example, on x86, macro-fusion/branch fusion can allow for multiple extra instructions to be executed in a single cycle<span class="foot"></span><span class="foot"></span><span class="foot"></span>.
+  </li>
+  <li>
+  It is common for compilers to generate predicated instructions (eg. cmov) likely due to their generally good performance characteristics and resiliency against unpredictable conditions.  Intel recommends against using these instructions for predictable branches due to the overhead of executing both paths of a branch<span class="foot"></span>.  Testing done while writing this proposal did find better performance when using compare/jump instead of cmov for highly predictable branches.
+  </li>
+  <li>
+  Some microarchitectures, such as Power, have branch hints which can override dynamic branch prediction<span class="foot"></span>.
+  </li>
+  <li>
+  AMD recommends structuring code for its processors so that branches are not taken which consumes fewer branch prediction resources and does not incur the prediction-based bubble of a correctly-predicted taken branch<span class="foot"></span>.
+  </li>
+</ul>
+
+<p>
+Since this proposal has made claims about the potential to improve generated code and performance I have created a few small examples showing the possible benefits.  All testing was performed with the GCC 6.1.1 20160621 compiler and run on a Xeon E3 1245 v3.  All examples were compiled with <code>-O3 -march=haswell</code> plus defines to control behavior and some other test specific flags mentioned below.  Tests were run three times using <code>perf stat</code> and the median value was taken.
+</p>
+
+<p>
+This <a href="#appendix_A">first example</a> examines clamping integer values into the interval [0, 65535].  The code was compiled without hints and with hints that the values would not need to be adjusted.  The compiled example was then run with various percentages of values that needed to be adjusted.  The below results show that the hinting was able to improve performance when most values were in the expected range, but as more values were outside of the expected range the code compiled with the branch hints became slower then the code compiled without any hints.
+</p>
+
+<table>
+  <tr>
+    <th>% values outside [0, 65535] (approx)</th>
+    <th>Time (secs) no hint</th>
+    <th>Time (secs) <code>unlikely</code></th>
+  </tr>
+  <tr class="stripe">
+    <td>.1%</td>
+    <td>8.01</td>
+    <td>6.17 (-1.84)</td>
+  </tr>
+  <tr>
+    <td>1%</td>
+    <td>8.25</td>
+    <td>6.76 (-1.49)</td>
+  </tr>
+  <tr class="stripe">
+    <td>5%</td>
+    <td>9.36</td>
+    <td>7.91 (-1.45)</td>
+  </tr>
+  <tr>
+    <td>10%</td>
+    <td>10.83</td>
+    <td>9.42 (-1.41)</td>
+  </tr>
+  <tr class="stripe">
+    <td>50%</td>
+    <td>22.55</td>
+    <td>23.42 (+0.87)</td>
+  </tr>
+  <tr>
+    <td>90%</td>
+    <td>33.91</td>
+    <td>35.42 (+1.51)</td>
+  </tr>
+  <tr class="stripe">
+    <td>95%</td>
+    <td>34.35</td>
+    <td>35.88 (+1.53)</td>
+  </tr>
+  <tr>
+    <td>99%</td>
+    <td>34.48</td>
+    <td>36.02 (+1.54)</td>
+  </tr>
+  <tr class="stripe">
+    <td>99.9%</td>
+    <td>34.53</td>
+    <td>36.03 (+1.5)</td>
+  </tr>
+</table>
+
+<p>
+The <a href="#appendix_B">next example</a> examines the tradeoffs between using conditional move and compare/jump.  This time the code was compiled without hints, with a hint to expect the comparison to succeed, and with a hint to expect the comparison to fail.  The compiled example was then run with various percentages of values for which the comparison would succeed.  I was unable to get GCC to stop generating conditional move instructions using only <code>__builtin_expect</code> so I compiled with <code>-fno-if-conversion -fno-tree-loop-if-convert</code> to simulate it.  Recent versions of Clang (3.9+) change from generating conditional moves to comparison and jumps based on the usage of <code>__builtin_expect</code><span class="foot"></span>.
+</p>
+
+<p>
+The results show that if almost all values (99%+) will take a particular branch then generating a comparison and branch is better.  When the data is slightly more random, generating a conditional move can be much better than branching code.  For the 50% case I saw that over 20% of branches were mispredicted for the cases using branch instructions.
+</p>
+
+<table>
+  <tr>
+    <th>% values set (approx)</th>
+    <th>Time (secs) cmov</th>
+    <th>Time (secs) cmp/jmp <code>unlikely</code></th>
+    <th>Time (secs) cmp/jmp <code>likely</code></th>
+  </tr>
+  <tr class="stripe">
+    <td>.1%</td>
+    <td>4.98</td>
+    <td>3.47 (-1.51)</td>
+    <td>5.58 (+0.6)</td>
+  </tr>
+  <tr>
+    <td>.5%</td>
+    <td>4.96</td>
+    <td>3.76 (-1.2)</td>
+    <td>5.95 (+0.99)</td>
+  </tr>
+  <tr class="stripe">
+    <td>1%</td>
+    <td>4.97</td>
+    <td>4.12 (-0.85)</td>
+    <td>6.31 (+1.34)</td>
+  </tr>
+  <tr>
+    <td>50%</td>
+    <td>4.91</td>
+    <td>36.02 (+31.11)</td>
+    <td>33.74 (+28.83)</td>
+  </tr>
+  <tr class="stripe">
+    <td>99%</td>
+    <td>4.95</td>
+    <td>5.44 (+0.49)</td>
+    <td>5.04 (+0.09)</td>
+  </tr>
+  <tr>
+    <td>99.5%</td>
+    <td>4.91</td>
+    <td>5.02 (+0.11)</td>
+    <td>4.56 (-0.35)</td>
+  </tr>
+  <tr class="stripe">
+    <td>99.9%</td>
+    <td>4.92</td>
+    <td>4.73 (-0.19)</td>
+    <td>4.09 (-0.83)</td>
+  </tr>
+</table>
+
+<p>
+Finally, the impact of <code>__builtin_expect</code> was measured on two open source projects since their code should be a bit closer to what would be seen in actual codebases than the previous examples.
+</p>
+
+<p>
+The first test used <a href="https://github.com/zeux/pugixml">pugixml</a> to parse an <a href="http://www.ins.cwi.nl/projects/xmark/Assets/standard.gz">example</a> XMark file from memory.
+</p>
+
+<p>
+The subsequent tests ran the bench.c benchmark from <a href="https://github.com/h2o/picohttpparser">picohttpparser</a>.  These tests were run with and without <code>-march=haswell</code>.
+</p>
+
+<p>
+All of the tests were run without using <code>__builtin_expect</code>, using <code>__builtin_expect</code> with the opposite values (1 for unlikely and 0 for likely), and using <code>__builtin_expect</code> with the proper values (0 for unlikely and 1 for likely).
+</p>
+
+<p>These tests show that proper usage of <code>__builtin_expect</code> can have a positive impact on runtime performance.  For the cases where the measured times are relatively close together I was able to run each version repeatedly and saw very similar numbers to what is reported below so the differences do seem to be real.</p>
+
+<table>
+  <tr>
+    <th>Case</th>
+    <th>No expect</th>
+    <th>Opposite expect</th>
+    <th>Regular expect</th>
+  </tr>
+  <tr class="stripe">
+    <td>pugixml</td>
+    <td>126.0936 ms</td>
+    <td>128.6235 ms (+2.5299)</td>
+    <td>122.7716 ms (-3.322)</td>
+  </tr>
+  <tr>
+    <td>picohttpparser -march=haswell</td>
+    <td>1.7857 s</td>
+    <td>1.7763 s (-0.0094)</td>
+    <td>1.7119 s (-0.0738)</td>
+  </tr>
+  <tr class="stripe">
+    <td>picohttpparser</td>
+    <td>3.5989 s</td>
+    <td>3.7150 s (+0.1161)</td>
+    <td>3.0369 s (-0.562)</td>
+  </tr>
+</table>
+
+<p>
+The preceding examples show that allowing the programmer to specify branch hints can lead to improved code generation and decreased run time.  Due to these potential benefits this proposal aims to standardize the common likely/unlikely usage pattern so it can be used in a portable manner across compilers without macros. It also hopes to serve as encouragement for more compilers to implement this functionality.       
+</p>
+
+<h2 id="impact">IV. Impact On the Standard</h2>
+
+<p>
+This proposal has minimal impact on the current standard as it proposes two new attributes which do not change program semantics.
+</p>
+
+<h2 id="design">V. Design Decisions</h2>
+
+<h3>Related Use Cases</h3>
+
+<p>
+From discussions regarding this proposal it seems that there are several related cases that people would like to be able to provide hints to the compiler for:
+</p>
+
+<ul>
+  <li>
+    Annotating statements which are very likely or unlikely to execute.
+  </li>
+  <li>
+    Indicating whether or not a branch is predictable.  This is useful in cases where it is known ahead of time that the values being branched on are going to follow a predictable pattern, but a particular direction does not have a high likelihood (in which case likely/unlikely could be used). 
+  </li>
+  <li>
+    Annotating the priority of a particular branch direction.  This is orthogonal to the likelihood of a branch being taken and indicates that the a particular direction should be optimized for even if it is unlikley in order to decrease latency for that particular case (even at the cost of slowing down the more common case). 
+  </li>
+</ul>
+
+<p>
+This proposal currently focuses on solving the first of the above cases as support for such annotations already exist in at least two compilers and their usage is relatively widespread.  The other cases either have limited (eg. <code>__builtin_unpredictable</code> in Clang) or no support in existing compilers which makes it more difficult to judge the benefits of any particular approach to solving those cases <span class="foot"></span>.  
+</p>
+
+<h3>Possible Objections</h3>
+
+<p>
+<em>Objection #1:</em> Can this feature easily result in code pessimization?
+</p>
+<blockquote>
+<p>
+Yes, as shown by the conditional move example misusing a branch hint can definitely result in worse code with a much longer run time.  This feature is primarily meant to be used after a hotspot has been found in existing code.  The proposed attributes are not meant to be added to code without measuring the impact to ensure they do not end up degrading performance.
+</p>
+</blockquote>
+
+<p>
+<em>Objection #2:</em> Why should branch hints be standardized when many compilers implement PGO?
+</p>
+<blockquote>
+<p>
+Branch hints are definitely not meant to replace PGO; if PGO can be used it should be.  PGO may be able to give the optimizer even more information then a branch hint.  However, PGO and branch hints do not need to be mutually exclusive; branch hints could act as another indicator of expected frequent usage of particular branches.
+</p>
+<p>
+Also, PGO is not always easy to use.  PGO necessitates creating a realistic test scenario to profile which, depending on the application, may be difficult and opens up the possibility that some important real world usage may be missed.  The additional build tooling to keep the profile up to date, particularly across multiple OS's and compilers may also be challenging. 
+</p>
+<p>
+Additionally, certain kinds of applications, such as those which may be distributed to clients who then build and run their own plugins in the distributed application may be very difficult or impossible to generate a realistic benchmark for, as there is no way of knowing how the client will use the application.  Similar problems could also occur if an application is highly configurable; creating test scenarios and builds for all different possible configurations may not be realistic.
+</p>
+<p>
+Finally, PGO sometimes does the exact opposite of what is wanted for certain low-latency use cases.  PGO tries to make the common case faster, but it may actually be more important to make the uncommon cases faster so that when they do occur they run as quickly as possible.
+</p>
+</blockquote>
+
+<h2 id="spec">VI. Technical Specifications</h2>
+<p>In section 6.4 (stmt.select) paragraph 1, change the grammar to allow an optional attribute before the substatements of <span class="mono"><em>selection-statements</em></span>.</p>
+
+<blockquote>
+<pre style="background:none"><em>selection-statement:</em>
+    <strong>if constexpr</strong><sub><em>opt</em></sub> ( <em>init-statement<sub>opt</sub> condition</em> ) <ins><em>attribute-specifier-seq<sub>opt</sub></em></ins> <em>statement</em>
+    <strong>if constexpr</strong><sub><em>opt</em></sub> ( <em>init-statement<sub>opt</sub> condition</em> ) <ins><em>attribute-specifier-seq<sub>opt</sub></em></ins> <em>statement</em> <strong>else</strong> <ins><em>attribute-specifier-seq<sub>opt</sub></em></ins> <em>statement</em>
+</pre>
+</blockquote>
+
+<p>In section 6.5 (stmt.iter) paragraph 1, change the grammar to allow an optional attribute before the substatement of <span class="mono">while</span>, <span class="mono">do</span>, and <span class="mono">for</span> statements.</p>
+
+<blockquote>
+<pre style="background:none"><em>iteration-statement:</em>
+    <strong>while</strong> ( <em>condition</em> ) <ins><em>attribute-specifier-seq<sub>opt</sub></em></ins> <em>statement</em>
+    <strong>do</strong> <ins><em>attribute-specifier-seq<sub>opt</sub></em></ins> <em>statement</em> <strong>while</strong> ( <em>expression</em> ) ;
+    <strong>for</strong> ( <em>init-statement condition<sub>opt</sub>; expression<sub>opt</sub></em> ) <ins><em>attribute-specifier-seq<sub>opt</sub></em></ins> <em>statement</em>
+    <strong>for</strong> ( <em>for-range-declaration</em> : <em>for-range-initializer</em> ) <ins><em>attribute-specifier-seq<sub>opt</sub></em></ins> <em>statement</em>
+</pre>
+</blockquote>
+
+<p>Add the <code>likely</code> attribute.</p>
+
+<p>
+<ins>7.6.N Likely attribute [dcl.attr.likely]</ins>
+</p>
+
+<p>
+<ins>
+The <em>attribute-token</em> <span class="mono"><strong>likely</strong></span> indicates that a statement has a high probability of being executed.  It shall appear at most once in each <em>attribute-list</em> and no <em>attribute-argument-clause</em> shall be present.  The <span class="mono"><strong>likely</strong></span> attribute is not allowed to appear in the same <em>attribute-list</em> as the <span class="mono"><strong>unlikely</strong></span> attribute.
+</ins>
+</p>
+
+<p>
+<ins>
+The attribute may be applied to the substatements of selection-statements, to labeled-statements whose label is case or default, or to the substatement of an iteration statement.
+</ins>
+</p>
+
+<p>
+<ins>
+[ <em>Note:</em> Implementations are encouraged to use the <span class="mono"><strong>likely</strong></span> attribute as a hint for optimization purposes <em>&mdash; end note</em>]
+</ins>
+</p>
+
+<p>
+<ins>[ <em>Example:</em></ins>
+<pre style="background:none"><ins>if (foo()) [[likely]] {
+  do_something();
+}
+</ins></pre>
+<ins>Implementations are encouraged to optimize for the case where foo() returns true. <em>&mdash; end example</em>]</ins>
+</p>
+
+<p>Add the <code>unlikely</code> attribute.</p>
+
+<p>
+<ins>7.6.N Unlikely attribute [dcl.attr.unlikely]</ins>
+</p>
+
+<p>
+<ins>
+The <em>attribute-token</em> <span class="mono"><strong>unlikely</strong></span> indicates that a statement has a low probability of being executed.  It shall appear at most once in each <em>attribute-list</em> and no <em>attribute-argument-clause</em> shall be present.  The <span class="mono"><strong>unlikely</strong></span> attribute is not allowed to appear in the same <em>attribute-list</em> as the <span class="mono"><strong>likely</strong></span> attribute.
+</ins>
+</p>
+
+<p>
+<ins>
+The attribute may be applied to the substatements of selection-statements, to labeled-statements whose label is case or default, or to the substatement of an iteration statement.
+</ins>
+</p>
+
+<p>
+<ins>
+[ <em>Note:</em> Implementations are encouraged to use the <span class="mono"><strong>unlikely</strong></span> attribute as a hint for optimization purposes <em>&mdash; end note</em>]
+</ins>
+</p>
+
+<p>
+<ins>[ <em>Example:</em></ins>
+<pre style="background:none"><ins>if (foo()) [[unlikely]] {
+  do_something();
+}
+</ins></pre>
+<ins>Implementations are encouraged to optimize for the case where foo() returns false. <em>&mdash; end example</em>]</ins>
+</p>
+
+<h2 id="acknowledgements">VII. Acknowledgements</h2>
+Thank you to Bartosz Bielecki, Carl Cook, Matt Dziubinski, Mathias Gaunard, Paul Hampson, and others in SG14 for sharing their insights and suggestions.
+
+<h2 id="references">VIII. References</h2>
+
+<ol>
+  <li>
+    <a href="https://gcc.gnu.org/onlinedocs/gcc/Other-Builtins.html">https://gcc.gnu.org/onlinedocs/gcc/Other-Builtins.html</a>
+  </li>
+
+  <li>
+    <a href="http://llvm.org/docs/BranchWeightMetadata.html#built-in-expect-instructions">http://llvm.org/docs/BranchWeightMetadata.html#built-in-expect-instructions</a>
+  </li>
+  
+  <li>
+    <a href="https://groups.google.com/a/isocpp.org/d/msg/sg14/ohFcWdlvrh0/FJXC94MeAgAJ">https://groups.google.com/a/isocpp.org/d/msg/sg14/ohFcWdlvrh0/FJXC94MeAgAJ</a>
+  </li>
+  
+  <li>
+    <a href="https://dxr.mozilla.org/mozilla-central/search?q=MOZ_UNLIKELY&redirect=false">https://dxr.mozilla.org/mozilla-central/search?q=MOZ_UNLIKELY&redirect=false</a>
+  </li>
+  
+  <li>
+    <a href="https://cs.chromium.org/search/?q=LIKELY+case:yes+exact:yes&sq=package:chromium&type=cs">https://cs.chromium.org/search/?q=LIKELY+case:yes+exact:yes&sq=package:chromium&type=cs</a>
+  </li>
+  
+  <li>
+    <a href="http://www.intel.com/content/dam/www/public/us/en/documents/manuals/64-ia-32-architectures-optimization-manual.pdf">http://www.intel.com/content/dam/www/public/us/en/documents/manuals/64-ia-32-architectures-optimization-manual.pdf</a>, page 575
+  </li>
+  
+  <li>
+    <a href="http://www.intel.com/content/dam/www/public/us/en/documents/manuals/64-ia-32-architectures-optimization-manual.pdf">http://www.intel.com/content/dam/www/public/us/en/documents/manuals/64-ia-32-architectures-optimization-manual.pdf</a>, page 108
+  </li>  
+
+  <li>
+    <a href="http://support.amd.com/TechDocs/47414_15h_sw_opt_guide.pdf">http://support.amd.com/TechDocs/47414_15h_sw_opt_guide.pdf</a>, page 122
+  </li>
+  
+  <li>
+    <a href="https://gcc.gnu.org/bugzilla/show_bug.cgi?id=67153#c23">https://gcc.gnu.org/bugzilla/show_bug.cgi?id=67153#c23</a>
+  </li>
+  
+  <li>
+    <a href="http://www.intel.com/content/dam/www/public/us/en/documents/manuals/64-ia-32-architectures-optimization-manual.pdf">http://www.intel.com/content/dam/www/public/us/en/documents/manuals/64-ia-32-architectures-optimization-manual.pdf</a>, page 101
+  </li>
+  
+  <li>
+    <a href="https://www.power.org/wp-content/uploads/2013/05/PowerISA_V2.07_PUBLIC.pdf">https://www.power.org/wp-content/uploads/2013/05/PowerISA_V2.07_PUBLIC.pdf</a>, page 64
+  </li>
+  
+  <li>
+    <a href="http://support.amd.com/TechDocs/47414_15h_sw_opt_guide.pdf">http://support.amd.com/TechDocs/47414_15h_sw_opt_guide.pdf</a>, page 129
+  </li>
+  
+  <li>
+    <a href="https://reviews.llvm.org/D19488">https://reviews.llvm.org/D19488</a>
+  </li>
+  
+  <li>
+    <a href="http://clang.llvm.org/docs/LanguageExtensions.html#builtin-unpredictable">http://clang.llvm.org/docs/LanguageExtensions.html#builtin-unpredictable</a>
+  </li>
+</ol>
+
+<h2 id="appendix_A">Appendix A</h2>
+<pre><code>#include &lt;array&gt;
+#include &lt;cstdint&gt;
+#include &lt;random&gt;
+
+#ifdef EXPECT_VAL
+#define expect(x) __builtin_expect(!!(x), EXPECT_VAL)
+#else
+#define expect(x) (x)
+#endif
+
+std::uint16_t clamp(int i) {
+  if (expect(i &lt; 0)) {
+    return 0; 
+  } else if (expect(i &gt; 0xFFFF)) {
+    return 0xFFFFu;
+  }
+  
+  return i;
+}
+
+int main() {
+  std::mt19937 gen(42);
+  std::bernoulli_distribution d(.001), up_down(.5);
+  
+  std::array&lt;int, 1'000'000&gt; data;
+  for (std::size_t i = 0; i != data.size(); ++i) {
+    if (d(gen)) {
+        data[i] = up_down(gen) ? -1 : 0xFFFFF;
+    } else {
+        data[i] = 1;
+    }
+  }
+  
+  std::uint32_t result = 0;
+  for (int i = 0; i != 10000; ++i) {
+    for (auto val : data) {
+      result += clamp(val);
+    }
+  }
+
+  return result &gt; 5 ? 1 : 2;
+}
+</pre></code>
+
+<h2 id="appendix_B">Appendix B</h2>
+<pre><code>#include &lt;array&gt;
+#include &lt;cstdint&gt;
+#include &lt;random&gt;
+
+#ifdef EXPECT_VAL
+#define expect(x) __builtin_expect(!!(x), EXPECT_VAL)
+#else
+#define expect(x) (x)
+#endif
+
+int main() {
+  std::mt19937 gen(42);
+  std::bernoulli_distribution d(.001);
+  std::array&lt;std::uint32_t, 1'000'000&gt; data;
+  for (std::size_t i = 0; i != data.size(); ++i) {
+    data[i] = d(gen) ? 1 : 0;
+  }
+  
+  std::uint32_t result = 0;
+  for (int i = 0; i != 10000; ++i) {
+    for (auto val : data) {
+      if (expect(val != 0)) {
+        result = i;
+      }
+    }
+  }
+
+  return result &gt; 5 ? 1 : 2;
+}
+</pre></code>
+
+</body>
+</html>
+

@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>P0347R1: Simplifying simple uses of &lt;random&gt;</title>
+    <style type="text/css">
+  p {text-align:justify}
+  li {text-align:justify}
+  blockquote.note
+  {
+    background-color:#E0E0E0;
+    padding-left: 15px;
+    padding-right: 15px;
+    padding-top: 1px;
+    padding-bottom: 1px;
+  }
+  ins {background-color:#A0FFA0}
+  del {background-color:#FFA0A0}
+</style>
+</head>
+<body>
+<h1 id="simplifying-simple-uses-of-random-">Simplifying simple uses of <code>&lt;random&gt;</code></h1>
+<table>
+<tbody>
+<tr>
+<td>Document number:</td>
+<td>P0347R1</td>
+</tr>
+<tr>
+<td>Date:</td>
+<td>2016-10-16</td>
+</tr>
+<tr>
+<td>Audience:</td>
+<td>SG6 Numerics, Library Evolution Working Group</td>
+</tr>
+<tr>
+<td>Reply-to:</td>
+<td>R. &quot;Tim&quot; Song &lt;rs2740@gmail.com&gt;, Melissa O&#39;Neill &lt;oneill@cs.hmc.edu&gt;</td>
+</tr>
+</tbody>
+</table>
+<h2 id="abstract">Abstract</h2>
+<p>This paper proposes adding to the standard library a class template <code>random_generator</code>, which functions as a thin wrapper over an underlying uniform random number generator to simplify seeding and common simple tasks, improving convenience and correctness. </p>
+<h2 id="history">History</h2>
+<p> R1: Incorporate feedback from Oulu small group discussion.
+<ul>
+<li>Renamed <code>sample</code> to <code>inplace_sample</code>, reordered parameters to match <code>std::sample</code>'s order better, and added additional requirements.</li>
+<li>Added new <code>sample</code> to match <code>std::sample</code>.</li>
+<li>Removed <code>sample</code>-related discussion in the Q&amp;A section.</li>
+<li>Require <code>DistType</code> to meet the distribution requirements.</li>
+<li>Explicitly note that the in-place constructor doesn't perform seeding.</li>
+<li>s/URNG/URBG/g to match P0346R0. </li>
+</ul></p>
+<h2 id="motivation">Motivation</h2>
+<p>C++11&#39;s <code>&lt;random&gt;</code> facility is elegantly designed and easily extensible, but performing even the simplest tasks requires substantial boilerplate that is easy to get wrong, which is a significant problem for beginners, and even seasoned programmers.</p>
+<p>Consider the following admittedly silly program written using the proposed facility:</p>
+<pre><code>#include &lt;random&gt;
+#include &lt;iostream&gt;
+int main()
+{
+    std::mt19937_rng rng; // nondeterministically seeded, convenience typedef for std::random_generator&lt;std::mt19937&gt;
+    std::cout &lt;&lt; &quot;Greetings from Office #&quot; &lt;&lt; rng.uniform(1,17) // uniform integer in [1, 17]
+              &lt;&lt; &quot; (where we think PI = &quot;  &lt;&lt; rng.uniform(3.1,3.2) &lt;&lt; &quot;)\n\n&quot; // uniform real in [3.1, 3.2)
+              &lt;&lt; &quot;We &quot; &lt;&lt; rng.pick({&quot;welcome&quot;,
+                                    &quot;look forward to synergizing with&quot;,
+                                    &quot;will resist&quot;,
+                                    &quot;are apathetic towards&quot;})
+                       &lt;&lt; &quot; our management overlords\n\n&quot;;
+
+    std::cout &lt;&lt; &quot;On the &#39;business intelligence&#39; test, we scored &quot;
+              &lt;&lt; rng.variate(std::normal_distribution&lt;&gt;(70.0, 10.0))
+              &lt;&lt; &quot;%\n&quot;;
+}
+</code></pre><p>and its current rough equivalent:</p>
+<pre><code>#include &lt;random&gt;
+#include &lt;iostream&gt;
+int main()
+{
+    std::random_device rd; // assume unsigned int is 32 bits
+    std::seed_seq sseq {rd(), rd(), rd(), rd(), rd(), rd(), rd(), rd()};
+    std::mt19937 engine(sseq); // seeded with 256 bits of entropy from random_device
+
+    auto strings = {&quot;welcome&quot;,
+                    &quot;look forward to synergizing with&quot;,
+                    &quot;will resist&quot;,
+                    &quot;are apathetic towards&quot;
+                   };
+
+    std::cout &lt;&lt; &quot;Greetings from Office #&quot; &lt;&lt; std::uniform_int_distribution&lt;&gt;(1,17)(engine) // uniform integer in [1, 17]
+              &lt;&lt; &quot; (where we think PI = &quot;  &lt;&lt; std::uniform_real_distribution&lt;&gt;(3.1, 3.2)(engine) &lt;&lt; &quot;)\n\n&quot; // uniform real in [3.1, 3.2)
+            &lt;&lt; &quot;We &quot; &lt;&lt; *(strings.begin() + std::uniform_int_distribution&lt;&gt;(0, std::size(strings) - 1)(engine))
+                       &lt;&lt; &quot; our management overlords\n\n&quot;;
+
+    std::cout &lt;&lt; &quot;On the &#39;business intelligence&#39; test, we scored &quot;
+              &lt;&lt; std::normal_distribution&lt;&gt;(70.0, 10.0)(engine)
+              &lt;&lt; &quot;%\n&quot;;
+}
+</code></pre><p>Putting aside the convoluted seeding procedure for a moment (we note that it would be even more convoluted if manually writing out all the calls is undesirable or impractical, such as when seeding a <code>std::mt19937</code> with enough entropy to cover its entire state), it&#39;s obvious that even the simplest tasks such as &quot;picking a random element from a list&quot; or &quot;pick a random number from this range&quot; require substantial typing. With the extra complexity, it's also easier to get wrong - accidentally mixing up the two <code>uniform_{int,real}_distribution</code>s, or getting the range size wrong for &quot;pick a random element&quot;. And there&#39;s no easy way to write that <code>pick</code>-with-braced-initializer-list line without creating a variable that may never be used again.</p>
+<p>Some might object that while <code>*(strings.begin() + std::uniform_int_distribution&lt;&gt;(0, std::size(strings) - 1)(engine))</code> seems ugly, <code>std::uniform_int_distribution&lt;&gt;(1,17)(engine)</code> is not too unreasonable. But imagine explaining this code to the new programmer: <code>uniform_int_distribution</code> is a class template, and the empty angle brackets is needed to tell the compiler to use the default result type (which is <code>int</code>); we then construct a temporary <code>uniform_int_distribution</code> object passing the desired range as arguments, which can then be called on a random number engine to produce the desired value. That is a lot of scaffolding (template arguments, temporary function objects) to support what is conceptually a simple task ("pick a random integer between 1 and 17"). This complexity makes some users avoid <code>&lt;random&gt;</code> completely and write <code>rand() % 17 + 1</code> instead - with all the attendant correctness issues. Similar concerns about <code>&lt;random&gt;</code>'s lack of approachability motivated <code>std::experimental::randint</code> in Library Fundamentals v2 TS, but the facility it provides is limited to uniformly distributed integers and the interface is largely orthogonal to the facilities in <code>&lt;random&gt;</code> - it is no easier for a <code>randint</code> user to "upgrade" to <code>&lt;random&gt;</code> than a <code>rand</code> user.</p>
+
+
+<h2 id="overview">Overview</h2>
+<p>We propose a class template <code>random_generator</code> that operates as a simple wrapper over an underlying URBG, with the following features:</p>
+<ul>
+<li>If the underlying URBG is a random number engine, default construction and calling <code>.seed()</code> with no arguments will seed it into an unpredictable state.</li>
+<li>Most operations are supported for all URBGs; the only operations that require a random number engine are the default constructor and <code>.seed()</code></li>
+<li>An in-place constructor is provided that will forward arbitrary arguments to the URBG&#39;s constructor, for when the URBG is not an engine or when deterministic seeding is needed.</li>
+<li><p>A set of member function templates covering the most common tasks used with a random number generator:</p>
+<ul>
+<li>Making a random selection (<code>pick</code>, <code>choose</code>)</li>
+<li>Generating a uniformly distributed value within a range (<code>uniform</code>)</li>
+<li>Shuffling a range (<code>shuffle</code>)</li>
+<li>Sampling a range without replacement (<code>sample</code>)</li>
+</ul>
+<p>Together, these covers all of the utility functions offer by Python&#39;s <code>random</code> package.</p>
+</li>
+<li>Member functions <code>generate</code> and <code>variate</code> that allows the user to generate random numbers from an arbitrary user-specified distribution, thus allowing the user to exploit the full power of <code>&lt;random&gt;</code>.</li>
+</ul>
+<h2 id="design-decisions">Design decisions</h2>
+<h3 id="default-construction-seeds-the-engine-to-an-unpredictable-state">Default construction seeds the engine to an unpredictable state</h3>
+<p>A pain point in using <code>&lt;random&gt;</code> is correct nondeterministic seeding. It is therefore crucial to <code>random_generator</code>&#39;s design that its default constructor performs this seeding automatically.</p>
+<p>This means that the default constructor also requires the underlying URBG type to be a random number engine.</p>
+<h3 id="all-uniform-random-number-generators-are-supported">All uniform random number generators are supported</h3>
+<p>Notably, this includes <code>random_device</code>. The only member functions that require engines are the default constructor and <code>seed()</code>. For a <code>random_generator&lt;random_device&gt;</code>, the constructor that forwards its arguments can be used:</p>
+<pre><code>random_generator&lt;random_device&gt; rng(std::in_place);
+</code></pre><p>The proposed wording reuses <code>std::in_place_t</code> as the tag type, but a different one can be used.</p>
+<h3 id="provide-convenience-member-functions-for-common-tasks-">Provide convenience member functions for common tasks.</h3>
+<p>Making a random selection and generating a uniformly distributed value within a range are two of the most common use cases for random number generators and are directly supported by the member function templates <code>pick</code>, <code>choose</code> and <code>uniform</code>. Shuffling and sampling are also supported via the member function templates <code>shuffle</code> and <code>sample</code>. Together, these covers all of the utility functions offered by Python&#39;s <code>random</code> package.</p>
+<h3 id="provide-a-stepping-stone-to-the-full-c-11-random-number-generation-facility">Provide a stepping stone to the full C++11 random number generation facility</h3>
+<p><code>random_generator</code> makes it easy to gradually introduce new users to the full majesty of <code>&lt;random&gt;</code>. The simplest uses of <code>random_generator</code> will accustom the user to the the idea of generators-as-objects, while the member function templates <code>variate</code> and <code>generate</code> will introduce the idea of distributions.</p>
+<h2 id="responses-to-potention-concerns">Responses to potential concerns</h2>
+<h3 id="in-your-sample-code-what-s-wrong-with-just-writing-std-mt19937-rng-std-random_device-as-done-in-many-online-examples-and-not-using-seed_seq-aren-t-you-making-it-more-convoluted-than-necessary-">In your sample code, what&#39;s wrong with just writing &quot;<code>std::mt19937 rng(std::random_device{}());</code>&quot; (as done in many online examples) and not using <code>seed_seq</code>? Aren&#39;t you making it more convoluted than necessary?</h3>
+<p>That seeds the random number generator with a single (probably 32-bit) integer, which means that</p>
+<ul>
+<li>There are only 2<sup>32</sup> possible initial states for the RNG, so it&#39;s very easy to predict future output by searching through them all.</li>
+<li><a href="http://www.pcg-random.org/posts/cpp-seeding-surprises.html#bias">The first output after the seeding will be biased</a> - more than one-third of the 2<sup>32</sup> possible outputs will not show up at all regardless of the value of the seed, while others will show up more than once.</li>
+</ul>
+<h3 id="there-s-a-proposal-2-already-to-simplify-seeding-with-std-random_device-">There&#39;s <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0205r0.html">a proposal</a> already to simplify seeding with <code>std::random_device</code>.</h3>
+<p>We are happy to see that proposal, which goes a long way towards addressing the usability issues with seeding random number engines with <code>random_device</code>. However, <code>std::random_device</code> is allowed to utilize a random number engine, and <a href="http://stackoverflow.com/questions/18880654/why-do-i-get-the-same-sequence-for-every-run-with-stdrandom-device-with-mingw">is known to do so on at least one platform</a>, and in practice it is difficult for a program to detect whether an engine is being used behind the scenes (<code>random_device::entropy</code> always returns zero on several major implementations). Thus, that proposal does not fully address the seeding problem.</p>
+<h3 id="but-why-would-an-implementation-that-doesn-t-support-nondeterministic-random_device-support-your-nondeterministic-seeding-scheme-">But why would an implementation that doesn&#39;t support nondeterministic <code>random_device</code> support your nondeterministic seeding scheme?</h3>
+<p>There are <a href="http://www.pcg-random.org/posts/simple-portable-cpp-seed-entropy.html">other sources of entropy</a> which can be used by the implementation as a fallback for seeding purposes, even though they would not be able to power <code>std::random_device</code>. We note that the <em>per-thread engine</em> in the Library Fundamentals v2 TS is also required to be initialized to an unpredictable state.</p>
+<h3 id="most-functions-construct-or-encourage-the-construction-of-a-distribution-object-on-every-call-which-can-be-wasteful-what-happened-to-you-don-t-pay-for-what-you-don-t-use-">Most functions construct (or encourage the construction of) a distribution object on every call, which can be wasteful. What happened to &quot;you don&#39;t pay for what you don&#39;t use&quot;?</h3>
+<p>In our view, for a user of <code>random_generator</code>, part of what they are paying for is the convenience, including the convenience of not having to construct a distribution object themselves. Users who desire the very last bit of performance can construct their own distribution objects once and reuse them, possibly with different parameter objects. We do provide a <code>generate</code> member function template for the common case of generating multiple random numbers all from the same distribution.</p>
+<h3 id="why-member-functions-what-happened-to-the-lesson-of-std-basic_string-and-its-s-103-s-s-127-s-s-128-s-130-member-functions-">Why member functions? What happened to the lesson of <code>std::basic_string</code> and its <s>103</s> <s>127</s> <s>128</s> 130 member functions?</h3>
+<p>We do agree that <code>basic_string</code>&#39;s design is not exactly something that should be emulated. However, we think that <code>random_generator</code> here plays a very different role from <code>basic_string</code> that make the analogy inapposite. (Several of the points below <a href="https://groups.google.com/a/isocpp.org/d/msg/std-proposals/l3FLfjM91Mw/SNbYpzNLDgAJ">were raised by Zhihao Yuan on std-proposals</a>, with which we agree.)</p>
+<p>First, <code>random_generator</code> is a thin glue layer that wraps any URBG, in the standard library or outside. <code>std::basic_string</code> is a concrete string class, with many analogues in other code bases.</p>
+<p>Second, unlike things like <code>find_first_of</code> or <code>replace</code>, which applies equally well to all sequences, including non-<code>char</code> ones, <code>pick</code>, <code>choose</code>, <code>uniform</code>, etc. don&#39;t really apply outside the random number context. Our <code>generate</code> is not <code>std::generate</code>.</p>
+<p>Third, the design of <code>random_generator</code> intentionally favors convenience over maximal efficiency (see the previous question), so our member functions are not necessarily the most efficient - for instance, calling <code>pick</code>, <code>choose</code>, and <code>uniform</code> multiple times may not be as efficient as the hand-written version if the distribution object is stateful. Packaging them together provides a simple rule of thumb - &quot;if you care about getting every last bit of performance, don&#39;t use <code>random_generator</code>&quot;, which seems preferable to &quot;if you care about getting every last bit of performance, don&#39;t use these X different things&quot;.</p>
+<p>We also note that with member functions, the name of the class provides context, allowing shorter names such as <code>pick</code> and <code>choose</code> to be used without causing ambiguity. Unlike <code>shuffle</code> and to a lesser degree <code>sample</code>, words like <code>pick</code>, <code>choose</code> or <code>uniform</code> do not inherently bring randomness to mind: it is far from obvious that a hypothetical <code>std::pick</code> means &quot;pick randomly&quot;, whereas <code>random_generator::pick</code> clearly implies that the picking is done in a random manner.</p>
+<p>Finally, we simply do not have that many member functions - our member function count is 20, not 109 :)</p>
+<h3 id="do-we-really-need-both-pick-and-choose-">Do we really need both <code>pick</code> and <code>choose</code>?</h3>
+<p><code>pick</code> deals with containers, and it&#39;s natural for it to return a reference to the element picked; <code>choose</code> is passed a pair of iterators, so it&#39;s natural for it to return an iterator. We think both are useful and worth providing. <code>pick()</code> is sugar for <code>*choose()</code> much like <code>front()</code> is sugar for <code>*begin()</code>.</p>
+<h2 id="impact-on-the-standard">Impact on the standard</h2>
+<p>This is a pure extension.</p>
+<h2 id="technical-specification">Technical specification</h2>
+<h3 id="open-questions">Open questions</h3>
+<ul>
+<li>Is there a better way to specify the range-based overloads other than <em>BEGIN_EXPR</em> / <em>END_EXPR</em>?</li>
+</ul>
+</li>
+</ul>
+<h3 id="addition-to-random-synopsis">Addition to <code>&lt;random&gt;</code> synopsis</h3>
+<pre><code>template &lt;class URBG = default_random_engine&gt;
+class random_generator;
+using default_rng = random_generator&lt;&gt;;
+using mt19937_rng = random_generator&lt;mt19937&gt;;
+using mt19937_64_rng = random_generator&lt;mt19937_64&gt;;
+</code></pre><h3 id="class-template-random_generator-synopsis">Class template <code>random_generator</code> synopsis</h3>
+<blockquote class="note">
+<p><em>Drafting note</em>: the name <code>URBG</code> brings in the requirement in [rand.req.genl].</p>
+</blockquote>
+<pre><code>template &lt;class URBG = default_random_engine&gt;
+class random_generator {
+public:
+    using urbg_type       = URBG;
+private:
+    urbg_type urbg_; // exposition only
+public:
+    random_generator();
+
+    template &lt;class... Params&gt;
+    explicit random_generator(in_place_t, Params&amp;&amp;... params);
+
+    void seed();
+
+    template &lt;class... Params&gt;
+    void seed(Params&amp;&amp;... params);
+
+    URBG&amp; urbg() noexcept;
+
+    template &lt;class DistType&gt;
+    typename DistType::result_type variate(DistType&amp;&amp; dist);
+
+    template &lt;class Numeric&gt;
+    Numeric uniform(Numeric lower, Numeric upper);
+
+    template &lt;class DistType, class ForwardIterator&gt;
+    void generate(DistType&amp;&amp; dist, ForwardIterator first, ForwardIterator last);
+
+    template &lt;class DistType, class Range&gt;
+    void generate(DistType&amp;&amp; dist, Range&amp;&amp; range);
+
+    template &lt;class ForwardIterator&gt;
+    void generate(ForwardIterator first, ForwardIterator last);
+
+    template &lt;class Range&gt;
+    void generate(Range&amp;&amp; range);
+
+    template &lt;class RandomAccessIterator&gt;
+    void shuffle(RandomAccessIterator first, RandomAccessIterator last);
+
+    template &lt;class Range&gt;
+    void shuffle(Range&amp;&amp; range);
+
+    template &lt;class ForwardIterator&gt;
+    ForwardIterator choose(ForwardIterator first, ForwardIterator last);
+
+    template &lt;class Range&gt;
+    auto choose(Range&amp;&amp; range);
+
+    template &lt;class Range&gt;
+    decltype(auto) pick(Range&amp;&amp; range);
+
+    template &lt;class T&gt;
+    decltype(auto) pick(std::initializer_list&lt;T&gt; range);
+
+    template &lt;class ForwardIterator, class Distance&gt;
+    ForwardIterator inplace_sample(ForwardIterator first, ForwardIterator last, Distance n);
+
+    template &lt;class Range, class Distance&gt;
+    auto inplace_sample(Range&amp;&amp; range, Distance n);
+
+    template &lt;class PopulationIterator, class SampleIterator, class Distance&gt;
+    SampleIterator sample(PopulationIterator first, PopulationIterator last, SampleIterator out, Distance n);
+
+};
+</code></pre><h4 id="random_generator-construction-and-seeding"><code>random_generator</code> construction and seeding</h4>
+<pre><code>random_generator();
+</code></pre>
+<blockquote>
+<p><em>Requires</em>: <code>URBG</code> shall satisfy the random number engine requirements ([rand.req.eng]).</p>
+<p><em>Effects</em>: Initializes <code>urbg_</code> to an unpredictable state.</p>
+<p><em>Remarks</em>: Implementations should seed <code>urbg_</code> using at least 256 bits of entropy of reasonable quality. [<em>Note</em>: the seeding need not be cryptographically secure, but should not be trivially weak. &mdash; <em>end note</em>] Implementations should ensure that distinct calls to this constructor and to <code>seed()</code> utilize distinct seeds, even if the calls are closely separated in time.</p>
+</blockquote>
+<pre><code>template &lt;class... Params&gt;
+explicit random_generator(in_place_t, Params&amp;&amp;... params);
+</code></pre><blockquote><p><em>Effects</em>: Direct-non-list-initializes <code>urbg_</code> with <code>std::forward&lt;Params&gt;(params)...</code>.</p>
+<p><em>Remarks</em>: No additional seeding is performed. [<i>Note:</i> If <code>URBG</code> satisfies the random number engine requirements ([rand.req.eng]), the underlying engine may be seeded by calling <code>seed()</code>. <i>&mdash; end note</i>]</p>
+</blockquote><pre><code>void seed();
+</code></pre><blockquote><p><em>Requires</em>: <code>URBG</code> shall satisfy the random number engine requirements ([rand.req.eng]).</p>
+<p><em>Effects</em>: Reseeds <code>urbg_</code> to an unpredictable state.</p>
+<p><em>Remarks</em>: Implementations should seed <code>urbg_</code> using at least 256 bits of entropy of reasonable quality. [<em>Note</em>: the seeding need not be cryptographically secure, but should not be trivially weak. &mdash; <em>end note</em>] Implementations should ensure that distinct calls to <code>seed()</code> and to the default constructor utilize distinct seeds, even if the calls are closely separated in time.</p>
+</blockquote><pre><code>template &lt;class... Params&gt;
+void seed(Params&amp;&amp;... params);
+</code></pre><blockquote><p><em>Requires</em>: <code>URBG</code> shall satisfy the random number engine requirements ([rand.req.eng]).</p>
+<p><em>Effects</em>: Equivalent to <code>urbg_.seed(std::forward&lt;Params&gt;(params)...);</code></p>
+</blockquote>
+<h4 id="random_generator-underlying-engine-access"><code>random_generator</code> underlying engine access</h4>
+<pre><code>URBG&amp; urbg() noexcept;
+</code></pre><blockquote><p><em>Returns</em>: <code>urbg_</code>.</p></blockquote>
+<h4 id="random_generator-random-number-generation"><code>random_generator</code> random number generation</h4>
+<p>Given an expression <code>t</code>, define <code><em>BEGIN_EXPR</em>(t)</code> and <code><em>END_EXPR</em>(t)</code> as follows:</p>
+<ul>
+<li>If the expression <code>std::begin(t)</code> is valid ([temp.deduct]) when considered as an unevaluated operand, then  <code><em>BEGIN_EXPR</em>(t)</code> is <code>std::begin(t)</code> and <code><em>END_EXPR</em>(t)</code> is <code>std::end(t)</code>.  [<em>Note:</em> This handles classes with member <code>begin()</code> and <code>end()</code>. <em>&mdash; end note</em>]</li>
+<li>Otherwise, <code><em>BEGIN_EXPR</em>(t)</code> is <code>begin(t)</code> and <code><em>END_EXPR</em>(t)</code> is <code>end(t)</code>, where <code>begin</code> and <code>end</code> are looked up in the associated namespaces ([basic.lookup.argdep]) of <code>T</code>. [<em>Note:</em> This can be done by performing an unqualified call in a context where no viable <code>begin</code> or <code>end</code> are found by ordinary unqualified lookup. <em>&mdash; end note</em>]</li>
+</ul>
+<blockquote class="note">
+<p><em>Drafting note</em>: the intended semantics here is &quot;use <code>std::begin</code> if valid,  ADL <code>begin</code> otherwise&quot;. (The <code>std::begin</code> that dispatches to <code>.begin()</code> is  SFINAE-friendly.) Done in two steps so as to avoid ambiguities due to possible greedy ADL <code>begin</code>s.</p>
+</blockquote>
+<pre><code>template &lt;class DistType&gt;
+typename remove_reference_t&lt;DistType&gt;::result_type variate(DistType&amp;&amp; dist);
+</code></pre><blockquote>
+<p><em>Requires</em>: <code>remove_reference_t&lt;DistType&gt;</code> shall satisfy the random number distribution requirements ([rand.req.dist]).</p>
+<p><em>Effects</em>: Equivalent to <code>return dist(urbg_);</code></p>
+</blockquote><pre><code>template &lt;class Numeric&gt;
+Numeric uniform(Numeric lower, Numeric upper);
+</code></pre><blockquote><p>Let <code>UniformDist</code> be <code>uniform_int_distribution&lt;Numeric&gt;</code> if <code>Numeric</code> is an integral type, <code>uniform_real_distribution&lt;Numeric&gt;</code> otherwise. [<em>Note:</em> This implies that <code>Numeric</code> must be one of the allowed types for <code>IntType</code> or <code>RealType</code> in [rand.req.genl]. <em>&mdash; end note</em>]</p>
+<p><em>Effects</em>:  Equivalent to <code>return variate(UniformDist(lower, upper));</code></p>
+</blockquote><pre><code>template &lt;class DistType, class ForwardIterator&gt;
+void generate(DistType&amp;&amp; dist, ForwardIterator first, ForwardIterator last);
+
+template &lt;class ForwardIterator&gt;
+void generate(ForwardIterator first, ForwardIterator last);
+</code></pre><blockquote><p>For the second overload, let <code>T</code> be the value type of <code>ForwardIterator</code>, and let <code>dist</code> be <code>uniform_int_distribution&lt;T&gt;()</code> if <code>T</code> is an integral type, and <code>uniform_real_distribution&lt;T&gt;()</code> otherwise. [<em>Note:</em> This implies that <code>T</code> must be one of the allowed types for <code>IntType</code> or <code>RealType</code> in [rand.req.genl]. <em>&mdash; end note</em>]</p>
+<p><em>Requires</em>: <code>ForwardIterator</code> shall meet the requirements of a forward iterator ([forward.iterators]). For the first overload, <code>remove_reference_t&lt;DistType&gt;</code> shall satisfy the random number distribution requirements ([rand.req.dist]).</p>
+<p><em>Effects</em>: Equivalent to:</p>
+<blockquote><pre><code>auto&amp;&amp; d_ = dist;
+std::generate(first, last, [&amp;]{return d_(urbg_);});
+</code></pre></blockquote></blockquote><pre><code>template &lt;class DistType, class Range&gt;
+void generate(DistType&amp;&amp; dist, Range&amp;&amp; range);
+</code></pre><blockquote><p><em>Effects</em>: Equivalent to <code>generate(dist, <i>BEGIN_EXPR</i>(range), <i>END_EXPR</i>(range));</code></p>
+</blockquote><pre><code>template &lt;class Range&gt;
+void generate(Range&amp;&amp; range);
+</code></pre><blockquote><p><em>Effects</em>: Equivalent to <code>generate(<i>BEGIN_EXPR</i>(range), <i>END_EXPR</i>(range));</code></p>
+</blockquote>
+<h4 id="random_generator-shuffling-and-sampling"><code>random_generator</code> shuffling and sampling</h4>
+<pre><code>template &lt;class RandomAccessIterator&gt;
+void shuffle(RandomAccessIterator first, RandomAccessIterator last);
+</code></pre><blockquote><p><em>Requires</em>: <code>RandomAccessIterator</code> shall meet the requirements of a random access iterator ([random.access.iterators]).</p>
+<p><em>Effects</em>: Equivalent to <code>std::shuffle(first, last, urbg_);</code></p>
+</blockquote><pre><code>template &lt;class Range&gt;
+void shuffle(Range&amp;&amp; range);
+</code></pre><blockquote><p><em>Effects</em>: Equivalent to <code>shuffle(<i>BEGIN_EXPR</i>(range), <i>END_EXPR</i>(range))</code>;</p>
+</blockquote><pre><code>template &lt;class ForwardIterator&gt;
+ForwardIterator choose(ForwardIterator first, ForwardIterator last);
+</code></pre><blockquote><p><em>Requires</em>: <code>ForwardIterator</code> shall meet the requirements of a forward iterator ([forward.iterators]).</p>
+<p><em>Returns</em>: If <code>first == last</code>, <code>first</code>. Otherwise, an iterator in the range <code>[first, last)</code>, such that each iterator in the range has equal probability of being chosen.</p>
+<p><em>Remarks</em>: To the extent that the implementation of this function makes use of random numbers, the object <code>urbg_</code> shall serve as the implementation&#39;s source of randomness.</p>
+</blockquote><pre><code>template &lt;class Range&gt;
+auto choose(Range&amp;&amp; range);
+</code></pre><blockquote><p><em>Effects</em>: Equivalent to <code>return choose(<i>BEGIN_EXPR</i>(range), <i>END_EXPR</i>(range));</code></p>
+</blockquote><pre><code>template &lt;class Range&gt;
+decltype(auto) pick(Range&amp;&amp; range);
+
+template &lt;class T&gt;
+decltype(auto) pick(std::initializer_list&lt;T&gt; range);
+</code></pre><blockquote><p><em>Effects</em>: Equivalent to <code>return *choose(range);</code>;</p>
+</blockquote><pre><code>template &lt;class ForwardIterator, class Distance&gt;
+ForwardIterator inplace_sample(ForwardIterator first, ForwardIterator last, Distance n);
+</code></pre><blockquote><p><em>Requires</em>: <code>ForwardIterator</code> shall meet the requirements of a forward iterator ([forward.iterators]) and the <code>ValueSwappable</code> requirements ([swappable.requirements]). The type of <code>*first</code> shall satisfy the requirements of <code>MoveConstructible</code>  (Table [tab:moveconstructible]) and <code>MoveAssignable</code> (Table [tab:moveassignable]).</p>
+<p>In the description below, the + and - operators have the semantics specified in [algorithms.general].</p>
+<p><em>Effects</em>: If <code>n &gt;= last - first</code>, has no effects. Otherwise, reorders elements in the range <code>[first, last)</code>, such that each possible sample of size <code>n</code> has equal probability of appearing in the range <code>[first, first + n)</code>. The relative order of the elements both inside the sample and outside the sample is preserved.</p>
+<p><em>Returns</em>: <code>first + min(n, last - first)</code>.</p>
+<p><em>Remarks</em>: To the extent that the implementation of this function makes use of random numbers, the object <code>urbg_</code> shall serve as the implementation&#39;s source of randomness.</p>
+</blockquote><pre><code>template &lt;class Range, class Distance&gt;
+auto inplace_sample(Range&amp;&amp; range, Distance n);
+</code></pre><blockquote><p><em>Effects</em>: Equivalent to <code>return inplace_sample(<i>BEGIN_EXPR</i>(range), <i>END_EXPR</i>(range), n);</code></p>
+</blockquote><pre><code>template &lt;class PopulationIterator, class SampleIterator, class Distance&gt;
+SampleIterator sample(PopulationIterator first, PopulationIterator last, SampleIterator out, Distance n);
+</code></pre><blockquote><p><em>Effects</em>: Equivalent to <code>return std::sample(first, last, out, n, urbg_);</code></p>
+</blockquote>
+<h2 id="acknowledgements">Acknowledgements</h2>
+<p>We thank Chandler Carruth for his encouragement and support. We also thank Zhihao Yuan, Jeffrey Yasskin, Nicol Bolas, and other members of the std-proposal mailing list for their comments on an earlier draft of this proposal. </p>
+</body>
+</html>

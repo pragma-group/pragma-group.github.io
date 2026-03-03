@@ -1,0 +1,564 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<html>
+<head>
+<title>N4518: Make exception-specifications be part of the type system, version 2</title>
+
+<style type="text/css">
+  ins { text-decoration:none; font-weight:bold; background-color:#A0FFA0 }
+  .new { text-decoration:none; font-weight:bold; background-color:#D0FFD0 }
+  del { text-decoration:line-through; background-color:#FFA0A0 }
+  strong { font-weight: inherit; color: #2020ff }
+  .old { background-color:#ffff40 }
+  .old ins { background-color:#a0ff30 }
+</style>
+
+</head>
+
+<body>
+
+N4518<br/>
+revises N4320<br/>
+Jens Maurer &lt;Jens.Maurer@gmx.net><br/>
+2015-05-08
+
+<h1>N4518: Make exception specifications be part of the type system, version 2</h1>
+
+<h2>Introduction</h2>
+
+<p>
+The exception specification of a function was never considered a part
+of its type.  Instead, 15.4 [except.spec] paragraphs 5 and 6 only
+restrict assignments and initializations of pointers and references to
+(member) functions.  This leads to odd holes in the type system that
+have resulted in a number of core issues.
+</p>
+
+Core issue 92 asks the fundamental question "Should
+exception-specifications be part of the type system?" and gives this
+example:
+<pre>
+    void (*p)() throw(int);
+    void (**pp)() throw() = &p;   // not currently an error
+</pre>
+
+<p>
+This issue was closed as NAD in February 2014, because "EWG determined
+that no action should be taken on this issue" (quote from the core
+issues list).  Little technical argument seems to have been presented;
+closing the issue was rather seen as warding off work.
+</p>
+
+<p>
+Core issue 1946 "exception-specifications vs pointer dereference"
+highlighted that clarifications for determining potential exceptions
+of an expression brought forward for core issue 1351 caused this
+example to be ill-formed, which was arguably well-formed under the
+earlier imprecise wording:
+</p>
+
+<pre>
+  void (*p)() throw(int);
+  void (&r)() throw(int) = *p;  // ill-formed
+</pre>
+
+A similar example involving templates is impossible to fix without
+changes to the type system:
+
+<pre>
+  template&lt;typename T> T& f(T* p);
+  void (*p)() throw(int);
+  void (&r)() throw(int) = f(p);  // ill-formed
+</pre>
+
+<p>
+Core issue 2010 "exception-specifications and conversion operators"
+adds these examples:
+</p>
+
+<pre>
+  struct S { typedef void (*p)(); operator p(); };
+  void (*q)() noexcept = S();
+
+  void (*r)() noexcept = []() noexcept {};
+</pre>
+
+<p>
+The recent work on a specification for transactional memory support
+(see N4265 "Transactional Memory Support for C++: Wording (revision
+3)") required integrating the <code>transaction_safe</code> specifier
+into the types of functions, among other things considering it for
+implicit conversions and overload resolution.  This paper clones that
+approach to integrate the presence or absence of a non-throwing
+exception-specification (called <code>noexcept</code>) into the types
+of functions, too.
+</p>
+
+<h2>Feature-test macro</h2>
+
+The recommended feature-test macro is
+<code>__cpp_noexcept_function_type</code>.
+
+
+<h2>Wording</h2>
+
+<h3>Clause 4 [conv]</h3>
+
+No change in section 4.3 [conv.func] paragraph 1:
+
+<blockquote>
+An lvalue of function type T can be converted to a prvalue of type
+"pointer to T". The result is a pointer to the function. [ Footnote:
+... ]
+
+</blockquote>
+
+Add a new section after section 4.11 [conv.mem]:
+
+<blockquote class="new">
+<b>4.12 [conv.fctptr] Function pointer conversions</b><br/>
+
+<p>
+A prvalue of type "pointer to <code>noexcept</code> function"
+can be converted to a prvalue of type "pointer to function".  The
+result is a pointer to the function.  A prvalue of type
+"pointer to member of type <code>noexcept</code> function" can
+be converted to a prvalue of type "pointer to member of type
+function".  The result points to the member function.
+</p>
+
+<p>
+[ Example:
+<pre>
+  void (*p)() throw(int);
+  void (**pp)() throw() = &p;   // error
+
+  struct S { typedef void (*p)(); operator p(); };
+  void (*q)() noexcept = S();   // error
+</pre>
+-- end example ]
+</p>
+</blockquote>
+
+
+<h3>Clause 5 [expr] Expressions</h3>
+
+Change in 5 [expr] paragraph 13: 
+
+<blockquote>
+[ Note: ... ] The <em>composite pointer type</em> of two operands p1
+and p2 having types T1 and T2, respectively, where at least one is a
+pointer or pointer to member type or <code>std::nullptr_t</code>, is:
+
+<ul>
+<li>...</li>
+
+<li>if T1 or T2 is "pointer to cv1 void" and the other type is
+"pointer to cv2 T", "pointer to cv12 void", where cv12 is the union of
+cv1 and cv2 ;</li>
+
+<li><ins>if T1 or T2 is "pointer to <code>noexcept</code>
+function" and the other type is "pointer to function", where the
+function types are otherwise the same, "pointer to
+function";</ins></li>
+
+<li>...</li>
+
+</ul>
+
+</blockquote>
+
+
+Change in 5.1.2 [expr.prim.lambda] paragraph 6:
+
+<blockquote>
+The closure type for a non-generic <em>lambda-expression</em> with no
+<em>lambda-capture</em> has a public non-virtual non-explicit const
+conversion function to pointer to function with C++ language linkage
+(7.5 [dcl.link]) having the same parameter and return types as the
+closure type's function call operator. <ins>That pointer type is "pointer
+to <code>noexcept</code> function" if the function call operator has a
+non-throwing exception specification.</ins>
+
+</blockquote>
+
+
+Change in 5.2.9 [expr.static.cast] paragraph 7:
+
+<blockquote>
+The inverse of any standard conversion sequence (Clause 4 [conv]) not
+containing an lvalue-to-rvalue (4.1 [conv.lval]), array-to-pointer
+(4.2 [conv.array]), function-to-pointer (4.3), null pointer (4.10),
+null member pointer (4.11), <del>or</del> boolean (4.12)<ins>,
+or function pointer (4.12 [conv.fctptr])</ins> conversion, can
+be performed explicitly using <code>static_cast</code>. ...
+</blockquote>
+
+Change in 5.10 [expr.eq] paragraph 2:
+
+<blockquote>
+If at least one of the operands is a pointer, pointer conversions
+(4.10 [conv.ptr])<ins>, function pointer conversions (4.12
+[conv.fctptr]),</ins> and qualification conversions (4.4 [conv.qual]) are
+performed on both operands to bring them to their composite pointer
+type (clause 5 [expr]).
+
+</blockquote>
+
+
+Change in 5.16 [expr.cond] paragraph 6:
+
+<blockquote>
+<ul>
+<li>One or both of the second and third operands have pointer type;
+pointer conversions (4.10 [conv.ptr])<ins>, function pointer
+conversions (4.12 [conv.fctptr]),</ins> and qualification conversions (4.4
+[conv.qual]) are performed to bring them to their composite pointer type
+(5 [expr]). ...</li>
+
+<li>...</li>
+
+</ul>
+
+</blockquote>
+
+
+
+Change in 5.17 [expr.throw]:
+
+<blockquote>
+
+Evaluating a <em>throw-expression</em> with an operand throws an
+exception (15.1 [except.throw]); the type of the exception object is
+determined by removing any top-level cv-qualifiers from the static
+type of the operand and adjusting the type from "array of T" or
+<del>"function returning T"</del> <ins>function type T</ins>
+to "pointer to T"<del> or "pointer to "function returning T,"
+respectively</del>.
+
+</blockquote>
+
+
+Change in 5.20 [expr.const] paragraph 3:
+
+<blockquote>
+... A <em>converted constant expression</em> of type T is an
+expression, implicitly converted to a prvalue of type T, where the
+converted expression is a core constant expression and the implicit
+conversion sequence contains only user-defined conversions,
+lvalue-to-rvalue conversions (4.1 [conv.lval]), integral promotions
+(4.5 [conv.prom]), <del>and</del> integral conversions (4.7
+[conv.integral]) other than narrowing conversions (8.5.4
+[dcl.init.list])<ins>, and function pointer conversions (4.12
+[conv.fctptr])</ins>. [ Note: ... ]
+
+</blockquote>
+
+
+<h3>Section 8 [dcl.decl] Declarators</h3>
+
+Change in 8.3.5 [dcl.fct] paragraphs 1 and 2: 
+
+<blockquote>
+In a declaration T D where D has the form
+<pre>
+    D1 ( <em>parameter-declaration-clause</em> ) <em>cv-qualifier-seq<sub>opt</s
+ub>
+         ref-qualifier<sub>opt</sub></em> <em>exception-specification<sub>opt</sub> attribute-specifier-seq<sub>opt</sub></em>
+</pre>
+and the type of the contained <em>declarator-id</em> in the
+declaration T D1 is "derived-declarator-type-list T", the type of the
+<em>declarator-id</em> in D is "derived-declarator-type-list
+<ins><code>noexcept</code><sub>opt</sub></em></ins> function of
+(parameter-declaration-clause)
+<em>cv-qualifier-seq<sub>opt</sub> ref-qualifier<sub>opt</sub></em>
+returning T"<ins>, where the optional <code>noexcept</code> is present if
+and only if
+the <em>exception-specification</em> is non-throwing</ins>.
+The optional <em>attribute-specifier-seq</em> appertains to the function type.
+
+<p>
+In a declaration T D where D has the form
+<pre>
+    D1 ( <em>parameter-declaration-clause</em> ) <em>cv-qualifier-seq<sub>opt</s
+ub>
+         ref-qualifier<sub>opt</sub></em> <em>exception-specification<sub>opt</sub> attribute-specifier-seq<sub>opt</sub> trailing-return-type</em>
+</pre>
+and the type of the contained <em>declarator-id</em> in the
+declaration T D1 is "derived-declarator-type-list T", T shall be the
+single <em>type-specifier</em> auto. The type of the
+<em>declarator-id</em> in D is "derived-declarator-type-list
+<ins><code>noexcept</code><sub>opt</sub></ins> function of
+(parameter-declaration-clause) <em>cv-qualifier-seq<sub>opt</sub>
+ref-qualifier<sub>opt</sub></em> returning
+<em>trailing-return-type</em>"<ins>, where the optional <code>noexcept</code>
+is present if and only if the <em>exception-specification</em> is non-throwing</ins>.
+The optional <em>attribute-specifier-seq</em> appertains to the function type.
+</blockquote>
+
+
+Change in 8.3.5 [dcl.fct] paragraph 5:
+
+<blockquote>
+... After determining the type of each parameter, any parameter of
+type "array of T" or <del>"function returning T"</del> <ins>of function type T</ins> is adjusted to be "pointer
+to T" <del>or "pointer to function returning T," respectively</del>. ...
+
+</blockquote>
+
+
+Change in 8.3.5 [dcl.fct] paragraph 6:
+
+<blockquote>
+... The return type, the parameter-type-list, the
+<em>ref-qualifier</em>, <del>and</del> the <em>cv-qualifier-seq</em>,
+<ins>and whether the function has a non-throwing
+<em>exception-specification</em>,</ins> but not the default arguments
+(8.3.6 [dcl.fct.default]) or the <em>exception specification</em>
+(15.4 [except.spec]), are part of the function type. ...
+
+</blockquote>
+
+
+Change in section 8.4.1 [dcl.fct.def.general] paragraph 2:
+
+<blockquote>
+The <em>declarator</em> in a <em>function-definition</em> shall have
+the form
+<pre>
+         D1 <del>( <em>parameter-declaration-clause</em> ) <em>cv-qualifier-seq<sub>opt</sub>
+               ref-qualifier<sub>opt</sub> exception-specification<sub>opt</sub> attribute-specifier-seq<sub>opt</sub></em></del> 
+               <em><ins>parameters-and-qualifiers</ins> trailing-return-type<sub>opt</sub></em>
+</pre>
+</blockquote>
+
+<p>
+<em>[ Drafting note: This is intended to reduce the grammar
+redundancies around function declarators. ]</em>
+</p>
+
+
+<h3>Clause 13 [over] Overloading</h3>
+
+Change in 13.1 [over.load] paragraph 2:
+
+<blockquote>
+Certain function declarations cannot be overloaded:
+<ul>
+
+<li>Function declarations that differ only in the return type
+<ins>and/or the exception specification (15.4 [except.spec])</ins> cannot be
+overloaded.</li>
+
+<li>...</li>
+</ul>
+
+</blockquote>
+
+In 13.3.3.1.1 [over.ics.scs], add an entry to table 12:
+
+<blockquote class="new">
+<ul>
+<li>Conversion: Function pointer conversion</li>
+<li>Category: Lvalue transformation</li>
+<li>Rank: Exact Match</li>
+<li>Subclause: 4.12 [conv.fctptr]
+</ul>
+</blockquote>
+
+
+Change in 13.4 [over.over] paragraph 1:
+
+<blockquote>
+... <del>The function selected is the one whose type is
+identical to the function type of the target type required in the
+context.</del>
+
+<ins>A function with type <code>F</code> is selected for the function
+type <code>FT</code> of the target type required in the context if F
+(after possibly applying the function pointer conversion (4.12
+[conv.fctptr])) is identical to FT.</ins>
+
+[ Note: ... ]
+
+</blockquote>
+
+
+Change in 13.4 [over.over] paragraph 7:
+
+<blockquote>
+[ Note: <del>There are no standard conversions (Clause 4) of one
+pointer-to-function type into another. In particular, even</del>
+<ins>Even</ins> if B is a public base of D, we have
+<pre>
+D* f();
+B* (*p1)() = &amp;f;     // error
+void g(D*);
+void (*p2)(B*) = &amp;g; // error
+</pre>
+]
+</blockquote>
+
+
+<h3>Clause 14 [temp] Templates</h3>
+
+Change in 14.1 [temp.param] paragraph 8:
+
+<blockquote>
+A non-type template-parameter of type "array of T" or <del>"function
+returning T"</del> <ins>of function type T</ins> is adjusted to be of
+type "pointer to T"<del> or "pointer to
+function returning T", respectively</del>. [ Example: ... ]
+
+</blockquote>
+
+
+Change in 14.8.2.1 [temp.deduct.call] paragraph 4:
+
+<blockquote>
+... However, there are three cases that allow a difference:
+
+<ul>
+<li>...</li>
+
+<li>The transformed A can be another pointer or pointer to member type
+that can be converted to the deduced A via a qualification conversion
+(4.4 [conv.qual]) <ins>or a function pointer conversion (4.12
+[conv.fctptr])</ins>.</li>
+
+<li>...</li>
+
+</ul>
+
+</blockquote>
+
+
+Change in 14.8.2.3 temp.deduct.conv paragraph 5:
+
+<blockquote>
+In general, the deduction process attempts to find template argument
+values that will make the deduced A identical to A. However, there are
+<del>two</del> <ins>three</ins> cases that allow a difference:
+
+<ul>
+
+<li>If the original A is a reference type, A can be more cv-qualified
+than the deduced A (i.e., the type referred to by the reference)<ins>.</ins></li>
+
+<li><ins>If the original A is a pointer to function type, A can be "pointer
+to <code>noexcept</code> function" even if the deduced A is "pointer to
+function".</ins></li>
+
+<li>...</li>
+
+</ul>
+
+</blockquote>
+
+<h3>Clause 15 [except] Exception handling</h3>
+
+Change in 15.3 except.handle paragraph 3:
+
+<blockquote>
+A <em>handler</em> is a match for an exception object of type E if
+
+<ul>
+
+<li>...</li>
+
+<li>the handler is of type cv T or const T& where T is a pointer type
+and E is a pointer type that can be converted to T by <del>either or
+both of</del> <ins>one or more of</ins>
+
+<ul>
+
+<li>a standard pointer conversion (4.10 [conv.ptr]) not involving
+conversions to pointers to private or protected or ambiguous
+classes</li>
+
+<li>a qualification conversion <ins>(4.4 [conv.qual])</ins></li>
+
+<li><ins>a function pointer conversion (4.12 [conv.fctptr])</ins></li>
+
+</ul>
+
+<li>...</li>
+
+</ul>
+
+</blockquote>
+
+
+Change in 15.4 [except.spec] paragraph 1:
+
+<blockquote>
+A function <del>declaration</del> <ins>declarator</ins> lists
+exceptions that its function might directly or indirectly throw by
+using an <em>exception-specification</em> as a suffix <del>of its
+declarator</del>.
+
+</blockquote>
+
+Change in 15.4 [except.spec] paragraph 2:
+
+<blockquote>
+<del>An <em>exception-specification</em> shall appear only on a
+function declarator for a function type, pointer to function type,
+reference to function type, or pointer to member function type that is
+the top-level type of a declaration or definition, or on such a type
+appearing as a parameter or return type in a function declarator. An
+exception-specification shall not appear in a typedef declaration or
+alias-declaration. [ Example: ... ]</del> ...
+
+</blockquote>
+
+
+Change in 15.4 [except.spec] paragraph 5 and delete paragraph 6:
+
+<blockquote>
+
+<p>
+[ Example: ... ] <del>A similar restriction applies to assignment
+to and initialization of pointers to functions, pointers to member
+functions, and references to functions: the target entity shall allow
+at least the exceptions allowed by the source value in the assignment
+or initialization. [ Example: ... ]</del>
+</p>
+
+<p>
+<del>In such an assignment or initialization,
+<em>exception-specification</em>s on return types and parameter types
+shall be compatible. In other assignments or initializations, <em>
+exception-specification</em>s shall be compatible.</del>
+</p>
+
+</blockquote>
+
+
+Add a new paragraph after 15.4 [except.spec] paragraph
+15:
+
+<blockquote class="new">
+A function with an implied non-throwing exception specification, where
+the function's type is declared to be T, is instead considered to be
+of type "<code>noexcept</code> T".
+
+</blockquote>
+
+Add a new section after C.4.1 [diff.cpp14.lex]:
+
+<blockquote class="new">
+<b>C.4.2 Clause 8: Declarators [diff.cpp14.decl]</b><br/>
+8.3.5 [dcl.fct]<p>
+<b>Change:</b> Make exception specifications be part of the type system.<br/>
+<b>Rationale:</b> Improve type-safety.<br/>
+<b>Effect on original feature:</b> Valid C++2014 code may fail to
+compile or change meaning in this International Standard:
+
+<pre>
+  void g1() noexcept;
+  void g2();
+  template&lt;class T> int f(T *, T *);
+  int x = f(g1, g2);    // ill-formed; previously well-formed
+</pre>
+
+</blockquote>

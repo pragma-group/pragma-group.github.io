@@ -1,0 +1,221 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+ "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8">
+<title>P0735R0: Interaction of memory_order_consume with release sequences</title>
+<style type="text/css">
+html { line-height: 135%; }
+ins { background-color: #DFD; }
+del { background-color: #FDD; }
+</style>
+</head>
+<body>
+<table>
+        <tr>
+                <th>Doc. No.:</th>
+                <td>WG21/P0735R0</td>
+        </tr>
+        <tr>
+                <th>Date:</th>
+                <td>2017-10-02</td>
+        </tr>
+        <tr>
+                <th>Reply-to:</th>
+                <td>Will Deacon</td>
+        </tr>
+        <tr>
+                <th>Email:</th>
+                <td><a href="mailto:will.deacon@arm.com">will.deacon@arm.com</a></td>
+        </tr>
+        <tr>
+                <th>Authors:</th>
+                <td>Will Deacon with input from Olivier Giroux and Paul McKenney</td>
+        </tr>
+        <tr>
+                <th>Audience:</th>
+                <td>SG1</td>
+        </tr>
+</table>
+
+<h1>P0735R0: Interaction of <code>memory_order_consume</code> with release sequences</h1>
+<p>
+The current definition of <code>memory_order_consume</code> is not sufficient
+to allow implementations to map a consume load to a "plain" load instruction
+(i.e. without using fences), despite this being the intention of the original
+proposal. Instead, <code>memory_order_consume</code> is typically treated as
+though the program had specified <code>memory_order_acquire</code>, which is
+now preferred by the standard (32.4p1.3 [atomics.order], <a
+href="http://wg21.link/p0371">P0371</a>).
+</p>
+<p>
+Work is ongoing to make <code>memory_order_consume</code> viable for
+implementations (<a href="http://wg21.link/p0462">P0462</a>, <a
+href="http://wg21.link/p0190">P0190</a>), but its interaction with release
+sequences remains unchanged and continues to be problematic for ARMv8 and
+potentially future architectures.
+</p>
+
+<h2>Release sequences</h2>
+<p>
+Release sequences provide a way to extend order from a release operation to
+other stores to the same object that are adjacent in the modification order.
+Consequently, an acquire operation can establish a "synchronizes with" relation
+with a release store by reading from any member of the release sequence headed
+by that store (32.4p2 [atomics.order]). An example use-case for release
+sequences is when a locking implementation places other flags into the lock
+word, which can be modified using relaxed read-modify-write operations by
+threads that do not hold the lock. Without the ordering guarantees of the
+release sequence, the read-modify-write operations updating the flags would
+need to use <code>memory_order_acq_rel</code> to ensure that lock operations
+synchronize with prior unlock operations for a given lock.
+</p>
+<p>
+Consume operations interact with release sequences in a similar manner to
+acquire operations via the "dependency-ordered before" relation (4.7.1p8
+[intro.races]). One notable difference between the behaviour of consume and
+acquire operations in this regard is that the consume operation must be
+performed by a different thread than the one performing the release operation.
+</p>
+<p>
+The following example shows a release store that is dependency-ordered before a
+relaxed load, due to the release sequence from B to C:
+</p>
+<pre><code>
+	int x, y;
+	atomic&ltint *&gt datap;
+	
+	void p0(void)
+	{
+		x = 42; /* A */
+		datap.store(&y, memory_order_release); /* B */
+	}
+	
+	void p1(void)
+	{
+		int *p, *q, r;
+	
+		do {
+			p = datap.exchange(&x, memory_order_relaxed); /* C */
+		} while (p != &y);
+	
+		q = datap.load(memory_order_consume); /* D */
+		r = *q; /* E */
+	}
+</code></pre>
+<p>
+The C++ memory model establishes the following relations, which can be used to
+construct "happens before" for the program.
+</p>
+<ul>
+<li>
+A is sequenced-before B
+<ul>
+	<li>
+	therefore A happens before B
+</ul>
+<li>
+C is in the release sequence headed by B
+<li>
+D reads from C
+<ul>
+	<li>
+	therefore B is dependency-ordered before D
+</ul>
+<li>
+D carries a dependency to E
+<ul>
+	<li>
+	therefore B is dependency-ordered before E,
+	<li>
+	B inter-thread happens before E, and
+	<li>
+	B happens before E
+</ul>
+</ul>
+<p>
+The "happens before" relation requires that <code>r == 42</code>, however this
+is not guaranteed by the ARMv8 architecture if the existing compiler mappings
+are changed to map <code>memory_order_consume</code> loads to <code>LDR</code>
+(the same as <code>memory_order_relaxed</code>). There is production silicon
+capable of exhibiting this behaviour.
+</p>
+
+<h2>Behaviour on hardware</h2>
+<p>
+In the previous example, P1 can be compiled to the following AArch64
+instructions:
+</p>
+<pre><code>
+/*
+ * X0 = &x
+ * X1 = &y
+ * X2 = &datap
+ * X3 = p
+ * X4 = q
+ * W5 = r
+ */
+.L1:	SWP	X3, X0, [X2]	// exchange
+	CMP	X3, X1
+	B.NE	.L1
+	LDR	X4, [X2]	// consume load
+	LDR	W5, [X4]	// dependent load
+</code></pre>
+<p>
+In the absence of any fence instructions, the CPU can forward the write to
+<code>datap</code> from the <code>SWP</code> instruction to the
+<code>LDR</code> of the consume load, speculating past the conditional branch.
+The dependent load can then complete before the <code>SWP</code> has returned
+data, returning a stale value for <code>x</code> (i.e. not 42).
+</p>
+<p>
+This behaviour is permitted by the ARMv8 memory model and is likely to be
+permitted on other upcoming architectures.
+</p>
+
+<h2>Possible solutions</h2>
+<p>
+While it is tempting to fix this problem by changing "dependency-ordered
+before" to require that the consume load must read a data value written by
+another thread, this does not resolve the problem for non-multi-copy atomic
+architectures that can perform forwarding between threads using a shared
+pre-cache store buffer.
+</p>
+<p>
+Another option is to restrict the read-modify-write operations that can appear
+in a release sequence used to establish a "dependency-ordered before" relation
+to those with implicit data dependencies (e.g.  <code>atomic_fetch_*</code>).
+This would notably omit <code>compare_exchange</code> operations which only
+provide a control dependency and are not sufficent to order against subsequent
+loads. Since <code>compare_exchange</code> is often used to implement
+<code>atomic_fetch_*</code> operations, then ordering may be broken in certain
+corner-cases (e.g. saturating arithmetic).
+</p>
+<p>
+Given that there appear to be no known use-cases for release sequences in
+conjunction with <code>memory_order_consume</code> operations, this paper
+instead proposes to remove then entirely from the definition of
+"dependency-ordered before".
+</p>
+
+<h2>Proposed wording</h2>
+<p>
+Change 4.7.1p8 [intro.races] to remove release sequences from the definition of
+"dependency-ordered before":
+</p>
+<blockquote>
+An evaluation A is dependency-ordered before an evaluation B if
+<ul>
+<li>
+A performs a release operation on an atomic object M, and, in another thread, B
+performs a consume operation on M and reads <del>a value written by any
+side effect in the release sequence headed</del> <ins>the value written</ins>
+by A, or
+<li>
+for some evaluation X, A is dependency-ordered before X and X carries a
+dependency to B.
+</ul>
+[ <em>Note:</em> The relation "is dependency-ordered before" is analogous to
+"synchronizes with", but uses release/consume in place of release/acquire. —
+<em>end note</em> ]
+</blockquote>

@@ -1,0 +1,234 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head>
+    <meta http-equiv="content-type" content="text/html; charset=UTF-8">
+
+    <title>P0110: Implementing the strong guarantee for variant&lt;&gt; assignment</title>
+    <style type="text/css">
+      p {text-align:justify}
+      li {text-align:justify}
+      blockquote.note
+      {
+      background-color:#E0E0E0;
+      padding-left: 15px;
+      padding-right: 15px;
+      padding-top: 1px;
+      padding-bottom: 1px;
+      }
+      ins, .inserted
+      {
+      color: black;
+      background: #a0ffa0;
+      text-decoration: underline;
+      }
+      del
+      {
+      color: black;
+      background: #ffa0a0;
+      text-decoration: line-through;
+      }
+    </style>
+  </head><body>
+    <table>
+      <tr><td>Document Number:</td><td>P0110R0</td></tr>
+      <tr><td>Date:</td><td>2015-09-25</td></tr>
+      <tr><td>Author:</td><td><a href="mailto:anthony@justsoftwaresolutions.co.uk">Anthony
+            Williams</a><br>Just Software Solutions Ltd</td></tr>
+    </table>
+    <h1>P0110R0: Implementing the strong guarantee for <code>variant&lt;&gt;</code> assignment</h1>
+
+    <p>N4542 has drawn a lot of comments across the web, from me and others. The fundamental problem
+      from my perspective is the undefined behaviour that arises from the <em>invalid</em> state. My
+      initial reaction was to propose an <em>empty</em> state in its place, the key distinction
+      being that (a) the user could explicitly set the variant to be <em>empty</em>, and (b)
+      operations on <em>empty</em> variants either succeeded without problem (e.g. copying
+      an <em>empty</em> variant just created a second <em>empty</em> variant), or threw an exception
+      (e.g. calling <code>get</code> on an empty variant), rather than having undefined
+      behaviour.</p>
+
+    <p>However, some people were strongly against the idea of an empty state, since they want to be
+    able to rely on their variants holding exactly one of the types in the list, and an empty state
+      is in many ways equivalent to an additional type in the list. Rather than
+      handling <code>variant&lt;int,string&gt;</code>, code must now
+    handle <code>variant&lt;int,string,<em>empty</em>&gt;</code>. Several people proposed that we
+      require <code>variant&lt;&gt;</code> to implement the <em>strong guarantee</em> for
+    assignment, so either the assignment is successful, or the value is unchanged if an exception
+      was thrown. I then set out to see how efficiently we could manage this.</p>
+
+    <h2>The strong guarantee for assignment</h2>
+
+    <p>The difficulty with providing the strong guarantee is that we want <code>variant</code> to
+      hold any kind of type, so operations might throw exceptions, or not be available at all. We
+      therefore need to identify the possible scenarios and ensure that the everything works OK.</p>
+
+    <p>Assumption: if the contained type is the same as the type being assigned, then we use the
+      assignment operator of that type, just as in N4542.</p>
+    
+    <p>For all the following, I'm going to assume we have a variant <code>v</code> of
+      type <code>variant&lt;A,B,C,D&gt;</code> that holds an instance of type <code>A</code>, and we
+      are doing an operation that will construct an instance of type
+      <code>B</code>. In each scenario I'll describe the properties
+      of <code>A</code>, <code>B</code>, <code>C</code> and <code>D</code> that I'm assuming for
+      that scenario.</p>
+
+    <h3>Case 1: The easy case</h3>
+
+    <p>If we're assigning to <code>v</code> using an operation that creates a type <code>B</code>
+      using a <code>noexcept</code> constructor, then it's all straightforward:</p>
+
+    <ol>
+      <li>Destroy the contained <code>A</code> object (which can't throw as we
+        require <code>noexcept</code> destructors).</li>
+      <li>Construct the new <code>B</code> object (which can't throw as the constructor we're
+        using is <code>noexcept</code>).</li>
+      <li>Mark the variant as holding a <code>B</code> (which can't throw).</li>
+    </ol>
+
+    <p>This is what we get if our type <code>B</code> is a built-in type, or we're move-constructing
+      a type with a <code>noexcept</code> move constructor like <code>std::string</code>. e.g.</p>
+
+    <pre>
+      variant&lt;int,std::string&gt; v(42);
+      v=std::string("hello");
+    </pre>
+
+    <p>If we're assigning to <code>v</code> using an operation that creates a type <code>B</code>,
+      but <code>B</code> has no <code>noexcept</code> constructors (e.g. any C++98 legacy type),
+      then step 2 above may throw. This would leave <code>v</code> in an inconsistent state, so we
+      need to do something to avoid it.</p>
+
+    <h3>Case 2: <code>B</code> is <em>nothrow-move-constructible</em></h3>
+
+    <p>If <code>std::nothrow_move_constructible&lt;B&gt;::value</code> is <code>true</code>, then
+      things are almost as easy. Rather than constructing our new <code>B</code> directly in the
+      variant, we can first construct an instance on the stack. If this throws then there isn't a
+      problem, but if it succeeds then we can move-construct it into the variant storage without any
+      exceptions, and we're home and dry:</p>
+
+    <ol>
+      <li>Construct a new <code>B</code> on the stack. If this throws then <code>v</code> is
+        unchanged.</li>
+      <li>Destroy the contained <code>A</code> object (which can't throw as we
+        require <code>noexcept</code> destructors).</li>
+      <li>Move-construct a <code>B</code> object in the variant from our local <code>B</code> object
+      (which can't throw as the move constructor is <code>noexcept</code>).</li>
+      <li>Mark the variant as holding a <code>B</code> (which can't throw).</li>
+      <li>Destroy the local <code>B</code> object on return from the function (which can't throw as
+        we require <code>noexcept</code> destructors).</li>
+    </ol>
+    
+    <p>This safely provides us with the strong guarantee at the cost of an extra move operation, but
+    what if <code>B</code> isn't <em>nothrow-move-constructible</em>?</p>
+
+    <h3>Case 3: <code>B</code> isn't <em>nothrow-move-constructible</em>, but <code>A</code>, <code>C</code>
+      and <code>D</code> are</h3>
+
+    <p>If all the other types in the variant are <em>nothrow-move-constructible</em>, then it
+      doesn't matter whether or not <code>B</code> is, because we can use safely save the old value,
+      and then restore it if our <code>B</code> construction fails:</p>
+
+    <ol>
+      <li>Move-construct the existing <code>A</code> onto the stack (which can't throw
+      as <code>A</code> is <em>nothrow-move-constructible</em>).</li>
+      <li>Destroy the contained <code>A</code> object (which can't throw as we
+        require <code>noexcept</code> destructors).</li>
+      <li>Construct the new <code>B</code> object (which may throw).</li>
+      <li>Either:
+        <ol type="a">
+          <li>The constructor didn't throw, so mark the variant as holding a <code>B</code> (which
+            can't throw), or</li>
+          <li>The constructor did throw, so move-construct the <code>A</code> from the stack back
+            into the variant storage (which can't throw as <code>A</code>
+            is <em>nothrow-move-constructible</em>), and rethrow the exception.</li>
+        </ol>
+      <li>Destroy the local <code>A</code> object on return from the function (which can't throw as
+        we require <code>noexcept</code> destructors).</li>
+    </ol>
+
+    <p>Though the execution sequence only cares about <code>A</code> and <code>B</code>, we can only
+      use this if <code>C</code> and <code>D</code> are also <em>nothrow-move-constructible</em>,
+      since we cannot tell at compile time which type is contained in the variant.</p>
+    
+    <p>This again safely provides the strong guarantee at the cost of an extra move (and a second
+      extra move in the case of an exception), but what if we can't do that either
+      because <code>A</code> is not <em>nothrow-move-constructible</em>?</p>
+    
+    <h3>Case 4: The extreme case: neither <code>A</code> or <code>B</code>
+    are <em>nothrow-move-constructible</em></h3>
+
+    <p>If <code>A</code> is non-movable, or has a move constructor that may throw then we cannot
+      touch the contained <code>A</code> object in case things go terribly wrong, meaning we end up
+      with neither a <code>B</code> nor an <code>A</code>. We're trying to implement the strong
+      guarantee, so those are the only two possibilities here.</p>
+
+    <p>The solution is thus to provide a second buffer to hold our <code>B</code> object, and
+      construct it before we destroy the old value, as follows:</p>
+
+    <ol>
+      <li>Construct the new <code>B</code> object in the buffer. If this throws then <code>v</code>
+        is unchanged.</li>
+      <li>Destroy the contained <code>A</code> object (which can't throw as we
+        require <code>noexcept</code> destructors).</li>
+      <li>Mark the variant as holding a <code>B</code> <em>in the buffer</em> (which can't throw).</li>
+    </ol>
+
+    <p>The question is: where does the buffer live? One option is to keep it in the variant
+      instance, thus making the variant larger, and the second is to dynamically allocate it, and
+      store a pointer to the buffer in the variant itself.</p>
+
+    <p>The dynamically allocated buffer is unacceptable to many users, and the circumstances under
+      which the secondary buffer is necessary are going to be increasingly rare, so I feel
+      comfortable requiring that it be part of the variant. As we shall see below, this does not
+      require doubling the size of the variant, as there are techniques that can minimize the buffer
+      size required.</p>
+
+    <h2>Double buffering</h2>
+
+    <p>Case 1 is only detectable on a use-by-use basis, as types may have throwing constructors that
+      we don't use, and there is no type trait for "all constructors for this type
+      are <code>noexcept</code>". All decisions about buffering therefore need to be done based on
+      the availability of <code>noexcept</code> move constructors.</p>
+    
+    <p>Based on our four scenarios above, we only need double-buffering in the variant if there are
+      two or more types that are not <em>nothrow-move-constructible</em>. The question then is: how
+      big a buffer do we need?</p>
+
+    <p>The answer is simple: we need a backup buffer that is big enough to hold the largest of the
+      types that is not <em>nothrow-move-constructible</em>. We only need the buffer if the type
+      being assigned is not <em>nothrow-move-constructible</em>, so we'll only double the required
+      storage space if the largest type may throw when moved.</p>
+
+    <h3>Double buffering enables optimization</h3>
+
+    <p>You may have noticed that the operation list for case 4 is the same 3 operations as case 1,
+      just in a different order, whereas cases 2 and 3 have additional move operations. This means
+      that double-buffering is more efficient than cases 2 and 3. Therefore we want to use it where
+      we can, without compromising our minimal space requirements.</p>
+
+    <p>Thus, if our type <code>B</code> will fit in our buffer, it is thus more efficient to use the
+      operations from case 4, even if case 2 would have applied. If double-buffering is enabled, we
+      will never hit case 3, because there will always be at least one of the other types that is
+      not <em>nothrow-move-constructible</em>. For large types that don't fit in the buffer, we can
+      still use case 2 if case 1 doesn't apply.</p>
+
+    <h2><code>emplace</code></h2>
+
+    <p><code>emplace</code> is subtly different. The implication of <code>emplace</code> is that it
+      is a direct in-place construction. Doing anything else is therefore somewhat
+      disingenuous. This therefore rules out case 2 from the <code>emplace</code> implementation,
+      and also rules out using assignment when the type is the same as the original. Supporting the
+      strong guarantee for <code>emplace</code> would therefore require double-buffering in more
+      cases: if any types are not <em>nothrow-move-constructible</em> we would have to
+      double-buffer, as we cannot rely on being able to move the source out of the way.</p>
+
+    <p>For my implementation I have chosen to make <code>emplace</code> provide only the basic
+      guarantee, and revert to an "empty" state if an exception is thrown.</p>
+
+    <h2>Sample implementation</h2>
+
+    <p>I have an implementation of <code>variant</code> that provides the strong guarantee for
+      assignment on bitbucket, under the BSD license. The code and tests are
+      available <a href="https://bitbucket.org/anthonyw/variant">here</a>.</p>
+
+  </body>
+</htm>
+

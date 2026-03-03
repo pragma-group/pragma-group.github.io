@@ -1,0 +1,380 @@
+<html>
+<head>
+<TITLE>
+ISO/IEC JTC1/SC22/WG21
+N3588
+</TITLE>
+</head>
+<body>
+<h1>
+<img align=top src="/pics/iso44.gif" alt="ISO/">
+<img align=top src="/pics/iec44.gif" alt="IEC">
+JTC1/SC22/WG21
+N3588
+</h1>
+<pre>
+Document number: N3588
+Date: 2013-03-15
+Project: Programming Language C++, Library Evolution Working Group
+Reply-to: Stephan T. Lavavej &lt;stl@microsoft.com>
+
+
+make_unique
+
+
+I. Introduction
+
+This is a proposal to add make_unique for symmetry, simplicity, and safety.
+
+
+II. Motivation And Scope
+
+C++11 provided make_shared for shared_ptr, but not make_unique for unique_ptr.
+This is widely viewed as an oversight. While it isn't absolutely necessary for
+the Standard to provide make_unique (because skilled users can implement it
+with perfect efficiency), it's still important. The implementation of
+make_unique&lt;T>(args...), a perfectly forwarding variadic template, is difficult
+for beginners to understand. make_unique&lt;T[]> involves even more subtleties.
+Because make_unique is commonly desired, adding it to the Standard Library will
+put an end to the proliferation of user implementations.
+
+make_unique's presence in the Standard Library will have several wonderful
+consequences. It will be possible to teach users "never say new/delete
+/new[]/delete[]" without disclaimers. Additionally, make_unique shares two
+advantages with make_shared (excluding the third advantage, increased
+efficiency). First, unique_ptr&lt;LongTypeName> up(new LongTypeName(args)) must
+mention LongTypeName twice, while auto up = make_unique&lt;LongTypeName>(args)
+mentions it once. Second, make_unique prevents the unspecified-evaluation-order
+leak triggered by expressions like foo(unique_ptr&lt;X>(new X),
+unique_ptr&lt;Y>(new Y)). (Following the advice "never say new" is simpler than
+"never say new, unless you immediately give it to a named unique_ptr".)
+
+
+III. Impact On The Standard
+
+This proposal has no dependencies beyond C++11.
+
+Nothing depends on this proposal.
+
+This proposal is a pure extension to &lt;memory>. It doesn't affect user code at
+all, except for adding new names to namespace std.
+
+
+IV. Design Decisions
+
+Let's examine unique_ptr&lt;T, D>'s possible arguments.
+
+1. T, "for single objects"
+    This is the easiest case, although there are some issues to consider:
+
+    make_unique&lt;T>(args...) - invokes new T(std::forward&lt;Args>(args)...)
+
+    First issue: Should this say T(stuff) with parentheses or T{stuff} with
+    braces?
+        This says T(stuff) with parentheses for symmetry with make_shared&lt;T>().
+        It would be very strange if make_unique&lt;vector&lt;int>>(1998, 2011)
+        constructed a vector with size() == 2, while make_shared&lt;vector&lt;int>>(
+        1998, 2011) constructs a vector with size() == 1998. Additionally, the
+        function call make_unique&lt;T>(stuff) uses parentheses, so constructing
+        T(stuff) with parentheses is unsurprising.
+
+    Second issue: Should this say plain new or global ::new?
+        This says plain new because default_delete invokes plain delete
+        (20.7.1.1.2 [unique.ptr.dltr.dflt]/3). Note that make_shared&lt;T>() says
+        ::new (pv) because it must invoke "true placement new" (which can't be
+        replaced, 18.6.1.3 [new.delete.placement]/1) instead of
+        T::operator new(size_t, void *) (which is allowed to exist).
+
+    Third issue: Given zero arguments, should this say new T() for
+    value-initialization or new T for default-initialization?
+        This says new T() for value-initialization for several reasons:
+        symmetry with make_shared&lt;T>(), consistency with the empty parentheses
+        in the function call make_unique&lt;T>(), predictability as this is the
+        natural result of a variadic implementation, and most importantly
+        safety ("zero is a strict subset of garbage"). The only reason for a
+        user to want default-initialization would be performance.
+        (make_unique&lt;T>() is faster than make_shared&lt;T>(), so performance
+        concerns can't be immediately dismissed by appealing to symmetry.)
+        However, it is extremely likely that the cost of a dynamic memory
+        allocation (plus the corresponding deallocation) will dwarf the cost of
+        value-initializing a single object, even if it's a large POD struct.
+        This proposal actually provides default-initialization for single
+        objects with special syntax; see below.
+
+2. T[], "for array objects with a runtime length"
+    Let's consider all possible new-expressions for the Standard Library to
+    imitate. Curiously, 5.3.4 [expr.new]/1 forbids new int[]{ 11, 22, 33 }
+    because int[] is incomplete. (This may change when Core Issue 1469 is
+    resolved.) Let's pretend that this is well-formed.
+
+    The optional new-initializer could be omitted, (), (expression-list), or
+    braced-init-list. 8.5 [dcl.init]/17 says that (expression-list) is
+    ill-formed when the destination type is an array (there's a special case
+    for string literals, but the Standard Library can't detect them). That
+    leaves three new-initializers, resulting in six cases:
+
+    new T[] - ill-formed, no length information
+    new T[]() - ill-formed, no length information
+    new T[]{ up, down, strange } - (should be) well-formed, length deduced
+
+    new T[n] - default-initialized
+    new T[n]() - value-initialized
+    new T[n]{ charm, bottom, top } - value-initialized if
+    initializer-clauses &lt; n, bad_array_new_length if initializer-clauses > n
+
+    Note that 5.3.4 [expr.new]/7 permits new T[0], but 8.5.1 [dcl.init.aggr]/4
+    forbids T t[]{}. Also note that default-initialization versus
+    value-initialization is increasingly important for increasingly large
+    arrays.
+
+    Because the Core Language provides multiple ways to initialize dynamically
+    allocated arrays, users will expect the Standard Library to provide the
+    same things. To avoid confusion, the following syntax is proposed:
+
+    make_unique&lt;T[]>(n) - invokes new T[n](), requesting value-initialization.
+    (This can be thought of as moving the length out of the parentheses and
+    into the square brackets.) This is safe (again, "zero is a strict subset of
+    garbage"), consistent with vector/etc., and consistent with
+    make_unique/make_shared for single objects as mentioned above. Because this
+    form will be used frequently, it is deliberately being kept very
+    simple - in particular, elements cannot be specified.
+
+    make_unique_default_init&lt;T[]>(n) - invokes new T[n], requesting
+    default-initialization. This requires users to explicitly say that they
+    want higher performance at the cost of getting garbage bits, but doesn't
+    otherwise burden them. Note that elements cannot be specified, because the
+    Core Language doesn't allow that mix.
+
+    make_unique_value_init&lt;T[]>(n, args...) - invokes
+    new T[n]{ std::forward&lt;Args>(args)... }, requesting value-initialization
+    for extra elements at the end. This is mostly being provided for
+    completeness - it's not too much trouble to specify, and it may be useful
+    in a few situations. Note that providing zero elements makes this
+    equivalent to the ordinary form; banning this case isn't necessary.
+
+    make_unique_auto_size&lt;T[]>(args...) - invokes
+    new T[sizeof...(Args)]{ std::forward&lt;Args>(args)... }, for convenience and
+    consistency with the long-standing ability to say
+    int arr[] = { 11, 22, 33 }. ("auto_size" is proposed for terseness; other
+    alternatives are "auto_length", "deduce_size", "deduce_length", etc.)
+
+    This syntax can be extended to single objects, satisfying users who really
+    want garbage bits:
+
+    make_unique_default_init&lt;T>() - invokes new T, requesting
+    default-initialization. (To avoid confusion, args cannot be specified.)
+
+3. T[N]
+    As of <a hRef="../2012/n3485.pdf">N3485</a>, unique_ptr doesn't provide a partial specialization for T[N].
+    However, users will be strongly tempted to write make_unique&lt;T[N]>(). This
+    is a no-win scenario. Returning unique_ptr&lt;T[N]> would select the primary
+    template for single objects, which is bizarre. Returning unique_ptr&lt;T[]>
+    would be an exception to the otherwise ironclad rule that
+    make_unique&lt;something>() returns unique_ptr&lt;something>. Therefore, this
+    proposal makes T[N] ill-formed here, allowing implementations to emit
+    helpful static_assert messages.
+
+4. Custom deleters
+    While C++11 provides make_shared and allocate_shared, this proposal
+    provides make_unique without allocate_unique. Here are the reasons for this
+    asymmetry. First and most importantly, make_shared and allocate_shared can
+    do things that users can't do. (Specifically, they can implement the
+    "we know where you live" optimization with special control blocks.) This
+    doesn't apply to unique_ptr. Expert users with custom allocators can easily
+    write their own wrappers with corresponding custom deleters. In contrast,
+    make_unique will be used by programmers of all skill levels, and beginners
+    cannot be expected to write perfectly forwarding variadic templates.
+    Intermediate/advanced programmers can, but the need for make_unique is so
+    common (and arrays are surprisingly subtle) that it makes sense to
+    standardize.
+
+    Second, specifying allocate_unique would increase complexity, multiplied by
+    single objects versus arrays. This is unlike allocate_shared, which is a
+    single additional overload (because shared_ptr doesn't deal with arrays).
+
+    Third, allocate_unique's complexity would result from the fact that the
+    Standard Library currently doesn't contain enough machinery to implement
+    it - specifically, to adapt allocator syntax to deleter syntax. (Returning
+    unique_ptr&lt;T, unspecified> would be inconvenient for users.) This is unlike
+    allocate_shared, because shared_ptr is powered by type erasure.
+
+    While this proposal doesn't provide allocate_unique (and is recommending
+    that it never be provided), one way to provide it without introducing a
+    wrapper class could be to unify deleters and allocators in unique_ptr's
+    specification. That is, specifying that if the expression d(ptr) is not
+    valid, then D shall meet the Allocator requirements.
+
+Syntax summary:
+                 make_unique&lt;T>(args...)
+    make_unique_default_init&lt;T>()
+
+                 make_unique&lt;T[]>(n)
+    make_unique_default_init&lt;T[]>(n)
+      make_unique_value_init&lt;T[]>(n, args...)
+       make_unique_auto_size&lt;T[]>(args...)
+
+Questions and answers:
+
+Q1. Can initializer_list&lt;T> be used to simplify the syntax?
+
+A1. Unfortunately, no. Consider new X[n]{ a, b, c } when X is
+default constructible and constructible from A/B/C, but non-copyable and
+non-movable.
+
+Q2. Can users make their constructors non-public, then grant friendship to
+make_unique?
+
+A2. This is tracked by Library Issue 2070 for make_shared/allocate_shared. For
+make_unique, two things could interfere with friendship: having a helper
+function invoke the new-expression, or modifying the user-facing function's
+signature. Unfortunately, switching between the highly desirable syntax
+make_unique&lt;T> versus make_unique&lt;T[]> involves one or the other: tag dispatch
+to helper functions, or SFINAE in user-facing signatures (used by the
+implementation below). The Standard typically doesn't limit implementer freedom
+to use helper functions, but it also doesn't depict SFINAE in signatures.
+
+Q3. Can make_unique&lt;T[]>(n) and make_unique_value_init&lt;T[]>(n, args...)
+be unified?
+
+A3. Yes, at the cost of endless confusion. Quick, how many ints does
+make_unique&lt;int[]>(11, 22, 33, 44) allocate, 4 or 11? So, no.
+
+Q4. Can make_unique_value_init&lt;T[]>(n, args...) and
+make_unique_auto_size&lt;T[]>(args...) be eliminated?
+
+A4. Yes! The remaining syntax would be simple and symmetric:
+
+             make_unique&lt;T>(args...)
+make_unique_default_init&lt;T>()
+             make_unique&lt;T[]>(n)
+make_unique_default_init&lt;T[]>(n)
+
+It wouldn't expose the full power of new-expressions in the C++11 Core
+Language, but advanced users can write their own wrappers and choose their own
+syntax, while the 4 signatures above would suffice for the vast majority of
+users.
+
+
+V. Standardese
+
+To be provided after consensus on the interface has been reached.
+
+
+VI. Acknowledgements
+
+Thanks to Hyman Rosen via Dilip Ranganathan for various suggestions that led me
+to think deeply about the array cases.
+
+Thanks to Bill Plauger, Josh Rowe, Marshall Clow, Phil Deets, and Vinny Romano
+for reviewing this proposal.
+
+
+VII. References
+
+All of the citations in this proposal are to Working Paper <a hRef="../2012/n3485.pdf">N3485</a>:
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3485.pdf">http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2012/n3485.pdf</a>
+
+Core Issue 1469, "Omitted bound in array new-expression":
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/cwg_active.html#1469">http://www.open-std.org/jtc1/sc22/wg21/docs/cwg_active.html#1469</a>
+
+Library Issue 2070, "allocate_shared should use allocator_traits&lt;A>::construct":
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/lwg-active.html#2070">http://www.open-std.org/jtc1/sc22/wg21/docs/lwg-active.html#2070</a>
+
+
+VIII. Implementation
+
+#include &lt;cstddef>
+#include &lt;memory>
+#include &lt;type_traits>
+#include &lt;utility>
+
+namespace std {
+    template&lt;class T> struct _Never_true : false_type { };
+
+    template&lt;class T> struct _Unique_if {
+        typedef unique_ptr&lt;T> _Single;
+    };
+
+    template&lt;class T> struct _Unique_if&lt;T[]> {
+        typedef unique_ptr&lt;T[]> _Runtime;
+    };
+
+    template&lt;class T, size_t N> struct _Unique_if&lt;T[N]> {
+        static_assert(_Never_true&lt;T>::value, "make_unique forbids T[N]. Please use T[].");
+    };
+
+    template&lt;class T, class... Args> typename _Unique_if&lt;T>::_Single make_unique(Args&&... args) {
+        return unique_ptr&lt;T>(new T(std::forward&lt;Args>(args)...));
+    }
+
+    template&lt;class T> typename _Unique_if&lt;T>::_Single make_unique_default_init() {
+        return unique_ptr&lt;T>(new T);
+    }
+
+    template&lt;class T> typename _Unique_if&lt;T>::_Runtime make_unique(size_t n) {
+        typedef typename remove_extent&lt;T>::type U;
+        return unique_ptr&lt;T>(new U[n]());
+    }
+
+    template&lt;class T> typename _Unique_if&lt;T>::_Runtime make_unique_default_init(size_t n) {
+        typedef typename remove_extent&lt;T>::type U;
+        return unique_ptr&lt;T>(new U[n]);
+    }
+
+    template&lt;class T, class... Args> typename _Unique_if&lt;T>::_Runtime make_unique_value_init(size_t n, Args&&... args) {
+        typedef typename remove_extent&lt;T>::type U;
+        return unique_ptr&lt;T>(new U[n]{ std::forward&lt;Args>(args)... });
+    }
+
+    template&lt;class T, class... Args> typename _Unique_if&lt;T>::_Runtime make_unique_auto_size(Args&&... args) {
+        typedef typename remove_extent&lt;T>::type U;
+        return unique_ptr&lt;T>(new U[sizeof...(Args)]{ std::forward&lt;Args>(args)... });
+    }
+}
+
+#include &lt;iostream>
+#include &lt;string>
+using namespace std;
+
+void print(const unique_ptr&lt;int[]>& up) {
+    for (int i = 0; i &lt; 5; ++i) {
+        cout &lt;&lt; up[i] &lt;&lt; " ";
+    }
+
+    cout &lt;&lt; endl;
+}
+
+int main() {
+    cout &lt;&lt; *make_unique&lt;int>() &lt;&lt; endl;
+    cout &lt;&lt; *make_unique&lt;int>(1729) &lt;&lt; endl;
+    cout &lt;&lt; "\"" &lt;&lt; *make_unique&lt;string>() &lt;&lt; "\"" &lt;&lt; endl;
+    cout &lt;&lt; "\"" &lt;&lt; *make_unique&lt;string>("meow") &lt;&lt; "\"" &lt;&lt; endl;
+    cout &lt;&lt; "\"" &lt;&lt; *make_unique&lt;string>(6, 'z') &lt;&lt; "\"" &lt;&lt; endl;
+
+    cout &lt;&lt; *make_unique_default_init&lt;int>() &lt;&lt; endl;
+    cout &lt;&lt; "\"" &lt;&lt; *make_unique_default_init&lt;string>() &lt;&lt; "\"" &lt;&lt; endl;
+
+    print(make_unique&lt;int[]>(5));
+    print(make_unique_default_init&lt;int[]>(5));
+    print(make_unique_value_init&lt;int[]>(5, 100, 200, 300));
+    print(make_unique_auto_size&lt;int[]>(111, 222, 333, 444, 555));
+}
+
+Output, when -842150451 is the result of an 0xCDCDCDCD debug fill pattern:
+
+0
+1729
+""
+"meow"
+"zzzzzz"
+-842150451
+""
+0 0 0 0 0
+-842150451 -842150451 -842150451 -842150451 -842150451
+100 200 300 0 0
+111 222 333 444 555
+
+(end)
+</pre>
+</body>
+</html>

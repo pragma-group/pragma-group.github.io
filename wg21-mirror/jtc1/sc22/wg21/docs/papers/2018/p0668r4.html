@@ -1,0 +1,758 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+ "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8">
+<title>P0668R4: Revising the C++ memory model</title>
+<style type="text/css">
+html { line-height: 135%; }
+ins { background-color: #DFD; }
+del { background-color: #FDD; }
+</style>
+</head>
+<body>
+<table>
+        <tr>
+                <th>Doc. No.:</th>
+                <td>WG21/P0668R4</td>
+        </tr>
+        <tr>
+                <th>Date:</th>
+                <td>2018-06-24</td>
+        </tr>
+        <tr>
+                <th>Reply-to:</th>
+                <td>Hans-J. Boehm</td>
+        </tr>
+        <tr>
+                <th>Email:</th>
+                <td><a href="mailto:hboehm@google.com">hboehm@google.com</a></td>
+        </tr>
+        <tr>
+                <th>Authors:</th>
+                <td>Hans-J. Boehm, Olivier Giroux, Viktor Vafeiades,
+		with input from from Will Deacon, Doug Lea, Daniel Lustig,
+		Paul McKenney and others</td>
+        </tr>
+        <tr>
+                <th>Audience:</th>
+                <td>CWG, LWG</td>
+        </tr>
+        <tr>
+		<th>Note to editor:</th>
+		<td><em><b>Consolidated wording is in the last section</b></em></td>
+	</tr>
+</table>
+
+<h1>P0668R4: Revising the C++ memory model</h1>
+<p>
+Although the current C++ memory model, adopted essentially in C++11, has served
+our user community reasonably well in practice, a number of problems have come
+to light. The first one of these is particularly new and troubling:
+</p><ol>
+<li>Existing implementation schemes on Power and ARM are not correct with
+respect to the current memory model definition. These implementation schemes can
+lead to results that are disallowed by the current memory model when the user
+combines acquire/release ordering with seq_cst ordering. On some architectures,
+especially Power and Nvidia GPUs, it is expensive to repair the implementations
+to satisfy the existing memory model. Details are discussed in (Lahav et al) <a
+href="http://plv.mpi-sws.org/scfix/paper.pdf">http://plv.mpi-sws.org/scfix/paper.pdf</a>
+(which this discussion relies on heavily). The same issues
+were briefly outlined at the Kona SG1 meeting. We summarize below.
+<li>Our current definition of <code>memory_order_seq_cst</code>, especially for
+fences, is too weak. This was caused by historical assumptions that
+have since been disproved.
+<li>The current definition of <i>release sequence</i> is problematic, allowing
+seemingly irrelevant <code>memory_order_relaxed</code> operations to interfere
+with synchronizes-with relationships.
+<li>We still do not have an acceptable way to make our informal (since C++14)
+prohibition of out-of-thin-air results precise. The primary practical effect of
+that is that formal verification of C++ programs using relaxed atomics remains
+unfeasible. The above paper suggests a solution similar to <a
+href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2013/n3710.html">
+http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2013/n3710.html</a>
+.  We continue to ignore the problem here, but try to stay out of the way of
+such a solution.
+<li>The current definition of <code>memory_order_consume</code> is widely
+acknowledged to be unusable, and implementations generally treat it as
+<code>memory_order_acquire</code>. The current draft "temporarily discourages"
+it.
+See <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0371r1.html">
+http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0371r1.html</a>
+. There are proposals to repair it (cf. <a
+href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/p0190r3.pdf">
+http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/p0190r3.pdf</a> and
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/p0462r1.pdf">
+http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2017/p0462r1.pdf</a>
+), but nothing that is ready to go.</li></ol>
+<p>
+Here we concentrate on, and outline proposals for, the first two.
+The third one is now the subject of a separate proposal,
+<a href="wg21.link/p0982">P0982</a>, since it seemed to generate
+more of an SG1 consensus than the others in Jacksonville.
+The last two are not addressed here, but should be kept in mind.
+In our view, the first of these is currently the most pressing.
+</p>
+<h3>Power, ARM, and GPU implementability</h3>
+<p>
+Although we previously believed otherwise, it has recently been shown that the
+standard implementations of memory_order_acquire and memory_order_release on
+Power are insufficient. Very briefly, these are compiled using "lightweight"
+fences, which are insufficient to enforce required properties for
+memory_order_sq_cst accesses to the same location.
+</p>
+<p>
+To illustrate, we borrow the Z6.U example, from S 2.1 of <a
+href="http://plv.mpi-sws.org/scfix/paper.pdf">http://plv.mpi-sws.org/scfix/paper.pdf</a>
+(pseudo-C++ syntax, memory orders indicated by subscript, e.g. y =<sub>rel</sub>
+1 abbreviates <code>y.store(memory_order_release, 1)</code>):
+</p>
+<blockquote>
+<table border="1">
+<tr>
+<td>Thread 1</td> <td>Thread 2</td><td>Thread 3</td>
+</tr>
+<tr>
+<td rowspan=2><code>x =<sub>sc</sub> 1</code><br>
+<code>y =<sub>rel</sub> 1</code></td>
+
+<td rowspan=2><code>b = fetch_add(y)<sub>sc</sub></code> //1<br>
+<code>c = y<sub>rlx</sub></code> //3</td>
+
+<td rowspan=2><code>y =<sub>sc</sub> 3</code><br>
+<code>a = x<sub>sc</sub></code> //0</td>
+</tr>
+</table>
+</blockquote>
+<p>
+The comments here indicate the observed assigned value.
+</p>
+<p>
+The indicated outcome here is disallowed by the current standard: All
+<code>memory_order_seq_cst</code> (sc) accesses must occur in a single total
+order, which is constrained to have <code><b>a = x<sub>sc</sub> //0</b></code>
+before <code><b>x =<sub>sc</sub> 1</b></code> (since it doesn't observe the store),
+which must be before <code><b>b = fetch_add(y)<sub>sc</sub> //1</b></code>
+(since it happens before it), which must be before
+<code><b>y =<sub>sc</sub> 3</b></code>
+(since the fetch_add does not observe the store, which is
+forced to be last in modification order by the load in Thread 2). But this is
+disallowed since the standard requires the happens before ordering to be
+consistent with the sequential consistency ordering,
+and <code><b>y =<sub>sc</sub> 3</b></code>, the
+last element of the sc order, happens before
+<code><b>a = x<sub>sc</sub> //0</b></code>, the first one.
+</p>
+<p>
+On the other hand, this outcome is allowed by the Power implementation. Power
+normally uses the "leading fence" convention for sequentially consistent
+atomics. ( See <a
+href="http://www.cl.cam.ac.uk/~pes20/cpp/cpp0xmappings.html">http://www.cl.cam.ac.uk/~pes20/cpp/cpp0xmappings.html</a>
+) This means that there is only an lwsync fence between Thread 1's instructions.
+This does not have the "cumulativity"/transitivity properties that would be
+required to make the store to <code>x</code> visible to Thread 3 under
+these circumstances.
+</p>
+<p>
+This issue was missed in earlier analyses. This example is not a problem for the
+"trailing fence" mapping that could also have been used on Power. But Lahav et
+al contains examples that fail for that mapping as well, for similar reasons.
+</p>
+<p>
+This example relies crucially on the fact that a
+<code>memory_order_release</code> operation synchronizes with a
+<code>memory_order_seq_cst</code> operation on the same location. Code that
+consistently accesses each location only with <code>memory_order_seq_cst</code>,
+or only with weaker ordering, is not affected, and works correctly.
+</p>
+<p>
+Whether or not such code occurs in practice depends on coding style. One
+reasonable coding style is to initially use only seq_cst operations, and then
+selectively weaken those that are performance critical; it does result in such
+cases. Even in such cases, it seems clear that the current compilation strategy
+does not result in frequent failures; this problem was discovered through
+careful theoretical analysis, not bug reports. It is unclear whether there is
+any real code that can fail as a result of the current mapping; it would require
+careful analysis of the use cases to determine whether the weaker ordering
+provided by the hardware is in fact sufficient for these use cases.
+</p>
+<p>
+For ARM, the situation is theoretically similar, but appears to be much less
+severe in practice. On ARMv8, the usual compilation mode for loads and stores is
+currently to compile acquire/release operations as seq_cst operations, so there
+is currently no issue. On ARMv7, some compilation schemes for acquire/release
+have the same issues as for Power, but the most common scheme seems to be to use
+"dmb ish", which does not share this problem.
+</p>
+<p>
+Nvidia GPUs have a memory model similar to Power, and share the same issues,
+probably with larger cost differences. For
+very large numbers of cores, it is natural to share store buffers between
+threads, which may make stores visible to different threads in inconsistent
+orders. This lack of "multi-copy atomicity" is also the core distinguishing
+property of the Power and ARM memory models. We suspect that other GPUs are also
+affected, but cannot say that definitively.
+</p>
+<p>
+We are not aware of issues on other existing CPU architectures. Since it appears
+more attractive to drop multi-copy atomicity with higher core counts, we expect
+the same issue to recur with some future processor designs.
+</p>
+<h3>Alternative 1: "Just" fix the implementations</h3>
+<p>
+Repairing this on Power without changing the specification would prevent us from
+generating the lighter weight "lwsync" fence instruction for a
+<code>memory_order_release</code> operation (unless we either know it will never
+synchronize with a <code>memory_order_seq_cst</code> operation, or we make
+<code>memory_order_seq_cst</code> operations even more expensive), which would
+have a significant performance impact on acquire/release synchronization. It
+would also defeat a significant part, though not all, of the motivation for for
+introducing <code>memory_order_acquire</code> and
+<code>memory_order_release</code> to start with.
+</p>
+<p>
+The cost on GPUs is likely to be higher.
+</p>
+<p>
+Among people we informally surveyed, this was not a popular option. Many people
+felt that we would be penalizing a subset of the available machine architectures
+for an issue with little practical impact. The language would no longer be able
+to express pure acquire-release synchronization, which many people feel is
+essential.
+</p>
+<p>
+We could regain acquire-release synchronization by adding a new "weak" atomic
+type that does not support <code>memory_order_seq_cst</code>, and requires
+explicit<code> memory_order</code> arguments. Again there was general concern
+that this significantly increases the library API footprint for an issue without
+much practical impact.
+</p>
+<h3>Alternative 2: Fix the standard</h3>
+<p>
+This is the approach taken by Lahav et al, and the one we pursue here.
+</p>
+<p>
+The proposal in Lahav et al is mathematically elegant. Currently the standard
+requires that the sequential consistency total order S is consistent with the
+happens before relation. Essentially, if any two sc operations are ordered by
+happens before, then they must be ordered the same way by S. In our example,
+this requires x =<sub>sc</sub> 1 to be ordered before b =
+fetch_add(y)<sub>sc</sub> //1 in spite of the fact that the hardware mapping
+does not sufficiently enforce it. The core fix (S1fix in the paper) is to relax
+the restriction that a happens before ordering implies ordering in S to only the
+sequenced before case, or the case in which the happens before ordering between
+<em>a</em> and <em>b</em> is produced by a chain
+</p>
+<blockquote>
+<p><em>a</em> is sequenced before <em>x</em> happens before <em>y</em> is
+sequenced before <em>b</em></p>
+</blockquote>
+<p>
+The downside of this is that "happens before" now has a rather strange meaning,
+since sequentially consistent operations can appear to execute in an order
+that's not consistent with it.
+</p>
+<p>
+In the Z6.U example, <code><b>x =<sub>sc</sub> 1</b></code>
+must no longer precede <code><b>b = fetch_add(y)<sub>sc</sub> //1</b></code> in the
+sequential consistency order S, in spite of
+the fact that the former "happens before" the latter. And in the questionable
+execution that we now wish to allow, they indeed have the opposite order in S.
+</p>
+<p>
+We propose to make this somewhat less confusing by suitably renaming the
+relations in the standard as follows:
+</p>
+<p>
+Currently the initialization rules, etc. use "strongly happens before" in
+guaranteeing ordering. The current intent is to also use that to specify library
+ordering, such as for mutexes. We propose to modify that definition to require
+"sequenced before" ordering at both ends. This new improved "strongly happens
+before" would be used in the same contexts as now, and would remain strong
+enough to ensure that if <em>a</em> happens before <em>b</em>, and they both
+participate in the sc ordering S, then <em>a</em> also precedes <em>b</em> in S.
+"Strongly happens before" would continue to exclude any ordering via
+memory_order_consume, since such ordering is much more restrictive, and must be
+explicitly accommodated by the caller.
+</p>
+<p>
+Thus we would propose to change 6.8.2.1p11 [intro.races, once known as 1.10] as
+follows:
+</p>
+<blockquote>
+<p>
+An evaluation A <em><del>strongly</del> <ins>simply</ins> happens before</em>
+an evaluation B if either</p>
+<ul>
+<li>
+A is sequenced before B, or
+<li>
+A synchronizes with B, or
+<li>
+A simply happens before X and X simply happens before B.
+</ul>
+<p>
+[ <em>Note: </em>In the absence of consume operations, the happens before and
+<del>strongly</del> <ins>simply</ins> happens before relations are identical.
+<del>Strongly happens before essentially excludes consume operations.</del> — <em>end note</em> ]
+</p>
+<p>
+<ins>An evaluation A <em>strongly happens before</em> an evaluation D if,
+either</ins>
+</p>
+<ul>
+<li><ins>A is sequenced before D, or</ins>
+<li><ins>A synchronizes with D, and both A and D are sequentially consistent atomic
+operations (32.4 [atomics.order]), or</ins>
+<li><ins>there are evaluations B and C such that A is sequenced before B, B simply
+happens before C, and C is sequenced before D, or</ins>
+<li><ins>there is an evaluation B such that A strongly happens before B, and B
+strongly happens before D.</ins>
+</ul>
+<p>
+<ins>[ <em>Note:</em> Informally, if A strongly happens before B, then A appears to
+be evaluated before B in all contexts. Strongly happens before excludes consume
+operations.-<em>-end note</em> ]</ins>
+</p>
+</blockquote>
+<p>
+We would then adjust 32.4p3 [atomics.order] correspondingly:
+</p>
+<blockquote>
+<p>
+There shall be a single total order S on all
+<code>memory_order_seq_cst</code> operations,
+consistent with the "<ins>strongly</ins> happens before" order, and
+modification orders for all affected locations, such that each
+<code>memory_order_seq_cst</code> operation B that
+loads a value from an atomic object M
+observes one of the following values: …
+</p>
+</blockquote>
+<p>
+and add a second note at the end of p3:
+</p>
+<blockquote>
+<p>
+<ins>
+[ <em>Note:</em> We do not require that S be consistent with "happens before" (6.8.2.1
+[intro.races]). This allows more efficient implementation of
+<code>memory_order_acquire</code> and <code>memory_order_release</code> on some
+machine architectures. It may produce more surprising results when these are
+mixed with <code>memory_order_seq_cst</code> accesses. -- <em>end note</em> ]
+</ins>
+</p>
+</blockquote>
+<p>
+Note for editor: Please use the consolidated wording at the end instead to resolve
+conflicts between sections.
+
+<h4>Terminology and teachability</h4>
+<p>
+There was a fair amount of discussion in Jacksonville about the number of
+different "happens before" variants, whether we plain "happens before" is correctly
+used for the most important variant, and whether this is all understandable.
+While we share some of this concern, we believe that the choices presented above
+represent the best possible option.
+<p>
+We are not touching the requirement that user code avoid data races.
+In the absence of weakly ordered atomics, this simply requires that conflicting
+operations not be executed concurrently. And programmers need not concern
+themselves with any of the happens-before variants. (We've added a few additional
+constructs, beyond weakly ordered atomics, that violate this. But so far
+such visible violations have been limited to code that is clearly unreasonable
+for other reasons.)
+<p>
+Once we throw weakly-ordered atomics into the mix, the major concern that
+programmers should have is whether this relaxation introduces data races.
+That means that conflicting operations must be ordered by happens-before.
+That also remains unchanged. The plain happens-before relation is unchanged,
+and continues to be the right one to use here.
+<p>
+The definition of plain happens-before became unpleasantly complicated with the
+introduction of <code>memory_order_consume</code>. And it is not transitive,
+which remains counterintuitive.
+This proposal changes neither of those. And if the user refrains from
+using <code>memory_order_consume</code> it can continue to be entirely ignored,
+as before. Until we have a usable version of <code>memory_order_consume</code>,
+I would expect teaching materials to ignore these issues, and pretend that
+happens-befors is defined as our simply-happens-before relation, which is
+clearly transitive. In the presence of <code>memory_order_consume</code>,
+this problem is unavoidable, since consume can order two accesses without
+also ordering the first with respect to an access that immediately follows the
+second; happens-before cannot compose with sequenced-before, and thus
+happens-before cannot be transitive.
+<p>
+Unfortunately, the plain happens-before relation is not the right one to
+use for most library writers. It does not suffice for a library to promise that
+a call A happens-before a call B, since the library user will generally
+also need to conclude that if B is immediately followed by another call C,
+then A also happens before C. And we want to make sure that happens-before
+promises also translate into guarantees about the ordering of
+sequentially-consistent operations. By default libraries should hide their
+internal weaknesses, and ensure correct usablility in all contexts.
+Thus they must ensure a <i>stronger</i> notion of happens-before that
+guarantees proper composability in all contexts. That is the purpose of
+strong-happens-before.
+<p>
+The fundamental role of strong-happens-before also is not changed by this proposal.
+However its definition has changed, since the old definition would no longer
+imply consistency with the SC ordering, and would thus allow surprising
+results in a few esoteric cases.
+<p>
+The definition of strong-happens-before now effectively requires that
+<ul>
+	<li><code>memory_order_consume</code> is not used to establish
+		happens-before, and</li>
+	<li>Any use of synchronizes-with in establishing the ordering
+		must either use SC operations at both ends, or preceded
+		and followed by a sequence-based intra-thread ordering.</li>
+</ul>
+<p>
+This definition is made appreciably more complicated
+by this proposal, but in a way that should not concern most library
+writers either. The only case it newly precludes is the one in which
+the second constraint is violated. Normally the
+strongly-happens-before guarantee will be used to order the users code
+before and after the calls, meaning that the requirement is implicitly
+satisfied by the addition of user code. It only matters when
+the library calls themselves are promised to participate in the SC ordering,
+so that the library user will use the happens-before relation to infer
+properties of the SC ordering. And even in that case, the implementation
+is likely to use SC operations at both ends, again avoiding any issues.
+We do not know of a way to simplify this while preserving correctness with
+respect to current widespread implementation strategies.
+<p>
+Summarizing, we continue to have, as we did before:
+<dl>
+	<dt>(plain) happens-before</dt>
+	<dd>The fundamental relation used to reason about data races</dd>
+	<dt>strong happens before</dt>
+	<dd>The ordering relation usually promised by libraries to ensure
+	usability and composability in all contexts</dd>
+</dl>
+<p>
+The simply-happens-before relation is an atifact of our definition. In the absence of
+<ol>
+	<li><code>memory_order_consume</code>, and</li>
+	<li>mixed use of both acquire/release and seq_cst operations on the same location</li>
+</ol>
+<p>
+all three definitions coincide.
+
+<h2>Strengthen SC fences</h2>
+<p>
+The current <code>memory_order_seq_cst</code> fence semantics
+do not guarantee that a program with only
+memory_order_relaxed accesses and <code>memory_order_seq_cst</code> fences
+between each pair actually exhibits sequential consistency. This was, at one
+point, intentional. The goal was to ensure that architectures like Itanium that
+allow stores to become visible to different processors in different orders, and
+do not provide fences to rectify this, could be supported. But it subsequently
+became clear that Itanium, as a result of failing to provide strong ordering for
+accesses to a single location) would need to use stronger primitives for
+memory_order_relaxed anyway. All known SC fence implementations provide the
+stronger semantics, and we should acknowledge that.
+</p>
+<p>
+We propose to strengthen the <code>memory_order_seq_cst</code> fence semantics
+as suggested in Lahav et al. (Note edit conflict with last section; please
+use the consolidated wording below to resolve.)
+<p>
+Replace Section 32.4 [atomics.order] paragraphs 3-7 (the definition of SC
+ordering) with:
+
+<blockquote>
+<p>
+<ins>An atomic operation A on some atomic object M is <em>coherence-ordered before</em>
+another atomic operation B on M if</ins>
+<ul>
+<li> <ins>A is a modification, and B observes A, or</ins>
+<li> <ins>A precedes B in the modification order, or</ins>
+<li> <ins>A and B are not the same atomic read-modify-write operation,
+and there exists an atomic modification X of M such that A observes the value
+written by X and X precedes B in modification order, or</ins>
+<li> <ins>there exists X such that A is coherence-ordered before X and X is
+coherence-ordered before B.</ins>
+</ul>
+<p>
+<ins>There shall be a single total order S on all <code>memory_order_seq_cst</code> operations,
+consistent with the “strongly happens before” order, such that for every pair of atomic
+operations A and B on an object M, where A is coherence-ordered before B,</ins>
+<ul>
+<li><ins>if A and B are both <code>memory_order_seq_cst</code> operations,
+then A precedes B in S; and</ins>
+
+<li><ins>if A is a <code>memory_order_seq_cst</code> operation and B happens before a
+<code>memory_order_seq_cst</code> fence Y, then A precedes Y in S; and</ins>
+
+<li><ins>if a <code>memory_order_seq_cst</code> fence X happens before A and B is
+a <code>memory_order_seq_cst</code> operation, then X precedes B in S; and</ins>
+
+<li><ins>if a <code>memory_order_seq_cst</code> fence X happens before A and B happens
+before a <code>memory_order_seq_cst</code> fence Y, then X precedes Y in S.</ins>
+</ul>
+<p>
+<ins>[ <em>Note:</em> This definition ensures that S is consistent with the modification order.
+It also ensures that a <code>memory_order_seq_cst</code> read of an atomic object M gets
+its value either from the last modification of M that precedes A in S or from
+some non-<code>memory_order_seq_cst</code> modification of M that does not happen before
+any modification of M that precedes A in S. -- <em>end note</em> ]</ins>
+</blockquote>
+<p>
+The note from the previous section would go after this.
+<p>
+Finally adjust the existing note in the immediately following p8 as follows,
+to remove a statement that is no longer correct:
+<blockquote>
+<p>
+[ <em>Note:</em>
+<code>memory_order::seq_cst</code> ensures sequential consistency only for a program
+that is free of data races and uses exclusively <code>memory_order::seq_cst</code>
+<ins>atomic</ins> operations.
+Any use of weaker ordering will invalidate this
+guarantee unless extreme care is used. In many cases,
+<ins><code>memory_order_seq_cst</code> atomic operations may be
+reordered with respect to other atomic operations performed by the same thread.</ins>
+<del>In particular,
+<code>memory_order::seq_cst</code> fences
+ensure a total order only for the fences themselves. Fences cannot,
+in general, restore sequential consistency for atomic
+operations with weaker ordering specifications.</del>
+<em>— end note</em> ]
+</blockquote>
+<p>
+The definition of "coherence-ordered before" is essentially standard terminology,
+but was not previously part of our standard. The third
+bullet corresponds to what's often called "reads before": A reads a write earlier than B.
+<p>
+This new wording takes a significantly different approach with respect to the
+sequential consistency ordering S:
+Instead of defining visibility in terms of S and the other orders in the standard,
+this essentially defines constraints on S in terms of visibility in a particular
+execution, as expressed by the coherence order. If these constraints are not satisfiable
+by any total order S, then the candidate execution which gave rise to the coherence
+order is not valid.
+
+<h2>History</h2>
+
+<h3>P0668R4</h3>
+<p>
+Reflected Rapperswil CWG comments in the wording. At the request of CWG and the editor,
+added consolidated wording section below.
+<p>
+Added a fix for the note in 32.4p8 that was previously overlooked.
+
+<h3>P0668R3</h3>
+<p>
+In response to SG1 discussion in Jacksonville:
+<ul>
+<li> Separated out the release sequence modifications into a separate paper,
+<a href="http://wg21.link/P0982">P0982</a>.
+<li> Added a section to justify the naming of happens-before variants
+and explain the intended model for teaching.
+SG1 was concerned that this would be hard to explain to a wider audience.
+This concern was also previously raised in discussions among the authors.
+</ul> 
+<p>
+The first clause in the definition of "coherence ordered before"
+was stated backwards. Fixed.
+
+<h3>P0668R2</h3>
+<p>
+Added wording for weakening release sequence guarantee. Adjust section numbering
+to N4713.
+
+<h3>P0668R1</h3>
+<p>
+In Toronto, we discussed an update D0668R1 of P0668R0 that added wording for the
+sequentially consistent fence changes, and that added the release sequence proposal.
+The first two proposals received strong support for the core idea; it was understood
+that the precise wording needed more bake time.
+<p>
+The vote on the release sequence
+proposal was delayed after hardware architects pointed out that it potentially
+imposed significant hardware constraints. It made sense to reexamine the
+significance of the underlying problem to make sure that the change was justified,
+particularly since the entire argument for allowing same thread stores to extend a
+release sequence now seems suspect.
+<p>
+This version incorporates the changes from the draft document we discussed,
+fixes some serious editing mistakes in D0668R1, adds further discussion
+for the release sequence proposal, and adjusts the desired straw poll list.
+
+<h3>P0668R0</h3>
+<p>
+Initial version.
+
+<h2>Consolidated wording:</h2>
+<p>
+This is relative to N4750.
+<p>
+Change 6.8.2.1p11 [intro.races] as follows:
+</p>
+<blockquote>
+<p>
+An evaluation A <em><del>strongly</del> <ins>simply</ins> happens before</em>
+an evaluation B if either</p>
+<ul>
+<li>
+A is sequenced before B, or
+<li>
+A synchronizes with B, or
+<li>
+A simply happens before X and X simply happens before B.
+</ul>
+<p>
+[ <em>Note: </em>In the absence of consume operations, the happens before and
+<del>strongly</del> <ins>simply</ins> happens before relations are identical.
+<del>Strongly happens before essentially excludes consume operations.</del> — <em>end note</em> ]
+</p>
+<p>
+<ins>An evaluation A <em>strongly happens before</em> an evaluation D if,
+either</ins>
+</p>
+<ul>
+<li><ins>A is sequenced before D, or</ins>
+<li><ins>A synchronizes with D, and both A and D are sequentially consistent atomic
+operations (32.4 [atomics.order]), or</ins>
+<li><ins>there are evaluations B and C such that A is sequenced before B, B simply
+happens before C, and C is sequenced before D, or</ins>
+<li><ins>there is an evaluation B such that A strongly happens before B, and B
+strongly happens before D.</ins>
+</ul>
+<p>
+<ins>[ <em>Note:</em> Informally, if A strongly happens before B, then A appears to
+be evaluated before B in all contexts. Strongly happens before excludes consume
+operations.-<em>-end note</em> ]</ins>
+</p>
+</blockquote>
+
+<p>
+Replace Section 32.4 [atomics.order] paragraphs 3-7, which currently reads:
+
+<blockquote>
+<del>There shall be a single total order S on all memory_order::seq_cst operations,
+consistent with the “happens
+before” order and modification orders for all affected locations, such
+that each <code>memory_order::seq_cst</code>
+operation B that loads a value from an atomic object M observes one of the following values:
+</del>
+<ol>
+<li> <del> the result of the last modification A of M that precedes B in S, if it exists, or
+</del>
+<li> <del>if A exists, the result of some modification of M that is not
+<code>memory_order::seq_cst</code> and that does
+not happen before A, or</del>
+<li> <del>if A does not exist, the result of some modification of M that is not
+<code>memory_order::seq_cst</code>.</del>
+</ol>
+<p>
+<del>[ <em>Note:</em> Although it is not explicitly required that S include locks,
+it can always be extended to an order
+that does include lock and unlock operations,
+since the ordering between those is already included in the
+“happens before” ordering. <em>— end note</em> ]</del>
+<p>
+<del>For an atomic operation B that reads the value of an atomic object M,
+if there is a <code>memory_order::seq_cst</code>
+fence X sequenced before B, then B observes either the last
+<code>memory_order::seq_cst</code> modification of M
+preceding X in the total order S or a later modification of M in its modification order.</del>
+<p>
+<del>For atomic operations A and B on an atomic object M, where A modifies M and B
+takes its value, if there is
+a <code>memory_order::seq_cst</code> fence X such that A is sequenced before X and B follows X in S,
+then B observes
+either the effects of A or a later modification of M in its modification order.</del>
+<p>
+<del>For atomic operations A and B on an atomic object M, where A modifies M and B takes
+its value, if there
+are <code>memory_order::seq_cst</code> fences X and Y such that A is sequenced before X,
+Y is sequenced before B,
+and X precedes Y in S, then B observes either the effects of A or a later modification of
+M in its modification order.</del>
+<p>
+<del>For atomic modifications A and B of an atomic object M, B occurs later than A in the
+modification order of M if:</del>
+<ol>
+<li> <del>there is a <code>memory_order::seq_cst</code> fence X such that A is sequenced before X,
+and X precedes B in S, or</del>
+<li> <del>there is a <code>memory_order::seq_cst</code> fence Y such that Y is sequenced before B,
+and A precedes Y in S, or</del>
+<li> <del>there are <code>memory_order::seq_cst</code> fences X and Y such that A is sequenced before X,
+Y is sequenced before B, and X precedes Y in S.</del>
+</ol>
+</blockquote>
+
+<p>
+with:
+
+<blockquote>
+<p>
+<ins>An atomic operation A on some atomic object M is <em>coherence-ordered before</em>
+another atomic operation B on M if</ins>
+<ul>
+<li> <ins>A is a modification, and B observes A, or</ins>
+<li> <ins>A precedes B in the modification order, or</ins>
+<li> <ins>A and B are not the same atomic read-modify-write operation,
+and there exists an atomic modification X of M such that A observes the value
+written by X and X precedes B in modification order, or</ins>
+<li> <ins>there exists X such that A is coherence-ordered before X and X is
+coherence-ordered before B.</ins>
+</ul>
+<p>
+<ins>There shall be a single total order S on all <code>memory_order_seq_cst</code> operations,
+consistent with the “strongly happens before” order, such that for every pair of atomic
+operations A and B on an object M, where A is coherence-ordered before B,</ins>
+<ul>
+<li><ins>if A and B are both <code>memory_order_seq_cst</code> operations,
+then A precedes B in S; and</ins>
+
+<li><ins>if A is a <code>memory_order_seq_cst</code> operation and B happens before a
+<code>memory_order_seq_cst</code> fence Y, then A precedes Y in S; and</ins>
+
+<li><ins>if a <code>memory_order_seq_cst</code> fence X happens before A and B is
+a <code>memory_order_seq_cst</code> operation, then X precedes B in S; and</ins>
+
+<li><ins>if a <code>memory_order_seq_cst</code> fence X happens before A and B happens
+before a <code>memory_order_seq_cst</code> fence Y, then X precedes Y in S.</ins>
+</ul>
+<p>
+<ins>[ <em>Note:</em> This definition ensures that S is consistent with the modification order.
+It also ensures that a <code>memory_order_seq_cst</code> read of an atomic object M gets
+its value either from the last modification of M that precedes A in S or from
+some non-<code>memory_order_seq_cst</code> modification of M that does not happen before
+any modification of M that precedes A in S. -- <em>end note</em> ]</ins>
+<p>
+<ins>
+[ <em>Note:</em> We do not require that S be consistent with "happens before" (6.8.2.1
+[intro.races]). This allows more efficient implementation of
+<code>memory_order_acquire</code> and <code>memory_order_release</code> on some
+machine architectures. It may produce more surprising results when these are
+mixed with <code>memory_order_seq_cst</code> accesses. -- <em>end note</em> ]
+</ins>
+</p>
+</blockquote>
+<p>
+Finally adjust the existing note in the immediately following p8 as follows,
+to remove a statement that is no longer correct:
+<blockquote>
+<p>
+[ <em>Note:</em>
+<code>memory_order::seq_cst</code> ensures sequential consistency only for a program
+that is free of data races and uses exclusively <code>memory_order::seq_cst</code>
+<ins>atomic</ins> operations.
+Any use of weaker ordering will invalidate this
+guarantee unless extreme care is used. In many cases,
+<ins><code>memory_order_seq_cst</code> atomic operations may be
+reordered with respect to other atomic operations performed by the same thread.</ins>
+<del>In particular,
+<code>memory_order::seq_cst</code> fences
+ensure a total order only for the fences themselves. Fences cannot,
+in general, restore sequential consistency for atomic
+operations with weaker ordering specifications.</del>
+<em>— end note</em> ]
+</blockquote>
+</body>
+</html>

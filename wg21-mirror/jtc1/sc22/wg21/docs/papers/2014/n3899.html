@@ -1,0 +1,264 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN"
+ "http://www.w3.org/TR/html4/strict.dtd">
+<html><head>
+
+<meta http-equiv="Content-Type" content="text/html; charset=US-ASCII">
+
+<style type="text/css">
+
+p.example {
+  margin: 2em;
+}
+pre.example {
+  margin: 2em;
+}
+div.example {
+  margin: 2em;
+}
+
+</style>
+
+<title>Nested Allocation</title>
+</head>
+<body>
+<h1>Nested Allocation</h1>
+
+<p>
+ISO/IEC JTC1 SC22 WG21 N3899 - 2014-01-20
+</p>
+
+<p>
+Lawrence Crowl, Lawrence@Crowl.org
+</p>
+
+<p>
+<a href="#Introduction">Introduction</a><br>
+<a href="#Local">Local Non-Static Arrays</a><br>
+<a href="#Abstraction">Enabling Abstraction</a><br>
+<a href="#Storage">Generalizing Storage Class</a><br>
+<a href="#Lifetime">Nested Lifetime</a><br>
+<a href="#Allocation">Nested Allocation</a><br>
+</p>
+
+
+<h2><a name="Introduction">Introduction</a></h2>
+
+<p>
+Stack allocation is generally faster than heap allocation.
+C and C++ have exploited this speed
+by allocating statically-sized local variables on the execution stack.
+With the exception of the rather limited <code>alloca</code> facility,
+all non-statically-sized objects could only be allocated on the heap.
+</p>
+
+<p>
+That is, programmers had the choice between
+fast-but-limited and general-but-slow.
+</p>
+
+<p>
+This paper explores some of the issues when refining allocation choices.
+</p> 
+
+
+<h2><a name="Local">Local Non-Static Arrays</a></h2>
+
+<p>
+C99 introduced variable-length arrays (VLAs).
+These arrays may appear only as automatic-duration objects.
+They are typically implemented
+as a static-sized handle
+with a pointer to variable-sized data area.
+The handle is allocated within the main activation record
+and the data is separately allocated from the stack.
+C has variable-length arrays
+</p>
+
+<p>
+<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2013/n3639.html">
+N3639 Runtime-sized arrays with automatic storage duration (revision 5)</a>
+defines the C++ equivalent to VLAs.
+These are called arrays of runtime bound (ARBs).
+They have the same restrictions and implementations as VLAs.
+</p>
+
+<p>
+<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2013/n3810.pdf">
+N3810 Alternatives for Array Extensions</a>
+proposes a <code>bs_array</code> (bikeshed name),
+which is the <code>std::array</code> equivalent to ARB.
+It too has the same restrictions and implementations as VLAs.
+</p>
+
+
+<h2><a name="Abstraction">Enabling Abstraction</a></h2>
+
+<p>
+The above facilities may only appear as direct local variables,
+and thus may not be used to implement new data abstractions.
+I consider this a critical flaw
+because good abstraction is the great strength of C++.
+</p>
+
+<p>
+<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2014/n3875.pdf">
+N3875 Run-time bounded array data members</a> (RBADMs)
+presents two proposals for extending ARBs to data member variables,
+thus satisfying the essential requirement for abstraction.
+The proposals
+still restrict RBADM and their containing classes
+to automatic storage duration.
+That is, an RBADM will prohibit use of all containing classes
+in static-duration, thread-duration, or dynamic-duration objects.
+</p>
+
+<p>
+The essential idea of the proposals
+is to expose the dynamic size of the array bounds computation
+to the compiler
+so that it can allocate the arrays' data areas.
+This approach requires inlining of the constructors,
+or at least the part of them concerned with allocation.
+Furthermore, the inlining is not just nominal,
+it must also be <em>effective</em>.
+That is, the constructors must not create a separate activation record.
+</p>
+
+<p>
+In essence,
+the implementation strategy is to promote all allocations (through inlining)
+to the function (and its activation record)
+of the complete object.
+</p>
+
+
+<h2><a name="Storage">Generalizing Storage Class</a></h2>
+
+<p>
+All of the above facilities
+require using the complete object
+only as an automatic variable.
+Use in static-duration, thread-duration and static-duration variables
+is prohibited.
+One of C++'s great strengths
+is being able to use an abstraction anywhere it is needed.
+This strength is particularly important in generic contexts.
+</p>
+
+<p>
+<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2013/n3662.html">
+N3662 C++ Dynamic Arrays</a>
+addresses this problem.
+A <code>dynarray</code> is a general container,
+suitable for use in an arbitrary location.
+Because allocation is possible anywhere,
+stack allocation is not guaranteed,
+and allocation falls back to the heap (or an allocator) when necessary.
+</p>
+
+<p>
+With compiler support,
+stack allocation should be implementable in all situations
+where more restricted facilities are permitted.
+However,
+some environments may restrict the size of objects allocated on the stack,
+thus forcing allocation of larger objects on the heap.
+Other environments may be very latency sensitive,
+thus prohibiting any implicit heap allocations.
+Thus, the allocation behavior of <code>dynarray</code>
+needs to be a property of the implementation.
+</p>
+
+
+<h2><a name="Lifetime">Nested Lifetime</a></h2>
+
+<p>
+The primary objection to <code>dynarray</code>
+is the problem of reallocation
+as described by Richard Smith and Chandler Carruth.
+Consider the following example.
+</p>
+
+<pre class="example">
+<code>int f(dynarray&lt;int&gt;&amp; r) {
+  ....  r.~dynarray&lt;int&gt;();
+  ....  new(r) dynarray&lt;int&gt;(2);
+  ....
+}
+....
+{
+  dynarray&lt;int&gt; a(1);
+  f(a);
+}</code>
+</pre>
+
+<p>
+The lifetime of <code>a</code> is split in two,
+one from declaration of <code>a</code> to the explicit destruction and
+one from the placement <code>new</code> to the destruction of <code>a</code>.
+The core of the problem comes from the activation record for <code>f</code>,
+and any local objects,
+incompletely overlapping the split lifetimes.
+That is, with reallocation,
+the lifetimes of automatic-duration objects are no longer strictly nested.
+</p>
+
+<p>
+Reallocation was not an implementation problem in the past 
+because storage was either statically sized and could be simply reused,
+or obtained from the heap and could be managed out-of-order.
+</p>
+
+<p>
+The problem outlined here is fundamental to any named class,
+including <code>bs_array</code>
+and any class built using RBADM.
+</p>
+
+<p>
+Indeed the RBADM requires inline constructors and destructors
+because otherwise the allocation would be inside the lifetime
+of the activation record of a non-inline function
+and the destructor would be outside.
+That is, the lifetimes are not strictly nested.
+</p>
+
+<p>
+The C++ language needs a mechanism to identify and enforce nested lifetimes.
+We cannot simply prohibit reallocation
+because
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2008/n2544.pdf">
+N2544 Unrestricted Unions</a>
+depends on reallocation to change active fields.
+</p>
+
+
+<h2><a name="Allocation">Nested Allocation</a></h2>
+
+<p>
+Nested lifeimes permit nested allocation and deallocation.
+In addition to stack allocation,
+nested lifetimes also enable merging heap allocations.
+<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2013/n3664.html">
+N3664 Clarifying Memory Alocation</a>
+already permits this merging through compiler analysis.
+Indeed, the present definition of RBADMs and <code>dynarray</code>
+rely on compiler analysis through inlining to allocate on the stack.
+Direct support for nested allocation would
+take stack allocation and heap merging beyond the reach of compiler analysis.
+</p>
+
+<p>
+The nature of that direct support is unclear right now.
+However,
+the support would probably require three-phase construction.
+The first phase would calculate sizes
+by traversing the construction hierarchy of a complete object,
+the second phase would allocate the total size as one object,
+and the third phase would traverse the hierarchy
+to partitioning the storage and initializing it.
+At present,
+constructors are not structured so as to easily enable that separation.
+</p>
+
+</body></html>

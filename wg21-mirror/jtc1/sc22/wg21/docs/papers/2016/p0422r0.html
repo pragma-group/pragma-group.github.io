@@ -1,0 +1,1545 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+"http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=us-ascii">
+<title>Out-of-Thin-Air Execution is Vacuous</title>
+</head>
+<body>
+<h1>Out-of-Thin-Air Execution is Vacuous</h1>
+
+<p>
+ISO/IEC JTC1 SC22 WG21 P0422R0 - 2016-07-27
+</p>
+
+<p>
+Paul E. McKenney, paulmck@linux.vnet.ibm.com<br>
+Alan Jeffrey, ajeffrey@mozilla.com<br>
+Ali Sezgin, as2418@cam.ac.uk<br>
+Tony Tye, Tony.Tye@amd.com
+</p>
+
+<h2>Introduction</h2>
+
+<p>
+This paper is an updated version of
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2015/n4375.html">N4375</a>,
+revised based on discussions with Tony Tye.
+N4375 itself is based on
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n4323.html">N4323</a>,
+revised based on discussions with Michael Wong and Maged Michael.
+N4323 was in turn an updated version of
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2014/n4216.html">N4216</a>,
+revised based on discussions
+at the 2014 UIUC meeting (with much good feedback especially from
+Hans Boehm and Victor Luchangco) and on email reflector discussion.
+</p>
+
+<p>
+Out-of-thin-air (OOTA) values have proven to be a thorny issue for memory
+models, including the Java memory model (JMM) and the C11 and C++11
+memory models.
+The current C and C++ draft standards simply advise implementers to
+avoid OOTA values, without precisely defining what OOTA values might be.
+A number of publications have looked at this, including that of
+<a href="http://www.di.ens.fr/~zappa/readings/c11comp.pdf">Vafeiadis et al.</a>,
+<a href="http://www.cl.cam.ac.uk/~pes20/cpp/c_concurrency_challenges.pdf">Batty et al.</a>,
+<a href="http://dl.acm.org/citation.cfm?id=2618134">Boehm and Demsky</a>,
+<a href="http://www.cl.cam.ac.uk/~pes20/weakmemory/transsafety.pdf">Sevcik</a>,
+<a href="http://mail.openjdk.java.net/pipermail/jmm-dev/2014-July/000072.html">Jeffrey</a>,
+<a href="http://www.cl.cam.ac.uk/~pes20/cpp/notes42.html">Sewell and Batty</a>,
+and
+<a href="http://www.cs.umd.edu/~pugh/java/memoryModel/unifiedProposal/testcases.html">the JMM Causality Test Cases</a>.
+These publications establish that OOTA is harmful, and look at a number of
+interesting consequences.
+Unfortunately, these publications focus only on a small (relatively)
+sensible-seeming subset of possible OOTA scenarios.
+This paper will explore some of the less sane scenarios, which will have
+the side-effect of demonstrating that out-of-thin-air execution is,
+in the C and C++ worlds, vacuous.
+</p>
+
+<p>
+To that end, this paper will look at an
+interesting open problem, which is the fact that harmful OOTA programs can be
+very closely related to benign operation-reordering programs.
+This paper will discuss a general method, called <i>perturbation analysis</i>
+that may be used to distinguish harmful from benign.
+</p>
+
+<p>
+<b>NOTE:</b> There are no known production-quality implementations that
+can induce OOTA.
+Therefore, implementations need not do anything to avoid OOTA, other
+than avoid dubious (at best) data-speculation optimizations.
+The OOTA shortcoming is therefore a shortcoming of theory rather than
+a change needed in practice.
+</p>
+
+
+<h2>Examples: Harmful OOTA vs. Benign Reordering</h2>
+
+<p>
+The canonical harmful-OOTA example is as follow, where <code>x</code>
+and <code>y</code> are both initially zero, and where all accesses
+to shared variables are <code>memory_order_relaxed</code> (though
+loads may instead be <code>memory_order_consume</code> loads):
+</p>
+
+<blockquote>
+<pre>
+Thread 1               Thread 2
+--------               --------
+r1 = x;                r2 = y;
+y = r1;                x = r2;
+</pre>
+</blockquote>
+
+<p>
+The current C and C++ standards do not rule out the outcome of
+<code>r1</code> and <code>r2</code> both equalling 42&mdash;or any
+other value that can be represented by <code>x</code> and <code>y</code>.
+This outcome would of course be quite surprising, and would have
+a number of
+<a href="http://dl.acm.org/citation.cfm?id=2618134">fatal consequences</a>.
+</p>
+
+<p>
+In contrast, the following closely related program is an example of
+benign reordering:
+</p>
+
+<blockquote>
+<pre>
+Thread 1               Thread 2
+--------               --------
+r1 = x;                r2 = y;
+y = 42;                x = r2;
+</pre>
+</blockquote>
+
+<p>
+Here, the outcome of <code>r1</code> and <code>r2</code> is perfectly
+legitimate, and in fact occurs on actual implementations.
+</p>
+
+<p>
+However, the presence of the constant 42 in and of itself cannot distinguish
+between the benign and harmful cases, for example, this program is an
+example of harmful OOTA:
+</p>
+
+<blockquote>
+<pre>
+Thread 1               Thread 2
+--------               --------
+r1 = x;                r2 = y;
+if (r1 == 42)          x = r2;
+    y = 42;
+else
+    y = r1;
+</pre>
+</blockquote>
+
+<p>
+This example can be extended to produce a variety of OOTA values by
+expanding Thread&nbsp;1's &ldquo;if&rdquo; statement to provide
+additional values.
+A very large number and variety of examples can be generated,
+a few of which appear in the
+<a href="http://www.cs.umd.edu/~pugh/java/memoryModel/unifiedProposal/testcases.html">the JMM Causality Test Cases</a>.
+</p>
+
+<h2>Properties of Harmful OOTA</h2>
+
+<p>
+In the canonical harmful OOTA example, the value of 42 comes from nowhere,
+and circulates between <code>x</code> and <code>y</code>.
+This situation suggests the following perverse modification,
+which assumes that <code>x</code> and <code>y</code> are unsigned and thus
+not subject to undefined behavior upon overflow:
+</p>
+
+<blockquote>
+<pre>
+Thread 1               Thread 2
+--------               --------
+r1 = x;                r2 = y;
+y = r1;                x = r2 + 1;
+</pre>
+</blockquote>
+
+<p>
+This cannot result in <code>r1</code> and <code>r2</code> both having the
+value 42.
+To see this, note that the only way that <code>r1</code> can have a
+non-zero value is if it loads the value stored by Thread&nbsp;2.
+Similarly, the only way that <code>r2</code> can have a non-zero value
+is if it loads from Thread&nbsp;1's store.
+So suppose that <code>r2</code> has the value 42.
+This means that Thread&nbsp;2 stores 43, which means that the value of
+<code>r1</code> will also be 43.
+But this means that Thread&nbsp;1 will store 43 to <code>y</code>,
+which means that <code>r2</code> also cannot be 42, contradicting the
+initial assumption.
+This example demonstrates that OOTA execution is similar
+to the classic spreadsheet &ldquo;solve&rdquo; functionality: OOTA
+conceptually requires iterating until a fixed point is reached.
+This functionality has its place in spreadsheets, but has no place
+in the confines of the C and C++ memory models, most especially for
+non-converging test cases such as above.
+Hence, this example demonstrates that OOTA is not just confusing
+and harmful (for example, by inflicting undefined behavior on
+unsuspecting developers and code), but is also vacuous in the
+context of the C and C++ memory models.
+</p>
+
+<p>
+Please note that this problem does not occur if either or both of
+the loads get the initial value of zero.
+The three convergent cases are as follows:
+</p>
+
+<table border=3>
+<tr><th><code>r1</code> Source</th><th><code>r2</code> Source</th>
+	<th><code>r1</code></th><th><code>r2</code></th>
+		<th><code>x</code></th><th><code>y</code></th></tr>
+<tr><td>Initial Value</td><td>Initial Value</td>
+	<td>0</td><td>0</td>
+		<td>1</td><td>0</td></tr>
+<tr><td>Initial Value</td><td>Thread 1 Store</td>
+	<td>0</td><td>0</td>
+		<td>1</td><td>0</td></tr>
+<tr><td>Thread 2 Store</td><td>Initial Value</td>
+	<td>1</td><td>0</td>
+		<td>1</td><td>1</td></tr>
+</table>
+
+<p>
+In contrast, the benign example does not diverge when modified:
+</p>
+
+<blockquote>
+<pre>
+Thread 1               Thread 2
+--------               --------
+r1 = x;                r2 = y;
+y = 42;                x = r2 + 1;
+</pre>
+</blockquote>
+
+<p>
+This program produces well-defined results regardless of where
+the loaded values come from, as shown below:
+</p>
+
+<table border=3>
+<tr><th><code>r1</code> Source</th><th><code>r2</code> Source</th>
+	<th><code>r1</code></th><th><code>r2</code></th>
+		<th><code>x</code></th><th><code>y</code></th></tr>
+<tr><td>Initial Value</td><td>Initial Value</td>
+	<td>0</td><td>0</td>
+		<td>1</td><td>42</td></tr>
+<tr><td>Initial Value</td><td>Thread 1 Store</td>
+	<td>0</td><td>42</td>
+		<td>43</td><td>42</td></tr>
+<tr><td>Thread 2 Store</td><td>Initial Value</td>
+	<td>1</td><td>0</td>
+		<td>1</td><td>42</td></tr>
+<tr><td>Thread 2 Store</td><td>Thread 1 Store</td>
+	<td>43</td><td>42</td>
+		<td>1</td><td>42</td></tr>
+</table>
+
+<p>
+The if-statement version of the harmful example also diverges in
+response to perturbation:
+</p>
+
+<blockquote>
+<pre>
+Thread 1               Thread 2
+--------               --------
+r1 = x;                r2 = y;
+if (r1 == 42)          x = r2 + 1;
+    y = 42;
+else
+    y = r1;
+</pre>
+</blockquote>
+
+<p>
+If Thread&nbsp;2 reads from Thread&nbsp;1's store, it might see the store
+of the constant 42.
+In that case, it will store 43 to <code>x</code>.
+But if Thread&nbsp;1 also reads Thread&nbsp;2's store, it will load
+the value 43, and thus won't execute the store of 42,
+which means that Thread&nbsp;2's load gives 43, not 42, contradicting the
+initial assumption.
+</p>
+
+<h2>General Two-Thread/Two-Variable OOTA</h2>
+
+<p>
+A general two-thread/two-variable form of OOTA is as follows:
+</p>
+
+<blockquote>
+<pre>
+Thread 1               Thread 2
+--------               --------
+r1 = x;                r3 = y;
+if (f(r1, &amp;r2))        if (g(r3, &amp;r4))
+    y = r2;                x = r4;
+</pre>
+</blockquote>
+
+<p>
+The previous section applied a perturbation function to Thread&nbsp;2's
+store, resulting in the following:
+</p>
+
+<blockquote>
+<pre>
+Thread 1               Thread 2
+--------               --------
+r1 = x;                r3 = y;
+if (f(r1, &amp;r2))        if (g(p(r3), &amp;r4))
+    y = r2;                x = r4;
+</pre>
+</blockquote>
+
+<p>
+In the previous section, we chose <code>p()</code> to the increment
+function.
+Unfortunately, this choice does not always force an inconsistency,
+for example:
+
+<blockquote>
+<pre>
+int f(unsigned a, unsigned *b)
+{
+    *b = a &amp; ~0x1;
+    return 1;
+}
+
+unsigned g(unsigned a, unsigned *b)
+{
+    *b = a;
+    return 1;
+}
+
+unsigned p(unsigned a)
+{
+    return a + 1;
+}
+
+Thread 1               Thread 2
+--------               --------
+r1 = x;                r3 = y;
+if (f(r1, &amp;r2))        if (g(p(r3), &amp;r4))
+    y = r2;                x = r4;
+</pre>
+</blockquote>
+
+<p>
+If Thread&nbsp;1 stores the value 42 to <code>y</code>, Thread&nbsp;2
+will increment it and thus store 43 to <code>x</code>.
+But Thread&nbsp;1's call to <code>f()</code> will strip off the bottom
+bit, restoring both the value 42 and consistent execution.
+In this case, a perturbation function <code>p</code> that is an
+increment fails to force an inconsistency (although it does succeed
+in changing the overal behavior).
+The choice of the perturbation function <code>p()</code> depends on
+the algorithm, and is in the general case undecidable.
+</p>
+
+<p>
+However, all is not lost.
+First, it can easily be seen that a function <code>p()</code> that
+increments by two rather than one suffices to produce the needed
+inconsistency.
+This is still a total function and results in the following, where
+the functions <code>f()</code>,
+<code>g()</code>, and <code>p()</code> have all been inlined for ease
+of exposition:
+</p>
+
+<blockquote>
+<pre>
+Thread 1               Thread 2
+--------               --------
+r1 = x;                r2 = y;
+y = r1 &amp; ~0x1;         x = r2 + 2;
+</pre>
+</blockquote>
+
+<p>
+Here, if Thread&nbsp;2's load returns 42, it will store the value 44.
+Thread&nbsp;1's load will thus return 44, which is unaffected
+by the bitwise AND, so that Thread&nbsp;1 stores 44.
+This contradicts Thread&nbsp;2's initial load of 42, thus providing
+the needed inconsistency.
+</p>
+
+<p>
+Although the choice of <code>p()</code> is in theory undecidable,
+the examples in this paper can be solved for a suitable <code>p()</code>
+using (at most) simple algebra.
+We further conjecture that a randomly chosen function would have a high
+probability of forcing an inconsistency.
+In fact, it is possible for the identity function to
+result in an inconsistency, for example, in the following case:
+</p>
+
+<blockquote>
+<pre>
+Thread 1               Thread 2
+--------               --------
+r1 = x;                r2 = y;
+y = r1;                x = ~r2;
+</pre>
+</blockquote>
+
+<p>
+Because the example is itself inconsistent, the choice of the identity
+function for <code>p()</code> suffices to preserve this inconsistency.
+</p>
+
+<p>
+We further conjecture that the choice of <code>p()</code> is
+not only decidable but trivial in the case where all variables
+are boolean.
+In this case, <code>p()</code> can be simple boolean NOT,
+as in the C and C++ prefix <code>!</code> operator.
+In fact, the only reasonable choices for <code>p()</code> are
+NOT on the one hand and the identity function on the other.
+It might be necessary to apply <code>p()</code> to the Thread&nbsp;1's
+load instead of that of Thread&nbsp;2.
+Of course, just as with integers, it is necessary to check the original
+example for inconsistencies before applying a perturbation function.
+</p>
+
+<p>
+We will see that the choice of perturbation function <code>p()</code>
+is constrained as follows:
+</p>
+
+<ol>
+<li>	<code>p()</code> must be total over the set of possible argument
+	values.
+<li>	<code>p()</code> must not violate constraints deduced from
+	global analysis.
+</ol>
+
+<h2>JMM Causality Test Cases</h2>
+
+<p>
+This section applies perturbation to each of the JMM causality test
+cases, comparing the results to the decisions.
+</p>
+
+<h3>Causality Test Case 1</h3>
+
+<blockquote>
+<pre>
+Thread 1               Thread 2
+--------               --------
+r1 = x;                r2 = y;
+if (r1 &gt;= 0)           x = r2;
+    y = 1;
+
+Behavior in question: r1 == r2 == 1
+Decision: Allowed.
+</pre>
+</blockquote>
+
+<p>
+The decision is based on the assumption that the compiler determines that
+the variables are all non-negative.
+We can define <code>p()</code> to be the increment function, and see
+that although this choice of perturbation function does change the
+behavior, it does not introduce an inconsistency.
+</p>
+
+<p>
+On the other hand, if we violate the non-negativity assumption by choosing
+<code>p()</code>
+to be the function that decrements by two, we have
+<code>r2 == 1 &amp;&amp; x == -2 &amp;&amp; r1 == -2 &amp;&amp; y == 0</code>,
+which is an inconsistent execution.
+</p>
+
+<p>
+This example therefore illustrates another constraint on the perturbation
+function, namely that it not violate constraints deduced from global
+analysis.
+</p>
+
+<h3>Causality Test Case 2</h3>
+
+<blockquote>
+<pre>
+Thread 1               Thread 2
+--------               --------
+r1 = x;                r3 = y;
+r2 = x;                x = r3;
+if (r1 == r2)
+    y = 1;
+
+Behavior in question: r1 == r2 == r3 == 1
+Decision: Allowed.
+</pre>
+</blockquote>
+
+<p>
+Assume an arbitrary perturbation function <code>p()</code>, and that
+Thread&nbsp;1's loads happen after Thread&nbsp;2's store.
+Then <code>r1</code> will always be equal to <code>r2</code>, so
+that Thread&nbsp;1 will always store to <code>y</code>.
+Therefore, we have a consistent execution regardless of the perturbation
+function.
+</p>
+
+<h3>Causality Test Case 3</h3>
+
+<blockquote>
+<pre>
+Thread 1               Thread 2               Thread 3
+--------               --------               --------
+r1 = x;                r3 = y;                x = 2
+r2 = x;                x = r3;
+if (r1 == r2)
+    y = 1;
+
+Behavior in question: r1 == r2 == r3 == 1
+Decision: Allowed.
+</pre>
+</blockquote>
+
+<p>
+Assume an arbitrary perturbation function <code>p()</code>, and that
+Thread&nbsp;1's loads happen after both Thread&nbsp;2's and
+Thread&nbsp;3's stores.
+Then <code>r1</code> will always be equal to <code>r2</code>, so
+that Thread&nbsp;1 will always store to <code>y</code>.
+Therefore, we again have a consistent execution regardless of the perturbation
+function.
+</p>
+
+<h3>Causality Test Case 4</h3>
+
+<blockquote>
+<pre>
+Thread 1               Thread 2
+--------               --------
+r1 = x;                r2 = y;
+y = r1;                x = r2;
+
+Behavior in question: r1 == r2 == 1
+Decision: Disallowed.
+</pre>
+</blockquote>
+
+<p>
+This test case was analyzed earlier, and that analysis agrees with the
+decision of &ldquo;disallowed.&rdquo;
+Interestingly enough, a compiler examining this test case could deduce
+that only the value 0 is assigned to <code>x</code> and <code>y</code>
+(at initialization time).
+The JMM applied this sort of compiler-based variable-value deduction to
+other test cases, so it is curious that they chose not to apply it to
+this case.
+(Or, alternatively, given that they did not apply it to this case, it is
+curious that they felt comfortable applying it to other cases.)
+Of course, in general, the range of values of variables is also
+undecidable.
+</p>
+
+<h3>Causality Test Case 5</h3>
+
+<blockquote>
+<pre>
+Thread 1               Thread 2               Thread 3               Thread 4
+--------               --------               --------               --------
+r1 = x;                r2 = y;                z = 1;                 r3 = z;
+y = r1;                x = r2;                                       x = r3;
+
+Behavior in question: r1 == r2 == 1, r3 == 0
+Decision: Disallowed.
+</pre>
+</blockquote>
+
+<p>
+Because <code>r3</code> is zero, we know that Thread&nbsp;4 stored zero
+to <code>x</code>.
+Therefore, the only way for <code>r1</code> and <code>r2</code> to
+equal 1 is for an OOTA cycle involving only Threads&nbsp;1 and&nbsp;2.
+However, this part of the test case is the same as test case&nbsp;4,
+and perturbation analysis gives the same outcome of &ldquo;disallowed.&rdquo;
+</p>
+
+<h3>Causality Test Case 6</h3>
+
+<blockquote>
+<pre>
+Thread 1               Thread 2
+--------               --------
+r1 = A;                r2 = B;
+if (r1 == 1)           if (r2 == 1)
+    B = 1;                 A = 1;
+                       if (r2 == 0)
+		           A = 1;
+
+Behavior in question: r1 == r2 == 1
+Decision: Allowed.
+</pre>
+</blockquote>
+
+<p>
+<code>B</code> is always either zero or one, so Thread&nbsp;2
+will load either zero or one into <code>r2</code>.
+This means that one or the other of the two <code>if</code> statements
+will always be taken, so Thread&nbsp;2 will always store the value 1 to
+<code>A</code>.
+This means that a sufficiently aggressive compiler could eliminate
+Thread&nbsp;2's <code>if</code> statements and simply unconditionally
+assign to <code>A</code>.
+Because all memory references are relaxed, the order of Thread&nbsp;2's
+load and store can be reversed, after which the result is allowed even in an
+SC execution.
+</p>
+
+<p>
+Perturbation can chance the values of <code>r1</code> and <code>r2</code>,
+but cannot introduce inconsistencies.
+If the compiler cannot determine that <code>B</code> is always either zero
+or one, perturbation still cannot introduce inconsistencies.
+Either way, perturbation analysis agrees with the decision of
+&ldquo;allowed.&rdquo;
+</p>
+
+<h3>Causality Test Case 7</h3>
+
+<blockquote>
+<pre>
+Thread 1               Thread 2
+--------               --------
+r1 = x;                r3 = y;
+r2 = x;                z = r3;
+y = r2;                x = 1;
+
+Behavior in question: r1 == r2 == r3 == 1
+Decision: Allowed.
+</pre>
+</blockquote>
+
+<p>
+Simple reordering can produce the behavior, and adding perturbation can
+change the behavior, but cannot result in inconsistencies.
+For example, applying an arbitrary perturbation function <code>p()</code>
+to the value stored to <code>y</code> results in the following:
+
+<blockquote>
+<pre>
+Thread 1               Thread 2
+--------               --------
+r1 = x;                r3 = y;
+r2 = x;                z = r3;
+y = p(r2);             x = 1;
+</pre>
+</blockquote>
+
+<p>
+In this case, we can see <code>r1 == r2 == 1 &amp;&amp; r3 == p(1)</code>.
+So because perturbation does not introduce inconsistencies (instead merely
+changing the behavior), perturbation analysis agrees with the decision
+of &ldquo;allowed.&rdquo;
+</p>
+
+<h3>Causality Test Case 8</h3>
+
+<blockquote>
+<pre>
+Thread 1               Thread 2
+--------               --------
+r1 = x;                r3 = y;
+                       x = r3;
+r2 = 1 + r1 * r1 - r1;
+y = r2;
+
+Behavior in question: r1 == r2 == 1
+Decision: Allowed.
+</pre>
+</blockquote>
+
+<p>
+One wonders why <code>r3 = 1</code> was not included in the behavior.
+</p>
+
+<p>
+The analysis in the JMM test cases assumes that inter-thread analysis
+determines that <code>x</code> and <code>y</code> is always either zero
+or one, so that the compiler converts the code to the following:
+</p>
+
+<blockquote>
+<pre>
+Thread 1               Thread 2
+--------               --------
+r1 = x;                r3 = y;
+r2 = 1;                x = r3;
+y = r2;
+</pre>
+</blockquote>
+
+<p>
+In this case, perturbation results in the following:
+</p>
+
+<blockquote>
+<pre>
+Thread 1               Thread 2
+--------               --------
+r1 = x;                r3 = y;
+r2 = 1;                x = p(r3);
+y = r2;
+</pre>
+</blockquote>
+
+<p>
+Note that applying the perturbation function to Thread&nbsp;1 has
+no effect: The <code>r1</code> variable is dead code.
+Applying the perturbation to Thread&nbsp;2 causes the value 2 to be
+stored to <code>x</code>, which again has no effect in Thread&nbsp;1
+other than changing the value of <code>r1</code>.
+Therefore, perturbations do not result in inconsistency, which agrees
+with the decision of &ldquo;allowed.&rdquo;
+</p>
+
+<p>
+This analysis applies given the range determination for <code>x</code>
+and <code>y</code> even without the optimization.
+In this case, the only reasonable perturbation function is the
+<code>!</code> operator, resulting in the following:
+</p>
+
+<blockquote>
+<pre>
+Thread 1               Thread 2
+--------               --------
+r1 = x;                r3 = y;
+                       x = !r3;
+r2 = 1 + r1 * r1 - r1;
+y = r2;
+</pre>
+</blockquote>
+
+<p>
+In this case, Thread&nbsp;1's load from <code>x</code> returns either
+zero or one, but it will always store the value of one to <code>y</code>.
+This means that Thread&nbsp;2's load from <code>y</code> will always
+return the value 1, so that there is no inconsistency.
+This again means that this test case is an example of benign reordering
+rather than harmful OOTA, again agreeing with the decision of
+&ldquo;allowed.&rdquo;
+</p>
+
+<h3>Causality Test Case 9</h3>
+
+<blockquote>
+<pre>
+Thread 1               Thread 2               Thread 3
+--------               --------               --------
+r1 = x;                r3 = y;                x = 2
+                       x = r3;
+r2 = 1 + r1 * r1 - r1;
+y = r2;
+
+Behavior in question: r1 == r2 == 1
+Decision: Allowed.
+</pre>
+</blockquote>
+
+<p>
+If the compiler can determine that Thread&nbsp;3 executes only after
+both Threads&nbsp;1 and&nbsp;2, then analysis proceeds as with
+test case&nbsp;8 above.
+On the other hand, if Thread&nbsp;3 can execute before Threads&nbsp;1
+and&nbsp;2, then the compiler cannot limit the values of <code>x</code>
+and <code>y</code> to zero and one, and so the perturbation might proceed
+as follows:
+</p>
+
+<blockquote>
+<pre>
+Thread 1               Thread 2               Thread 3
+--------               --------               --------
+r1 = x;                r3 = y;                x = 2
+                       x = r3 + 1;
+r2 = 1 + r1 * r1 - r1;
+y = r2;
+</pre>
+</blockquote>
+
+<p>
+If each of the Thread&nbsp;1's and Thread&nbsp;2's loads returns the
+value stored by the other thread, inconsistency results.
+For example, if we assume Thread&nbsp;1 stores the value 1, then Thread&nbsp;2
+will store the value 2.
+But that would mean that Thread&nbsp;1 would calculate and store the
+value 4, which is inconsistent with the assumption that Thread&nbsp;2
+loaded the value 1.
+Therefore, if the compiler is unable to determine that the values of
+<code>x</code> and <code>y</code> are limited to zero and one,
+then a load-store cycle is illegal.
+</p>
+
+<p>
+This situation might seem a bit disturbing, but it in fact will help lead to
+key insight, namely that optimizations that replace computations with
+the equivalent constants are legal and cannot result in OOTA values.
+</p>
+
+<h3>Causality Test Case 9a</h3>
+
+<p>
+This variation has the initial value of <code>x</code> be two rather
+than zero:
+</p>
+
+<blockquote>
+<pre>
+Thread 1               Thread 2               Thread 3
+--------               --------               --------
+r1 = x;                r3 = y;                x = 0
+                       x = r3;
+r2 = 1 + r1 * r1 - r1;
+y = r2;
+
+Behavior in question: r1 == r2 == 1
+Decision: Allowed.
+</pre>
+</blockquote>
+
+<p>
+This plays out very similarly to test cases&nbsp;8 and&nbsp;9: If the
+compiler can assign a constant to <code>r2</code>, then Threads&nbsp;1
+and&nbsp;2 can legitimately load from each other's stores, otherwise
+they cannot.
+</p>
+
+<h3>Causality Test Case 10</h3>
+
+<blockquote>
+<pre>
+Thread 1              Thread 2              Thread 3              Thread 4
+--------              --------              --------              --------
+r1 = x;               r2 = y;               z = 1;                r3 = z;
+if (r1 == 1)          if (r2 == 1)                                if (r3 == 1)
+    y = 1;                x = 1;                                      x = 1;
+
+Behavior in question: r1 == r2 == 1, r3 == 0
+Decision: Disallowed.
+</pre>
+</blockquote>
+
+<p>
+Given that <code>r3</code> is equal to zero, we know that Thread&nbsp;4's
+load could not have read from Thread&nbsp;2's store (possibly due to
+Thread&nbsp;2's store not having executed in the first place).
+We also know that Thread&nbsp;4 did not store to <code>x</code>.
+This test case therefore can be analyzed by looking only at Threads&nbsp;1
+and&nbsp;2.
+Perturbation then proceeds as follows:
+</p>
+
+<blockquote>
+<pre>
+Thread 1              Thread 2
+--------              --------
+r1 = x;               r2 = y - 1;
+if (r1 == 1)          if (r2 == 1)
+    y = 1;                x = 1;
+</pre>
+</blockquote>
+
+<p>
+Suppose that Thread&nbsp;1's load returns the value that Thread&nbsp;2
+stored.
+Then Thread&nbsp;1's <code>if</code> statement will execute the store
+in its <code>then</code> clause.
+If Thread&nbsp;2's load in turn returns the value that Thread&nbsp;1
+stored, <code>r2</code> will be zero, which will mean that Thread&nbsp;2's
+<code>if</code> statement will <i>not</i> execute the store in its
+<code>then</code> clause.
+But that means that Thread&nbsp;1's load cannot possibly return the
+value that Thread&nbsp;2 stored because nothing was stored.
+This inconsistency means that this test case is an example of harmful
+OOTA, which agrees with the JMM decision of &ldquo;disallowed&rdquo;.
+</p>
+
+<h3>Causality Test Case 11</h3>
+
+<blockquote>
+<pre>
+Thread 1              Thread 2
+--------              --------
+r1 = z;               r4 = w;
+w = r1;               r3 = y;
+r2 = x;               z = r3;
+y = r2;               x = 1;
+
+Behavior in question: r1 == r2 == r3 == r4 == 1
+Decision: Allowed.
+</pre>
+</blockquote>
+
+<p>
+We again assume that each load returns the value of the corresponding store
+from the other thread.
+This results in an update order of <code>x</code>, <code>y</code>,
+<code>z</code>, <code>w</code>.
+Because this is acyclic, perturbation cannot introduce an inconsistency,
+so this is an example of simple reordering, and not OOTA at all.
+Thus, perturbation analysis agrees with the JMM decision of
+&ldquo;allowed.&rdquo;
+</p>
+
+<h3>Causality Test Case 12</h3>
+
+<p>
+This test case has initial values of zero for <code>x</code> and <code>y</code>,
+1 for <code>a[0]</code>, and 2 for <code>a[1]</code>.
+</p>
+
+<blockquote>
+<pre>
+Thread 1              Thread 2
+--------              --------
+r1 = x;               r3 = y;
+a[r1] = 0;            x = r3;
+r2 = a[0];
+y = r2;
+
+Behavior in question: r1 == r2 == r3 == 1
+Decision: Disallowed.
+</pre>
+</blockquote>
+
+<p>
+Suppose as usual that each thread's load returns the value from the
+corresponding store by the other thread.
+We can perturb as follows:
+</p>
+
+<blockquote>
+<pre>
+Thread 1              Thread 2
+--------              --------
+r1 = x;               r3 = y;
+a[r1] = 0;            x = r3 + 1;
+r2 = a[0];
+y = r2;
+</pre>
+</blockquote>
+
+<p>
+Given this perturbation, if Thread&nbsp;2 loads the value 1 from
+<code>y</code>, then it will store the value 2 to x.
+Thread&nbsp;1 will then load 2, and run off the end of array <code>a</code>,
+resulting in undefined behavior (or, if the array has three elements,
+uninitialized values).
+This is clearly inconsistent, so this is an example of harmful OOTA,
+which agrees with the JMM decision of &ldquo;disallowed.&rdquo;
+</p>
+
+<h3>Causality Test Case 13</h3>
+
+<blockquote>
+<pre>
+Thread 1              Thread 2
+--------              --------
+r1 = x;               r2 = y;
+if (r1 == 1)          if (r2 == 1)
+    y = 1;                x = 1;
+
+Behavior in question: r1 == r2 == 1
+Decision: Disallowed.
+</pre>
+</blockquote>
+
+<p>
+The following perturbation works in this case:
+</p>
+
+<blockquote>
+<pre>
+Thread 1              Thread 2
+--------              --------
+r1 = x;               r2 = y;
+if (r1 == 1)          if (r2 + 1 == 1)
+    y = 1;                x = 1;
+</pre>
+</blockquote>
+
+<p>
+As before, suppose that each threads' load returns the value from the
+other thread's corresponding store.
+Then <code>r2</code> will be one, so that <code>r2 + 1</code> will not
+be equal to one, in turn meaning that Thread&nbsp;2's store will not be
+executed.
+In this case, <code>r1</code> must be zero, so that Thread&nbsp;1's
+store also is not executed.
+This means that <code>r2</code> cannot possibly have the value one, resulting
+in an inconsistency.
+This agrees with the JMM decision of &ldquo;disallowed.&rdquo;
+</p>
+
+<h3>Causality Test Case 14</h3>
+
+<p>
+In this test case, accesses to <code>y</code> use
+<code>memory_order_seqcst</code>.
+</p>
+
+<blockquote>
+<pre>
+Thread 1              Thread 2
+--------              --------
+r1 = a;               do {
+if (r1 == 0)              r2 = y;
+    y = 1;                r3 = b;
+else                  } while (r2 + r3 == 0);
+    b = 1;            a = 1;
+
+Behavior in question: r1 == r3 == 1 &amp;&amp; r2 == 0
+Decision: Disallowed.
+</pre>
+</blockquote>
+
+<p>
+If Thread&nbsp;2 leaves its loop due to Thread&nbsp;1's store to <code>y</code>,
+the resulting synchronized-with relationship will force the load from
+<code>a</code> to happen before the store, so that <code>r1 == 0</code>.
+We therefore consider executions where Thread&nbsp;2 leaves its loop due
+to Thread&nbsp;1's store to <code>b</code>.
+</p>
+
+<p>
+In this case, we can use the following perturbation:
+</p>
+
+<blockquote>
+<pre>
+Thread 1              Thread 2
+--------              --------
+r1 = a;               do {
+if (r1 - 1 == 0)          r2 = y;
+    y = 1;                r3 = b;
+else                  } while (r2 + r3 == 0);
+    b = 1;            a = 1;
+</pre>
+</blockquote>
+
+<p>
+Suppose that Thread&nbsp;1's load from <code>a</code> returns the value
+stored by Thread&nbsp;2.
+Then Thread&nbsp;1 will store to <code>y</code>, which, as noted above,
+ensures that either Thread&nbsp;2 never exits its loop or that there is
+a synchronized-with relationship between the store to and the load from
+<code>y</code>.
+Either outcome makes it impossible for Thread&nbsp;1 to load the value
+from Thread&nbsp;2's store to <code>a</code>, resulting in an inconsistency.
+This agrees with the JMM's decision of &ldquo;disallowed.&rdquo;
+</p>
+
+<h3>Causality Test Case 15</h3>
+
+<p>
+In this test case, accesses to <code>x</code> and <code>y</code> use
+<code>memory_order_seqcst</code>.
+</p>
+
+<blockquote>
+<pre>
+Thread 1              Thread 2              Thread 2
+--------              --------              --------
+r0 = x;               do {                  x = 1;
+if (r0 == 1)              r2 = y;
+    r1 = a;               r3 = b;
+else                  } while (r2 + r3 == 0);
+    r1 = 0;           a = 1;
+if (r1 == 0)
+    y = 1;
+else
+    b = 1;
+
+Behavior in question: r0 == r1 == r3 == 1 &amp;&amp; r2 == 0
+Decision: Disallowed.
+</pre>
+</blockquote>
+
+<p>
+Just as with test case&nbsp;14, we must consider cases where Thread&nbsp;2
+leaves its loop due to Thread&nbsp;1's store to <code>b</code>.
+And a similar perturbation suffices:
+</p>
+
+<blockquote>
+<pre>
+Thread 1              Thread 2              Thread 2
+--------              --------              --------
+r0 = x;               do {                  x = 1;
+if (r0 == 1)              r2 = y;
+    r1 = a - 1;           r3 = b;
+else                  } while (r2 + r3 == 0);
+    r1 = 0;           a = 1;
+if (r1 == 0)
+    y = 1;
+else
+    b = 1;
+</pre>
+</blockquote>
+
+<p>
+Suppose that Thread&nbsp;1's load from <code>x</code> returns the value
+stored by Thread&nbsp;3 and that Thread&nbsp;1's load from <code>a</code>
+returns the value stored by Thread&nbsp;2.
+But this means that Thread&nbsp;1 will store to <code>y</code>,
+which forces Thread&nbsp;2's store to <code>a</code> to happen after
+Thread&nbsp;1's load from <code>a</code>, thus forcing an inconsistency.
+Hence perturbation analysis agrees with the JMM's decision of
+&ldquo;disallowed.&rdquo;
+</p>
+
+<h3>Causality Test Case 16</h3>
+
+<blockquote>
+<pre>
+Thread 1              Thread 2
+--------              --------
+r1 = x;               r2 = x;
+x = 1;                x = 2;
+
+Behavior in question: r1 == 2 &amp;&amp; r2 == 1
+Decision: Allowed.
+</pre>
+</blockquote>
+
+<p>
+An arbitrary perturbation function applied to either load from
+<code>x</code> has no effect on subsequent execution (for
+some definition of &ldquo;subsequent&rdquo;).
+Therefore, perturbation analysis cannot induce an inconsistency,
+which agrees with the JMM decision of &ldquo;allowed.&rdquo;
+</p>
+
+<h3>Causality Test Case 17</h3>
+
+<blockquote>
+<pre>
+Thread 1              Thread 2
+--------              --------
+r3 = x;               r2 = y;
+if (r3 != 42)         x = r2;
+    x = 42;
+r1 = x;
+y = r1;
+
+Behavior in question: r1 == r2 == r3 == 42
+Decision: Allowed.
+</pre>
+</blockquote>
+
+<p>
+At the point where Thread&nbsp;1 loads <code>x</code> into <code>r1</code>,
+it has either just loaded the value 42 from <code>x</code> or just stored
+the value 42 to <code>x</code>.
+Therefore, the compiler could simply set <code>r1</code> to the constant 42.
+Once it has done that, because relaxed accesses do not provide any ordering
+guarantees, the assignment to <code>r1</code> (as well as the subsequent
+store to <code>y</code> may be reordered.
+Note that this transformation might be a bit controversial, because as soon
+as the assignment of 42 to <code>r1</code> is moved to precede the store to
+<code>x</code>, the rationale for replacing the load from <code>x</code>
+with 42 disappears.
+For the purpose of this analysis, we will assume that relaxed loads and
+stores permit even this somewhat extreme reordering.
+</p>
+
+<p>
+Given that transformation, no perturbation can change the value
+that Thread&nbsp;1 stores to <code>y</code>, which eliminates any
+possibility of inconsistency.
+Perturbation analysis thus agrees with the JMM decision of
+&ldquo;allowed.&rdquo;
+</p>
+
+<h3>Causality Test Case 18</h3>
+
+<blockquote>
+<pre>
+Thread 1              Thread 2
+--------              --------
+r3 = x;               r2 = y;
+if (r3 == 0)          x = r2;
+    x = 42;
+r1 = x;
+y = r1;
+
+Behavior in question: r1 == r2 == r3 == 42
+Decision: Allowed.
+</pre>
+</blockquote>
+
+<p>
+Given a compiler that could figure out that the only possible values that
+could be loaded from <code>x</code> are 0 and 42, the perturbation analysis
+is restricted to perturbing within these two values, which gives the same
+result as test case&nbsp;17.
+</p>
+
+<h3>Causality Test Case 19</h3>
+
+<blockquote>
+<pre>
+Thread 1              Thread 2              Thread 3
+--------              --------              --------
+join thread 3         r2 = y;               r3 = x;     
+r1 = x;               x = r2;               if (r3 != 42)
+y = r1;                                         x = 42;
+
+Behavior in question: r1 == r2 == r3 == 42
+Decision: Allowed.
+</pre>
+</blockquote>
+
+<p>
+If the compiler is allowed to optimize across the <code>join</code>,
+this is the same as test case&nbsp;17.
+</p>
+
+<h3>Causality Test Case 20</h3>
+
+<blockquote>
+<pre>
+Thread 1              Thread 2              Thread 3
+--------              --------              --------
+join thread 3         r2 = y;               r3 = x;     
+r1 = x;               x = r2;               if (r3 == 0)
+y = r1;                                         x = 42;
+
+Behavior in question: r1 == r2 == r3 == 42
+Decision: Allowed.
+</pre>
+</blockquote>
+
+<p>
+If the compiler is allowed to optimize across the <code>join</code>,
+this is the same as test case&nbsp;18.
+</p>
+
+<h2>Causality Test Case Discussion</h2>
+
+<p>
+In all cases, perturbation analysis gives the same decision as did the JMM's
+deliberations.
+We therefore hypothesize that the analysis distinguishes benign reordering
+from harmful OOTA.
+</p>
+
+<p>
+It is important to note that the perturbation-analysis approach sidesteps
+the issue of which compiler optimizations may be used in a given situation:
+Optimizations are applied first, and only then is perturbation analysis
+undertaken.
+However, this sidestepping has the benefit that perturbation analysis
+applies equally well to
+C, C++, and Java, despite the very different restrictions on optimizations
+across these three languages.
+</p>
+
+<p>
+It would be nice to have a succinct description of the set of test cases
+in which perturbation functions introduced inconsistencies.
+Ali Sezgin pointed out this set is described by <code>rf &#8746; sdep</code>,
+where <code>rf</code> is the reads-from relationship and <code>sdep</code>
+is &ldquo;semantic dependence&rdquo;, roughly defined as those dependency
+relationships in which at least some changes in the value at the head of the
+dependency relationship propagate through, resulting in a change at the
+tail of that relationship.
+</p>
+
+<p>
+Prohibiting executions that have cycles in <code>rf &#8746; sdep</code>
+can therefore be expected to prohibit OOTA behaviors.
+</p>
+
+<p>
+One beneficial consequence of this relationship to semantic dependency is
+that <code>rf &#8746; nsdep</code> cycles are allowed, where
+<code>nsdep &#8745; sdep</code> is the empty set and where
+<code>nsdep &#8746; sdep = dep</code>.
+This means that the compiler is free to replace expressions that are
+known to always result in a single value with the corresponding constant,
+without danger of introducing OOTA behavior.
+We hypothesize that non-speculative code-reordering optimizations are
+similarly unable to introduce OOTA behavior.
+</p>
+
+<p>
+Defining &ldquo;semantic dependency&rdquo; sufficiently for formal
+modeling remains an open issue.
+In the general case, this the question of whether or not a given
+dependency is a semantic dependency is of course undecidable.
+However, this question can be decided straightforwardly
+in many common cases.
+One approach would be to flag dependencies that the tool was unable to
+classify.
+Another approach would be to consider cases that a given compiler might
+optimize, and to classify other cases as semantic dependencies.
+</p>
+
+<h2>Asides</h2>
+
+<p>The following sections present asides on undecidabilty,
+inferred ordering, and code generated by old compilers.
+</p>
+
+<h3>Aside on Undecidability</h3>
+
+<p>
+The fact that the choice of the perturbation function is undecidable
+is no greater obstacle for OOTA than it is for anything else.
+After all, almost all interesting questions about Turing-complete
+languages are undecidable.
+(As Doug Lea pointed out, others are &ldquo;merely&rdquo; NP.)
+The following simple example is a case in point:
+</p>
+
+<blockquote>
+<pre>
+Thread 1                      Thread 2
+--------                      --------
+x = 1;                        r1 = y;
+if (undecidable())            r2 = x.load(acquire);
+    y.store(1, relaxed)
+else
+    y.store(1, release)
+</pre>
+</blockquote>
+
+<p>
+Is the outcome <code>r1 == 1 &amp;&amp; r2 ==0</code> permitted?
+In general, this is undecidable.
+</p>
+
+<p>
+So what do we do about this?
+</p>
+
+<p>
+The same things that we have always done.
+The <code>ppcmem</code> and <code>herd</code> tools permit only a small
+finite number of variables, thus avoiding undecidability.
+The <code>cbmc</code> model checker limits the number of passes through
+each loop, thus considering only finite executions, again avoiding
+undecidability.
+These two strategies should also work well for perturbation analysis.
+</p>
+
+<p>
+And selection of a perturbation function is usually straightforward:
+</p>
+
+<ol>
+<li>	Select the presumed cycle.  (Yes, in a large program, there
+	might be a lot of them.  Just like there might be a lot
+	of synchronized-with relationships.)
+
+<li>	Pick a load on the presumed cycle.
+
+<li>	Select a return value for the load (usually given by the
+	assertion).
+
+<li>	Check whether the selected return value is consistent,
+	in other words, whether this value results in that same
+	value being stored to that variable.
+	In theory, this step can be undecidable because an overly
+	clever programmer might do something like make the value
+	stored depend on some undecidable proposition such as the
+	halting problem.
+	In practice, making one's program depend on an undecidable
+	proposition seems like a clear case of a deeply flawed design.
+
+<li>	If the value is consistent, solve for a perturbation function
+	that makes it inconsistent.  For most litmus tests, this is
+	at worst simple algebra.  Of course, it might be undecidable,
+	in which case it is time to spend some quality time with the
+	litmus test's author.  ;-)
+</ol>
+
+<p>
+So the undecidability should not normally be a problem in practice.
+</p>
+
+<h3>Aside on Inferred Ordering</h3>
+
+<p>
+Suppose that a highly optimizing compiler and a less-aggressive
+analysis tool are applied to the following litmus test (put forward
+by Hans Boehm):
+</p>
+
+<blockquote>
+<pre>
+Thread 1                      Thread 2
+--------                      --------
+r1 = x;                       r2 = y;
+y = r1;                       r3 = f(y);
+                              x = r3;
+</pre>
+</blockquote>
+
+<p>
+Suppose the compiler determined that function <code>f()</code> did
+not represent a semantic dependency, but that the analysis tool was
+unable to make this determination.
+Might the analysis tool therefore incorrectly report to the developer
+that Thread&nbsp;2's load from <code>y</code> is ordered before
+its store to <code>x</code>?
+</p>
+
+<p>
+When considering this question, keep in mind that all accesses
+are relaxed.
+This means that there are no ordering properties, unless they are
+supplied by other non-relaxed accesses.
+Therefore the answer to the question is that the analysis tool
+should not report that Thread&nbsp;2's
+accesses are ordered in any case.
+It should instead confine itself to disregarding any candidate executions
+involving OOTA results.
+</p>
+
+<p>
+What <i>can</i> happen is that the compiler might be able to determine
+that <code>f(y)</code> always returns 42, thus allowing it to transform
+the code as follows:
+</p>
+
+<blockquote>
+<pre>
+Thread 1                      Thread 2
+--------                      --------
+r1 = x;                       r2 = y;
+y = r1;                       r3 = 42;
+                              x = r3;
+</pre>
+</blockquote>
+
+<p>
+The compiler might then generate code that resulted in
+<code>x = y = 42</code>.
+If the analysis tool had less sophisticated analysis than did the compiler,
+the tool might well exclude this result.
+But this would constitute a bug in the tool rather than a problem with OOTA:
+The compiler correctly determined that the dependency of <code>r3</code>
+on <code>r2</code> was not a semantic dependency, while the tool failed
+to make this distinction.
+However, a high-quality tool would report that it was unable to prove
+whether or not <code>f()</code> represented a semantic dependency.
+</p>
+
+<h3>Aside on Code From Old Compilers</h3>
+
+<p>
+Suppose that the code for function <code>f()</code> in the prior example
+was generated by an old compiler, perhaps even one that is unaware of
+C11 and C++11 atomics.
+Mightn't such a compiler carry out optimizations that could result in
+OOTA executions?
+(This possibility was raised in a small-group discussion by Hans Boehm
+at the 2014 UIUC meeting.)
+</p>
+
+<p>
+The answer is "no" for all known compilers used in production.
+The only possible exception would be research compilers used to
+investigate value speculation and similar extreme optimizations.
+However, these research compilers could potentially generate OOTA executions
+even in sequential code, so it makes sense to exclude them from
+consideration.
+</p>
+
+<p>
+Furthermore, old binaries often introduce data races due to overwriting
+adjacent fields, which means that old binaries (for example, from gcc 4.6
+and earlier) introduce undefined behavior.
+This means that use of old binaries in concurrent code is a dubious
+practice in any case.
+</p>
+
+<p>
+Nevertheless, this possibility does not permit data-race-free legacy
+libraries to inflict OOTA executions on multithreaded programs.
+</p>
+
+<h3>Aside on Perverse Compilers</h3>
+
+<p>
+A perverse conforming compiler could recognize a OOTA pattern, and,
+ignoring the non-normative strictures against OOTA results, provide
+arbitrary values.
+However, such a compiler would need an algorithm to recognize the
+difference between harmful OOTA and benign reordering, and would further need
+to recognize the difference between consistent and inconsistent OOTA cycles.
+If such an algorithm existed, it could be used by formal tools to
+classify cycles.
+However, this problem is undecidable:
+
+<blockquote>
+<pre>
+Thread 1               Thread 2
+--------               --------
+r1 = x;                r2 = y;
+y = r1;                x = r2 + undecidable();
+</pre>
+</blockquote>
+
+<p>
+Therefore, such a perverse compiler could legally inflict its
+perversity only in a conservative manner.
+
+<h2>Summary</h2>
+
+<p>
+This document has shown that all of the harmful OOTA examples in the
+<a href="http://www.cs.umd.edu/~pugh/java/memoryModel/unifiedProposal/testcases.html">the JMM Causality Test Cases</a>
+are special cases that have a fixed point, and that slight perturbations
+result in inconsistent results.
+This supports the hypothesis that any harmful-OOTA test case can be
+perturbed into an inconsistent state and that benign-reordering test
+cases cannot be.
+</p>
+
+<p>
+This perturbation analysis appears to be equivalent to requiring that
+<code>rf &#8746; sdep</code> be acyclic.
+This is an extremely important result:  It means that any compiler
+optimization that substitutes a constant value for a read known to return
+that value cannot induce OOTA behavior.
+This constraint should also ensure that non-speculative
+code-movemenet optimizations should be similarly unable to induce
+OOTA behavior.
+</p>
+
+<p>
+Effective and efficient modeling of semantic dependencies
+(<code>sdep</code>) remains an important open problem,
+although there is important
+<a href="http://www.cl.cam.ac.uk/~jp622/popl16-thinair/">work in progress</a>.
+</p>
+
+</body></html>

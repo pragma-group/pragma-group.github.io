@@ -1,0 +1,257 @@
+<html>
+<head>
+    <title>Fold expressions</title>
+    <link href="style.css" rel="stylesheet">
+</head>
+<body>
+<h1>Folding expressions</h1>
+
+<div style="text-align:center">
+Andrew Sutton, Richard Smith<br/>
+Date: 2014-10-07<br/>
+Document number: N4191
+</div>
+
+<h2>Introduction</h2>
+
+<p>This paper introduces a new kind of primary expression that allows
+parameter packs to be expanded as a sequence of operators.
+We call these "fold expressions", named after the ubiquitous fold
+algorithm that applies a binary operator to a sequence values
+(also called <code>accumulate</code> in the standard library).</p>
+
+<p>Today, when we want to compute folds over a parameter pack, we have to 
+resort to a handful of overloads of a variadic template in order to compute 
+the result. For example, a simple summation might be implemented like
+this:</p>
+
+<pre><code>auto sum() { return 0; }
+
+template&lt;typename T&gt;
+  auto sum(T t) { return t; }
+
+template(typename T, typename... Ts)
+  auto sum(T t, Ts... ts) { return t + sum(ts...); }
+</code></pre>
+
+<p>We should be able to do better. In particular, given a function
+parameter pack <code>args</code>, we would like to be able to compute its
+summation like this.</p>
+
+<pre><code>(args + ...)
+</code></pre>
+
+<p>This is a significant savings in keystrokes, and programmers are much
+less likely to get this wrong than the implementation above.</p>
+
+<p>There are a number of binary operators for which folding can defined. One
+such is the <code>,</code> operator. The <code>,</code> operator can be used, for example, to apply 
+a function to a sequence of elements in a parameter pack. For example, 
+printing can
+be done like this:</p>
+
+<pre><code>template&lt;typename T&gt; 
+  void print(const T&amp; x) { cout &lt;&lt; x &lt;&lt; '\n'; }
+
+template&lt;typename T&gt;
+  void for_each(const auto&amp;... args) {
+    (print(args), ...);
+  }
+</code></pre>
+
+<h2>Extra motivation</h2>
+
+<p>N4040 describes how a <em>constrained-type-specifier</em> is transformed into a 
+declaration and its constraints. For example:</p>
+
+<pre><code>template&lt;typename T&gt;
+  concept bool Integral = std::is_integral&lt;T&gt;::value;
+
+template&lt;Integral T&gt;  // "Integral T" is a constrained-parameter
+  void foo(T x, T y);
+
+template&lt;typename T&gt;
+  requires Integral&lt;T&gt; // Becomes this.
+void foo(T x, T y);
+</code></pre>
+
+<p>Hypothetically, this works to declare constrained template parameter packs.</p>
+
+<pre><code>template&lt;Integral... Ts&gt;  // "Integral Ts" is a constrained-parameter
+  void foo(Ts...);
+</code></pre>
+
+<p>What are the corresponding requirements? Can we do this?</p>
+
+<pre><code>template&lt;typename... Ts&gt;
+  requires Integral&lt;Ts&gt;... // error: ill-formed
+void foo(Ts...);
+</code></pre>
+
+<p>This doesn't work because we can't expand an argument pack in this
+context. What about this?</p>
+
+<pre><code>template&lt;typename... Ts&gt;
+  requires std::all_of({Ts...}) // OK?
+void foo(Ts...);
+</code></pre>
+
+<p>That might work if we had range algorithms and those algorithms were
+declared <code>constexpr</code>. Unfortunately, we have neither.</p>
+
+<p>However, with this fold syntax, that transformation is straightforward.</p>
+
+<pre><code>template&lt;typename... Ts&gt;
+  requires (Integral&lt;Ts&gt; &amp;&amp; ...)
+void foo(Ts...);
+</code></pre>
+
+<h2>Proposal</h2>
+
+<p>The proposal adds a new kind of <em>primary-expression</em>, called a
+<em>fold-expression</em>. A fold expression can be written like this:</p>
+
+<pre><code>(args + ...)
+</code></pre>
+
+<p>The arguments are expanded over the <code>+</code> operator as left fold. That is:</p>
+
+<pre><code>((args$0 + args$1) + ...) + args$n
+</code></pre>
+
+<p>Or, you can write the expression with the parameter pack on the right
+of the operator, like this:</p>
+
+<pre><code>(... + args)
+</code></pre>
+
+<p>With this spelling, the arguments are expanded over the operator as
+a right fold:</p>
+
+<pre><code>args$0 + (... + (args$n-1 + args$n))
+</code></pre>
+
+<p>The fold of an empty parameter pack evaluates to a specific value. The choice
+of value depends on the operator. The set of operators and their empty
+expansions are in the table below.</p>
+
+<table>
+<tr><th>Operator</th>    <th>Value when parameter pack is empty</th></tr>
+<tr><td><tt>*</tt></td>  <td><tt>1</tt></td>                        </tr>
+<tr><td><tt>+</tt></td>  <td><tt>0</tt></td>                        </tr>
+<tr><td><tt>&</tt></td>  <td><tt>-1</tt></td>                       </tr>
+<tr><td><tt>|</tt></td>  <td><tt>0</tt></td>                        </tr>
+<tr><td><tt>&&</tt></td> <td><tt>true</tt></td>                     </tr>
+<tr><td><tt>||</tt></td> <td><tt>false</tt></td>                    </tr>
+<tr><td><tt>,</tt></td>  <td><tt>void()</tt></td>                   </tr>
+</table>
+
+<p>If a fold of an empty parameter pack is produced for any other operator, the
+program is ill-formed. However, all binary operators are supported to allow
+the use of folds over arbitrary overloaded operators.</p>
+
+<p>In order to support expansions over a parameter pack and other operands, or
+to customize the behavior for a fold over an empty parameter pack, you
+can also use the mathematically oriented phrasing:</p>
+
+<pre><code>(args + ... + an)
+</code></pre>
+
+<p>This expands as a left fold, including the <code>an</code> as the last term in
+the sequence. Only one of the operands can be a parameter pack. You can
+also expand a right fold.</p>
+
+<pre><code>(a0 + ... + args)
+</code></pre>
+
+<h2>Wording</h2>
+
+<h3>5.1. Primary expressions [expr.prim]</h3>
+
+<p>Modify the grammar of <em>primary-expression</em> in [expr.prim] to include
+fold expressions.</p>
+
+<pre><i>primary-expression</i>:
+    <i>fold-expression</i>
+</pre>
+
+<p>Add the a new subsection to [expr.prim] called "Fold expressions".</p>
+
+<h4>5.1.3 Fold expressions [expr.prim.fold]</h4>
+
+<p>A fold expression allows a template parameter pack ([temp.variadic]) over 
+a binary operator.</p>
+
+<pre><i>fold-expression</i>:
+      ( <i>cast-expression</i> <i>fold-operator</i> ... )
+      ( ... <i>fold-operator</i> <i>cast-expression</i> )
+      ( <i>cast-expression</i> <i>fold-operator</i> ... <i>fold-operator</i> <i>cast-expression</i> )
+
+<i>fold-operator</i>: one of
+    +  -  *  /  %  ^  &  |  ~  =  &lt;  >  &lt;&lt;  >>
+    +=  -=  *=  /=  %=  ^=  &=  |=  &lt;&lt;=  >>=
+    ==  !=  <=  >=  &&  ||  ,  .*  ->*
+</pre>
+
+<p>An expression of the form <code>(e op ...)</code> where <code>op</code> is a <em>fold-operator</em> is
+called a <em>left fold</em>. The <em>cast-expression</em> <code>e</code> shall contain an
+unexpanded parameter pack. A left fold expands as expression
+<code>((e$1 op e$2) op ...) op e$n</code> where <code>$n</code> is an index into the unexpanded
+parameter pack.</p>
+
+<p>An expression of the form <code>(... op e)</code> where <code>op</code> is a <em>fold-operator</em> is
+called a <em>right fold</em>. The <em>cast-expression</em> <code>e</code> shall contain an
+unexpanded parameter pack. A right fold expands as expression
+<code>e$1 op (... (e$n-1 op e$n))</code> where <code>$n</code> is an index into the unexpanded
+parameter pack. <br/> [ <i>Example:</i></p>
+
+<pre>
+  template<typename... Args>
+    bool all(Args... args) { return (args && ...); }
+
+  all(true, true, true, false);
+</pre>
+
+<p>Within the instantiation of <code>all</code>, the returned expression expands to
+<code>((true &amp;&amp; true) &amp;&amp; true) &amp;&amp; false</code>, which evalutes to <code>false</code>.
+&mdash; <i>end example</i> ]</p>
+
+<p>In an expression of the form <code>(e1 op ... op e2)</code> either <code>e1</code> shall contain
+an unexpanded parameter pack or <code>e2</code> shall contain an unexpanded parameter
+pack, but not both. If <code>e1</code> contains an unexpanded parameter pack, the
+expression is a left fold and <code>e2</code> is the rightmost operand the expansion. If
+<code>e2</code> contains an unexpanded parameter pack, the expression is a right
+fold and <code>e1</code> is the leftmost operand in the expansion. [ <i>Example</i>:</p>
+
+<pre>
+template&lt;typename... Args>
+  bool f(Args... args) { 
+    return (true + ... + args); // <i>OK</i>
+  } 
+
+template&lt;typename... Args>
+  bool f(Args... args) { 
+    return (args && ... && args); // <i>error: both operands contain unexpanded parameter packs</i>
+</pre>                              
+
+<p>&mdash; <i>end example</i>]</p>
+
+<p>When the unexpanded parameter pack in a fold expression expands to an
+empty sequence, the value the expression is shown in Table N; the program
+is ill-formed if the operator is not listed in Table N.</p>
+
+<table>
+<caption>Table N. Value of folding empty sequences</caption>
+<tr><th>Operator</th>    <th>Value when parameter pack is empty</th></tr>
+<tr><td><tt>*</tt></td>  <td><tt>1</tt></td>                        </tr>
+<tr><td><tt>+</tt></td>  <td><tt>0</tt></td>                        </tr>
+<tr><td><tt>&</tt></td>  <td><tt>-1</tt></td>                       </tr>
+<tr><td><tt>|</tt></td>  <td><tt>0</tt></td>                        </tr>
+<tr><td><tt>&&</tt></td> <td><tt>true</tt></td>                     </tr>
+<tr><td><tt>||</tt></td> <td><tt>false</tt></td>                    </tr>
+<tr><td><tt>,</tt></td>  <td><tt>void()</tt></td>                   </tr>
+</table>
+
+<p></body></p>
+
+</body>
