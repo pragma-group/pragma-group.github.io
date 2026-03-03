@@ -8,20 +8,25 @@ already-published papers and rewrites links for offline browsing.
 
 ## Contents
 
+The scripts live in `.github/workflows/assets/`. Mirrored content is written
+directly to the repository root (no `wg21-mirror/` subdirectory):
+
 ```
-wg21-mirror/
-├── update-mirror.py          # Main crawler and link-rewriter (run this)
-├── rewrite-links.py          # Standalone link-rewriting utility
-├── requirements.txt          # Python dependency: requests>=2.28.0
-├── crawl.log                 # Log from the initial full download
-├── update-YYYY-MM-DD.log     # Logs from subsequent incremental runs
-└── www.open-std.org/         # Mirrored content tree
-    └── jtc1/sc22/wg21/
-        └── docs/
-            ├── papers/       # Papers from 1989 to present (by year)
-            ├── cwg_index.html
-            ├── lwg-index.html
-            └── ...
+repo-root/
+├── .github/workflows/assets/
+│   ├── update-mirror.py      # Main crawler and link-rewriter (run this)
+│   ├── rewrite-links.py      # Standalone link-rewriting utility
+│   └── requirements.txt      # Python dependency: requests>=2.28.0
+├── icons/                    # Apache directory icons (back, folder, …)
+├── pics/                     # ISO / IEC logos
+├── jtc1/sc22/wg21/           # Mirrored WG21 content tree
+│   └── docs/
+│       ├── papers/           # Papers from 1989 to present (by year)
+│       ├── cwg_index.html
+│       ├── lwg-index.html
+│       └── ...
+├── index.html                # Redirects to jtc1/sc22/wg21/index.html
+└── .nojekyll                 # Disables Jekyll for GitHub Pages
 ```
 
 **Mirror statistics (initial download, 2026-03-02):**
@@ -72,8 +77,8 @@ Re-fetches all non-paper pages (index files, issues lists, standards) and
 skips already-published immutable papers:
 
 ```bash
-python update-mirror.py \
-  --mirror-dir ~/wg21-mirror \
+python .github/workflows/assets/update-mirror.py \
+  --mirror-dir /path/to/pragma-group.github.io \
   --threads 3 \
   --wait 0.5 \
   2>update-$(date +%F).log
@@ -89,8 +94,8 @@ re-fetched; paper files that already exist are skipped entirely.
 - name: Update WG21 mirror
   run: |
     pip install requests
-    python update-mirror.py \
-      --mirror-dir ${{ github.workspace }}/wg21-mirror \
+    python .github/workflows/assets/update-mirror.py \
+      --mirror-dir ${{ github.workspace }} \
       --threads 3 \
       --wait 0.5 \
       2>update-$(date +%F).log
@@ -107,7 +112,9 @@ automatically after every fetch. Use it standalone to re-process files
 without re-downloading:
 
 ```bash
-find ~/wg21-mirror -name "*.html" | python rewrite-links.py --mirror-dir ~/wg21-mirror
+find /path/to/pragma-group.github.io -name "*.html" | \
+  python .github/workflows/assets/rewrite-links.py \
+  --mirror-dir /path/to/pragma-group.github.io
 ```
 
 ---
@@ -131,7 +138,7 @@ Each worker thread shares a queue of `(url, follow_links)` items.
 - Applies a polite wait of `--wait` seconds (default 0.5 s) with a ×1–2
   random jitter between requests
 - Skips immutable papers that already exist locally (see below)
-- Saves files under `MIRROR_DIR/www.open-std.org/...` mirroring the URL path
+- Saves files directly under `MIRROR_DIR/jtc1/...` mirroring the URL path (netloc stripped)
 
 **Phase 2 — Link rewriting**
 
@@ -144,7 +151,7 @@ browsable offline via `file://`.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--mirror-dir DIR` | `~/wg21-mirror` | Root directory of the local mirror |
+| `--mirror-dir DIR` | `~/wg21-mirror` | Root of the repo / local mirror |
 | `--threads N` | `3` | Parallel download threads (1–10) |
 | `--wait SECS` | `0.5` | Base wait between requests in seconds |
 | `--no-random-wait` | off | Disable ×1–2 random jitter on the wait |
@@ -167,7 +174,7 @@ attributes to a relative path.
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--mirror-dir DIR` | `~/wg21-mirror` | Root directory of the local mirror |
+| `--mirror-dir DIR` | `~/wg21-mirror` | Root of the repo / local mirror |
 | `--verbose` / `-v` | off | Print per-file REWRITTEN/UNCHANGED to stdout |
 
 **Exit codes:** 0 = success, 1 = rewrite errors, 2 = bad arguments or no stdin.
