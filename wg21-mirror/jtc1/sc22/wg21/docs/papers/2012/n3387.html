@@ -1,0 +1,303 @@
+<html>
+<head>
+<title>Overload resolution tiebreakers for integer types</title>
+
+<style type="text/css">
+  ins { text-decoration:none; font-weight:bold; background-color:#A0FFA0 }
+  del { text-decoration:line-through; background-color:#FFA0A0 }
+  strong { font-weight: inherit; color: #2020ff }
+</style>
+
+</head>
+
+<body>
+N3387=12-0077<br/>
+Jens Maurer<br/>
+2012-09-12
+
+<h1>Overload resolution tiebreakers for integer types</h1>
+
+<h2>Motivation</h2>
+
+<p>
+Overload resolution chooses one single best function among a set of
+candidate functions, as described in section 13.3 [over.match] of the
+Working Paper.  For built-in integer types, a hierarchy called
+"integer conversion rank" is defined in section 4.13 [conv.rank], but
+that hierarchy is reflected in the overload resolution rules only in a
+very limited way, namely in form of the differentiation between
+"integral promotions (4.5 [conv.prom]) and integral conversions (4.7
+[conv.integral]).
+</p>
+
+<p>
+For example, consider the following code for an unlimited-precision
+integer class:
+
+<pre>
+class BigUnsignedInt
+{
+public:
+ BigUnsignedInt(unsigned long long);   // #1
+ BigUnsignedInt(long long);            // #2
+};
+
+int main()
+{
+ BigUnsignedInt b = 5;   // error: ambiguous
+}
+</pre>
+
+<p>
+The class author wanted to make sure that users get clear feedback
+when misusing the class by attempting to store a negative value.  Just
+providing overload #1 for the constructor doesn't prevent calls with
+signed integer types, because integral conversions (4.7
+[conv.integral]) will
+implicitly (and silently) convert to an unsigned type (13.3.3.1.1
+[over.ics.scs]).
+Adding overload #2 to catch usage with signed integers enables
+checking for negative values, for example by defining that overload as
+<code>= delete</code>, thereby reminding users to restrict calls to
+unsigned types.  However, that alone is not helpful, because then even
+simple calls with small integer literals are considered ambiguous,
+because both overloads #1 and #2 require an integral conversion, thus
+neither overload is better.
+</p>
+
+<p>
+The current state-of-the-art in C++ is to add overloads for all
+integer types with integer conversion rank equal to or larger than
+"int", which is impossible to formulate portably given the potential
+existence of an arbitrary amount of extended integer types (3.9.1
+[basic.fundamental]).  It is a nuisance, too.
+</p>
+
+
+<h2>Scope</h2>
+
+<p>
+While I believe that the integral promotion rules consistently
+preferring signed over unsigned integer types of the same rank,
+regardless of the signedness of the original value, as well as the
+integral conversion rules blindly
+permitting narrowing conversions, deserve fixing, the amount of
+ensuing code breakage would be overwhelming.  Thus, this paper only
+deals with adding disambiguation rules to overload resolution.
+</p>
+
+
+<h2>Discussion</h2>
+
+<p>
+In general, there are only a few use-cases why a function taking a
+built-in integer type would reasonably be overloaded with a function
+taking another built-in integer type:
+</p>
+
+<ul>
+<li>efficiency: handling an "unsigned long long" is more expensive
+than handling an "unsigned int"</li>
+<li>safety: avoid being called with signed or negative arguments</li>
+<li>error catching: calling a function expecting a
+<code>std::size_t</code> with a larger type is probably a usage error
+that could lead to surprising truncation.</li>
+<li>?</li>
+</ul>
+
+<p>
+The argument for the limited number of use-cases is that a function taking
+a built-in integer type genuinely expects a value; the type for that
+value is of secondary interest other than making sure it is large
+enough and sufficiently signed (or not) to satisfy the use case.
+</p>
+
+<p>
+The proposal is to prefer integral conversions that maintain the value
+range of the argument type over those that don't, and to prefer conversions
+moving fewer steps in the integer conversion rank hierarchy over those
+that move more steps.  The first rule is a mirror of the narrowing
+conversion rules introduced for brace-initialization, but without
+special consideration of the value of constant arguments.
+Consideration of the argument value (in addition to the argument type)
+would be a radically novel concept for the overload resolution
+tiebreaker rules that I am therefore not proposing.
+</p>
+
+<p>
+Removing ambiguities in overload resolution for the integer conversion
+cases seems to be a relatively safe approach: Function calls that used
+to be ambiguous (i.e. ill-formed) now become non-ambiguous
+(i.e. well-formed).  However, new ambiguities will be introduced, e.g.
+</p>
+
+<pre>
+struct A { };
+struct B : A { };
+
+void f(long, A);           // #1
+void f(unsigned long, B);  // #2
+
+int main()
+{
+  f(-5, B());  // calls #2 in C++11
+}
+</pre>
+
+<p>
+This call would be ambiguous given the current proposal, because
+conversion of the first argument (which is of type "int") is better
+for #1 (keeps value range), whereas conversion of the second argument
+is better for #2 (identity vs. derived-to-base conversion).
+</p>
+
+<p>
+I would consider such code rather rare, plus the breakage is noisy (as
+opposed to silently calling a different function), and so can be fixed
+as appropriate.
+</p>
+
+
+<h2>Open Issues</h2>
+
+<ul>
+<li>Should we address unscoped enumeration types as well?</li>
+</ul>
+
+<h2>Changes to the Working Draft</h2>
+
+<h3>Alternative 1: same signedness first, then lowest rank</h3>
+
+Change in 4.13 conv.rank paragraph 1:
+
+<blockquote>
+[ Note: The integer conversion rank is used in the definition of
+the integral promotions (4.5 conv.prom)<del> and</del><ins>,</ins> the
+usual arithmetic conversions (Clause 5 expr)<ins>, and the ranking of
+implicit conversion sequences (13.3.3.2 over.ics.rank)</ins>.
+-- end note ]
+</blockquote>
+
+Add two new bullets in 13.3.3.2 over.ics.rank paragraph 4:
+
+<blockquote>
+<ul>
+<li>A conversion that does not convert a pointer, a pointer to member,
+or <code>std::nullptr_t</code> to <code>bool</code> is better than one
+that does.</li>
+
+<li><ins>A conversion that converts an integer type to another integer
+type with the same signedness (i.e. both are signed or both are
+unsigned) and a greater integer conversion rank (4.13 conv.rank) is
+better than a conversion to an integer type that has different
+signedness or does not have greater integer conversion rank.
+[ Example:</ins>
+<pre>
+<ins>int f(long);
+int f(unsigned long long);
+int i = f((unsigned char)0);     // calls f(unsigned long long)</ins>
+</pre>
+<ins>]</ins>
+</li>
+
+<li><ins>If integer types T1, T2, and T3 all have the same signedness,
+T3 has greater integer conversion rank (4.13 conv.rank) than T2,
+and T2 has greater integer conversion rank than T1:</ins>
+<ul>
+<li><ins>conversion of T1 to T2 is better than conversion of T1 to
+T3</ins></li>
+<li><ins>conversion of T2 to T3 is better than conversion of T1 to
+T3</ins></li>
+</ul>
+<ins>[ Example:</ins>
+<pre>
+<ins>int f(long);
+int f(long long);
+int i = f(0);         // calls f(long)</ins>
+</pre>
+<ins>]</ins>
+</li>
+<li>...</li>
+</ul>
+</blockquote>
+
+
+<h3>Alternative 2: lowest rank first, then same signedness</h3>
+
+
+Change in 4.13 conv.rank paragraph 1:
+
+<blockquote>
+[ Note: The integer conversion rank is used in the definition of
+the integral promotions (4.5 conv.prom)<del> and</del><ins>,</ins> the
+usual arithmetic conversions (Clause 5 expr)<ins>, and the ranking of
+implicit conversion sequences (13.3.3.2 over.ics.rank)</ins>.
+-- end note ]
+</blockquote>
+
+
+Add five new bullets in 13.3.3.2 over.ics.rank paragraph 4:
+
+<blockquote>
+<ul>
+<li>A conversion that does not convert a pointer, a pointer to member,
+or <code>std::nullptr_t</code> to <code>bool</code> is better than one
+that does.</li>
+
+<li><ins>A conversion that converts an integer type to another integer
+type that can represent all the values of the original type is better
+than a conversion to an integer type that cannot.
+[ Example:</ins>
+<pre>
+<ins>int f(long);
+int f(unsigned long);
+int i = f(0);   // calls f(long)
+</pre>
+<ins>]</ins>
+</li>
+
+<li><ins>If integer types T2 and T3 can each represent all the values
+of integer type T1, T3 has greater integer conversion rank (4.13
+conv.rank) than T2, and T2 has greater integer conversion rank than
+T1, conversion of T1 to T2 is better than conversion of T1 to T3. [
+Example:</ins>
+<pre>
+<ins>int f(long);
+int f(long long);
+int i = f(0);   // calls f(long)
+</pre>
+<ins>]</ins>
+</li>
+
+<li><ins>If integer type T1 can represent all the values of both
+integer types T2 and T3, T1 has greater integer conversion rank (4.13
+conv.rank) than T2, and T2 has greater integer conversion rank than
+T3, conversion of T2 to T1 is better than conversion of T3 to
+T1.</ins></li>
+
+
+<li><ins>If integer types T2 and T3 have equal integer conversion rank
+(4.13 conv.rank), both can represent all the values of unsigned
+integer type T1, T2 is unsigned and T3 is signed, conversion of T1 to
+T2 is better than conversion of T1 to T3.  [ Example: </ins>
+<pre>
+<ins>int f(long);
+int f(unsigned long);
+int i = f((unsigned char)0);  // calls f(unsigned long)
+</pre>
+</li>
+
+<li><ins>If integer types T2 and T3 have equal integer conversion rank
+(4.13 onv.rank), signed integer type T1 can represent all the values
+of both T2 and T3, T2 is unsigned and T3 is signed, conversion of T3
+to T1 is better than conversion of T2 to T1.</ins></li>
+
+<li>...</li>
+</ul>
+</blockquote>
+
+
+<h2>Acknowledgements</h2>
+
+Thanks to Marc Glisse for helpful comments on various iterations of
+this paper.  Thanks to Steve Adamczyk for preferring alternative 2.

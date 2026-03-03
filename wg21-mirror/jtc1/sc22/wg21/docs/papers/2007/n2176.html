@@ -1,0 +1,973 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html lang="en-us">
+<HEAD>
+<meta http-equiv="Content-Type" content="text/html;charset=US-ASCII" >
+<TITLE>N2176: Memory Model Rationales</title>
+</head>
+<BODY>
+<table summary="Identifying information for this document.">
+	<tr>
+		<th>Doc. No.:</th>
+		<td>WG21/N2176<br />
+		J16/07-0036</td>
+	</tr>
+	<tr>
+		<th>Date:</th>
+		<td>2007-03-09</td>
+	</tr>
+	<tr>
+		<th>Reply to:</th>
+		<td>Hans-J. Boehm</td>
+	</tr>
+	<tr>
+		<th>Phone:</th>
+		<td>+1-650-857-3406</td>
+	</tr>
+	<tr>
+		<th>Email:</th>
+		<td><a href="mailto:Hans.Boehm@hp.com">Hans.Boehm@hp.com</a></td>
+	</tr>
+</table>
+<H1>Memory Model Rationales</h1>
+<H2>Contents</h2>
+This paper contains an assortment of short rationales for decisions
+made in the memory model paper (N2171, and
+<A HREF="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n2052.htm">
+N2052</a> before that, and in the closely related
+atomics proposal
+<A HREF="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2145.html">
+N2145</a>.
+<P>
+The contents benefitted significantly from discussions with many other
+people such as Lawrence Crowl, Peter Dimov, Paul McKenney, Doug Lea,
+Sarita Adve, Herb Sutter, and Jeremy Manson and others.  Not all of the
+paticipants in those discussions agree with all of my conclusions.
+<P>
+This document is essentially the concatenation of five shorter ones
+that previously appeared on the author's
+<A HREF="http://web.hpl.hp.com/personal/Hans_Boehm/c++mm/">
+C++ memory model web site</a>:
+<UL>
+<LI><A HREF="#undefined">Why do we leave semantics for races on ordinary
+variables completely undefined?</a>
+<LI><A HREF="#integrated">Why do our atomic operations have integrated memory ordering specifications?</a>
+<LI><A HREF="#dependencies">Why do we not guarantee that dependencies enforce memory ordering?</a>
+<LI><A HREF="#write-fences">Why do our ordering constraints not distinguish between loads and stores, when many architectures provide fences that do?</a>
+<LI><A HREF="#thin-air">A discussion of out-of-thin-air results and how we might want to prohibit them.</a>
+</ul>
+<H2><A id="undefined">Why Undefined Semantics for C++ Data Races?</a></h2>
+<A HREF="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n2052.htm">
+Our proposed C++ memory model</a> (or the later version
+appearing as N2171 in this mailing) gives completely undefined semantics
+to programs with data races.  Many people have questioned whether this is
+necessary, or whether we can provide some guarantees in even this case.
+Here we give the arguments for completely undefined semantics.
+<P>
+Some arguments are already given in the introductory "Rationale" section
+of committee paper
+<A HREF="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n1942.html">
+N1942</a>.  This is a more detailed exploration.
+<P>
+The basic arguments for undefined data race semantics in C++ are:
+<UL>
+<LI> Unlike Java or .NET we can get away with it.  We do not have to
+worry about untrusted sand-boxed code exploiting such "undefined behavior" as
+a security hole.  We also do not currently have to worry about preserving
+type-safety in the presence of data races, since we don't have it anyway.
+Other inherent "holes" in the type system, such as C-style arrays,
+are far more likely to result in type-safety violations in practice.
+<LI> I believe it is usually the status quo.  Pthreads
+states "Applications <I>shall</i> ensure that
+access to any memory location by more than one thread of control (threads or
+processes) is restricted such that no thread of control can read or modify a
+memory location while another thread of control may be modifying it."  I've
+seen no evidence that the original intent of win32 threads was any different,
+though recent Microsoft tools may enforce stronger implementation properties.
+<LI> I am unconvinced that we are doing the programmer a favor by
+providing stronger semantics.  <I>Data races among ordinary variables
+are a bug.</i>  If the programmer intended for there to be a data race,
+we will provide <I>atomic</i> variables, which convey that
+intent to both the compiler and any human readers of the code.  They
+also allow the programmer to be explicit about ordering assumptions, which
+typically require careful consideration to ensure correctness.
+<LI> By leaving data race semantics undefined, we allow implementations to
+generate error diagnostics if a race is encountered.  I believe this
+would be highly desirable.  Constructing such tools that can operate beyond
+a debug environment on current hardware is clearly challenging, but
+may be feasible in some cases, and hardware support seems at least conceivable
+here.
+<LI> Perhaps more importantly, by requiring programmers to avoid
+unannotated races, we reduce false positives in more practical debug-time
+race detection tools.
+<LI> It appears likely that we have to leave the semantics of data races
+undefined in at least some cases.  Consider the case in which
+I declare a function scope object <I>P</i>
+with a vtable pointer, store a pointer to <I>P</i> in a global <I>x</i>,
+another thread reads <I>x</i>, and then calls one of its virtual member
+functions.  On many architectures (e.g. PowerPC, ARM), a memory
+fence would be required as part of object construction in order to
+preclude a wild branch as a result of the virtual function call.
+<P>
+There
+appears to be a consensus that we do not want to incur the fence overhead
+in such cases.  This means that we need to allow wild branches in
+response to <I>some</i> kinds of data races.  Allowing this in some
+cases, but not allowing it in all cases, would undoubtedly complicate
+the specification.
+<LI>
+Current compiler optimizations often assume that objects do not
+change unless there is an intervening assignment through a potential alias.
+Violating such a built-in assumption can cause very complicated
+effects that will be very hard to explain to a programmer, or
+to delimit in the standard.
+And I believe this assumption is sufficiently ingrained in current
+optimizers that it would be very difficult to effectively remove it.
+</ul>
+As an example of the last phenomenon, consider a relatively
+simple example, which does not include any synchronization code.
+Assume <TT>x</tt> is a shared global and everything else is local:
+<PRE>
+unsigned i = x;
+
+if (i < 2) {
+    foo: ...
+    switch (i) {
+    	case 0:
+		...;
+		break;
+    	case 1:
+		...;
+		break;
+	default:
+		...;
+    }
+}
+</pre>
+Assume the code at label <TT>foo</tt> is fairly complex, and forces <TT>i</tt>
+to be spilled and that the <TT>switch</tt> implementation uses a branch table.
+(If you don't believe the latter is a reasonable assumption here, assume that
+"2" is replaced by a larger number, and there are more explicit cases in
+the <TT>switch</tt> statement.)
+<P>
+The compiler now performs the following reasonable
+(and common?) optimizations:
+<UL>
+<LI> It notices that <TT>i</tt> and <TT>x</tt> (in its view of the world)
+contain the same values.  Hence when <TT>i</tt> is spilled, there is no need
+to store it; the value can just be reloaded from <TT>x</tt>.
+<LI> It notices that the <TT>switch</tt> expression is either 0 or 1, and hence
+eliminates the bounds check on the branch table access and the branch to the
+default case.
+</ul>
+Now consider the case in which, unbeknownst to the compiler, there is
+actually a race on <TT>x</tt>, and its value changes to 5 during the execution
+of the code labelled by <TT>foo</tt>.  The results are:
+<OL>
+<LI> When <TT>i</tt> is reloaded for the evaluation of the <TT>switch</tt>
+expression, it gets the value 5 instead of its original value.
+<LI> The branch table is accessed with an out-of-bounds index of 5,
+resulting in a garbage branch target.
+<LI> We take a wild branch, say to code that happens to implement
+rogue-o-matic (the canonical form of C++ "undefined behavior").
+</ol>
+Although it appears difficult to get existing compilers to exhibit this
+kind of behavior for a variety of reasons, I think compiler writers will
+generally refuse to promise that it cannot happen.  It can be the result
+of very standard optimization techniques.  As far as I know, precluding
+this behavior with certainty would require significant optimizer redesign.
+I do not see how to avoid this kind of behavior without fundamentally
+Even if we were to prohibit reloading
+of a local from a global shared variable, we would still have to explain
+similar behavior for the analogous program which tests <TT>x</tt> and then
+uses <TT>x</tt> as the <TT>switch</tt> expression.  That becomes slightly
+easier to explain, but it still seems very confusing.
+<P>
+Some such redesign is necessary anyway
+to avoid speculative writes.  But I think that is usually limited
+to a few transformations which can currently introduce such writes.
+I suspect the redesign required here would be significantly
+more pervasive.  And I do not see how to justify the cost.
+<P>
+The one benefit of providing better defined race semantics seems to
+be somewhat easier debuggability of production code that encounters a
+race.  But I'm not sure
+that outweighs the negative impact on race detection tools.
+
+<H2><A id="integrated">Why atomics have integrated ordering constraints</a></h2>
+<P>
+The interfaces for atomic objects that we have been considering
+provide ordering constraints as part of the atomic operations
+themselves.  This is consistent with the Java and C#
+volatile-based approach, and our
+<A HREF="http://www.hpl.hp.com/research/linux/atomic_ops/">atomic_ops</a>
+package, but inconsistent with some other atomic operation
+implementations, such as
+<A HREF="http://fxr.watson.org/fxr/source/Documentation/atomic_ops.txt?v=linux-2.6">
+that in the Linux kernel</a>, which often require the use of explicit
+memory fences..
+<P>
+Some rationale for this choice is provided as part of
+<A HREF="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2145.html">
+N2145</a> and
+<A HREF="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n2047.html">
+N2047</a>.
+Here we provide a somewhat expanded and updated version of that rationale.
+<P>
+Note that
+<A HREF="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2153.pdf">
+N2153</a>
+argues that explicit fences are still needed for maximum performance
+on certain applications and architectures.
+The arguments here do not preclude providing them as well.
+<P>
+Here we list our reasons for explicitly associating ordering semantics
+with atomic operations, and correspondingly providing different variants
+with different ordering constraints:
+
+<UL>
+<LI> On architectures such as X86 and Itanium, it can lead to substantially
+faster code, at least in the absence of significant compiler analysis.
+For example, on X86, a lock is often released with a simple store
+instruction, which is widely believed to effectively have implicit "release"
+semantics.  If this appears in the source as <TT>store_release</tt>
+it is easy to simply map that to a store instruction.  If it is
+expressed as a fence followed by a store, the compiler would have to
+deduce that the fence is redundant.
+<P>
+On X86 processors, the fence is
+redundant only if precisely the right kind of fence (for a store,
+one that prevents "LoadStore" and "StoreStore" reordering)
+is used.
+(<A HREF="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2153.pdf">
+N2153</a> does suggest such a fence.)
+<P>
+On Itanium, the fence, once requested, can generally not be
+optimized back to an <TT>st.rel</tt> instruction.  To see this, consider
+the hypothetical lock release sequence:
+<PRE>
+x = 1;	// lock protect assignment
+LoadStore_and_StoreStore_fence(); // hypothetical optimal fence
+lock.store_relaxed(0);	// atomically clear spinlock
+y.store_relaxed(42);  // Unrelated atomic assignment
+</pre>
+Note that this does not allow the assignments to <TT>x</tt> and <TT>y</tt>
+to be reordered.  However, on Itanium, we really want to transform
+this to the equivalent of
+<PRE>
+x = 1;	// lock protect assignment
+lock.store_release(0);	// atomically clear spinlock
+y.store_relaxed(42);  // Unrelated atomic assignment
+</pre>
+This is not safe, since this version <I>does</i> allow the
+assignments to <TT>x</tt> and <TT>y</tt> to be reordered.
+In most realistic contexts, it would be hard to determine that there
+is no subsequent assignment like the store to <TT>y</tt>.  Hence
+I would not expect this transformation to be generally feasible.
+<P>
+This issue is admittedly largely Itanium specific.  But note
+that the above reordering <EM>should be</em> allowed; the fence-based
+implementation adds a useless constraint.  If we only have fences,
+we can't express the abstractly <EM>correct</em> ordering constraint
+for even a spin-lock release.
+
+<LI> Acquire/release ordering constraints associated with atomic
+operations only affect the threads accessing those atomics.  Hence,
+if the optimizer combines those threads (or if there is only one
+such thread to start with), not only can the atomic operations
+become ordinary memory operations, but any need for fences or
+similar mechanisms in the generated code disappears.  Fences, on the
+other hand, order an open-ended set of memory accesses, which are
+unlikely to all be sufficiently visible to the optimizer to ever
+optimize out a fence.  (This is closely related to the preceding
+point, and the detailed benefits depend on details of the memory
+model that we are currently still revising.)
+
+<LI> In many cases, it seems to be more convenient.
+For example, double-checked
+locking can be easily written with load_acquire and store_release, with
+no explicit barriers.  (The semantics of the fence version are also
+unnecessarily stronger, causing unnecessary overhead on Itanium.  We
+are not aware of common examples where the reverse is true for other
+architectures.)
+
+<LI> It gives us an easy way to express that atomic loads and stores
+"normally" have acquire and release semantics, but that weaker
+options may exist.  Acquire loads and release stores enjoy
+the highly desirable property that they do not need
+<A HREF="#dependencies">dependency-based memory ordering</a>.
+They also seem to be the minimal ordering properties that
+somewhat naive programmers expect without realizing it.
+
+<LI> It makes it harder to ignore ordering issues.  Ignoring them is
+almost always a mistake at this level.  A number of existing atomics
+interfaces suffer from either sloppiness in dealing with memory
+ordering, or from making it impossible to state some useful ordering
+constraints.  Empirically, this has resulted in many bugs.
+
+<LI> Explicitly ordered atomics integrate cleanly with "higher level"
+atomics that guarantee sequential consistency if all "races" involve
+only atomic operations.  These again provide a consistent programming
+model across C++ and Java.  (I believe C# volatiles are essentially
+acquire/release atomics.  Thus we should also get consistency with
+C#.)
+</ul>
+<H2><A id="dependencies">Should atomic operations be ordered based on dependencies?</a></h2>
+Consider the simple program snippet, where <TT>x</tt> is an "atomic pointer
+to integer" variable,
+<TT>r1</tt> is a local <TT>int *</tt> variable, and <TT>r2</tt> is a local
+<TT>int</tt> variable:
+<PRE>
+r1 = x.load_relaxed();
+r2 = *r1;
+</pre>
+<P>
+Most processors guarantee that, for a naive translation of this code,
+the second load becomes visible after the first, since there is a data
+dependency between the two.  Indeed Java almost requires such a guarantee
+in order to allow efficient implementation of final fields.
+<P>
+Such a guarantee is occasionally useful.  It would guarantee that, for the
+above example, if another thread initialized an object, and then stored
+a pointer to it into a previously null
+<TT>x</tt> in a way that ensured the ordering of the two
+stores, then we could not see a non-null <TT>r1</tt> with an
+uninitialized value for <TT>r2</tt>.
+<P>
+Note however that all such guarantees become vacuous if only
+<TT>load_acquire</tt> and <TT>store_release</tt> are used.
+In the most interesting cases, dependency-based ordering allows
+us to use <TT>load_relaxed</tt> instead of <TT>load_acquire</tt>.
+The resulting performance impact varies from none on X86, SPARC,
+or PA-RISC to
+that of a full memory fence on Alpha.  PowerPC and Itanium fall in
+between.
+<P>
+Our most recent C++ atomics (N2145) and memory model (N2171)
+proposals provide no dependency-based ordering guarantees.
+Java provides no dependence-based guarantees for non-volatile
+(unordered) accesses, except for final field guarantees, which
+rely on dependence-based reasoning at most in the implementation.
+In contrast,
+<A HREF="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2153.pdf">
+N2153</a> does assume dependency based ordering.
+<P>
+The point of this note is to discuss the issues that bear on the C++
+decision.  Much of this relies on an earlier discussion led by
+Bill Pugh and Jeremy Manson in the context of the Java memory model,
+some of which is reproduced in the
+<A HREF="http://portal.acm.org/citation.cfm?doid=1040305.1040336">
+POPL 2005 paper by Manson, Pugh, and Adve</a>.  However, the Java
+discussion is in the context of ordinary variable accesses, and the
+motivation there relies heavily on not impeding compiler optimizations.
+Since the C++ rules apply only to "relaxed" (unordered) accesses to atomic
+variables, which are expected to be infrequent, these arguments are
+less convincing for C++.
+
+<H3>Dependency-based ordering at best makes sense for unordered atomics</h3>
+The discussion here only makes sense if at least one of the
+operations involved in a dependency is an unordered atomic operation.
+If only ordinary operations are involved, ordering is not observable
+without introducing a data race, which would result in undefined
+semantics.  In fact, if A depends on B, any implied ordering is observable
+only if either
+<UL>
+<LI> The instruction depended on is an unordered atomic load (or
+unordered atomic read-modify-write that includes a load), or
+<LI> The instruction depending on it is an unordered atomic store
+(or atomic read-modify-write that includes a store).
+</ul>
+
+<H3>Static dependencies cannot enforce ordering</h3>
+Consider the following variant of our original example:
+<PRE>
+r1 = x.load_relaxed();
+r3 = &amp;a + r1 - r1;
+r2 = *r3;
+</pre>
+Statically, the value of <TT>r3</tt> appears to depend on <TT>r1</tt>.  However,
+many compilers will optimize this to at least
+<PRE>
+r1 = x.load_relaxed();
+r3 = &amp;a;
+r2 = *r3;
+</pre>
+removing the dependency in the process.  As a result, much common hardware
+(e.g. PowerPC, ARM, Itanium) will no longer guarantee that the first and
+last load appear to be executed in order.  And it is unclear that even later
+stages of the compiler should be required to preserve the order;
+one of the reasons for introducing <TT>load_relaxed</tt> was to allow
+compiler reordering around the operation.
+<P>
+As we stated earlier, we expect <TT>load_relaxed</tt> to be infrequent
+in practice.  Thus it might not be unreasonable to
+disallow optimizations involving it.  But note that the above optimization
+is performed entirely on the middle statement, which does not mention
+<TT>load_relaxed</tt>, and in fact might occur in a function call, whose
+implementation is in a separate translation unit.
+<P>
+Thus requiring memory ordering based on static dependencies would impede
+optimization <I>in other translation units</i>, which might not even
+mention <TT>load_relaxed</tt>.  This is clearly unacceptable.
+
+<H3>Data vs. control dependencies</h3>
+Some processors enforce ordering constraints only for certain kinds of
+dependencies, e.g. for data dependencies, or they have even more
+specific rules about which kinds of dependencies enforce ordering.
+Although this is reasonable at the hardware level, these notions make
+little sense at the programming language level, since compilers routinely
+convert between different types of dependencies.
+<P>
+For example,
+<PRE>
+r1 = x.load_relaxed();
+if (r1 == 0)
+  r2 = *r1;
+else
+  r2 = *(r1 + 1);
+</pre>
+might be transformed to
+<PRE>
+r1 = x.load_relaxed();
+if (r1 == 0)
+  r3 = r1;
+else
+  r3 = r1 + 1;
+r2 = *r3;
+</pre>
+Again, the transformations that potentially break the dependency may happen
+in a separate compilation unit.  Thus restricting them appears impractical.
+
+<H3>Dynamic dependencies</h3>
+Based on a suggestion by Peter Dimov, we have instead pursued a notion
+of dependency that
+<OL>
+<LI> Is based purely on observable dynamic behavior, and is therefore
+not subject to breakage as a result of compiler transformations, and
+<LI> Does not distinguish between control and data dependencies, for
+the same reason.
+</ol>
+We'll say that a memory operation B depends on another
+memory operation A if 
+either
+<UL>
+<LI>the location accessed by B, or
+<LI>the value written (for a store), or
+<LI>whether B is executed at all,
+</ul>
+depends on the value produced by A.
+This has the advantages that
+<UL>
+<LI> It is based purely on potentially observable dynamic behavior,
+and is therefore less
+subject to breakage as a result of compiler transformations, and
+<LI> It does not distinguish between control and data dependencies, for
+the same reason.
+</ul>
+
+<H3>Different instances must be distinct</h3>
+Unfortunately, this definition is still incomplete for somewhat
+subtle reasons.  The open question is what constitutes
+"a memory operation".  Consider
+<PRE>
+r1 = x.load_relaxed();
+if (r1) {
+    r2 = y.a;
+} else {
+    r2 = y.a;
+}
+</pre>
+Either of the loads of the ordinary variable <TT>y</tt> are clearly
+conditionally executed.
+<P>
+If we identify the two loads of <TT>y</tt> since they both perform the
+same action, we end up with what almost certainly an unusable programming
+model.  This would mean that these loads are not dependent on
+the initial <TT>load_relaxed</tt>, and hence are not ordered with
+respect to it.
+<P>
+To see why this is unusable,
+consider instead the variant that involves function calls:
+<PRE>
+r1 = x.load_relaxed();
+if (r1) {
+    f(&amp;y);
+} else {
+    g(&amp;y);
+}
+</pre>
+Assume that the implementations of <TT>f()</tt> and <TT>g()</tt> 
+are defined elsewhere and not visible to the author of this code.
+If we identified the above loads in the original example,
+and both <TT>f()</tt> and <TT>g()</tt>
+happen to perform the same loads, then presumably we would have to say
+that the accesses to <TT>y</tt> by <TT>f()</tt> and <TT>g()</tt>
+are also unordered with respect to the <TT>load_relaxed</tt>.
+On the other hand, if they access different fields, the accesses would
+be ordered.
+<P>
+This leaves us in a position in which the author of the client code
+cannot tell whether memory accesses are ordered without inspecting
+the <EM>implementation</em> of called functions.  Even worse, ordering
+may be only partially guaranteed because the two functions happen
+to perform one common memory access.  We do not believe this is viable.
+<P>
+By a similar argument, we need to treat two memory operations as
+distinct if they correspond to the same source statement, but are
+reached via different call chains.  For example, if the functions
+<TT>f()</tt> and <TT>g()</tt> both call <TT>h(y)</tt>, which is implemented
+as
+<PRE>
+int h(int *y) {
+    return *y;
+}
+</pre>
+then the load is always performed by the same statement, but nothing
+substantive has changed.
+
+<H3>Why this seriously breaks optimizations</h3>
+If we reconsider the example from above
+<PRE>
+r1 = x.load_relaxed();
+if (r1) {
+    r2 = y.a;
+} else {
+    r2 = y.a;
+}
+</pre>
+and treat the two loads of <TT>y.a</tt> as distinct (as we must), then
+they depend on, and ordered with respect to, the <TT>load_relaxed</tt>.
+And for a naively compiled version, most hardware would implicitly enforce
+that.
+<P>
+However, if the above were compiled to
+<PRE>
+r1 = x.load_relaxed();
+r2 = y.a;
+</pre>
+as many compilers would, then the dependence has been removed, and
+the two loads are no longer ordered.  Hence such optimizations
+would have to be disallowed.
+<P>
+It quickly becomes clear that this is intolerable, when we consider
+that this code may again be distributed among several compilation units.
+Consider:
+<PRE>
+int h(int r1) {
+    if (r1) {
+        return y.a;
+    } else {
+        return y.a;
+    }
+}
+
+int f() {
+    ...
+    r1 = x.load_relaxed();
+    r3 = h(r1); 
+    ...
+}
+</pre>
+The dependency, and hence ordering, between the <TT>load_relaxed</tt>
+and the <TT>y.a</tt> loads is broken if <TT>h</tt> is optimized in the
+obvious way to just unconditionally return <TT>y.a</tt>.  But <TT>h()</tt>
+could easily reside in a separate compilation unit, possibly one that
+hasn't been recompiled since the addition of atomics.
+<P>
+Our conclusion is that this approach is also not viable.
+
+<H3>What might work?</h3>
+It is possible to construct similar examples in which the dependent
+operation is a store.  Restricting the dependent operation to
+another atomic operation doesn't improve matters much either; we
+can construct examples in which the offending optimization occurs
+somewhere in the middle of the call chain between the two, and
+hence could still occur in a compilation unit that doesn't mention
+atomics.
+<P>
+It may be feasible to restrict dependency-based ordering to the
+important special case in which the dependent operation is a load
+or store to a field of an object pointed to by the result of an
+initial <TT>load_relaxed</tt>.  But this seems to still run afoul
+of some, admittedly much more obscure, optimizations, which would
+otherwise be legal, and could be carried out in separate compilation
+units.  Consider:
+<PRE>
+r2 = x.load_relaxed();
+r3 = r2 -&gt; a;
+</pre>
+If we have some reason to believe, e.g. based on profiling, that
+the resulting value in r2 is usually the same as in r1,
+it may well be profitable to transform this to
+<PRE>
+r2 = x.load_relaxed();
+r3 = r1 -&gt; a;
+if (r1 != r2) r3 = r2 -&gt; a;
+</pre>
+since it usually breaks the dependency between the two loads.  But
+by doing so, it also breaks the hardware-based ordering guarantee.
+<P>
+Thus even this case doesn't appear very clear-cut.
+<P>
+If we tried to extend this to dependencies through array subscripts,
+things become more dubious still.  If we have
+<PRE>
+r1 = x.load_relaxed();
+r2 = a[r1 -&gt; index % a_size];
+</pre>
+and assume that some other thread <I>t'</i> initializes an object <TT>q</tt>,
+sets <TT>a[r1 -&gt; index]</tt>, and then performs a <TT>store_release</tt>
+to set <TT>x</tt> to <TT>p</tt>, are we guaranteed that <TT>r2</tt>
+will contain the value assigned by <I>t'</i> to the array element,
+instead of an earlier value?
+<P>
+Usually the answer would be "yes".  However if the compiler happens to
+be able to prove that <TT>a</tt> only has a single element, e.g. because
+the program is built for a particularly small configuration, the
+answer unexpectedly becomes "no".
+<P>
+We could easily add a templatized library function loads and dereferences
+an atomic pointer, guaranteeing only that the dereferenced value was
+completely read after the pointer dereference.  But that's of somewhat
+limited utility and error-prone.
+<H2><A id="write-fences">Why ordering constraints are never limited to loads or stores</a></h2>
+<P>
+Many modern architectures provide fence instructions that are specific
+to only loads or stores.  For example, SPARC provides an assortment of
+such fence
+instruction variants.  Alpha's "write memory barrier" is another
+well-known example. We have not proposed to provide
+similar facilities in the C++ memory model or atomic operations
+library.
+<P>
+Although there are cases in which load-only or store-only ordering
+are useful, we believe that the correctness constraints are
+exceedingly subtle, even relative to the other constructs
+we have been discussing.  Hence we believe it makes sense to
+consider support for these only if there is evidence that such
+restricted ordering is likely to be much cheaper on a reasonable
+selection of processors.  (This is apparently not the case on
+PowerPC, ARM, X86, MIPS, or Itanium.  I have not seen measurements
+for SPARC, where it might matter.  I think <TT>wmb</tt> is a bit cheaper than
+<TT>mb</tt> on most Alphas, but that's of limited interest.)
+<P>
+To see why read-only and write-only fences are tricky to
+use correctly,
+consider the canonical use case for acquire/release ordering
+constraints.  We use an atomic flag variable <TT>x_init</tt> to hand off
+data (an ordinary variable <TT>x</tt> from one thread to another:
+<PRE>
+<I>Thread 1:</i>
+&lt;Initialize x&gt;
+x_init.store_release(true);
+
+<I>Thread 2:</i>
+if (x_init.load_acquire())
+    &lt;use x&gt;
+</pre>
+
+At first glance, this should be the canonical use case that requires
+only store ordering in thread 1.  However, that is actually only safe
+under very limited conditions.
+To explain that, we consider two cases, depending on whether
+the uses of <TT>x</tt> are
+entirely read-only or not.
+<H3>Recipient writes to object</h3>
+<P>
+This case is highly problematic.
+<P>
+Clearly, and unsurprisingly, it is unsafe to replace the load_acquire
+with a version that restricts only load ordering in this case.
+That would allow the store to <TT>x</tt> in thread 2 to become
+visible before the initialization of <TT>x</tt> by thread 1 is complete,
+possibly losing the update, or corrupting the state of <TT>x</tt>
+during initialization.
+<P>
+More interestingly, it is also generally unsafe to restrict the
+release ordering constraint in thread 1 to only stores.
+To see this, consider what happens if the initialization of <TT>x</tt>
+also reads <TT>x</tt>, as in
+<PRE>
+x.a = 0; x.a++;
+x_init.store_write_release(true);
+</pre>
+and the code that uses <TT>x</tt> in thread 2 updates it, with e.g.
+<PRE>
+if (x_init.load_acquire())
+    x.a = 42;
+</pre>
+If the release store in thread 1 were restricted to only ensure
+completion of prior stores (writes), the load of <TT>x.a</tt> in thread 1
+(part of <TT>x.a++</tt>) could effectively be reordered with
+the assignment <TT>x_init</tt>, and could hence see a value of 42,
+causing <TT>x.a</tt> to be initialized to 43.
+<P>
+This admittedly appears rather strange, since the assignment of
+43 to <TT>x.a</tt> would have to become visible before the load,
+on which it depends, is completed.
+However, we've argued <A HREF="#dependencies">separately</a>
+that it doesn't make sense to
+enforce ordering based on dependencies, since they cannot be reliably
+defined at this level.  And machine architectures do not
+even consistently guarantee ordering based on dependencies through
+memory.  Thus this is an unlikely and very surprising result,
+but not one we could easily (or apparently even reasonably) disallow
+in the presence of a store-only fence.
+And clearly, it is surprising enough that it is important to disallow.
+<P>
+One might argue that there are nonetheless interesting cases in
+which the initial operations are known to involve only stores, and
+hence none of this applies.  There are three problems with this
+argument:
+<OL>
+<LI> In most cases any actual object initialization or the like
+will involve calls that cross abstraction boundaries.  Interface
+specifications however do not normally specify whether a
+constructor call, for example, performs a load.  Hence the
+programmer typically has no way to know whether or not (s)he is
+dealing with such a case.
+<LI>
+A number of operations, such as bit-field stores, perform loads
+that are not apparent to all but the most sophisticated programmers,
+and can be affected by this.
+<LI>
+The memory model otherwise allows transformations to, say, load
+a common subexpression value from a struct field if it had to be spilled.
+Thus not all such loads will even be programmer visible.  (The
+offending transformations might of course be applied to a compilation
+unit that doesn't reference atomic operations, and was compiled
+by a third party.)
+</ol>
+<H3>Recipient only reads <TT>x</tt></h3>
+<P>
+In this case, it appears to  be safe to limit the release and acquire
+constraints to loads and stores respectively.
+<P>
+However, I don't believe the argument here requires only that the
+operation here be logically read-only; it must truly not write
+to the object.
+Since I believe we generally allow library classes (e.g. containers)
+to avoid synchronization during construction, and then lock
+"under the covers" for read-only operations (e.g. for caching)
+this appears to be difficult to guarantee.
+<H2><A id="thin-air">Treatment of out-of-thin-air values</a></h2>
+<P>
+Simple formulations of programming language memory models often allow
+"out-of-thin-air" values to be produced.  To see how this might happen,
+consider the following canonical example (<EM>Example 1</em>),
+where variables <TT>x</tt> and <TT>y</tt> are
+initially zero and atomic, variables starting with "r" are local
+("register") variables, and assignment denotes unordered (raw, relaxed)
+loads or stores:
+<PRE>
+<I>Thread 1:</i>
+r1 = x;
+y = r1;
+
+<I>Thread 2:</i>
+r2 = y;
+x = r2;
+</pre>
+The code executed by each thread simply copies one global to another; we've
+just made the intermediate temporaries explicit to emphasize that both
+a load and a store is involved.
+<P>
+The question is whether each load can "see" the value written by the
+other thread's store.  If this is possible, then we can get an apparently
+consistent execution in which each store stores a value of 42, which is
+then read by the load in the other thread, justifying the stored value.
+<P>
+At some level this appears "obviously absurd".  But here are two arguments
+that, although we probably want to disallow the behavior, it is not as
+absurd as might appear at first glance:
+<OL>
+<LI>If the hardware uses naively implemented "load value prediction",
+and does not go out
+of its way to avoid this scenario and, e.g. based on different
+past executions,
+predicts that <TT>x</tt> and <TT>y</tt> contain 42,
+the prediction might be successfully
+confirmed, and actually result in this outcome.  (We know of no hardware that
+actually does this.  I believe that even on Alpha which for other reasons
+does not enforce
+memory ordering based on data dependence, this cannot actually happen.
+This is only a vague plausibility argument.)
+<LI>If we change the above example slightly, the analogous behavior needs
+to be allowed.  Consider instead <EM>Example 2</em>:
+<PRE>
+<I>Thread 1:</i>
+r1 = x;
+y = r1;
+
+<I>Thread 2:</i>
+r2 = y;
+x = 42;
+</pre>
+Since the assignments represent unordered operations, we would like to allow
+either the compiler or hardware to reorder the two statements in the second
+thread.  Once that happens, we get the questionable behavior if the first
+thread executes entirely between the two statements.  This corresponds to
+exactly the same visibility of stores as in the original example.  The
+only difference is the "data dependency" between the two statements in the
+second thread.
+</ol>
+Unfortunately, this already makes it clear that this issue is tied
+to dealing with dependencies in the memory model, which we show
+<A HREF="#dependencies">elsewhere</a> is difficult to do.
+In particular, the approach originally used in
+<A HREF="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2006/n2052.htm">
+N2052</a> doesn't seem to stand up to close scrutiny, and has thus
+been dropped from the N2171 revision.
+<P>
+(Adding the dependency based ordering to only the "precedes" relation, as
+suggested earlier, doesn't help, as becomes apparent below.)
+<P>
+To see why things are so bad, consider another variant
+(<EM>example 3</em>) of the above example:
+<PRE>
+<I>Thread 1:</i>
+r1 = x;
+y = r1;
+
+<I>Thread 2:</i>
+r2 = y;
+if (r2)
+  x = 42;
+else
+  x = 42;
+</pre>
+This differs from the preceding version in that each assignment to <TT>x</tt>
+is fairly clearly dependent on <TT>y</tt>, for any reasonable definition
+of what that means.  (Recall that considering only data dependencies
+doesn't work, since a data dependent assignment could be transformed to
+a switch statement with many constant assignments.  Somehow looking
+at "the next assignment to x" no matter where it occurs syntactically
+also doesn't work, for the reasons given in the dependency
+discussion, and since we could easily replace <TT>x = 42;</tt>
+by <TT>x = 41; x = 42;</tt>.)
+<P>
+The problem of course is that example 3 can be easily optimized to
+example 2, and most people would expect a good compiler to do so.
+Allowing <TT>r1</tt> = <TT>r2</tt> = 42 in example 2, but
+not example 3, seems untenable and, based on the previous dependency
+discussion, probably infeasible.
+<P>
+As a result, we now have a second example, which has basically the same
+structure as example 1 and the same dependency pattern.  The difference
+is really just that in one case the dependency can be "optimized away",
+and in the other case it cannot.
+<H3>A different proposal</h3>
+This seems to leave us several different options:
+<UL>
+<LI>Provide a more elaborate dynamic definition of which stores might
+be visible early, along the lines of the
+<A HREF="http://java.sun.com/docs/books/jls/third_edition/html/memory.html#17.4.8">
+corresponding Java definition</a>.  This doesn't fit well here,
+and is arguably the least well understood part of the Java memory
+model specification.
+<LI>Possibly switch to something closer to
+<A HREF="http://www.saraswat.org/rao.html">Vijay Saraswat et al's work</a>.
+Converting this to a form in which it would be palatable as an ISO
+standard also seems like a daunting task.
+<LI>Allow "out-of-thin-air" results.  Unlike Java, this is probably possible.
+But it seems undesirable, since it makes it harder to reason about even
+perfectly well-behaved and well-defined programs.  I believe it gives
+implementations flexibility to produce needlessly counterintuitive results,
+with no significant performance benefit.  I know of no architectures
+or useful program transformations that are otherwise safe (i.e. don't
+store speculative values), and generate "out-of-thin-air" results.
+<LI>Try for a different approach to the problem that at least
+partially sidesteps the hardest issues.
+</ul>
+Here I propose a combination of the last two:
+<UL>
+<LI>Simplify the main memory model description, so that it allows
+"out-of-thin-air" values.
+<LI>In the definition of unordered atomics, which is the only context
+in which "out-of-thin-air" results can be generated, explicitly prohibit
+them, as best we can.
+</ul>
+I suggest doing the latter with words along the following lines:
+<P>
+<I>An unordered atomic store shall only store a value that has been
+computed from constants and program input values by a finite sequence
+of program evaluations, such that each evaluation observes the values
+of variables as computed by the last prior assignment in the sequence.
+The ordering of evaluations in this
+sequence must be such that</i>
+<UL>
+<LI><I>If an evaluation B observes a value computed by A in the same thread,
+then B must not be sequenced before A.</i>
+<LI><I>If an evaluation B observes a value computed by A in a different thread,
+then B must not happen before A.</i>
+<LI><I>If an evaluation A is included, then all evaluations that assign to the same
+variable and are sequenced before or happen-before A must be included.</i>
+</ul>
+<P>
+<I>[Note: This requirement disallows "out-of-thin-air", or
+"speculative" stores of atomics.
+Since unordered operations are involved,
+evaluations may appear in this sequence out of thread order.
+For example, with x and y initially zero,</i>
+<PRE>
+<I>Thread 1: r1 = y.load_relaxed(); x.store_relaxed(r1);
+
+Thread 2: r2 = x.load_relaxed(); y.store_relaxed(42);</i>
+</pre>
+<I>is allowed to produce r1 = r2 = 42.  The sequence of evaluations
+justifying this starts consists of:</i>
+<PRE>
+<I>y.store_relaxed(42); r1 = y.load_relaxed(); x.store_relaxed(r1); r2 = x.load_relaxed();</i>
+</pre>
+<I>On the other hand,</i>
+<PRE>
+<I>Thread 1: r1 = y.load_relaxed(); x.store_relaxed(r1);
+
+Thread 2: r2 = x.load_relaxed(); y.store_relaxed(r2);</i>
+</pre>
+<I>may not produce r1 = r2 = 42,
+since there is no sequence of evaluations that results in the computation
+of 42.]
+</i>
+<P> This has the large advantage that we simplify the core memory model
+and move the complexity to the section on unordered atomics, where it
+belongs.
+<P>
+It has the potential disadvantage that my characterization above
+of what constitutes an "out-of-thin-air" results may well again be wrong.
+On the other hand, even if we discover that it is, and there is no
+adequate replacement, I think this rule is sufficiently esoteric that it
+may be acceptable just to state it as "no speculative unordered atomic stores",
+and then leave the note.
+<P>
+Jeremy Manson has already pointed out that the above rule fails
+to preclude
+<PRE>
+<I>Thread 1:</i>
+r1 = x;
+if (r1 == 42)
+  y = r1;
+
+<I>Thread 2:</i>
+r2 = y;
+if (r2 == 42)
+  x = 42;
+</pre>
+from assigning 42 to r1 and r2, in spite of the fact that the
+initial 42 still comes "out-of-thin-air".
+This is clearly unacceptable if <TT>x</tt> and <TT>y</tt>
+are ordinary variables,
+since this code is data-race free, and should thus be sequentially
+consistent.  And we guarantee that r1 = r2 = 0 for ordinary variables.
+<P>
+Whether this is acceptable for relaxed atomics, or whether we should
+specifically state that relaxed atomics will give sequentially consistent
+results if the relaxed atomics do not "race" is unclear to me.
+My impression is that users will not care because there is no
+reason to use relaxed atomics unless there is a race, and implementors
+will not care, since no reasonable implementation of atomics will
+exhibit weaker properties than for ordinary variables.
+<P>
+N2171 incorporates the first half of the change we proposed here, i.e. the last
+trace of dependency-based ordering was dropped from N2052.
+</body>
+</html>

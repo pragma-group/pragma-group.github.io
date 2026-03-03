@@ -1,0 +1,341 @@
+<html>
+<head>
+<title>N3070 - Handling Detached Threads and thread_local Variables</title>
+<style type="text/css">
+ins, .inserted
+{
+    color: black;
+    background: #a0ffa0;
+    text-decoration: underline;
+}
+del
+{
+    color: black;
+    background: #ffa0a0;
+    text-decoration: line-through;
+}
+.standardtext
+{
+    margin-left: 2em;
+}
+</style>
+</head>
+<body>
+<table>
+<tr><td>Document Number:</td><td>N3070=10-0060</td></tr>
+<tr><td>Date:</td><td>2010-03-11</td></tr>
+<tr><td>Author:</td><td><a href="mailto:anthony@justsoftwaresolutions.co.uk">Anthony
+      Williams</a><br>Just Software Solutions Ltd</td></tr>
+</table>
+
+<h1>N3070 - Handling Detached Threads and <code>thread_local</code> Variables</h1>
+
+<p>This paper replaces my earlier paper N3038. It provides a simpler
+  and more focused solution to the problem of the interactions
+  of <code>thread_local</code> variables and detached threads.</p>
+
+<p>As Hans Boehm and Lawrence Crowl pointed out in N2880, detached
+  threads pose a problem for objects with thread storage duration. If
+  we use a mechanism other than <code>thread::join</code> to wait for
+  a thread to complete its work &mdash; such as waiting for a
+  <code>future</code> to be ready &mdash; then N2880 correctly
+  highlights that under the current working paper the destructors
+  of <code>thread_local</code> variables will still be running after
+  the waiting thread has resumed. This paper proposes a mechanism to
+  make such synchronization safe by ensuring that the objects with
+  thread storage duration are destroyed prior to the future being made
+  ready. e.g.</p>
+
+<pre>
+int find_the_answer(); // uses thread_local objects
+void thread_func(std::promise&lt;int&gt; * p)
+{
+    p-&gt;set_value_at_thread_exit(find_the_answer());
+}
+
+int main()
+{
+    std::promise&lt;int&gt; p;
+    std::thread t(thread_func,&amp;p);
+    t.detach(); // we're going to wait on the future
+    std::cout&lt;&lt;p.get_future().get()&lt;&lt;std::endl;
+}
+</pre>
+
+<p>When the call to <code>get()</code> returns, we know that not only
+  is the future value ready, but the <code>thread_local</code>
+  variables on the other thread have also been destroyed.</p>
+
+<p>Such mechanisms are provided
+  for <code>std::condition_variable</code>, <code>std::promise</code>
+  and <code>std::packaged_task</code>. e.g.</p>
+
+<pre>
+void task_executor(std::packaged_task&lt;void(int)&gt; task,int param)
+{
+    task.make_ready_at_thread_exit(param); // execute stored task
+} // destroy thread_locals and wake threads waiting on futures from task
+</pre>
+
+<p>Other threads can wait on a <code>future</code> obtained from the
+  task without having to worry about races due to the execution of
+  destructors of the <code>thread_local</code> objects from the task's
+  thread.</p>
+
+<pre>
+std::condition_variable cv;
+std::mutex m;
+complex_type the_data;
+bool data_ready;
+
+void thread_func()
+{
+    std::unique_lock&lt;std::mutex&gt; lk(m);
+    the_data=find_the_answer();
+    data_ready=true;
+    std::notify_all_at_thread_exit(cv,std::move(lk));
+} // destroy thread_locals, notify cv, unlock mutex
+
+void waiting_thread()
+{
+    std::unique_lock&lt;std::mutex&gt; lk(m);
+    while(!data_ready)
+    {
+        cv.wait(lk);
+    }
+    process(the_data);
+}
+</pre>
+
+<p>The waiting thread is guaranteed that the <code>thread_local</code>
+  objects used by <code>thread_func()</code> have been destroyed by
+  the time <code>process(the_data)</code> is called. If the lock
+  on <code>m</code> is released and reacquired after
+  setting <code>data_ready</code> and before
+  calling <code>std::notify_all_at_thread_exit()</code> then this
+  does <strong>NOT</strong> hold, since the thread may return from the
+  wait due to a spurious wakeup.</p>
+
+<h2>Proposed Wording</h2>
+
+<h3>Modifications to <code>std::condition_variable</code></h3>
+
+<p>Add the following non-member function following the class definition
+of <code>condition_variable</code> in 30.5.1:</p>
+
+<pre class="standardtext"><ins>
+    void notify_all_at_thread_exit(std::condition_variable&amp; cond,std::unique_lock&lt;std::mutex&gt; lk);
+</ins></pre>
+
+<p>Insert a new paragraph following 30.5.1p37:
+
+<div class="standardtext inserted">
+<pre>
+    void notify_all_at_thread_exit(std::condition_variable&amp; cond,std::unique_lock&lt;std::mutex&gt; lk);
+</pre>
+
+<dl>
+  <dt>Requires:</dt>
+  <dd><code>lk</code> is locked by the calling thread and either 
+    <ul>
+      <li>no other thread is waiting on <code>cond</code> or</li>
+      <li><code>lk.mutex()</code> returns the same value for each of the
+        lock arguments supplied by all concurrently waiting
+        (via <code>wait</code>, <code>wait_for</code>
+        or <code>wait_until</code>) threads.</li>
+  </ul></dd>
+  <dt>Effects:</dt>
+  <dd><p>Transfer ownership of the lock associated with <code>lk</code>
+      into internal storage and schedule <code>cond</code> to be notified
+      when the current thread exits, after all objects of thread storage
+      duration associated with the current thread have been
+      destroyed. This notification shall be as-if</p>
+    
+<pre>
+lk.unlock();
+cond.notify_all();
+</pre>
+
+    <p>[Note: The supplied lock will be held until the thread exits,
+      and care must be taken to ensure that this does not cause
+      deadlock due to lock ordering issues. After calling
+      <code>notify_all_at_thread_exit</code> it is recommended that
+      the thread should be exited as soon as possible, and that no
+      blocking or time-consuming tasks are run on that thread. &mdash;
+      End Note]</p>
+    
+    <p>[Note: It is the user's responsibility to ensure that waiting
+      threads do not erroneously assume that the thread has finished if
+      they experience spurious wake-ups. This typically requires that the
+      condition being waited for is satisfied whilst holding the lock
+      on <code>lk</code>, and that this lock is not released and
+      reacquired prior to calling <code>notify_all_at_thread_exit</code>.
+      &mdash; End Note]</p></dd>
+</dl>
+
+</div>
+
+<h3>Modifications to <code>std::promise</code> and <code>std::packaged_task</code></h3>
+
+<p>Add the following to the class definition
+  of <code>std::promise</code> in section 30.6.5
+  [futures.promise]:</p>
+
+<pre class="standardtext"><ins>void set_value_at_thread_exit(const R&amp; r);
+void set_value_at_thread_exit(see below);
+void set_exception_at_thread_exit(exception_ptr p);
+</ins></pre>
+
+<p>Modify the error conditions for <code>set_value</code> in 30.6.5 [futures.promise] p19:
+
+<div class="standardtext">
+<dl>
+  <dt>Error conditions:</dt>
+  <dd>
+    <ul>
+      <li><code>promise_already_satisfied</code> if the
+      associated <ins>asynchronous</ins> state <del>is already
+          ready</del><ins>already has a stored value or exception</ins>.</li>
+      <li><code>no_state</code> if <code>*this</code> has no
+      associated <ins>asynchronous</ins> state.</li>
+    </ul>
+  </dd>
+</dl>
+</div>
+
+<p>Modify the error conditions for <code>set_exception</code> in 30.6.5 [futures.promise] p23:
+
+<div class="standardtext">
+<dl>
+  <dt>Error conditions:</dt>
+  <dd>
+    <ul>
+      <li><code>promise_already_satisfied</code> if the
+      associated <ins>asynchronous</ins> state <del>is already
+          ready</del><ins>already has a stored value or exception</ins>.</li>
+      <li><code>no_state</code> if <code>*this</code> has no
+      associated <ins>asynchronous</ins> state.</li>
+    </ul>
+  </dd>
+</dl>
+</div>
+
+<p>Add the following to the end of section 30.6.5
+  [futures.promise]:</p>
+
+<div class="standardtext inserted">
+<pre>
+void promise::set_value_at_thread_exit(const R&amp; r);
+void promise::set_value_at_thread_exit(R&amp;&amp; r);
+void promise&lt;R&amp;&gt;::set_value_at_thread_exit(R&amp; r);
+void promise&lt;void&gt;::set_value_at_thread_exit();
+</pre>
+<dl>
+  <dt>Effects:</dt>
+  <dd>Stores r in the associated asynchronous state without making the
+    associated asynchronous state <em>ready</em>
+    immediately. Schedules the associated asynchronous state to be
+    made <em>ready</em> when the current thread exits, after all
+    objects of thread storage duration associated with the current
+    thread have been destroyed.</dd>
+
+  <dt>Throws:</dt>
+  <dd><code>future_error</code> if an error condition occurs.</dd>
+
+  <dt>Error conditions:</dt>
+  <dd><ul>
+      <li><code>promise_already_satisfied</code> if its associated
+        asynchronous state already has a stored value or
+        exception.</li>
+      <li><code>no_state</code> if <code>*this</code> has no
+        associated asynchronous state.</li>
+    </ul>
+  </dd>
+</dl>
+
+<pre>
+void set_exception_at_thread_exit(exception_ptr p);
+</pre>
+<dl>
+  <dt>Effects:</dt>
+  <dd>Stores p in the associated asynchronous state without making the
+    associated asynchronous state <em>ready</em>
+    immediately. Schedules the associated asynchronous state to be
+    made <em>ready</em> when the current thread exits, after all
+    objects of thread storage duration associated with the current
+    thread have been destroyed.</dd>
+  
+  <dt>Throws:</dt>
+  <dd><code>future_error</code> if an error condition occurs.</dd>
+
+  <dt>Error conditions:</dt>
+  <dd><ul>
+      <li><code>promise_already_satisfied</code> if its associated
+        asynchronous state already has a stored value or
+        exception.</li>
+      <li><code>no_state</code> if <code>*this</code> has no
+        associated asynchronous state.</li>
+    </ul>
+  </dd>
+</dl>
+</div>
+
+<p>Added the following member function to the class definition
+  for <code>std::packaged_task</code> in 30.6.10 [futures.task]:</p>
+
+<pre class="standardtext"><ins>void make_ready_at_thread_exit(ArgTypes...);</ins></pre>
+
+<p>Modify the error conditions for <code>operator()</code> in 30.6.10
+[futures.task] p25:
+
+<div class="standardtext">
+<dl>
+  <dt>Error conditions:</dt>
+  <dd>
+    <ul>
+      <li><code>no_state</code> if <code>*this</code> has no
+      associated <ins>asynchronous</ins> state.</li>
+      <li><code>promise_already_satisfied</code> if the
+      associated <ins>asynchronous</ins> state <del>is already
+          ready</del><ins>already has a stored value or exception</ins>.</li>
+    </ul>
+  </dd>
+</dl>
+</div>
+
+<p>Add the following to 30.6.10 [futures.task] following paragraph
+  26:</p>
+
+<div class="standardtext inserted">
+<pre>
+void make_ready_at_thread_exit(ArgTypes... args);
+</pre>
+<dl>
+  <dt>Effects:</dt>
+  <dd><em>INVOKE (f, t1, t2, ..., tN, R)</em>, where <em>f</em> is the
+      associated task of <code>*this</code> and <em>t1, t2, ...,
+      tN</em> are the values in <code>args....</code> If the task
+      returns normally, the return value is stored in the associated
+      asynchronous state, otherwise the exception thrown by the task
+      is stored. In either case, this shall be done without making the
+      state <em>ready</em> immediately. Schedules the associated
+      asynchronous state to be made <em>ready</em> when the current
+      thread exits, after all objects of thread storage duration
+      associated with the current thread have been destroyed.</dd>
+
+  <dt>Throws:</dt>
+  <dd><code>future_error</code> if an error condition occurs.</dd>
+
+  <dt>Error conditions:</dt>
+  <dd><ul>
+      <li><code>promise_already_satisfied</code> if its associated
+        asynchronous state already has a stored value or
+        exception.</li>
+      <li><code>no_state</code> if <code>*this</code> has no
+        associated asynchronous state.</li>
+    </ul>
+  </dd>
+</dl>
+</div>
+
+</body></html>

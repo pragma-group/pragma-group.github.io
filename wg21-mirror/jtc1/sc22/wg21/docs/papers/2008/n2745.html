@@ -1,0 +1,1432 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+"http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=us-ascii">
+<title>Example POWER Implementation for C/C++ Memory Model</title>
+</head>
+<body>
+<h1>Example POWER Implementation for C/C++ Memory Model</h1>
+
+<p>
+ISO/IEC JTC1 SC22 WG21 N2745 = 08-0255 - 2008-08-22
+</p>
+
+<p>
+Paul E. McKenney, paulmck@linux.vnet.ibm.com<br>
+Raul Silvera, rauls@ca.ibm.com
+</p>
+
+<h2>Introduction</h2>
+
+<p>
+This document presents a PowerPC implementation of the proposed C/C++
+memory-order model
+(including the modifications for dependency ordering proposed in
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2008/n2556.html">
+N2556</A>),
+and analyzes some representative non-SC (sequentially consistent)
+code sequences.
+Sequences involving both acquire and dependency-ordering operations
+are analyzed.
+</p>
+
+<p>
+The authors owe a debt of gratitude to Derek Williams, Cathy May, and
+Brad Frey for their careful and patient explanations of the PowerPC
+memory model.
+However, all mistakes within are the sole property of the authors.
+</p>
+
+<h2>PowerPC Code Sequences</h2>
+
+<p>
+There are any number of possible mappings from the C/C++ memory-ordering
+primitives onto the PowerPC instruction set.
+This document assumes the following mapping, derived by Raul:
+</p>
+
+<table border=3>
+<tr><th>Operation</th>		<th>PowerPC Implementation</th></tr>
+<tr><td>Load Relaxed</td>	<td><code>ld</code></td></tr>
+<tr><td>Load Consume</td>	<td><code>ld</code></td></tr>
+<tr><td>Load Acquire</td>	<td><code>ld; cmp; bd; isync</code></td></tr>
+<tr><td>Load Seq Cst</td>
+		<td><code>hwsync; ld; cmp; bd; isync</code></td></tr>
+<tr><td>Store Relaxed</td>	<td><code>st</code></td></tr>
+<tr><td>Store Release</td>	<td><code>lwsync; st</code></td></tr>
+<tr><td>Store Seq Cst</td>	<td><code>hwsync; st</code></td></tr>
+<tr><td>Cmpxchg Relaxed,Relaxed</td>
+	<td><code>ldarx; cmp; bc _exit; stcwx; bc _loop</code></td></tr>
+<tr><td>Cmpxchg Acquire,Relaxed</td>
+	<td><code>ldarx; cmp; bc _exit; stcwx; bc _loop ; isync</code></td></tr>
+<tr><td>Cmpxchg Release,Relaxed</td>
+	<td><code>lwsync; ldarx; cmp; bc _exit; stcwx; bc _loop</code></td></tr>
+<tr><td>Cmpxchg AcqRel,Relaxed,Relaxed</td>
+	<td><code>lwsync; ldarx; cmp; bc _exit; stcwx; bc _loop; isync</code></td></tr>
+<tr><td>Cmpxchg SeqCst,Relaxed,Relaxed</td>
+	<td><code>hwsync; ldarx; cmp; bc _exit; stcwx; bc _loop; isync</code></td></tr>
+</table>
+
+<h2>Relevant Wording From PowerPC Architecture</h2>
+
+<h3>Modification Order and Memory Coherence</h3>
+
+<p>
+The C/C++ definition of &ldquo;modification order&rdquo; maps to
+the PowerPC notion of &ldquo;memory coherence&rdquo;.
+From Section&nbsp;1.6.3 of PowerPC Book 2 describes memory coherence
+as follows:
+</p>
+
+<blockquote>
+	<p>
+	An access to a Memory Coherence Required
+	storage location is performed coherently, as
+	follows.
+	</p><p>
+	Memory coherence refers to the ordering of
+	stores to a single location. Atomic stores to
+	a given location are coherent if they are serialized
+	in some order, and no processor or
+	mechanism is able to observe any subset of
+	those stores as occurring in a conflicting order.
+	This serialization order is an abstract
+	sequence of values; the physical storage location
+	need not assume each of the values
+	written to it. For example, a processor may
+	update a location several times before the
+	value is written to physical storage. The result
+	of a store operation is not available to
+	every processor or mechanism at the same
+	instant, and it may be that a processor or
+	mechanism observes only some of the values
+	that are written to a location. However,
+	when a location is accessed atomically and
+	coherently by all processor and mechanisms,
+	the sequence of values loaded from the location
+	by any processor or mechanism during
+	any interval of time forms a subsequence
+	of the sequence of values that the location
+	logically held during that interval. That is,
+	a processor or mechanism can never load a
+	&ldquo;newer&rdquo; value first and then, later, load an
+	&ldquo;older&rdquo; value.
+	</p><p>
+	Memory coherence is managed in blocks
+	called coherence blocks. Their size is
+	implementation-dependent (see the Book
+	IV, PowerPC Implementation Features document
+	for the implementation), but is larger
+	than a word and is usually the size of a cache
+	block.
+	</p>
+</blockquote>
+
+<h3>Release Sequences</h3>
+
+<p>
+Release sequences include two cases, subsequent stores by the same
+thread that performed the release, and non-relaxed atomic
+read-modify-write operations.
+The subsequent-stores case is covered by the following sentence
+of Section&nbsp;1.6.3 of PowerPC Book 2 quoted above:
+</p>
+
+<blockquote>
+	<p>
+	That is, a processor or mechanism can never load a
+	&ldquo;newer&rdquo; value first and then, later, load an
+	&ldquo;older&rdquo; value.
+	</p>
+</blockquote>
+
+<p>
+In addition, we shall see that the operation of PowerPC memory barriers
+causes the subsequent-stores case to trivially follow from the case
+where the acquire operation loads the head of the release chain.
+</p>
+
+<p>
+The non-relaxed-atomic case has not been carefully studied,
+but the authors are confident that use of either the <code>lwsync</code>
+or the <code>hwsync</code> instruction will suffice to enforce this
+ordering.
+A particular concern is the relationship of atomic operations and
+release sequences, which are explored in a later section.
+</p>
+
+<p>
+The relevant wording from PowerPC Book 2 describing PowerPC's atomic
+read-modify-write sequences is as follows:
+</p>
+
+<blockquote>
+	<p>
+	The store caused by a successful &ldquo;stwcx.&rdquo; is ordered,
+	by a dependence on the reservation, with respect to the load
+	caused by the &ldquo;lwarx&rdquo; that established the reservation,
+	such that the two storage accesses are performed in program
+	order with respect to any processor or mechanism.
+	</p>
+</blockquote>
+
+<h3>Synchronizes With</h3>
+
+<p>
+The &ldquo;synchronizes with&rdquo; relation is handled by the
+placement of the memory barriers in the code sequences table above.
+The stores to object <var>M</var> follow a <code>lwsync</code> or
+<code>hwsync</code> instruction, and the corresponding loads
+precede one of a number of instruction sequences called out in
+the table.
+These instructions are described in Section&nbsp;1.7.1 of
+PowerPC Book 2, as follows:
+</p>
+
+<blockquote>
+	<p>
+	When a processor (P1) executes a <code>sync</code>,
+	<code>lwsync</code>, or <code>eieio</code>
+	instruction a memory barrier
+	is created, which orders applicable storage
+	accesses pairwise, as follows. Let <var>A</var>
+	be a set of storage accesses that includes
+	all storage accesses associated with instructions
+	preceding the barrier-creating instruction,
+	and let <var>B</var> be a set of storage accesses
+	that includes all storage accesses associated
+	with instructions following the barrier-creating
+	instruction. For each applicable
+	pair <var>a<sub>i</sub>,b<sub>j</sub></var>
+	of storage accesses such that <var>a<sub>i</sub></var>
+	is in <var>A</var> and <var>b<sub>j</sub></var>
+	is in <var>B</var>, the memory barrier
+	ensures that <var>a<sub>i</sub></var> will be performed with respect
+	to any processor or mechanism, to the
+	extent required by the associated Memory
+	Coherence Required attributes, before <var>b<sub>j</sub></var> is
+	performed with respect to that processor or
+	mechanism.
+	</p>
+</blockquote>
+
+<p>
+The word &ldquo;performed&rdquo; is defined roughly as follows:
+</p>
+<ul>
+<li>	A load operation has been performed with respect
+	to a given CPU when that CPU is no
+	longer able to change the value that is to be loaded.
+<li>	A store operation has been performed with respect to a given
+	CPU when a subsequent load by that CPU will return either the
+	value store or some later value in the variable's modification
+	order.
+</ul>
+<p>
+Section&nbsp;1.7.1 of PowerPC Book 2 goes on to discuss cumulativity,
+which is somewhat similar to a causal ordering:
+</p>
+
+<blockquote>
+	<p>
+	The ordering done by a memory barrier is
+	said to be &ldquo;cumulative&rdquo; if it also orders storage accesses
+	that are performed by processors and mechanisms other than P1,
+	as follows.
+	</p>
+	<ul>
+	<li>	<var>A</var> includes all applicable storage accesses
+		by any such processor or mechanism that have been
+		performed with respect to P1 before the memory barrier
+		is created.
+	<li>	<var>B</var> includes all applicable storage accesses by
+		any such processor or mechanism that are performed
+		after a Load instruction executed by that processor or
+		mechanism has returned the value stored by a store that
+		is in <var>B</var>.
+	</ul>
+</blockquote>
+
+<p>
+Note that B-cumulativity recurses on stores, as illustrated by the
+following sequence of operations:
+</p>
+
+<ol>
+<li>	Thread 0 executes a memory fence followed by a store to
+	variable <code>a</code>.
+	This store will be in the memory fence's B-set.
+<li>	Thread 1 executes a load from <code>a</code> that returns
+	the value stored by thread 0.  Thread 1's load and all
+	of thread 1's operations that are ordered after that load
+	are in thread 0's memory fence's B-set.
+<li>	Thread 1 executes a store to variable <code>b</code> that
+	is ordered after the load from <code>a</code> (for example,
+	by either code or data dependency).  This store is therefore
+	in Thread 0's memory fence's B-set.
+<li>	Thread 2 executes a load from <code>b</code> that returns
+	the value stored by thread 1.
+	Thread 2's load and all of thread 1's operations that are
+	ordered after that load are in thread 0's memory fence's
+	B-set.
+</ol>
+
+<p>
+The recursive nature of B-cumulativity allows this sequence to be
+extended indefinitely.
+</p>
+
+<p>
+In contrast, A-cumulativity has no such recursion.
+Only those operations performed with respect to the specific thread
+containing the memory fence (termed &ldquo;memory barrier&rdquo; in PowerPC
+documentation) will be in that memory fence's A-set.
+There is no A-cumulativity recursion through other threads'
+loads; such recursion is confined to B-cumulativity.
+</p>
+
+<p>
+In both of the above passages from Section&nbsp;1.7.1, the importance
+of the word &ldquo;applicable&rdquo; cannot be overstated.
+This word's meaning depends on the type of memory-fence instruction
+as follows:
+</p>
+<ul>
+<li>	<code>eieio</code>: only stores are &ldquo;applicable&rdquo;.
+<li>	<code>hwsync</code>: both loads and stores are
+	&ldquo;applicable&rdquo;.
+	This instruction is often called <code>sync</code>,
+	and provides full causal ordering (in fact, full
+	sequential consistency).
+<li>	<code>lwsync</code> applicability is limited to the following
+	cases:
+	<ol>
+	<li>	loads preceding and following.
+	<li>	stores preceding and following.
+	<li>	loads preceding and stores following.
+	</ol>
+	Thus stores preceding and loads following are <i>not</i>
+	applicable in the case of <code>lwsync</code>.
+<li>	<code>bc;isync</code>: this is a very low-overhead and
+	very weak form of memory fence.
+	A specific set of preceding loads on
+	which the <code>bc</code> (branch conditional) instruction
+	depends are guaranteed to have completed
+	before any subsequent instruction begins execution.
+	However, store-buffer and cache-state effects can
+	nevertheless make it appear that subsequent loads
+	occur before the preceding loads
+	upon which the twi instruction depends. That
+	said, the PowerPC architecture does not permit
+	stores to be executed speculatively, so any store
+	following the twi;isync instruction is guaranteed to happen
+	after any of the loads on which
+	the <code>bc</code> depends.
+	<p>
+	Note that the <code>bc;isync</code>
+	instruction sequence does <i>not</i> provide cumulativity.
+	This permits the following counter-intuitive sequence of
+	events, with all variables initially zero, and results of
+	loads in square brackets following the load:
+	</p>
+	<ol>
+	<li>	CPU 0: <code>x=1</code>
+	<li>	CPU 1: <code>r1=x</code> [1]
+	<li>	CPU 1: <code>lwsync</code>
+	<li>	CPU 1: <code>y=1</code>
+	<li>	CPU 2: <code>r2=y</code> [1]
+	<li>	CPU 2: <code>bc;isync</code>
+	<li>	CPU 2: <code>r3=x</code> [0]
+	</ol>
+	<p>
+	This sequence of events is more likely to occur on systems
+	where CPUs 0 and 1 are closely related, for example,
+	when CPUs 0 and 1 are hardware threads in one core and
+	CPU 2 is a hardware thread in another core.
+	</p>
+</ul>
+
+<p>
+The effects of the <code>isync</code> instruction is described in
+the program note in Section&nbsp;1.7.1 of PowerPC book 2:
+</p>
+
+<blockquote>
+	<p>
+	Because an <code>isync</code> instruction prevents the
+	execution of instructions following the <code>isync</code>
+	until instructions preceding the <code>isync</code> have
+	completed, if an <code>isync</code> follows a conditional
+	Branch instruction that depends on the
+	value returned by a preceding Load instruction,
+	the load on which the Branch depends
+	is performed before any loads caused by instructions
+	following the <code>isync</code>. This applies
+	even if the effects of the &ldquo;dependency&rdquo; are
+	independent of the value loaded (e.g., the
+	value is compared to itself and the Branch
+	tests the EQ bit in the selected CR field),
+	and even if the branch target is the sequentially
+	next instruction.
+	</p>
+</blockquote>
+
+<p>
+This might seem at first glance to prohibit the above code sequence,
+however, please keep in mind that CPU 1's <code>lwsync</code> does
+not affect CPU 1's store.
+Cumulativity does not come into play here because prior stores
+(CPU 0's store to <var>x</var>) and subsequent loads (CPU 2's
+load from <var>x</var>) are not applicable to the <code>lwsync</code>
+instruction.
+However, if the <code>lwsync</code> were to be replaced with a
+<code>hwsync</code>, the outcome shows above would be impossible.
+</p>
+
+<h3>Carrying Dependencies</h3>
+
+<p>
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2008/n2556.html">
+N2556</A>
+defines carrying a dependency as follows:
+</p>
+
+<blockquote>
+<p>
+An evaluation <var>A</var>
+<dfn>carries a dependency</dfn> to
+an evaluation <var>B</var>
+if
+</p>
+<ul>
+<li>
+the value of <var>A</var> is used as an operand of <var>B</var>,
+and:
+	<ul>
+	<li><var>B</var> is not an invocation of any specialization of
+	<code>std::kill_dependency</code>, and</li>
+	<li><var>A</var> is not the left operand to the comma (',')
+	operator,</li>
+	</ul>
+or
+</li>
+<li>
+<var>A</var> writes a scalar object or bit-field <var>M</var>,
+<var>B</var> reads the value written by <var>A</var> from <var>M</var>,
+and <var>A</var> is sequenced before <var>B</var>, or
+</li>
+<li>
+for some evaluation <var>X</var>,
+<var>A</var> carries a dependency to <var>X</var>,
+and <var>X</var> carries a dependency to <var>B</var>.
+</li>
+</ul>
+</blockquote>
+
+<p>
+In cases where evaluation <var>B</var> is a load, we refer to
+Section&nbsp;1.7.1 of PowerPC Book 2:
+</p>
+
+<blockquote>
+	<p>
+	If a Load instruction depends on the value returned by
+	a preceding Load instruction (because the value is used
+	to compute the effective address specified by the second
+	Load), the corresponding storage accesses are performed in
+	program order with respect to any processor or mechanism
+	to the extent required by the associated Memory Coherence
+	Required attributes. This applies even if the dependency
+	has no effect on program logic (e.g., the value returned
+	by the first Load is ANDed with zero and then added to
+	the effective address specified by the second Load).
+	</p>
+</blockquote>
+
+<p>
+Where evaluation <var>B</var> is a store, we refer to
+Section&nbsp;4.2.4 of PowerPC Book 3:
+</p>
+
+<blockquote>
+	<p>
+	Stores are not performed out-of-order (even if the
+	Store instructions that caused them were executed
+	out-of-order). Moreover, address translations associated
+	with instructions preceding the corresponding Store
+	instruction are not performed again after the store has
+	been performed.
+	</p>
+</blockquote>
+
+<h2>Examples</h2>
+
+<h3>&ldquo;Synchronizes-With&rdquo; Examples</h3>
+
+<p>
+The synchronizes-with examples involve one thread performing an
+evaluation <var>A</var> sequenced before a release operation on
+some atomic object <var>M</var>, concurrently with another
+thread performing an acquire operation on this same atomic
+object <var>M</var> sequenced before an evaluation <var>B</var>.
+These examples are the four cases where <var>A</var> and <var>B</var>
+are all combinations of relaxed loads and stores.
+</p>
+
+<h4>Example 1: Load/Load</h4>
+
+<p>
+This example shows how the C++ synchronization primitives can be
+used to order loads.
+Consider the following C++ code, with all variables
+initially zero, and with the assertion executing after all threads
+have completed:
+</p>
+
+<ul>
+<li>	Thread 0:
+	<pre>
+	r1 = x.load(memory_order_relaxed);
+	y.store(1, memory_order_release);
+	</pre>
+<li>	Thread 1:
+	<pre>
+	r2 = y.load(memory_order_acquire);
+	r3 = x.load(memory_order_relaxed);
+	</pre>
+<li>	Thread 2 (required for assertion):
+	<pre>
+	x.store(1, memory_order_relaxed);
+	</pre>
+<li>	Assertion: <code>assert(r2==0||r1==0||r3==1);</code>
+</ul>
+
+<p>
+The corresponding PowerPC memory-ordering instructions are as shown
+in the following table:
+</p>
+
+<table border=3>
+<tr><th>Thread 0</th>	<th>Thread 1</th>		<th>Thread 2</th></tr>
+<tr><td>r1=x;</td>	<td>r2=y;</td>			<td>x=1;</td></tr>
+<tr><td>lwsync;</td>	<td>if (r2==r2)</td>		<td></td></tr>
+<tr><td>y=1;</td>	<td>&nbsp;&nbsp;isync;</td>	<td></td></tr>
+<tr><td></td>		<td>&nbsp;&nbsp;r3=x;</td>	<td></td></tr>
+</table>
+
+<p>
+Discussion:
+</p>
+
+<ol>
+<li>	Thread 0's load from <code>x</code> is in the <code>lwsync</code>'s
+	A-set and thread 0's store to <code>y</code> is in the
+	<code>lwsync</code>'s B-set.
+<li>	If <code>r1==1</code>, we know that,
+	by cumulativity, thread 2's store to <code>x</code> is also
+	in the <code>lwsync</code>'s A-set.
+<li>	If <code>r2==1</code>, then we know that thread 0's
+	store to <code>y</code> synchronizes with thread 1's
+	load from <code>y</code>, which in turn means that
+	thread 1's load
+	from <code>y</code> is in the <code>lwsync</code>'s B-set.
+<li>	The above conditions mean that if <code>r1==1</code> and
+	<code>r2==1</code>, thread 0's store to <code>x</code> is
+	performed before thread 1's load from <code>y</code>
+	with respect to all processors.
+<li>	Because of thread 1's conditional branch and <code>isync</code>,
+	thread 1's load from <code>y</code> is performed before thread 1's
+	load from <code>x</code> with respect to all processors.
+<li>	Therefore, if <code>r1==1</code> and <code>r2==1</code>, we
+	know that <code>r3==1</code>, so that the assert is satisfied.
+	(Note: we need not rely thread 1's load from <code>x</code>
+	being in the <code>lwsync</code>'s B-set.
+	This is fortunate given
+	that prior stores and subsequent loads are not applicable for
+	<code>lwsync</code>.)
+</ol>
+
+<p>
+Note that the C++ memory model does not actually require the loads
+to be ordered in this case, since thread 0's relaxed store is not
+guaranteed to be seen in any particular order by thread 0's and 1's
+relaxed loads.
+The fact that POWER provides ordering in this case is coincidental.
+The following modified code guarantees ordering according to the C++
+memory model:
+</p>
+
+<ul>
+<li>	Thread 0:
+	<pre>
+	r1 = x.load(memory_order_acquire);
+	y.store(1, memory_order_release);
+	</pre>
+<li>	Thread 1:
+	<pre>
+	r2 = y.load(memory_order_acquire);
+	r3 = x.load(memory_order_acquire);
+	</pre>
+<li>	Thread 2 (required for assertion):
+	<pre>
+	x.store(1, memory_order_release);
+	</pre>
+<li>	Assertion: <code>assert(r2==0||r1==0||r3==1);</code>
+</ul>
+
+<p>
+Since this code sequence adds memory barriers and does not remove any,
+the assert is never violated on Power.
+</p>
+
+<h4>Example 2: Load/Store</h4>
+
+<p>
+The C++ code for this example is as follows, with all variables
+initially zero, and with the assertion executing after all threads
+have completed:
+</p>
+
+<ul>
+<li>	Thread 0:
+	<pre>
+	r1 = x.load(memory_order_relaxed);
+	y.store(1, memory_order_release);
+	</pre>
+<li>	Thread 1:
+	<pre>
+	r2 = y.load(memory_order_acquire);
+	if (r2 != 0)
+		x.store(1,memory_order_relaxed);
+	</pre>
+<li>	Assertion: <code>assert(r1==0);</code>
+</ul>
+
+<p>
+The corresponding PowerPC memory-ordering instructions are as shown
+in the following table, combining the conditional branch from the
+acquire operation with the <code>if</code> statement:
+</p>
+
+<table border=3>
+<tr><th>Thread 0</th>	<th>Thread 1</th></tr>
+<tr><td>r1=x;</td>	<td>r2=y;</td></tr>
+<tr><td>lwsync;</td>	<td>if (r2!=0)</td></tr>
+<tr><td>y=1;</td>	<td>&nbsp;&nbsp;isync;</td></tr>
+<tr><td></td>		<td>&nbsp;&nbsp;x=1;</td></tr>
+</table>
+
+<p>
+Discussion:
+</p>
+
+<ol>
+<li>	Thread 0's load from <code>x</code> is in the <code>lwsync</code>'s
+	A-set and thread 0's store to <code>y</code> is in the
+	<code>lwsync</code>'s B-set.
+	This in turn means that the load is performed before the store
+	with respect to any given thread.
+<li>	If <code>r2==1</code>:
+	<ol>
+	<li>	Thread 0's store to <code>y</code> synchronizes with thread 1's
+		load from <code>y</code>, which in turn means that
+		thread 1's load from <code>y</code>
+		and store to <code>x</code> are in the
+		<code>lwsync</code>'s B-set.
+		This means that thread 0's load from <code>x</code>
+		is performed before thread 1's load from <code>y</code>
+		with respect to each processor.
+	<li>	Because Power does not perform stores speculatively,
+		thread 1's load from <code>y</code> is performed before
+		its store to <code>x</code> with respect to each
+		processor.
+	<li>	Therefore, thread 0's load from <code>x</code> is performed
+		before thread 1's store to <code>x</code> with respect to
+		any given processor.
+	</ol>
+	Therefore, in this case, we have <code>r1==0</code>.
+<li>	On the other hand, if <code>r2!=1</code>, then thread 1's
+	store to <code>x</code> will not be executed.
+	Therefore, <code>x</code>'s initial
+	value of zero is retained, so that <code>r1==0</code>.
+</ol>
+
+<h4>Example 3: Store/Load</h4>
+
+<p>
+The C++ code for this example is as follows, with all variables
+initially zero, and with the assertion executing after all threads
+have completed:
+</p>
+
+<ul>
+<li>	Thread 0:
+	<pre>
+	x.store(1, memory_order_relaxed);
+	y.store(1, memory_order_release);
+	</pre>
+<li>	Thread 1:
+	<pre>
+	r1 = y.load(memory_order_acquire);
+	if (r1 == 1)
+		r2 = x.load(memory_order_relaxed);
+	</pre>
+<li>	Assertion: <code>assert(r1==0||r2==1);</code>
+</ul>
+
+<p>
+The corresponding PowerPC memory-ordering instructions are as shown
+in the following table, combining the conditional branch from the
+acquire operation with the <code>if</code> statement:
+</p>
+
+<table border=3>
+<tr><th>Thread 0</th>	<th>Thread 1</th></tr>
+<tr><td>x=1;</td>	<td>r1=y;</td></tr>
+<tr><td>lwsync;</td>	<td>if (r1==1)</td></tr>
+<tr><td>y=1;</td>	<td>&nbsp;&nbsp;isync;</td></tr>
+<tr><td></td>		<td>&nbsp;&nbsp;r2=x;</td></tr>
+</table>
+
+<p>
+Discussion:
+</p>
+
+<ol>
+<li>	Thread 0's store to <code>x</code> is in the <code>lwsync</code>'s
+	A-set and thread 0's store to <code>y</code> is in the
+	<code>lwsync</code>'s B-set.
+	This in turn means that the store to <code>x</code>
+	is performed before the store to <code>y</code>
+	with respect to any given thread.
+<li>	If <code>r1==1</code>:
+	<ol>
+	<li>	Thread 0's store to <code>y</code> synchronizes with thread 1's
+		load from <code>y</code>, which in turn means that
+		thread 1's load
+		from <code>y</code> is in the <code>lwsync</code>'s B-set.
+	<li>	Therefore, thread 0's store to <code>x</code> is performed
+		before thread 1's load from <code>y</code> with respect to
+		any given thread.
+	<li>	The conditional branch and the <code>isync</code> means
+		that thread 1's load from <code>y</code> is performed
+		before its load from <code>x</code> with respect to
+		each processor and mechanism.
+	<li>	Therefore, thread 0's store to <code>x</code> is
+		performed before thread 1's load from <code>x</code>.
+	</ol>
+	We therefore have <code>r2==1</code>, satisfying the assert.
+<li>	On the other hand, if <code>r2==0</code>, then the assert
+	is directly satisfied.
+</ol>
+
+<h4>Example 4: Store/Store</h4>
+
+<p>
+The C++ code for this example is as follows, with all variables
+initially zero, and with the assertion executing at any time:
+</p>
+
+<ul>
+<li>	Thread 0:
+	<pre>
+	x.store(1, memory_order_relaxed);
+	y.store(1, memory_order_release);
+	</pre>
+<li>	Thread 1:
+	<pre>
+	r1 = y.load(memory_order_acquire);
+	if (r1 == 1)
+		z.store(1,memory_order_relaxed);
+	</pre>
+<li>	Assertion: <code>assert(z==0||x==1);</code>
+</ul>
+
+<p>
+The corresponding PowerPC memory-ordering instructions are as shown
+in the following table, combining the conditional branch from the
+acquire operation with the <code>if</code> statement:
+</p>
+
+<table border=3>
+<tr><th>Thread 0</th>	<th>Thread 1</th></tr>
+<tr><td>x=1;</td>	<td>r1=y;</td></tr>
+<tr><td>lwsync;</td>	<td>if (r1==1)</td></tr>
+<tr><td>y=1;</td>	<td>&nbsp;&nbsp;isync;</td></tr>
+<tr><td></td>		<td>&nbsp;&nbsp;z=1;</td></tr>
+</table>
+
+<p>
+Discussion:
+</p>
+
+<ol>
+<li>	Thread 0's store to <code>x</code> is in the <code>lwsync</code>'s
+	A-set and thread 0's store to <code>y</code> is in the
+	<code>lwsync</code>'s B-set.
+	This means that the store to <code>x</code>
+	is performed before the store to <code>y</code>
+	with respect to any given thread.
+<li>	If <code>r1==1</code>:
+	<ol>
+	<li>	Thread 0's store to <code>y</code> synchronizes with thread 1's
+		load from <code>y</code>, which means that thread 1's load
+		from <code>y</code> is in the <code>lwsync</code>'s B-set.
+		Therefore, thread 0's store to <code>x</code> is performed
+		before thread 1's load from <code>y</code> with respect to
+		any given thread.
+	<li>	Because stores are not performed speculatively,
+		thread 1's load from <code>y</code>
+		is performed before its store to <code>z</code> with respect
+		to any processor.
+	<li>	Therefore, thread 0's store to <code>x</code> is performed
+		before thread 1's store to <code>z</code> with respect to
+		any processor.
+	</ol>
+	We thus have <code>x==1</code>, satisfying the assert.
+<li>	On the other hand, if <code>r1==0</code>, then <code>z</code>
+	is never assigned to, so its value remains zero, which
+	also satisfies the assert.
+</ol>
+
+<h3>&ldquo;Dependency-Ordered-Before&rdquo; Examples</h3>
+
+<p>
+The dependency-ordered-before examples involve one thread performing an
+evaluation <var>A</var> sequenced before a release operation on
+some atomic object <var>M</var>, concurrently with another
+thread performing an consume operation on this same atomic
+object <var>M</var> sequenced before an evaluation <var>B</var>
+that depends on the consume operation.
+These examples are the four cases where <var>A</var> and <var>B</var>
+are all combinations of relaxed loads and stores.
+Some of the examples will require a third thread, for example,
+the load/load case cannot detect ordering without an independent
+store.
+</p>
+
+<h4>Example 5: Load/Load</h4>
+
+<p>
+Like Example&nbsp;1, this example orders a pair of loads, but using
+dependency ordering rather than load-acquire.
+Consider the following C++ code, with all variables
+initially zero, and with the assertion executing after all threads
+have completed:
+</p>
+
+<ul>
+<li>	Thread 0:
+	<pre>
+	r1 = p.a.load(memory_order_acquire);
+	y.store(&amp;p, memory_order_release);
+	</pre>
+<li>	Thread 1:
+	<pre>
+	r2 = y.load(memory_order_consume);
+	r3 = r2->a.load(memory_order_acquire);
+	</pre>
+<li>	Thread 2 (required for assertion):
+	<pre>
+	p.a.store(1, memory_order_release);
+	</pre>
+<li>	Assertion: <code>assert(r2==&amp;p||r1==0||r3==1);</code>
+</ul>
+
+<p>
+The corresponding PowerPC memory-ordering instructions are as shown
+in the following table:
+</p>
+
+<table border=3>
+<tr><th>Thread 0</th>	<th>Thread 1</th>		<th>Thread 2</th></tr>
+<tr><td>r1=p.a;</td>	<td>r2=y;</td>			<td>p.a=1;</td></tr>
+<tr><td>lwsync;</td>	<td>if (r2==&amp;p)</td>	<td>lwsync;</td></tr>
+<tr><td>y=&amp;p;</td>	<td>&nbsp;&nbsp;r3=r2->a;</td>	<td></td></tr>
+</table>
+
+<p>
+Note that the ordering instructions corresponding to thread 0's
+load-acquire from <code>p.a</code> are folded into the following
+<code>lwsync</code> instruction.
+Note also that the ordering instructions corresponding to thread 1's
+second load have no effect, and hence have been omitted.
+</p>
+
+<p>
+Discussion:
+</p>
+
+<ol>
+<li>	Thread 0's load from <code>p.a</code> is in the <code>lwsync</code>'s
+	A-set and thread 0's store to <code>y</code> is in the
+	<code>lwsync</code>'s B-set.
+<li>	If <code>r1==1</code>, then we know that, by cumulativity,
+	thread 2's store to <code>p.a</code> is also in the
+	<code>lwsync</code>'s A-set.
+<li>	If <code>r2==&amp;p</code>, then we know that thread 0's
+	store to <code>y</code> synchronizes with thread 1's
+	load from <code>y</code>, which in turn means that
+	thread 1's load
+	from <code>y</code> is in the <code>lwsync</code>'s B-set.
+	Therefore, thread 0's load from <code>r2->a</code> is performed
+	before thread 1's load from <code>p.a</code> with respect to
+	any given thread.
+<li>	Because of dependency ordering,
+	thread 1's load from <code>y</code> is performed before thread 1's
+	load from <code>r2->a</code> with respect to all processors.
+<li>	Therefore, if <code>r1==1</code> and <code>r2==1</code>, we know
+	that <code>r3==1</code> so that the assert must always be satisfied.
+	(Note: we need not rely thread 1's load from <code>r2->a</code>
+	being in the <code>lwsync</code>'s B-set, which is good given
+	that prior stores and susequent loads are not applicable for
+	<code>lwsync</code>.)
+</ol>
+
+<h4>Example 6: Load/Store</h4>
+
+<p>
+The C++ code for this example is as follows, with all variables
+initially zero:
+</p>
+
+<ul>
+<li>	Thread 0:
+	<pre>
+	r1 = p.a.load(memory_order_relaxed);
+	y.store(&amp;p, memory_order_release);
+	</pre>
+<li>	Thread 1:
+	<pre>
+	r2 = y.load(memory_order_consume);
+	if (r2 == &amp;p)
+		r2->a.store(1,memory_order_relaxed);
+	</pre>
+<li>	Assertion: <code>assert(r1==0);</code>
+</ul>
+
+<p>
+The corresponding PowerPC memory-ordering instructions are as shown
+in the following table:
+</p>
+
+<table border=3>
+<tr><th>Thread 0</th>	<th>Thread 1</th></tr>
+<tr><td>r1=p.a;</td>	<td>r2=y;</td></tr>
+<tr><td>lwsync;</td>	<td>if (r2==&amp;p)</td></tr>
+<tr><td>y=&amp;p;</td>	<td>&nbsp;&nbsp;r2->a=1;</td></tr>
+</table>
+
+<p>
+Discussion:
+</p>
+
+<ol>
+<li>	Thread 0's load from <code>p.a</code> is in the <code>lwsync</code>'s
+	A-set and thread 0's store to <code>y</code> is in the
+	<code>lwsync</code>'s B-set.
+	This in turn means that thread 0's load is performed before its store
+	with respect to any given processor.
+<li>	If <code>r2==&amp;p</code>, then we know that thread 0's
+	store to <code>y</code> synchronizes with thread 1's
+	load from <code>y</code>, which in turn means that thread 1's load
+	from <code>y</code> is in the <code>lwsync</code>'s B-set.
+<li>	Power processors do not perform stores speculatively.
+	Therefore, thread 0's load from <code>p.a</code> is performed
+	before thread 1's store to <code>r2->a</code> with respect to
+	any given thread.
+	Therefore, in this case, we have <code>r1==0</code>.
+<li>	On the other hand, if <code>r2!=&amp;p</code>, then thread 1's
+	store to <code>p.a</code> will not be executed,
+	so that <code>r1==0</code>.
+</ol>
+
+<h4>Example 7: Store/Load</h4>
+
+<p>
+The C++ code for this example is as follows, with all variables
+initially zero:
+</p>
+
+<ul>
+<li>	Thread 0:
+	<pre>
+	p.a.store(1, memory_order_relaxed);
+	y.store(&amp;p, memory_order_release);
+	</pre>
+<li>	Thread 1:
+	<pre>
+	r1 = y.load(memory_order_consume);
+	if (r1 == &amp;p)
+		r2 = r1->a.load(memory_order_relaxed);
+	</pre>
+<li>	Assertion: <code>assert(r1==&amp;p||r2==1);</code>
+</ul>
+
+<p>
+The corresponding PowerPC memory-ordering instructions are as shown
+in the following table:
+</p>
+
+<table border=3>
+<tr><th>Thread 0</th>	<th>Thread 1</th></tr>
+<tr><td>p.a=1;</td>	<td>r1=y;</td></tr>
+<tr><td>lwsync;</td>	<td>if (r1==&amp;p)</td></tr>
+<tr><td>y=&amp;p;</td>	<td>&nbsp;&nbsp;r2=r1->a;</td></tr>
+</table>
+
+<p>
+Discussion:
+</p>
+
+<ol>
+<li>	Thread 0's store to <code>p.a</code> is in the <code>lwsync</code>'s
+	A-set and thread 0's store to <code>y</code> is in the
+	<code>lwsync</code>'s B-set.
+	This in turn means that the store to <code>p.a</code>
+	is performed before the store to <code>y</code>
+	with respect to any given thread.
+<li>	If <code>r1==&amp;p</code>:
+	<ol>
+	<li>	Thread 0's
+		store to <code>y</code> synchronizes with thread 1's
+		load from <code>y</code>, which in turn means
+		that thread 1's load from <code>y</code> is in the
+		<code>lwsync</code>'s B-set.
+	<li>	Dependency ordering means that thread 1's load from
+		<code>y</code>
+		will be performed before its load from <code>r1->a</code>
+		with respect to all processors.
+	<li>	Therefore, thread 0's store to <code>p.a</code> is performed
+		before thread 1's load from <code>r1->a</code> with respect to
+		any given thread.
+	</ol>
+	Therefore, in this case, we have <code>r2==1</code>,
+	satisfying the assert.
+<li>	On the other hand, if <code>r2==0</code>, then the assert
+	is directly satisfied.
+</ol>
+
+<h4>Example 8: Store/Store</h4>
+
+<p>
+The C++ code for this example is as follows, with all variables
+initially zero, and with the assertion executing at any time:
+</p>
+
+<ul>
+<li>	Thread 0:
+	<pre>
+	p.a.store(1, memory_order_relaxed);
+	y.store(&amp;p, memory_order_release);
+	</pre>
+<li>	Thread 1:
+	<pre>
+	r1 = y.load(memory_order_consume);
+	if (r1 == &amp;p)
+		r1->b.store(1,memory_order_relaxed);
+	</pre>
+<li>	Assertion: <code>assert(p.b==0||p.a==1);</code>
+</ul>
+
+<p>
+The corresponding PowerPC memory-ordering instructions are as shown
+in the following table:
+</p>
+
+<table border=3>
+<tr><th>Thread 0</th>	<th>Thread 1</th></tr>
+<tr><td>p.a=1;</td>	<td>r1=y;</td></tr>
+<tr><td>lwsync;</td>	<td>if (r1==&amp;p)</td></tr>
+<tr><td>y=&amp;p;</td>	<td>&nbsp;&nbsp;r1->b=1;</td></tr>
+</table>
+
+<p>
+Discussion:
+</p>
+
+<ol>
+<li>	Thread 0's store to <code>p.a</code> is in the <code>lwsync</code>'s
+	A-set and thread 0's store to <code>y</code> is in the
+	<code>lwsync</code>'s B-set.
+	This in turn means that the store to <code>p.a</code>
+	is performed before the store to <code>y</code>
+	with respect to any given thread.
+<li>	If <code>r1==&amp;p</code>:
+	<ol>
+	<li>	Thread 0's
+		store to <code>y</code> synchronizes with thread 1's
+		load from <code>y</code>, which in turn means that
+		thread 1's load
+		from <code>y</code> is in the <code>lwsync</code>'s B-set.
+	<li>	Therefore, thread 0's store to <code>p.a</code> is performed
+		before thread 1's store to <code>r1->b</code> with respect to
+		any given thread.
+	<li>	Because Power does not do speculative stores, 
+		thread 1's load from <code>y</code> is performed before
+		its store to <code>r1->b</code>.
+	<li>	Therefore, thread 0's store to <code>p.a</code> is
+		performed before thread 1's store to <code>r1->b</code>
+		with respect to each processor.
+	</ol>
+	Therefore, in this case, we have <code>p.a==1</code>,
+	satisfying the assert.
+<li>	On the other hand, if <code>r2==0</code>, then thread 2's
+	assignment to <code>r1->b</code> is never executed, so that
+	<code>p.b</code> is zero, again satisfying the assert.
+</ol>
+
+<h3>Release-Sequence Examples</h3>
+
+<p>
+The C++ memory model also provides for a &ldquo;release sequences&rdquo;,
+which comprise either (1) subsequent stores to the variable that was
+the subject of the release operation by the same thread that performed the
+release operation or (2) non-relaxed atomic read-modify-write
+operations on the variable
+that was the subject of the release operation by any thread.
+We consider these two release-sequence components separately in the
+following sections.
+
+<h3>Release-Sequence Same-Thread Examples</h3>
+
+<p>
+Subsequent same-thread stores are trivially accommodated.
+Simply add an additional atomic store (but possibly relaxed) operation
+after the release operation, and modify checks on the corresponding
+acquire operation to test for this subsequent store.
+</p>
+
+<p>
+The same reasoning that worked for the original analyses applies
+straightforwardly to the updated examples.
+</p>
+
+<h3>Release-Sequence Atomic-Operation &ldquo;Synchronizes-With&rdquo; Examples</h3>
+
+<p>
+This section reprises the examples in the &ldquo;Synchronizes-With&rdquo;
+section, but introducing an atomic read-modify-write operation.
+</p>
+
+<h4>Example 9: Load/Load</h4>
+
+<p>
+This example shows how the C++ synchronization primitives can be
+used to order loads.
+Consider the following C++ code, with all variables
+initially zero, and with the assertion executing after all threads
+have completed:
+</p>
+
+<ul>
+<li>	Thread 0:
+	<pre>
+	r1 = x.load(memory_order_acquire);
+	y.store(2, memory_order_release);
+	</pre>
+<li>	Thread 1:
+	<pre>
+	r2 = y.load(memory_order_acquire);
+	r3 = x.load(memory_order_acquire);
+	</pre>
+<li>	Thread 2 (required for assertion):
+	<pre>
+	x.store(1, memory_order_release);
+	</pre>
+<li>	Thread 3 (adds atomic read-modify-write operation):
+	<pre>
+	y.fetch_add(1, memory_order_acq_rel);
+	</pre>
+<li>	Assertion: <code>assert(r2<=1||r1==0||r3==1);</code>
+</ul>
+
+<p>
+The corresponding PowerPC memory-ordering instructions are as shown
+in the following table:
+</p>
+
+<table border=3>
+<tr><th>Thread 0</th>	<th>Thread 1</th>		<th>Thread 2</th>
+	<th>Thread 3</th></tr>
+<tr><td>r1=x;</td>	<td>r2=y;</td>			<td>x=1;</td>
+	<td>ldarx r4,y</td></tr>
+<tr><td>lwsync;</td>	<td>if (r2==r2)</td>		<td></td>
+	<td>r5=r4+1</td></tr>
+<tr><td>y=2;</td>	<td>&nbsp;&nbsp;isync;</td>	<td></td>
+	<td>stdcx. y,r5</td></tr>
+<tr><td></td>		<td>&nbsp;&nbsp;r3=x;</td>	<td></td>
+	<td></td></tr>
+</table>
+
+<p>
+Discussion:
+</p>
+
+<ol>
+<li>	Thread 0's load from <code>x</code> is in the <code>lwsync</code>'s
+	A-set and thread 0's store to <code>y</code> is in the
+	<code>lwsync</code>'s B-set.
+<li>	If <code>r4==1</code>, then thread 3's <code>stdcx.</code>
+	is also in the <code>lwsync</code>'s B-set.
+<li>	The <code>r2==1</code> case was handled in example 1, and is
+	not repeated here.
+<li>	If <code>r2==2</code>, we have loaded the value stored by
+	an operation in the <code>lwsync</code>'s B-set, and therefore
+	all operations following this load are also in the
+	<code>lwsync</code>'s B-set.
+<li>	The above conditions mean that if <code>r1==1</code> and
+	<code>r2==2</code>, thread 0's store to <code>x</code> is
+	performed before thread 1's load from <code>y</code>
+	with respect to all processors.
+<li>	Because of thread 1's conditional branch and <code>isync</code>,
+	thread 1's load from <code>y</code> is performed before thread 1's
+	load from <code>x</code> with respect to all processors.
+<li>	Therefore, if <code>r1==1</code> and <code>r2==2</code>, we
+	know that <code>r3==1</code>, so that the assert is satisfied.
+	(Note: we need not rely thread 1's load from <code>x</code>
+	being in the <code>lwsync</code>'s B-set.
+	This is fortunate given
+	that prior stores and subsequent loads are not applicable for
+	<code>lwsync</code>.)
+</ol>
+
+<p>
+Note that this line of reasoning does not depend on any memory barriers
+in the atomic read-modify-write operation, which means that this code
+sequence would maintain the synchronizes-with relationship even when
+using <code>memory_order_relaxed</code>.
+However, the standard does not require this behavior, so portable
+code must use a non-relaxed memory-order specifier in this case.
+</p>
+
+<h4>Example 10: Load/Store</h4>
+
+<p>
+The C++ code for this example is as follows, with all variables
+initially zero, and with the assertion executing after all threads
+have completed:
+</p>
+
+<ul>
+<li>	Thread 0:
+	<pre>
+	r1 = x.load(memory_order_relaxed);
+	y.store(2, memory_order_release);
+	</pre>
+<li>	Thread 1:
+	<pre>
+	r2 = y.load(memory_order_acquire);
+	if (r2 >= 2)
+		x.store(1,memory_order_relaxed);
+	</pre>
+<li>	Thread 2 (adds atomic read-modify-write operation):
+	<pre>
+	y.fetch_add(1, memory_order_acq_rel);
+	</pre>
+<li>	Assertion: <code>assert(r1==0);</code>
+</ul>
+
+<p>
+The corresponding PowerPC memory-ordering instructions are as shown
+in the following table, combining the conditional branch from the
+acquire operation with the <code>if</code> statement:
+</p>
+
+<table border=3>
+<tr><th>Thread 0</th>	<th>Thread 1</th>		<th>Thread 2</th></tr>
+<tr><td>r1=x;</td>	<td>r2=y;</td>			<td>ldarx r3,y</td></tr>
+<tr><td>lwsync;</td>	<td>if (r2>=2)</td>		<td>r4=r3+1</td></tr>
+<tr><td>y=2;</td>	<td>&nbsp;&nbsp;isync;</td>	<td>stdcx. y,r4</td></tr>
+<tr><td></td>		<td>&nbsp;&nbsp;x=1;</td>	<td></td></tr>
+</table>
+
+<p>
+Discussion:
+</p>
+
+<ol>
+<li>	Thread 0's load from <code>x</code> is in the <code>lwsync</code>'s
+	A-set and thread 0's store to <code>y</code> is in the
+	<code>lwsync</code>'s B-set.
+	This in turn means that the load is performed before the store
+	with respect to any given thread.
+<li>	The case <code>r2==1</code> was handled in example 2, and is
+	not repeated here.
+<li>	If <code>r2==2</code>, we know that thread 2's <code>ldarx</code>
+	read the value stored by thread 0, and thread 2's <code>stdcx.</code>
+	is therefore in the <code>lwsync</code>'s B-set.
+	In addition, thread 1's load to <code>r2</code> read the value
+	stored by thread 2's <code>stdcx.</code>, so thread 2's
+	operations ordered after that load are therefore also in
+	the <code>lwsync</code>'s B-set, meaning that thread 2's
+	load to <code>r2</code> is performed after thread 0's
+	load to <code>r1</code> with respect to all threads.
+<li>	Thread 1's conditional branch and <code>isync</code> ensure
+	that the load into <code>r2</code> is performed before the
+	store to <code>x</code> with respect all other threads.
+<li>	Therefore, <code>r1</code> will always be zero, as thread 1's
+	store to <code>x</code> is never performed unless thread 0's
+	load to <code>r1</code> has already been performed.
+</ol>
+
+<h4>Example 11: Store/Load</h4>
+
+<p>
+The C++ code for this example is as follows, with all variables
+initially zero, and with the assertion executing after all threads
+have completed:
+</p>
+
+<ul>
+<li>	Thread 0:
+	<pre>
+	x.store(1, memory_order_relaxed);
+	y.store(1, memory_order_release);
+	</pre>
+<li>	Thread 1:
+	<pre>
+	r1 = y.load(memory_order_acquire);
+	if (r1 >= 2)
+		r2 = x.load(memory_order_relaxed);
+	</pre>
+<li>	Thread 2 (adds atomic read-modify-write operation):
+	<pre>
+	y.fetch_add(1, memory_order_acq_rel);
+	</pre>
+<li>	Assertion: <code>assert(r1<=1||r2==1);</code>
+</ul>
+
+<p>
+The corresponding PowerPC memory-ordering instructions are as shown
+in the following table, combining the conditional branch from the
+acquire operation with the <code>if</code> statement:
+</p>
+
+<table border=3>
+<tr><th>Thread 0</th>	<th>Thread 1</th>		<th>Thread 2</th></tr>
+<tr><td>x=1;</td>	<td>r1=y;</td>			<td>ldarx r3,y</td></tr>
+<tr><td>lwsync;</td>	<td>if (r1>=2)</td>		<td>r4=r3+1</td></tr>
+<tr><td>y=1;</td>	<td>&nbsp;&nbsp;isync;</td>	<td>stdcx. y,r4</td></tr>
+<tr><td></td>		<td>&nbsp;&nbsp;r2=x;</td>	<td></td></tr>
+</table>
+
+<p>
+Discussion:
+</p>
+
+<ol>
+<li>	Thread 0's store to <code>x</code> is in the <code>lwsync</code>'s
+	A-set and thread 0's store to <code>y</code> is in the
+	<code>lwsync</code>'s B-set.
+	This in turn means that the store to <code>x</code>
+	is performed before the store to <code>y</code>
+	with respect to any given thread.
+<li>	If <code>r1==1</code>, we have the case covered in example 3,
+	which will not be further discussed here.
+<li>	If <code>r1>=2</code>, we know that thread 2's atomic increment
+	intervened, so that thread 2's <code>stdcx.</code> is in
+	<code>lwsync</code>'s B-set.
+	In addition, thread 1's load to <code>r1</code> will have loaded
+	the value stored by thread 2's <code>stdcx.</code>, so that
+	all memory operations ordered after
+	thread 1's load to <code>r1</code> will also be in the
+	<code>lwsync</code>'s B-set.
+<li>	Thread 1's conditional branch and <code>isync</code> ensure that
+	thread 1's load to <code>r1</code> is performed before
+	its load to <code>r2</code>.
+	Therefore, if <code>r1</code> is equal to two, <code>r2</code> is
+	guaranteed to be the value stored to <code>x</code> by thread 0,
+	namely, the value 1.
+	The assertion is therefore always satisfied.
+</ol>
+
+<h4>Example 12: Store/Store</h4>
+
+<p>
+The C++ code for this example is as follows, with all variables
+initially zero, and with the assertion executing at any time:
+</p>
+
+<ul>
+<li>	Thread 0:
+	<pre>
+	x.store(1, memory_order_relaxed);
+	y.store(1, memory_order_release);
+	</pre>
+<li>	Thread 1:
+	<pre>
+	r1 = y.load(memory_order_acquire);
+	if (r1 == 1)
+		z.store(1,memory_order_relaxed);
+	</pre>
+<li>	Thread 2 (adds atomic read-modify-write operation):
+	<pre>
+	y.fetch_add(1, memory_order_acq_rel);
+	</pre>
+<li>	Assertion: <code>assert(z==0||x==1);</code>
+</ul>
+
+<p>
+The corresponding PowerPC memory-ordering instructions are as shown
+in the following table, combining the conditional branch from the
+acquire operation with the <code>if</code> statement:
+</p>
+
+<table border=3>
+<tr><th>Thread 0</th>	<th>Thread 1</th>		<th>Thread 2</th></tr>
+<tr><td>x=1;</td>	<td>r1=y;</td>			<td>ldarx r2,y</td></tr>
+<tr><td>lwsync;</td>	<td>if (r1>=2)</td>		<td>r3=r2+1</td></tr>
+<tr><td>y=1;</td>	<td>&nbsp;&nbsp;isync;</td>	<td>stdcx. y,r2</td></tr>
+<tr><td></td>		<td>&nbsp;&nbsp;z=1;</td>	<td></td></tr>
+</table>
+
+<p>
+Discussion:
+</p>
+
+<ol>
+<li>	Thread 0's store to <code>x</code> is in the <code>lwsync</code>'s
+	A-set and thread 0's store to <code>y</code> is in the
+	<code>lwsync</code>'s B-set.
+	This means that the store to <code>x</code>
+	is performed before the store to <code>y</code>
+	with respect to any given thread.
+<li>	If <code>r1==1</code>, we have the case dealt with in example 4,
+	which will not be discussed further.
+<li>	If <code>r1==2</code>, we know that thread 2's atomic operation
+	intervened, so that thread 2's
+	<code>stdcx.</code> is in the <code>lwsync</code>'s B-set.
+	Furthermore, because thread 1's load into <code>r1</code>
+	sees the value stored by thread 2's <code>stdcx.</code>,
+	all of thread 1's operations ordered after that load are
+	also in the <code>lwsync</code>'s B-set.
+<li>	Thread 1's conditional branch and <code>isync</code> guarantee
+	that the load into <code>r1</code> is performed before
+	its store to <code>z</code> with respect to all threads.
+	This means that if the store to <code>z</code> is performed,
+	the value of <code>x</code> must already be one, satisfying
+	the assert.
+</ol>
+
+<h3>Release-Sequence Atomic-Operation &ldquo;Dependency-Ordered-Before&rdquo; Examples</h3>
+
+<p>
+The key point in examples 9-12 was the recursive nature of B-cumulativity.
+This applies straightforwardly to the dependency ordering examples as well,
+so that Power allows a chain of atomic operations to form a release
+sequence, regardless of the memory_order argument.
+</p>
+
+<h2>Summary</h2>
+
+<p>
+The PowerPC code sequences shown at the beginning of this document
+suffice to implement the synchronizes-with and dependency-carrying
+portions of the proposed C++ memory model.
+These code sequences are able to take advantage of the lightweight
+memory barriers provided by the PowerPC architecture.
+</p>
+
+</body></html>

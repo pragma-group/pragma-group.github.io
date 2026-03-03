@@ -1,0 +1,1124 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<title>An Analysis of Async and Futures</title>
+<meta http-equiv="Content-Type" content="text/html;charset=US-ASCII">
+<style type="text/css">
+table { border: 1px solid black; border-spacing: 0px }
+/* table { padding: 0.5em; border: 1px solid black; border-spacing: 0px } */
+caption { font-weight: bold }
+th { text-align: left; vertical-align: top; padding: 0.5em; border: 1px solid black }
+td { text-align: left; vertical-align: top; padding: 0.5em; border: 1px solid black }
+dt { font-weight: bold; }
+</style>
+</head>
+<body>
+<h1>An Analysis of Async and Futures</h1>
+
+<p>
+ISO/IEC JTC1 SC22 WG21 N2974 = 09-0164 - 2009-09-27
+</p>
+
+<p>
+Lawrence Crowl, crowl@google.com, Lawrence@Crowl.org
+</p>
+
+<p>
+
+<a href="#Introduction">Introduction</a><br>
+<a href="#Analysis">Action Analysis Async/Future</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#SendActions">Actions at the Send</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#ReceiveActions">Actions at the Receive</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Combinations">Action Combinations</a><br>
+<a href="#Issues">Other Issues</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Limiting">Limiting Threads</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Pools">Thread Pools</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Speculative">Speculative Concurrency and Execution</a><br>
+<a href="#Choices">Design and Implementation Choices</a><br>
+<a href="#Current">Current Operations</a><br>
+<a href="#Alterante">Alternate Operations</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Uses">Various Uses</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Methods">Code for Query-Like Methods</a><br>
+
+</p>
+
+
+<h2><a name="Introduction">Introduction</a></h2>
+
+<p>
+The intent of the <code>async</code> and <code>future</code>
+combination is to potentially initiate a task concurrently,
+and then retreive its return value or exception at a later time.
+</p>
+
+<p>
+The semantics of <code>async</code> and <code>future</code>
+have come under considerable debate.
+Part of the debate arises from the expected use,
+part arises from implicit assumptions about implementation,
+and part arises from a lack of clarity in the implications
+of certain operations.
+This paper is intended to clarify the latter two parts of the debate.
+</p>
+
+
+<h2><a name="Analysis">Action Analysis Async/Future</a></h2>
+
+<p>
+The implementation of <code>async</code> and <code>future</code>
+requires actions at two points, the 'send' and the 'receive'.
+The 'send' is just the call to <code>async</code>.
+The 'receive' is the call to <code>get</code>
+or any other call that
+might be used to decide whether or not to call <code>get</code>.
+For the purposes of this discussion,
+we assume a 'unique' future.
+</p>
+
+
+<h3><a name="SendActions">Actions at the Send</a></h3>
+
+<p>
+Clarifying the actions and their consequences really requires a table,
+but that table is too big to understand at once,
+so we first describe the attributes and then present the table.
+</p>
+
+<dl class=fluffy>
+<dt>Actions and Benefits</dt>
+<dd><p>
+    The available actions are as follows.
+    </p>
+
+    <dl class=compact>
+
+    <dt>Fork</dt>
+    <dd>a new thread for the task immediately.
+        This action enables responsive threads.
+    </dd>
+
+    <dt>Delay</dt>
+    <dd>the thread fork for the task until resources are available,
+        which limits the number of active threads,
+        which in turn helps avoid oversubscription.
+    </dd>
+
+    <dt>Enqueue</dt>
+    <dd>the task for later execution.
+        In addition to limiting the number of threads,
+        this action enables task stealing,
+        where a call to <code>get</code> removes the task from the queue
+        and executes it sequentially.
+        Thus, this action enables speculative concurrency.
+        With an operation to simply remove the task from the queue,
+        this technique enables speculative execution as well.
+    </dd>
+
+    <dt>Invoke</dt>
+    <dd>the task immediately.
+        This action executes the task sequentially,
+        thus having no concurrency overhead.
+    </dd>
+
+    <dt>Defer</dt>
+    <dd>the decision on execution until the 'receive'.
+        This action enables speculative execution,
+        because if the <code>get</code> is never called,
+        the task is never executed.
+    </dd>
+    </dl>
+    <p></p>
+</dd>
+
+<dt>Future States</dt>
+<dd><p>
+    The states communicate between a asynchronous threads
+    that might affect the future storage.
+    They are otherwise self-explanatory.
+    </p>
+</dd>
+
+<dt>Task Restrictions</dt>
+<dd><p>
+    The use of <code>async</code>
+    necessarily imposes some restrictions on the type of synchronization
+    that the tasks may employ.
+    </p>
+
+    <dl class=compact>
+    <dt>Get-free</dt>
+    <dd>tasks shall not deadlock with the caller of <code>get</code>.
+        Most sender actions have this constraint.
+    </dd>
+
+    <dt>Async-free</dt>
+    <dd>tasks shall not deadlock with the caller of <code>async</code>.
+    </dd>
+
+    <dt>Delayable</dt>
+    <dd>tasks shall not require responsiveness
+        and shall tolerate live lock.
+
+    </dd>
+    </dl>
+</dd>
+</dl>
+
+<p>
+The following table provides the various attributes of the various actions.
+</p>
+
+<table>
+<caption>Attributes for various send actions</caption>
+
+<thead>
+<tr>
+<th>Action</th>
+<th>Benefits</th>
+<th>States</th>
+<th>Restrictions</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<th>Fork</th>
+<td>responsive</td>
+<td>running,<br>
+complete</td>
+<td>get-free</td>
+</tr>
+
+<tr>
+<th>Delay</th>
+<td>thread limiting</td>
+<td>running,<br>
+complete</td>
+<td>get-free,<br>
+delayable</td>
+</tr>
+
+<tr>
+<th>Enqueue</th>
+<td>thread&nbsp;limiting,<br>
+speculative&nbsp;concurrency,<br>
+speculative&nbsp;execution</td>
+<td>enqueued,<br>
+running,<br>
+complete</td>
+<td>get-free,<br>
+delayable</td>
+</tr>
+
+<tr>
+<th>Invoke</th>
+<td>indirect&nbsp;sequential</td>
+<td></td>
+<td>async-free</td>
+</tr>
+
+<tr>
+<th>Defer</th>
+<td>direct&nbsp;sequential,<br>
+thread&nbsp;limiting,<br>
+speculative&nbsp;concurrency,<br>
+speculative&nbsp;execution</td>
+<td></td>
+<td>get-free,<br>
+delayable</td>
+</tr>
+
+</tbody>
+</table>
+
+
+<h3><a name="ReceiveActions">Actions at the Receive</a></h3>
+
+<p>
+Again, clarifying the actions and their consequences
+requires attributes and then table.
+</p>
+
+<dl class=fluffy>
+<dt>Actions and Benefits</dt>
+<dd><dl class=compact>
+
+<dt>Retrieve</dt>
+<dd>the value or exception from the future storage.
+    This action is required to exploit concurrency.
+</dd>
+
+<dt>Wait</dt>
+<dd>for the task to complete.
+This action enables synchronization
+and will likely soon be followed by value retrieval.
+</dd>
+
+<dt>Check</dt>
+<dd>the state of the future.
+The design point for this operation
+is to see if the state is not yet complete,
+and do something else before trying again later.
+This action extends concurrency between the receiver and the task.
+</dd>
+
+<dt>Dequeue</dt>
+<dd>the task from the queue without executing it.
+This action contributes to speculative execution.
+</dd>
+
+<dt>Call</dt>
+<dd>the task sequentially.
+This action avoids concurrency, and may avoid some synchronization.
+In additon,
+the sequential overhead is lower than the invoke action
+because the call can be direct;
+no value need be stored nor any exception caught.
+</dd>
+
+<dt>Morph</dt>
+<dd>the future into a different kind of future,
+corresponding to a sender action of fork, delay, or enqueue.
+This action only applies to tasks whose action was deferred at the sender.
+</dd>
+
+</dl>
+</dd>
+
+<dt>Synchronization</dt>
+<dd>
+<p>
+Implementing the receive actions requires varying amounts of synchronization.
+<dl class=compact>
+
+<dt>Test</dt>
+<dd>progress via an atomic load relaxed.
+</dd>
+
+<dt>Acquire</dt>
+<dd>memory via an atomic load acquire.
+</dd>
+
+<dt>Lock</dt>
+<dd>a mutex to form a critical section.
+There are special cases that may have slightly weaker synchronization,
+but the expectation is that these will not be significant enough
+to affect the analysis.
+</dd>
+
+<dt>Wait</dt>
+<dd>on a condition variable.
+</dd>
+
+<dt>Reuse</dt>
+<dd>any synchronization from that used to communicate the future itself.
+That is, the release of the future is sufficient
+to release any information needed to receive perform the receive action.
+No additional synchronization is required.
+</dd>
+
+</dl>
+</dd>
+</dl>
+
+<p>
+The following table shows the possible receive actions for each send action,
+and lists the synchronization required for that combination.
+An empty entry indicates that the combination is not possible.
+</p>
+
+<table>
+<caption>Synchronization at receive actions for send actions</caption>
+<thead>
+<tr>
+<th rowspan=2>Sender Action</th>
+<th colspan=6>Receiver Actions</th>
+</tr>
+
+<tr>
+<th>Retreive</th>
+<th>Wait</th>
+<th>Check</th>
+<th>Dequeue</th>
+<th>Call</th>
+<th>Morph</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<th>Fork</th>
+<td>acquire</td>
+<td>wait</td>
+<td>test</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<th>Delay</th>
+<td>acquire</td>
+<td>wait</td>
+<td>test</td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<th>Enqueue</th>
+<td>acquire</td>
+<td>wait</td>
+<td>test</td>
+<td>lock</td>
+<td>lock</td>
+<td></td>
+</tr>
+
+<tr>
+<th>Invoke</th>
+<td>reuse</td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+<td></td>
+</tr>
+
+<tr>
+<th>Defer</th>
+<td></td>
+<td></td>
+<td></td>
+<td>reuse</td>
+<td>reuse</td>
+<td>reuse</td>
+</tr>
+</tbody>
+</table>
+
+
+<h3><a name="Combinations">Action Combinations</a></h3>
+
+<p>
+There are some combinations of sender and receiver actions
+that are at best marginally useful.
+We highlight these combinations
+with the intent that they may not be supported.
+</p>
+
+<p>
+The 'invoke' action
+has only one advantage over the 'defer' action,
+and that is to shift the task restrictions from get-free to async-free
+and to shift use of thread-local variables from the get to the async.
+However, these advantages are actually disadvantages,
+because no other action has those properties.
+The 'invoke' action prevents speculative execution,
+which is a desireable property.
+Furthermore, the 'invoke/retrieve' combination
+has higher overhead than the 'defer/call' combination,
+which does support speculative execution.
+That is, the 'defer' action is strictly more useful than the 'invoke'.
+</p>
+
+<p>
+Delayed forking of a task seems less useful than enqueuing the task.
+However, it has a lower synchronization, storage, and implementation burden.
+Furthermore, for those situations it which it is desireable that
+receivers do not execute tasks sequentially,
+the delayed forking provides assurance
+that the task will execute on another thread.
+</p>
+
+<p>
+The 'defer' sender action leaves significant choices to the receiver.
+A receiver 'fork' followed by 'wait'
+seems rarely desirable in comparison to 'call'.
+All 'fork' followed by 'wait'
+seems to offer only a more controlled environment
+for the use of thread-local storage,
+but at the high cost of increased thread overhead
+for no additional concurrency.
+A 'fork' or 'delay' sender action
+seems more appropriate to these circumstances.
+</p>
+
+
+<h2><a name="Issues">Other Issues</a></h2>
+
+
+<h3><a name="Limiting">Limiting Threads</a></h3>
+
+<p>
+There are two approaches to limiting the number of threads.
+</p>
+
+<dl>
+<dt>Limit the number of threads so that the system load is acceptable.</dt>
+<dd>
+This approach may be difficult to implement in some environments.
+It is best for using all available processor time.
+</dd>
+
+<dt>Limit the number of threads to a maximum number.</dt>
+<dd>
+This approach has straightforward implementation.
+It is best for memory constrained environments.
+However, 
+there is an additional requirement on 'delayable' tasks
+that they have only critical-section-like synchronization.
+That is, arbitrary synchronization with other threads is dangerous.
+</dd>
+</dl>
+
+
+<h3><a name="Speculative">Speculative Concurrency and Execution</a></h3>
+
+<p>
+When applications desire to use speculative concurrency,
+task that are speculative should be assigned lower priority
+than those that are not speculative.
+</p>
+
+<p>
+Tasks that may not be executed at all,
+should have an even lower priority.
+It may be difficult to determine when task may never be executed,
+so one possible approach is to simply execute
+only after some demand has been made for the future results.
+</p>
+
+<p>
+It is often difficult to determine a priori
+when potential concurrency in an application is valuable.
+One mechanism to obtain decent performance in this environment
+is to make heavy use of nested tasks with 'enqueue/call',
+relying on the majority of tasks to be executed sequentially,
+while still leaving opportunity for tasks to be executed concurrently.
+However, in this environment,
+first-come-first-served scheduling
+tends to produce a pathologically large number of concurrent tasks.
+Better is to have each processor maintain its own double-ended queue.
+A processor usually pushes and pops from the front of that queue.
+However, when the queue is empty,
+the processor can steal from the rear of another processor.
+With this approach,
+processors tend to steal large task
+that other processors are not working on,
+and the number of tasks executed concurrently tends to be much more managable.
+</p>
+
+
+<h3><a name="Policies">Execution Policies</a></h3>
+
+<p>
+Whenever multiple sender actions exist,
+the implementation needs policies on which action to choose.
+The simplest policy is to simply execute a user-specified action.
+However, more useful policies offer the implementation
+a range of policies within which it can chose to best use system resources.
+</p>
+
+<p>
+We anticipate the following policies
+and the actions they are permitted to perform.
+</p>
+<dl>
+<dt>immediate</dt>
+<dd>fork</dd>
+
+<dt>arbitrary_sync</dt>
+<dd>fork or delay,
+but containing arbitrary synchronization
+so that threads may not be limited by count</dd>
+
+<dt>fairly_soon</dt>
+<dd>fork or delay,
+but with a hint that the work is of significant priority</dd>
+
+<dt>whenever</dt>
+<dd>fork or delay,
+but with a hint that the work is of lower priority</dd>
+
+<dt>speculative_concurrency</dt>
+<dd>fork, delay, or enqueue,
+but with a hint that actual concurrency is on an "if available" basis</dd>
+
+<dt>speculative_execution</dt>
+<dd>fork, delay, or enqueue, or defer
+but with a hint that the value may not be requested
+and actual concurrency is on an "if available" basis</dd>
+</dl>
+
+
+<h3><a name="Pools">Thread Pools</a></h3>
+
+<p>
+Surprisingly,
+thread pools have no impact on the discussion above.
+However, the implementation of both <code>async</code> and <code>future</code>
+may be significantly affected.
+In particular, the need to establish a happens-before relationship
+between the last thread-local-storage destruction
+and returning the future value
+requires an intrusive implementation of <code>async</code>,
+a modification of futures to store <code>std::thread</code> for joining,
+or new language facilities.
+</p>
+
+
+<h2><a name="Choices">Design and Implementation Choices</a></h2>
+
+<p>
+Existing future designs and implementations
+are based on a set of actions that the future supports.
+As the set o factions expand,
+the representation may also increase.
+In this section, we look at some of the representations.
+</p>
+
+<dl>
+
+<dt>Future Representation and Storage</dt>
+<dd><p>
+    The representation and storage required by a future
+    depends on the actions supportd by that future.
+    The representation is the fields allocated within the class itself.
+    The storage is the dynamic data.
+    </p>
+
+    <dl class=compact>
+
+    <dt>storage&nbsp;pointer</dt>
+    <dd>references the dynamic storage
+        used to communicate between the worker thread and the receiver.
+        This pointer is needed if and only if there is any storage,
+    </dd>
+
+    <dt>call&nbsp;action</dt>
+    <dd>indicates the action used to create the future.
+        This information is only necessary
+        when capturing multiple actions within the same type.
+        In some cases, the a null storage pointer
+        is sufficient indication of the call action,
+        in which case we omit this field
+        and mark the storage pointer with an asterisk.
+    </dd>
+
+    <dt>value/exception</dt>
+    <dd>stores the returned value, or any uncaught exception.
+    </dd>
+
+    <dt>mutex&amp;condvar</dt>
+    <dd>enables locking and waiting.
+    </dd>
+
+    <dt><code>std::function</code></dt>
+    <dd>enables task stealing and speculative execution.
+    </dd>
+
+    </dl>
+
+    <p></p>
+</dd>
+
+</dl>
+
+<table>
+<caption>Future designs, actions, and representation</caption>
+
+<thead>
+<tr>
+<th>Future Design</th>
+<th>Sender Actions</th>
+<th>Receiver Actions</th>
+<th>Representation</th>
+<th>Storage</th>
+</tr>
+</thead>
+
+<tbody>
+<tr>
+<th><a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2008/n2671.html">
+N2671</a> <code>unique_future</code> (working&nbsp;draft)</th>
+<td>Fork, Delay</td>
+<td>Retrieve, Wait, Check</td>
+<td>storage&nbsp;pointer</td>
+<td>value/exception,<br>
+mutex&amp;condvar</td>
+</tr>
+
+<tr>
+<th><a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2009/n2889.html">
+N2889</a> <code>joining_future</code></th>
+<td>Fork, Delay, Defer</td>
+<td>Wait&amp;Retrieve, Call</td>
+<td>storage&nbsp;pointer*,<br>
+<code>std::thread</code>,<br>
+<code>std::function</code></td>
+<td>value/exception,<br>
+mutex&amp;condvar</td>
+</tr>
+
+<tr>
+<th><a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2009/n2901.pdf">
+N2901</a> <code>unique_future</code></th>
+<td>Fork, Delay, Defer</td>
+<td>Retrieve, Wait, Check, Call, Dequeue, Morph</td>
+<td>storage&nbsp;pointer*,<br>
+<code>std::function</code></td>
+<td>value/exception,<br>
+mutex&amp;condvar</td>
+</tr>
+
+<tr>
+<th>this paper, excepting invoke</th>
+<td>Fork, Delay, Enqueue, Defer</td>
+<td>Retrieve, Wait, Check, Call</td>
+<td>storage&nbsp;pointer*,<br>
+<code>std::function</code></td>
+<td><code>std::thread</code>,<br>
+<code>std::function</code>,<br>
+value/exception,<br>
+mutex&amp;condvar,<br>
+queue&nbsp;handling</td>
+</tr>
+</tbody>
+
+</table>
+
+<p><b>FIX:
+We don't need all fields in all copies of the future.
+</b></p>
+
+<p>
+The draft future design from
+<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2008/n2671.html">
+N2671</a>
+is underspecified with respect to <code>async</code>
+and thus cannot distinguish between the fork, delay, and invoke actions.
+</p>
+
+<p>
+Paper
+<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2009/n2889.html">
+N2889</a>
+added an additional future that supported actions
+'fork/delay' and 'defer&amp;call'.
+</p>
+
+<p>
+Paper
+<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2009/n2901.pdf">
+N2901</a>
+implicitly extended futures
+to support
+'fork/call' and 'defer&amp;call'.
+</p>
+
+
+<h2><a name="Current">Current Operations</a></h2>
+
+<p>
+In this section we look at operations on
+<code>unique_future</code> defined in the working draft.
+</p>
+
+<p>
+The use of <code>unique_future</code>
+in data structures in hampered by the lack of a coordinated set of operations:
+a default constructor, a move assignment operator, and a test for the default.
+The <code>std::thread</code> class has such operations
+so as to enable storing them in data structures.
+</p>
+
+<p>
+Furthermore, an 'empty' value associated with default constructors
+can lead to defined exceptional behavior
+rather than the current undefined behavior
+for double <code>get</code> operations.
+</p>
+<blockquote><pre><code>
+std::unique_future&lt;moveable&lt; f = std::async(g);
+moveable v = f.get(); // fine
+moveable w = f.get(); // 'cannot get from empty' exception
+</code></pre></blockquote>
+
+<p>
+These problems are addressed by 
+<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2009/n2888.html">
+N2888</a> and successors.
+</p>
+
+<p>
+Anthony Williams points a problem with the return type of <code>get</code>.
+</p>
+
+<blockquote>
+<p>
+... given "<code>T&amp;&amp;&nbsp;get();</code>",
+"<code>T&amp;v=f.get();</code>" requires that
+the reference is valid beyond the call to <code>get()</code>
+&mdash; specifically,
+it requires that
+it is valid long enough for the constructor of <code>v</code> to use it.
+</p>
+
+<p>
+This means that <code>get()</code>
+cannot free the internal storage for the value,
+even if it marks the future as "empty".
+</p>
+
+<p>
+Consequently,
+you may have "empty" futures
+that actually have a very large amount of internal storage associated with them,
+and even a valid object of some resource-owning type
+if that type does not have a move constructor.
+In this case,
+I would rather that the future remained "ready",
+and a subsequent call to <code>get()</code> was permitted.
+</p>
+</blockquote>
+
+<p>
+He also points out that
+the freedom to
+"implement the <code>get()</code> as a call
+to a stored <code>std::function</code> and never store the result"
+requires returning by value rather than rvalue reference.
+</p>
+
+<p>
+The <code>is_ready</code> operation is ambiguous
+with respect to the 'call' action.
+Does <code>f.is_ready()</code> true mean
+that its value has been computed and stored,
+or that obtaining its value does not require waiting on another thread?
+The former definition could lead to problematic behavior
+because for 'defered' tasks,
+<code>f.is_ready()</code> will never become true
+and hence the call to <code>get</code> may be indefinitely delayed.
+On the other hand,
+the latter definition could lead to unexpected delays
+due to unintended sequential evaluation.
+Furthermore, the latter definition could lead to retractions.
+Consider an 'enqueued' future.
+Its <code>is_ready()</code> returns true,
+then the scheduler assigns that future to a thread,
+and some subsequent <code>is_ready()</code> calls would return false.
+However, the caller may have already decided to call <code>get</code>
+and thus be subject to synchronization delays.
+</p>
+
+<p>
+Assuming the later definition for <code>is_ready</code>,
+then sequential tasks
+will have not been executed at the return from a call to <code>is_ready</code>.
+In that case,
+what should <code>has_value</code> and <code>has_exception</code> return?
+The information necessary for a precise answer is not available.
+We must either provide a convention that
+<code>!f.has_value()&amp;&amp;!f.has_exception()</code>
+means that the value has not been computed,
+or we must extend the interface.
+Since exceptions are by definition rare,
+these operations seem to be of little value,
+and given their semantic difficulties
+may well warrant being removed from the interface.
+</p>
+
+<p>
+The <code>wait</code> operations were designed to reflect
+internal condition variable waits to the user of the future.
+Unfortunately, the timed waits
+do not have a corresponding operations on <code>std::thread</code>.
+To enable timed waits one must implement waiting a condition variable,
+even when timed waits are not actually used
+and a <code>join</code> on the <code>std::thread</code> would be sufficient.
+Even using a condition variable may yield unexpected waiting
+when the currently-still-necessary <code>join</code> on the controlling thread
+waits for destruction of thread-local variables.
+</p>
+
+<p>
+Anthony Williams comments:
+</p>
+
+<blockquote>
+<p>
+This suggests to me that
+<code>std::thread</code> is lacking a timed-join function.
+Such a function is implementable on both POSIX and Windows platforms.
+On Windows there is no overhead,
+as the platform supports it natively.
+On POSIX then the cost is larger.
+It does mean that <code>std::thread</code>
+can't be a simple wrapper around <code>pthread_t</code>
+(e.g. so you can store a semaphore for <code>sem_timedwait</code>,
+or use a condition variable),
+but you generally need more than that anyway
+since <code>pthread_t</code> doesn't support all the operations required
+of <code>std::thread::id</code>.
+</p>
+
+<p>
+Anyway, you could add this overhead exclusively
+to those threads that were tied to async-launched futures,
+even if it wasn't added to <code>std::thread</code>.
+</p>
+</blockquote>
+
+<h2><a name="Alternate">Alternate Operations</a></h2>
+
+<p>
+Reformulating the future operations
+may well provide interactions
+that are more robust to varying implementation.
+In order to outline these operations,
+we concentrate on the various ways futures might be used.
+</p>
+
+<p>
+Similarly, another important fact
+is whether or not the computation has completed.
+That is, whether or not the value or exception is stored.
+That operation is <code>is_done</code>.
+</p>
+
+<p>
+Ideally, though, user-level operations
+should not be calling functions that are specific
+to particular sender actions.
+We want operations that mean roughly the same thing
+regardless of the actions used to create the future.
+So, we try to recast the operations in those terms.
+</p>
+
+
+<h3><a name="Methods">Code for Query-Like Methods</a></h3>
+
+<p>
+Before we can simplify uses, we must define some tools.
+</p>
+
+<p>
+Central to how a future might be used
+is whether or not the future 'owns' the task.
+A future that is 'defered', and hence may be 'called', owns the task.
+On the other hand,
+a future cannot own a task that is currently executing on a thread.
+More subtle is an enqueued task,
+which is neither owned by the future nor committed to another thread.
+In this case, we need an operation to resolve the situation,
+that is to make the future take the task from the queue
+to make it callable.
+That operation is <code>be_owner</code>,
+which returns true
+if either the future already owned the task
+or if it was successful in obtaining ownership.
+</p>
+
+<blockquote><pre><code>
+bool is_owner() {
+	return sender_action == defer;
+}
+
+bool be_owner() {
+	if ( sender_action == defer ) return true;
+	else if ( sender_action != enqueue ) return false;
+	else return dequeue(); /* whether or not it worked */
+}
+</code></pre></blockquote>
+
+<p>
+Likewise whether or not a task has already started,
+and is thus committed to concurrency,
+is important.
+</p>
+
+<blockquote><pre><code>
+bool is_started() {
+	return sender_action != defer &amp;&amp; state != enqueued;
+}
+</code></pre></blockquote>
+
+<p>
+Likewise whether or not a task has already completed,
+and is thus its value is ready for copy/move,
+is important.
+</p>
+
+<blockquote><pre><code>
+bool is_done() {
+	return sender_action != defered &amp;&amp; state == complete;
+}
+</code></pre></blockquote>
+
+
+<h3><a name="Uses">Use Cases</a></h3>
+
+<p>
+The various uses cases are coded in terms of the operations above
+and sender and receiver actions encoded as methods.
+</p>
+
+<dl>
+
+<dt>Obtain Value as Soon as Possible</dt>
+<dd><p>
+Of course, the most prevalent operation
+will be simply to obtain the value as soon as possible.
+The code is:
+</p>
+<blockquote><pre><code>
+if ( f.be_owner() ) notional_work += f.call();
+else { f.wait(); notional_work += f.retrieve(); }
+</code></pre></blockquote>
+<p>
+In the case of the 'enqueue' futures,
+this operation provides the mechanism for speculative concurrency.
+</p>
+<blockquote><pre><code>
+notional_work += f.value();
+</code></pre></blockquote>
+<p>
+An alternate form returns a reference to a object stored
+within the future.
+This approach may be more efficient in some case, less in others.
+</p>
+<blockquote><pre><code>
+notional_work += f.refer();
+</code></pre></blockquote>
+</dd>
+
+<dt>Abandon a Task</dt>
+<dd><p>
+For speculative execution,
+simply not asking for the value will serve in the case of 'defered' futures.
+However, for 'enqueued' futures,
+efficiency is improved with an explicit action.
+</p>
+<blockquote><pre><code>
+f.be_owner(); /* proceede to future destruction */
+</code></pre></blockquote>
+<p>
+This code would be clearer as a distinct method.
+</p>
+<blockquote><pre><code>
+f.abandon();
+</code></pre></blockquote>
+</dd>
+
+<dt>Speculative Execution with Waiting</dt>
+<dd><p>
+For algorthms that can profitably use any result computed,
+but need not use that the result, the following code serves.
+</p>
+<blockquote><pre><code>
+if ( f.be_owner() ) /* ignore task not yet computed */ ;
+else { f.wait(); notional_work += f.retrieve(); }
+</code></pre></blockquote>
+<p>
+The else clause is effectively a <code>value()</code>.
+</p>
+<blockquote><pre><code>
+if ( f.started_or_never() ) notional_work += f.value();
+</code></pre></blockquote>
+</dd>
+
+<dt>Speculative Execution without Waiting</dt>
+<dd><p>
+For algorthms that can profitably use any result available immediately,
+but need not use that the result, the following code serves.
+Note that there will be some wasted computation with this approach.
+</p>
+<blockquote><pre><code>
+if ( f.is_done() ) notional_work += f.retrieve();
+else f.be_owner() /* abandon the task */ ;
+</code></pre></blockquote>
+<p>
+There does seem to be advantage to folding
+the <code>is_done</code> and <code>be_owner</code>
+operations into a single method.
+</p>
+<blockquote><pre><code>
+if ( f.done_or_never() ) notional_work += f.value();
+</code></pre></blockquote>
+</dd>
+
+<dt>Speculative Rendevous with Waiting</dt>
+<dd><p>
+For algorthms that can profitably that is otherwise being computed,
+but need not use that the result, the following code serves.
+</p>
+<blockquote><pre><code>
+if ( f.is_started() ) { f.wait(); notional_work += f.retrieve(); }
+</code></pre></blockquote>
+<p>
+Which can be simplified to:
+</p>
+<blockquote><pre><code>
+if ( f.is_started() ) notional_work += f.value();
+</code></pre></blockquote>
+</dd>
+
+<dt>Speculative Rendezvous without Waiting</dt>
+<dd><p>
+For algorthms that can profitably that has otherwise been computed,
+but need not use that the result, the following code serves.
+</p>
+<blockquote><pre><code>
+if ( f.is_done() ) notional_work += f.retrieve();
+</code></pre></blockquote>
+<p>
+Or
+</p>
+<blockquote><pre><code>
+if ( f.is_done() ) notional_work += f.value();
+</code></pre></blockquote>
+</dd>
+
+<dt>Responsive Execution or Rendezvous without Waiting</dt>
+<dd><p>
+If a GUI managament thread is to be responsive,
+it needs to avoid doing any extensive computation.
+That is, the task must execute on another thread.
+We assume that the management thread will periodically inspect the future,
+and if the computation is done, act on it.
+The following code will serve.
+</p>
+<blockquote><pre><code>
+if ( f.is_owner() ) f.fork() /* or f.delay() */ ;
+else if ( f.is_done() ) notional_work += f.retrieve();
+</code></pre></blockquote>
+<p>
+The first condition handles the case where a future has been 'defered',
+and morphs it into future with asynchronous execution.
+We avoid the 'enqueue' action
+because its advantage over 'fork'
+is that it can call tasks synchronously,
+which is not wanted here.
+There does seem to be advantage to folding
+the <code>is_owner</code>, <code>fork</code>, and <code>is_done</code>
+operations into a single method.
+However, there is one complication.
+We may want to apply a policy, not an action
+in scheduling the task for execution.
+This single method would thus need a policy parameter.
+</p>
+<blockquote><pre><code>
+if ( f.be_done(immediately) ) notional_work += f.retrieve();
+</code></pre></blockquote>
+
+</dd>
+
+</dl>
+
+
+</body>
+</html>

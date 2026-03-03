@@ -1,0 +1,978 @@
+<html>
+<head>
+<title>Upgrading the Interface of Allocators using API Versioning</title>
+<style>
+p {text-align:justify}
+li {text-align:justify}
+blockquote.note
+{
+    background-color:#E0E0E0;
+    padding-left: 15px;
+    padding-right: 15px;
+    padding-top: 1px;
+    padding-bottom: 1px;
+}
+ins {background-color:#FFFFA0}
+del {background-color:#FFFFA0}
+</style>
+</head>
+
+<body>
+
+<address align=right>
+Document number: N1953=06-0023<br>
+<br>
+<a href="mailto:howard.hinnant@gmail.com">Howard E. Hinnant</a><br>
+2006-02-14
+</address>
+<hr>
+<h1 align=center>Upgrading the Interface of Allocators using API Versioning</h1>
+
+<h2>Contents</h2>
+
+<ul>
+<li><a href="#Introduction">Introduction</a></li>
+<li><a href="#Versioning Infrastructure">Versioning Infrastructure</a></li>
+<li><a href="#The Version 2 Allocator">The Version 2 Allocator</a></li>
+<li><a href="#Example: <tt>vector</tt> Use Of Versioned Allocators">Example: <tt>vector</tt> Use Of Versioned Allocators</a></li>
+<li><a href="#Dependencies">Dependencies</a></li>
+<li><a href="#Prior Art">Prior Art</a></li>
+<li><a href="#Proposed Wording">Proposed Wording</a></li>
+<li><a href="#Acknowledgments">Acknowledgments</a></li>
+</ul>
+
+<h2><a name="Introduction"></a>Introduction</h2>
+
+<p>
+With the introduction of non-trivial copy constructors and assignment operators,
+C++ long ago lost the potential efficiency gains associated with expanding dynamic arrays
+<em>in-place</em> as provided by <tt>realloc</tt> in C.  When dealing with dynamic
+arrays of objects in C++ (e.g. <tt>vector&lt;T&gt;</tt>), there exists no standard
+facility today by which the <tt>vector</tt> can expand its capacity without allocating a
+larger block of memory and copying each element over (using the element's copy
+constructor).
+</p>
+
+<p>
+Move semantics
+(<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2002/n1377.htm">N1377</a>)
+provides a tremendous performance boost when the need arises to reallocate the
+contiguous block of memory.  This paper proposes to complement move semantics by
+giving the client (i.e. <tt>vector</tt> or <tt>string</tt>) a way to possibly
+delay the reallocation by expanding the block of memory <em>in-place</em> (and thus
+gain back what we lost when we had to give up <tt>realloc</tt>).
+</p>
+
+<p>
+There are several pieces of functionality that should be in place in order to
+make <em>in-place</em> memory expansion for templates such as <tt>vector</tt> and
+<tt>string</tt> practical:
+</p>
+
+<ol>
+<li>An C-level interface which augments the current <tt>malloc</tt> interface
+should be introduced.</li>
+<li>The <tt>allocator</tt> interface must be augmented so that containers
+can ask the proper questions.</li>
+<li>The containers must know whether they have a new allocator (with the
+expanded interface) or not, so they can continue to work with today's
+allocators, and also take advantage of an enhanced allocator interface.</li>
+</ol>
+
+<p>
+Strictly speaking, the first point isn't absolutely required.  However I believe
+that without it, writing allocators capable of supplying <em>expand-in-place</em>
+functionality will be overly difficult for the average programmer.  With that
+in mind, <a href="http://www.open-std.org/jtc1/sc22/wg14/www/docs/n1085.htm">N1085</a>
+has been submitted to WG14 for review.  WG14 subsequently passed it to WG21 for
+comment.  This paper augments
+<a href="http://www.open-std.org/jtc1/sc22/wg14/www/docs/n1085.htm">N1085</a>
+in the context of C++ applicability.
+<a href="http://www.open-std.org/jtc1/sc22/wg14/www/docs/n1085.htm">N1085</a>
+proposes four new C functions which augment the <tt>malloc</tt> interface.  This
+paper builds on that proposal, showing how an expanded allocator interface could
+make use of the C interface proposed in
+<a href="http://www.open-std.org/jtc1/sc22/wg14/www/docs/n1085.htm">N1085</a>,
+and how in turn <tt>vector</tt>
+could make use of such an allocator.  This expanded allocator interface, along
+with the infrastructure (versioning) to detect that interface is herein
+respectfully proposed for standardization in C++0X.
+</p>
+
+<h2><a name="Versioning Infrastructure"></a>Versioning Infrastructure</h2>
+
+<p>
+This paper will propose five new member functions for the allocator requirements.
+These five new member functions are optional, and even the default <tt>std::allocator</tt>
+need not implement them.  However, so that containers can query (at compile time)
+the allocator to discover if this expanded interface is available, it is convenient
+to <em>version</em> the allocator's API.  Note:  this paper does not address ABI
+versioning issues which is a separate topic.
+</p>
+
+<p>
+The current (C++03) allocator interface
+will be referred to as version 1.  The proposed addition to the allocator will
+be referred to as version 2.  And there will exist a versioning infrastructure
+such that a container will be able to retrieve an allocator's version number
+with the following simple statement:
+</p>
+
+<blockquote><pre>
+static const unsigned ver = std::version&lt;Allocator&gt;::value;
+</pre></blockquote>
+
+<p>
+Where <tt>Allocator</tt> is the container's allocator type.  This versioning system
+will even work with today's allocators (without modifying them) and return the value
+1.  There is also nothing which is allocator-specific about this versioning system
+and it could be applied in a number of other cases.
+</p>
+
+<p>
+Allocators which wish to declare themselves as supporting the version 2 interface
+must include the following nested typedef which must be publicly accessible:
+</p>
+
+<blockquote><pre>
+template &lt;class T&gt; class my_allocator
+{
+public:
+    typedef std::version_type&lt;my_allocator, 2&gt; version;
+    ...
+};
+</pre></blockquote>
+
+<p>
+This versioning system has been designed to reduce the risk of accidental
+conformance to a vanishingly low probability.  The <tt>version_type&lt;T, V&gt;</tt>
+template has the following interface:
+</p>
+
+<blockquote><pre>
+template &lt;class T, unsigned V&gt;
+struct version_type
+    : public integral_constant&lt;unsigned, V&gt;
+{
+    typedef T type;
+
+    version_type(const version_type&lt;T, 0&gt;&amp;);
+};
+</pre></blockquote>
+
+<p>
+Note the non-explicit constructor taking a <tt>version_type&lt;T, 0&gt;</tt>.
+The purpose of this constructor is to provide extra security against accidental
+conformance.  The allocator must not only have a nested type named version,
+that type must also have the property that <tt>std::version_type&lt;T,0&gt;</tt>
+is implicitly convertible to it, else <tt>std::version</tt> will not recognize it
+as a version number.  All <tt>std::version_type&lt;T,N&gt;</tt> types
+have this property because of this non-explicit constructor.
+</p>
+
+<p>
+Note also that the client type is embedded in the <tt>version_type</tt>.
+The purpose of this is to allow base classes to have versions without propagating
+that version information to derived types.  Thus derived types must explicitly be
+changed to reflect version changes.  This insures that derived types won't accidently
+inherit an updated version number.
+</p>
+
+<p>
+Additionally, if desired, clients can explicitly specialize the <tt>std::version</tt>
+traits class in order to specify their version number.  This is simply an alternate
+syntax for versioning and has no different functionality.
+</p>
+
+<p>
+Examples:
+</p>
+
+<blockquote><pre>
+struct A
+{
+    typedef std::version_type&lt;A, 2&gt; version;
+};
+</pre></blockquote>
+
+<p>
+<tt>std::version&lt;A&gt;::value</tt> is 2.
+</p>
+
+<blockquote><pre>
+struct B
+{
+    struct version {static unsigned const value = 3;};
+};
+</pre></blockquote>
+
+<p>
+<tt>std::version&lt;B&gt;::value</tt> is 1.  <tt>B::version</tt> does not influence
+<tt>std::version&lt;B&gt;::value</tt>.
+</p>
+
+<blockquote><pre>
+struct C
+{
+    static int const version = 4;
+};
+</pre></blockquote>
+
+<p>
+<tt>std::version&lt;C&gt;::value</tt> is 1.  <tt>C::version</tt> does not influence
+<tt>std::version&lt;C&gt;::value</tt>.
+</p>
+
+<blockquote><pre>
+struct D
+{
+    int version() const {return 5;}
+};
+</pre></blockquote>
+
+<p>
+<tt>std::version&lt;D&gt;::value</tt> is 1.  <tt>D::version()</tt> does not influence
+<tt>std::version&lt;D&gt;::value</tt>.
+</p>
+
+<blockquote><pre>
+struct E
+{
+};
+</pre></blockquote>
+
+<p>
+<tt>std::version&lt;E&gt;::value</tt> is 1.  Types with no nested <tt>version</tt>
+type are automatically assigned a version of 1.
+</p>
+
+<blockquote><pre>
+struct F
+{
+};
+
+namespace std
+{
+template &lt;&gt;
+struct version&lt; ::F &gt;
+{
+    static const unsigned value = 6;
+};
+} // std
+</pre></blockquote>
+
+<p>
+<tt>std::version&lt;F&gt;::value</tt> is 6.  This example demonstrates the
+technique of registering a version number by specialization of <tt>std::version</tt>.
+</p>
+
+<blockquote><pre>
+struct G
+    : public A
+{
+};
+</pre></blockquote>
+
+<p>
+<tt>std::version&lt;G&gt;::value</tt> is 1, despite the fact that
+<tt>std::version&lt;A&gt;::value</tt> is 2.  Version numbers are not inheritable.
+</p>
+
+<blockquote><pre>
+struct H
+    : public G
+{
+    typedef std::version_type&lt;H, 3&gt; version;
+};
+</pre></blockquote>
+
+<p>
+<tt>std::version&lt;H&gt;::value</tt> is 3, its base class <tt>G</tt> has a
+version of 1, and the base class of <tt>G</tt>, <tt>A</tt>, has a version of 2.
+</p>
+
+<p>
+Additionally, <tt>version</tt> should be insensitive to <i>cv</i>-qualifications.
+That is, an invariant is that <tt>version&lt;A&gt;::value == version&lt;const A&gt;::value</tt>.
+This reduces the chance of obtaining the wrong version number.  Also in generic
+code it can be the case that a reference to some object <tt>A</tt> can be used
+instead of an <tt>A</tt> itself.  Therefore <tt>version</tt> should operate on
+the referenced object in that case:
+</p>
+
+<blockquote><pre>
+version&lt;A&gt;::value == version&lt;const A&amp;&gt;::value
+</pre></blockquote>
+
+<h2><a name="The Version 2 Allocator"></a>The Version 2 Allocator</h2>
+
+<p>
+The "version 2" allocator interface is a strict superset of the current (version 1)
+allocator interface.  This allows version 2 allocators to be used with containers
+(and any other objects) which only expect the version 1 interface.  This fact also
+allows the presentation of the version 2 interface without repeating the current
+interface.  In addition to the interface itself, also shown below is an example
+implementation based on
+<a href="http://www.open-std.org/jtc1/sc22/wg14/www/docs/n1085.htm">N1085</a>.
+</p>
+
+<blockquote><pre>
+template &lt;class T&gt;
+class allocator
+{
+public:
+    ...
+    // as today
+    ...
+    // plus:
+
+    typedef version_type&lt;allocator, 2&gt; version;
+
+    size_type size(pointer p) const throw() {return sizeof_alloc(p) / sizeof(T);}
+
+    pointer allocate(size_type size_requested, size_type&amp; size_received)
+    {
+        size_requested *= sizeof(T);
+        pointer result = (pointer)request_malloc(size_requested, &amp;size_received);
+        if (result == 0)
+            throw bad_alloc();
+        size_received /= sizeof(T);
+        return result;      
+    }
+
+    pointer request(size_type size_requested, size_type&amp; size_received) throw()
+    {
+        size_requested *= sizeof(T);
+        pointer result = (pointer)request_malloc(size_requested, &amp;size_received);
+        size_received /= sizeof(T);
+        return result;
+    }
+
+    bool resize(pointer p, size_type size_requested, size_type&amp; size_received) throw()
+    {
+        size_requested *= sizeof(T);
+        int result = resize_alloc(p, size_requested, &amp;size_received);
+        size_received /= sizeof(T);
+        return result != 0;
+    }
+
+    bool expand(pointer p, size_type min_size, size_type preferred_size, size_type&amp; size_received) throw()
+    {
+        min_size       *= sizeof(T);
+        preferred_size *= sizeof(T);
+        int result = negotiate_alloc(p, min_size, preferred_size, &amp;size_received);
+        size_received /= sizeof(T);
+        return result != 0;
+    }
+};
+</pre></blockquote>
+
+<p>
+As one can immediately see, if the interface proposed in
+<a href="http://www.open-std.org/jtc1/sc22/wg14/www/docs/n1085.htm">N1085</a>
+exists, it is quite easy to map that C interface to this proposed C++ allocator
+interface.  One merely has to adjust the results for <tt>sizeof(T)</tt>.
+</p>
+
+<p>
+The <tt>size</tt> function allows the client to ask how many elements a previously
+allocated pointer actually points to.  The amount returned may be greater than
+the number which was requested via a previous <tt>allocate</tt>.  Clients such as
+<tt>string</tt> or <tt>vector</tt> can use this information to add to their capacity
+at no cost.
+</p>
+
+<p>
+The <tt>allocate</tt> function is an overload of the existing <tt>allocate</tt>
+member function.  This overload passes a reference to a <tt>size_type</tt> which
+will hold the number of elements actually allocated after a successful allocation.
+This saves the client from needing to make a separate call to <tt>size</tt> directly
+after an allocation.
+</p>
+
+<p>
+The <tt>request</tt> member function is similar to <tt>allocate</tt> except that
+its failure mode is different.  On failure instead of throwing an exception, it
+returns null.  Also on failure the <tt>size_received</tt> parameter will hold a
+suggested size which <em>may</em> succeed in a future call to <tt>request</tt>
+(no guarantee is made).  This member function can be handy if the client has
+some flexibility in how much needs to be allocated (e.g. I would like up to 100
+elements, but I need at least 50).
+</p>
+
+<p>
+The <tt>resize</tt> member function will attempt to change the size of a memory
+block <em>in-place</em>.  It can attempt to either grow or shrink an allocation.
+If the change in size was successful, <tt>true</tt> is returned.  Also in this
+case, <tt>size_received</tt> will contain the new size (in terms of number of
+elements).  If the call was not successful (<tt>false</tt> was returned), then
+<tt>size_received</tt> will contain a suggested size which may succeed in a future
+call.  Clients may use this function to implement "shrink to fit" functionality,
+or to attempt a capacity growth while avoiding a reallocation.
+</p>
+
+<p>
+The <tt>expand</tt> member function is a more specialized version of <tt>resize</tt>
+which concentrates on growing the capacity.  The client can specify a preferred size
+and a minimum acceptable size.  The allocator should attempt to obtain the maximum
+amount of memory within that range that it can.  Clients such as <tt>vector</tt>
+can use this member during <tt>push_back</tt> when <tt>size() == capacity()</tt>.
+For example the client might ask to expand the current memory block by at least
+one element, and up to a maximum of double the current capacity.  On failure,
+<tt>false</tt> will be returned and the client will have to resort to allocating
+(or <tt>request</tt>ing) a larger block of memory.
+</p>
+
+<h2><a name="Example: <tt>vector</tt> Use Of Versioned Allocators"></a>Example: <tt>vector</tt> Use Of Versioned Allocators</h2>
+
+<p>
+In this section there is an example (and partial) implementation of <tt>std::vector</tt>
+which demonstrates how a few <tt>vector</tt> member functions would be implemented
+in order to be both compatible with version 1 allocators, and take advantage of
+the new functionality in version 2 allocators in order to boost performance.
+</p>
+
+<p>
+The basic technique is to rely on private helper functions which compile-time
+dispatch based on the version number of the allocator.  For example, the <tt>vector</tt>
+constructor that takes a <tt>size_type</tt> parameter indicating the number of
+elements to default construct might in turn call a private <tt>allocate</tt>
+helper function, which is split into two implementations:  one if the allocator
+is version 1, and another if the allocator is version 2:
+</p>
+
+<blockquote><pre>
+template &lt;class T, class A&gt;
+class vector
+{
+private:
+    typedef integral_constant&lt;unsigned,                 1&gt; allocator_v1;
+    typedef integral_constant&lt;unsigned,                 2&gt; allocator_v2;
+    typedef integral_constant&lt;unsigned, version&lt;A&gt;::value&gt; alloc_version;
+
+    void allocate(size_type n) {allocate(n, alloc_version());}
+    void allocate(size_type n, allocator_v1)
+    {
+        data_ = alloc_.allocate(n);
+        capacity_ = n;
+    }
+    void allocate(size_type n, allocator_v2)
+    {
+        data_ = alloc_.allocate(n, capacity_);
+    }
+
+public:
+    vector(size_type n)
+    {
+        allocate(n);
+        // default construct n elements
+        size_ = n;
+    }
+    ...
+</pre></blockquote>
+
+<p>
+In the above example the implementation sets up <tt>integral_constant</tt> types
+which correspond to version 1 allocators, version 2 allocators, and the version
+number of the current allocator.  One can then easily overload the private
+helper functions (<tt>allocate</tt> in this example) for the version 1 and
+version 2 implementations, and compile-time dispatch to them using the current
+allocator version.
+</p>
+
+<p>
+In the above example the <tt>vector</tt> constructor simply calls the private
+<tt>allocate</tt> function to allocate sufficient memory before it constructs
+the proper number of elements and correctly sets <tt>size()</tt>.  The private
+<tt>allocate</tt> function will behave as it does today if the <tt>vector</tt>
+has a version 1 allocator.  That is, it simply allocates the memory and sets
+the <tt>capacity()</tt> to the same size as the number of elements requested by
+the constructor.
+</p>
+
+<p>
+However if the allocator is version 2, a different private <tt>allocate</tt>
+helper is called which uses the new overloaded <tt>allocate</tt> function of
+version 2 allocators.  This variant will set the <tt>vector</tt>'s <tt>capacity()</tt>
+to at least the size requested by the constructor, and perhaps a little more
+depending upon the underlying allocator's implementation details.  This variation
+might be especially effective when the <tt>sizeof(T)</tt> is small (e.g.
+<tt>vector&lt;char&gt;</tt>).
+</p>
+
+<p>
+The current Freescale implementation of <tt>vector</tt>, combined with an
+extension allocator which calls <tt>malloc</tt> instead of new, implements this
+technique.  The following example code demonstrates this "free" extra capacity:
+</p>
+
+<blockquote><pre>
+#include &lt;vector&gt;
+#include &lt;iostream&gt;
+#include &lt;memory&gt;
+
+int main()
+{
+    std::vector&lt;char&gt; v1(5);
+    std::cout &lt;&lt; v1.capacity() &lt;&lt; '\n';
+    std::vector&lt;char, Metrowerks::malloc_alloc&lt;char&gt; &gt; v2(5);
+    std::cout &lt;&lt; v2.capacity() &lt;&lt; '\n';
+}
+</pre></blockquote>
+
+<p>
+The above code currently outputs:
+</p>
+
+<blockquote><pre>
+5
+12
+</pre></blockquote>
+
+<p>
+This output indicates that when asking for 5 <tt>char</tt>'s, the underlying
+<tt>malloc</tt> system actually delivers room for 12 (on this system).  Without
+this proposal, the
+memory for the extra 7 <tt>char</tt>'s goes <b>completely</b> to waste
+simply because the <tt>vector</tt> has no way to know that this additional memory
+exists.
+</p>
+
+<p>
+The <tt>push_back</tt> member of <tt>vector</tt> can also be optimized in the
+presence of a version 2 allocator.  Consider the following example code for
+<tt>push_back</tt>:
+</p>
+
+<blockquote><pre>
+void push_back(const T&amp; x)
+{
+    if (size_ &lt; capacity_ || expand_by(1))
+    {
+        // sufficient capacity, append element
+    }
+    else
+    {
+        // insufficient capacity, reallocate
+    }
+}
+</pre></blockquote>
+
+<p>
+Here if <tt>size()</tt> is threatening to exceed <tt>capacity()</tt>, before
+branching to the reallocation branch of the algorithm, an attempt is made to
+expand the current memory block <em>in-place</em> by calling the private helper
+function <tt>expand_by</tt>.  Like the private helper function in the constructor
+example, <tt>expand_by</tt> can branch to different algorithms depending upon
+the version of the allocator.
+</p>
+
+<blockquote><pre>
+bool expand_by(size_type n)
+    {return expand_by(n, alloc_version());}
+bool expand_by(size_type, allocator_v1) {return false;}
+bool expand_by(size_type n, allocator_v2)
+{
+    size_type minimum_size = n + capacity_;
+    size_type maximum_size = max(minimum_size, growth_factor * capacity_);
+    size_type size_received;
+    if (alloc_.expand(data_, minimum_size, maximum_size, size_received))
+    {
+        capacity_ = size_received;
+        return true;
+    }
+    return false;
+}
+</pre></blockquote>
+
+<p>
+For version 1 allocators, it is never possible to expand a block of memory in
+place so <tt>expand_by</tt> simply returns <tt>false</tt>.  Modern compilers
+should be able to optimize <tt>expand_by</tt> completely out of existence in this
+case.
+</p>
+
+<p>
+If we have a version 2 allocator, then the new <tt>expand</tt> member of the
+allocator is called, asking for an expansion that is as much as twice (or whatever
+the <tt>growth_factor</tt>) the current <tt>capacity</tt>, or at least big
+enough to hold <tt>n</tt> more elements (where <tt>n == 1</tt> in the case of
+<tt>push_back</tt>).  The <em>expand-in-place</em> will not always be successful
+of course, but it is relatively inexpensive to ask the question and pays off
+handsomely when the underlying allocator can manage it.
+</p>
+
+<p>
+A test with the Freescale implementation which does nothing but <tt>push_back</tt>
+a default constructed <tt>string</tt> 1000 times into a <tt>vector&lt;string&gt;</tt>
+shows that this optimization roughly doubles the speed of that loop.
+</p>
+
+<h2><a name="Dependencies"></a>Dependencies</h2>
+
+<p>
+This paper proposes the specification of the versioning system in terms of
+<tt>std::tr1::integral_constant</tt> (part of the type traits library) as if
+<tt>integral_constant</tt> was already part of the working draft.  This
+dependence could easily be removed, but currently I do not see the need to do
+that.
+</p>
+
+<h2><a name="Prior Art"></a>Prior Art</h2>
+
+<p>
+This proposal, in its entirety, including
+<a href="http://www.open-std.org/jtc1/sc22/wg14/www/docs/n1085.htm">N1085</a>,
+has been implemented in the Freescale C and C++ libraries, except that the names of
+the C functions have been mangled with underscores, and the C++ versioning system
+was put in namespace Metrowerks.
+</p>
+
+<p>
+The Freescale implementation of <tt>std::allocator</tt> does not support the
+version 2 interface, but an extension allocator does (<tt>Metrowerks::malloc_alloc</tt>).
+The Freescale <tt>std::vector</tt> and an extension container <tt>Metrowerks::cdeque</tt>
+recognize version 2 allocators and take advantage of their extended interface.
+Of course these containers continue to work with today's (version 1) allocators
+as well.
+</p>
+
+<h2><a name="Proposed Wording"></a>Proposed Wording</h2>
+
+<p>
+Note that in the proposed wording below, the implementation is required to
+provide infrastructure such as <tt>version</tt> and <tt>version_type</tt>, but is
+not required to provide a <tt>std::allocator</tt> which meets the version 2
+allocator specification, nor to provide containers which recognize version 2
+allocators (version 2 allocators will work with such containers, but offer no
+enhanced performance).  Merely the syntax for easily allowing such optimizations
+is standardized.  Market forces can dictate whether the optimization is actually
+provided on any given platform.
+</p>
+
+<p>
+Also note that if an implementation is to provide a <tt>std::allocator</tt> which
+supports the version 2 interface, it must either detect that the application
+has not replaced <tt>operator new</tt>, or it must must implement the interface
+in such a way as to be prepared for the application to replace <tt>operator new</tt>
+(i.e. <tt>std::allocator</tt> is required to call <tt>operator new</tt> and in
+general can not assume anything about the behavior of this allocation system).
+</p>
+
+<blockquote class="note">
+<p>
+Modify the &lt;utility&gt; synopsis in 20.2:
+</p>
+</blockquote>
+
+<blockquote><pre>
+namespace std {
+  //<i>  <a href="lib-utilities.html#lib.operators">lib.operators</a>, operators:</i>
+  namespace rel_ops {
+    template&lt;class T&gt; bool operator!=(const T&amp;, const T&amp;);
+    template&lt;class T&gt; bool operator&gt; (const T&amp;, const T&amp;);
+    template&lt;class T&gt; bool operator&lt;=(const T&amp;, const T&amp;);
+    template&lt;class T&gt; bool operator&gt;=(const T&amp;, const T&amp;);
+  }
+  
+  //<i>  <a href="lib-utilities.html#lib.pairs">lib.pairs</a>, pairs:</i>
+  template &lt;class T1, class T2&gt; struct pair;
+  template &lt;class T1, class T2&gt;
+    bool operator==(const pair&lt;T1,T2&gt;&amp;, const pair&lt;T1,T2&gt;&amp;);
+  template &lt;class T1, class T2&gt;
+    bool operator&lt; (const pair&lt;T1,T2&gt;&amp;, const pair&lt;T1,T2&gt;&amp;);
+  template &lt;class T1, class T2&gt;
+    bool operator!=(const pair&lt;T1,T2&gt;&amp;, const pair&lt;T1,T2&gt;&amp;);
+  template &lt;class T1, class T2&gt;
+    bool operator&gt; (const pair&lt;T1,T2&gt;&amp;, const pair&lt;T1,T2&gt;&amp;);
+  template &lt;class T1, class T2&gt;
+    bool operator&gt;=(const pair&lt;T1,T2&gt;&amp;, const pair&lt;T1,T2&gt;&amp;);
+  template &lt;class T1, class T2&gt;
+    bool operator&lt;=(const pair&lt;T1,T2&gt;&amp;, const pair&lt;T1,T2&gt;&amp;);
+  template &lt;class T1, class T2&gt; pair&lt;T1,T2&gt; make_pair(T1, T2);
+
+  //<i>  <a href="">lib.versioning</a>, version:</i>
+  <ins>template &lt;class T, unsigned V&gt; struct version_type;</ins>
+  <ins>template &lt;class T&gt; struct version;</ins>
+}
+</pre></blockquote>
+
+<blockquote class="note">
+<p>
+Add new section: 20.2.3:
+</p>
+</blockquote>
+
+<h3>20.2.3 - Versioning [lib.versioning]</h3>
+
+<p>
+<b>-1-</b> A standardized infrastructure for giving class types an easily extracted
+version number is defined.  Existing class types which lack explicit version numbers
+are automatically assigned a version number of 1 by this system.  This system
+allows classes to communicate versioned interfaces to each other.
+</p>
+
+<h4>20.2.3.1 - version_type</h4>
+
+<p>
+<b>-1-</b> The library provides a template which can be used to explicitly declare
+a version number for a user-defined class or struct.
+</p>
+
+<blockquote><pre>
+template &lt;class T, unsigned V&gt;
+struct version_type
+    : public integral_constant&lt;unsigned, V&gt;
+{
+    typedef T type;
+
+    version_type(const version_type&lt;T, 0&gt;&amp;);
+};
+</pre></blockquote>
+
+<p>
+<b>-2-</b> It is unspecified whether the <tt>version_type</tt> constructor has
+a definition.
+</p>
+
+<h4>20.2.3.2 - version</h4>
+
+<blockquote><pre>
+template &lt;class T&gt; struct version;
+</pre></blockquote>
+
+<p>
+<b>-1-</b> <tt>version</tt> publicly derives from
+<tt>integral_constant&lt;unsigned, 1&gt;</tt> for
+all types <tt>T</tt> except for the case that <tt>T</tt> is a struct or class and
+meets all of the following requirements:
+</p>
+
+<ul>
+<li><tt>T</tt> has a nested type named <tt>version</tt>.</li>
+<li><tt>std::version_type&lt;T, 0&gt;</tt> is implicitly convertible to
+<tt>T::version</tt> .</li>
+</ul>
+
+<p>
+For types <tt>T</tt> meeting the above requirements, <tt>version&lt;T&gt;</tt>
+will publicly derive from <tt>integral_constant&lt;unsigned, T::version::value&gt;</tt>.
+</p>
+
+<p>
+<b>-2-</b> In the case that <tt>T</tt> is a reference type, <tt>version</tt> will
+drop the reference and instead operate on the referenced type.
+</p>
+
+<p>
+<b>-3-</b> In the case that <tt>T</tt> is a <i>cv</i>-qualified type, <tt>version</tt> will
+ensure that the same value will be returned as for a non-<i>cv</i>-qualified <tt>T</tt>.
+</p>
+
+<p>
+<b>-4-</b> [<i>Example:</i>
+</p>
+
+<blockquote><pre>
+struct A {};
+const unsigned vA = std::version&lt;A&gt;::value;  // vA == 1
+
+struct B {
+    typedef std::version_type&lt;B, 2&gt; version;
+};
+const unsigned vB  = std::version&lt;      B &gt;::value; // vB  == 2
+const unsigned vBr = std::version&lt;const B&amp;&gt;::value; // vBr == 2
+
+struct C : public B {};
+const unsigned vC = std::version&lt;C&gt;::value;  // vC == 1
+</pre></blockquote>
+
+<p>
+<i>-- end example</i>]
+</p>
+
+<blockquote class="note">
+<p>
+Add new section 20.1.6.1 - Optional Allocator requirements:
+</p>
+</blockquote>
+
+<h4>20.1.6.1 - Optional Allocator requirements [lib.allocator.requirements.optional]</h4>
+
+<p>
+<b>-1-</b> Allocators may choose to implement an extended API in addition to
+those requirements defined in
+<a href="lib.allocator.requirements">lib.allocator.requirements</a>.  If such an
+allocator declares its intention to conform to this extended interface, it must
+implement all of it.
+</p>
+
+<p>
+<b>-2-</b> An allocator (named <tt>Alloc</tt> for example) declares its intent
+to conform to this optional interface by having the following nested declaration:
+</p>
+
+<blockquote><pre>
+class Alloc
+{
+public:
+    typedef std::version_type&lt;Alloc, 2&gt; version;
+    /* ... */
+};
+</pre></blockquote>
+
+<p>
+<b>-3-</b> Allocators having this nested <tt>version</tt> type will define the
+following additional member functions:
+</p>
+
+<blockquote><pre>
+size_type size(pointer <i>p</i>) const throw();
+</pre></blockquote>
+
+<p>
+<b>-4- Requires:</b> <tt><i>p</i></tt> is non-null and has been returned by a previous
+call to <tt>allocate</tt> (either overload), or <tt>request</tt>, and has not yet been deallocated
+by <tt>deallocate</tt>.
+</p>
+
+<p>
+<b>-5- Returns:</b>  The returned value indicates that the client can store
+valid values of <tt>T</tt> to the range <tt>[ptr, ptr + <i>returned-value</i>)</tt>
+without fear of corrupting the heap.
+</p>
+
+<p>
+<b>-6- Throws:</b>  Nothing.
+</p>
+
+<blockquote><pre>
+pointer allocate(size_type <i>size_requested</i>, size_type&amp; <i>size_received</i>);
+</pre></blockquote>
+
+<p>
+<b>-7- Effects:</b> Memory is allocated for <tt><i>size_requested</i></tt> objects of
+type <tt>T</tt> but objects are not constructed.  <tt>allocate</tt> may raise
+an appropriate exception.  On success, the returned <tt>pointer</tt> refers to
+the allocated memory, and <tt><i>size_received</i></tt> indicates the number of objects
+actually allocated (<tt><i>size_received</i> &gt;= <i>size_requested</i></tt>).
+<tt><i>size_received</i></tt> will hold the same value that would be returned by the
+<tt>size</tt> function if supplied the <tt>pointer</tt> returned from this call.
+[<i>Note:</i> If <tt><i>size_requested</i> == 0</tt>, the return value is unspecified,
+and throwing an exception is still possible. <i>-- end note</i>]
+</p>
+
+<p>
+<b>-8- Throws:</b> Throws an exception if unable to allocate the requested
+memory.
+</p>
+
+<blockquote><pre>
+pointer request(size_type <i>size_requested</i>, size_type&amp; <i>size_received</i>) throw();
+</pre></blockquote>
+
+<p>
+<b>-9- Effects:</b> Memory is allocated for <tt><i>size_requested</i></tt> objects of
+type <tt>T</tt> but objects are not constructed.  <tt>request</tt> will not raise
+an exception.  On success, the returned <tt>pointer</tt> refers to
+the allocated memory, and <tt><i>size_received</i></tt> indicates the number of objects
+actually allocated (<tt><i>size_received</i> &gt;= <i>size_requested</i></tt>).  On failure,
+a null pointer value will be returned and 
+<tt><i>size_received</i></tt> will hold a suggested value for <tt><i>size_requested</i></tt>
+which may succeed in a future call to <tt>request</tt> (there is no guarantee
+that it will succeed).
+[<i>Note:</i> If <tt><i>size_requested</i> == 0</tt>, the return value is unspecified.
+<i>-- end note</i>]
+</p>
+
+<p>
+<b>-10- Throws:</b> Nothing.
+</p>
+
+<blockquote><pre>
+bool resize(pointer <i>p</i>, size_type <i>size_requested</i>, size_type&amp; <i>size_received</i>) throw();
+</pre></blockquote>
+
+<p>
+<b>-11- Requires:</b> The <tt>pointer <i>p</i></tt> is non-null and has been returned
+from one of the <tt>allocate</tt> member functions or the <tt>request</tt> member
+function and has not been deallocated with the <tt>deallocate</tt> member function.
+</p>
+
+<p>
+<b>-12- Effects:</b> An attempt is made to change the <tt>size</tt> of the
+memory block referenced by <tt><i>p</i></tt> to fit <tt><i>size_requested</i></tt> objects of
+<tt>T</tt>.  Whether or not this change in <tt>size</tt> is successful, <tt><i>p</i></tt>
+will still point to the block of memory after this call (the memory block will
+not be relocated in the client's address space, nor deallocated,
+even if <tt><i>size_requested</i> == 0</tt>).  On success <tt><i>size_received</i></tt>
+will hold the new <tt>size(<i>p</i>)</tt> and <tt><i>size_received</i> &gt;= <i>size_requested</i></tt>.
+If <tt><i>size_requested</i> &lt;</tt> the <tt>size(<i>p</i>)</tt> just prior to this call,
+success will only be reported if this call to <tt>resize</tt> results in a decrease
+reported by <tt>size(<i>p</i>)</tt>.  If not successful, <tt><i>size_received</i></tt> will
+have a value that serves as a hint for a <tt><i>size_requested</i></tt> that may succeed
+in a future call (no guarantee of such success is offered).  On failure, the value
+reported by <tt>size(<i>p</i>)</tt> after the call will be the same as was reported
+just prior to the call.  [<i>Note:</i>
+Implementations are allowed to set <tt><i>size_received</i></tt> to <tt>size(<i>p</i>)</tt> on
+failure. <i>-- end note</i>]
+</p>
+
+<p>
+<b>-13- Returns:</b> <tt>true</tt> if the resize succeeded, otherwise <tt>false</tt>.
+</p>
+
+<p>
+<b>-14- Throws:</b> Nothing.
+</p>
+
+<blockquote><pre>
+bool expand(pointer <i>p</i>, size_type <i>min_size</i>, size_type <i>preferred_size</i>, size_type&amp; <i>size_received</i>) throw()
+</pre></blockquote>
+
+<p>
+<b>-15- Requires:</b> The <tt>pointer <i>p</i></tt> is non-null and has been returned
+from one of the <tt>allocate</tt> member functions or the <tt>request</tt> member
+function and has not been deallocated with the <tt>deallocate</tt> member function.
+<tt><i>min_size</i> &lt;= <i>preferred_size</i></tt>.
+</p>
+
+<p>
+<b>-16- Effects:</b> An attempt is made to change the <tt>size</tt> of the
+memory block referenced by <tt><i>p</i></tt> to fit <tt><i>preferred_size</i></tt> objects of
+<tt>T</tt>.  If the allocator can not expand the <tt>size(<i>p</i>)</tt> to
+<tt><i>preferred_size</i></tt>, the allocator will attempt to expand the block to hold
+the maximum number of objects it can as long as this results in
+<tt>size(<i>p</i>) &gt;= <i>min_size</i></tt>.  If the <tt>size(<i>p</i>)</tt> prior to the call to
+<tt>expand</tt> is already greater than or equal to <tt><i>min_size</i></tt>, success is assured.
+On success, <tt><i>size_received</i></tt> will have the value which would be returned
+by a subsequent call to <tt>size(<i>p</i>)</tt>.  On failure <tt><i>size_received</i></tt> will
+hold a hint for a <tt><i>preferred_size</i></tt> that may succeed in a future call to
+<tt>expand</tt> (no guarantee of such success is offered).  On failure the value
+reported by <tt>size(<i>p</i>)</tt> is not changed by this call.  Whether or not this
+change in <tt>size</tt> is successful, <tt><i>p</i></tt> will still point to the block
+of memory after this call (the memory block will
+not be relocated in the client's address space, nor deallocated,
+even if <tt><i>min_size</i> == 0</tt>).  [<i>Note:</i>
+Implementations are allowed to set <tt><i>size_received</i></tt> to <tt>size(<i>p</i>)</tt> on
+failure. <i>-- end note</i>]
+</p>
+
+<p>
+<b>-17- Returns:</b> <tt>true</tt> if the expansion succeeded, otherwise <tt>false</tt>.
+</p>
+
+<p>
+<b>-18- Throws:</b> Nothing.
+</p>
+
+<h2><a name="Acknowledgments"></a>Acknowledgments</h2>
+
+<p>
+I'm afraid that I do not know who to credit with the design of the proposed
+versioning system.  My thanks go out to the C++ community in general for all of
+the help generously offered over the years.
+</p>
+
+</body>
+</html>

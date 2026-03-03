@@ -1,0 +1,585 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+
+<meta http-equiv="Content-Type" content="text/html;charset=US-ASCII">
+
+<style type="text/css">
+
+body {
+  color: #000000;
+  background-color: #FFFFFF;
+}
+
+del {
+  text-decoration: line-through;
+  color: #8B0040;
+}
+ins {
+  text-decoration: underline;
+  color: #005100;
+}
+
+p.example {
+  margin: 2em;
+}
+pre.example {
+  margin: 2em;
+}
+div.example {
+  margin: 2em;
+}
+
+code.extract {
+  background-color: #F5F6A2;
+}
+pre.extract {
+  margin: 2em;
+  background-color: #F5F6A2;
+  border: 1px solid #E1E28E;
+}
+
+p.function {
+}
+
+p.attribute {
+  text-indent: 3em;
+}
+
+blockquote.std {
+  color: #000000;
+  background-color: #F1F1F1;
+  border: 1px solid #D1D1D1;
+  padding: 0.5em;
+}
+
+blockquote.stddel {
+  text-decoration: line-through;
+  color: #000000;
+  background-color: #FFEBFF;
+  border: 1px solid #ECD7EC;
+  padding: 0.5em;
+}
+
+blockquote.stdins {
+  text-decoration: underline;
+  color: #000000;
+  background-color: #C8FFC8;
+  border: 1px solid #B3EBB3;
+  padding: 0.5em;
+}
+
+table {
+  border: 1px solid black;
+  border-spacing: 0px;
+  margin-left: auto;
+  margin-right: auto;
+}
+th {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.2em;
+  border: none;
+}
+td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.2em;
+  border: none;
+}
+
+</style>
+
+<title>C++ Concurrent Queues</title>
+</head>
+<body>
+<h1>C++ Concurrent Queues</h1>
+
+<p>
+ISO/IEC JTC1 SC22 WG21 N3353 = 12-0043 - 2012-01-14
+</p>
+
+<p>
+Lawrence Crowl, crowl@google.com, Lawrence@Crowl.org
+</p>
+
+<p>
+<a href="#Introduction">Introduction</a><br>
+<a href="#Conceptual">Conceptual Interface</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#basic_operations">Basic Operations</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#closed_queues">Closed Queues</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#empty_queue">Empty Queues</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#queue_names">Queue Names</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#iterators">Iterators</a><br>
+<a href="#Binary">Binary Interfaces</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#virtual">Virtual Interfaces</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#wrapper">Queue Wrapper</a><br>
+<a href="#Concrete">A Concrete Buffer Queue</a><br>
+<a href="#Managed">Managed Indirection</a><br>
+<a href="#synopsis">Synopsis</a><br>
+</p>
+
+
+<h2><a name="Introduction">Introduction</a></h2>
+
+<p>
+The existing <code>deque</code> in the standard library
+is an inherently sequential data structure.
+Its reference-returning element access operations
+cannot synchronize access to those elements
+with other queue operations.
+</p>
+
+<p>
+Concurrent pushes and pops on queues
+requires a different interface to the queues.
+</p>
+
+<h2><a name="Conceptual">Conceptual Interface</a></h2>
+
+<p>
+We provide basic queue operations,
+and then extend those operations to cover other important issues.
+</p>
+
+
+<h3><a name="basic_operations">Basic Operations</a></h3>
+
+<p>
+The essential solution to the problem
+is to shift to a value-based operations, 
+rather than reference-based operations.
+</p>
+
+<p>
+The waiting operations are:
+</p>
+
+<dl>
+
+<dt><code>void
+<var>queue</var>::push(const <var>Element</var>&amp;);</code></dt>
+<dd>
+<p>
+Push the <code><var>Element</var></code> onto the queue.
+If the operation cannot be completed immediately,
+wait until it can be completed.
+</p>
+</dd>
+
+<dt><code><var>Element</var> <var>queue</var>::pop();</code></dt>
+<dd>
+<p>
+Pop the <code><var>Element</var></code> from the queue.
+If the operation cannot be completed immediately,
+wait until it can be completed.
+</p>
+</dd>
+
+</dl>
+
+<p>
+Of course, there are operations to attempt a push or pop,
+and execute that operation only if it can be completed immediately.
+</p>
+
+<dl>
+
+<dt><code>queue_op_status
+<var>queue</var>::try_push(const <var>Element</var>&amp;);</code></dt>
+<dd>
+<p>
+Try to immediately push the <code><var>Element</var></code> onto the queue.
+If successful, return <code>queue_op_status::success</code>.
+If the queue was full, return <code>queue_op_status::full</code>.
+</p>
+</dd>
+
+<dt><code>queue_op_status
+<var>queue</var>::try_pop(<var>Element</var>&amp;);</code></dt>
+<dd>
+<p>
+Try to immediately pop the <code><var>Element</var></code> from the queue.
+If successful, return <code>queue_op_status::success</code>.
+If the queue was empty, return <code>queue_op_status::empty</code>.
+</p>
+</dd>
+
+</dl>
+
+<p>
+We intend to extend this interface to cover movable element types as well.
+</p>
+
+
+<h3><a name="closed_queues">Closed Queues</a></h3>
+
+<p>
+Threads using a queue for communication
+need some mechanism to signal when the queue is no longer needed.
+Rather than require an out-of-band signal,
+we chose to directly support such a signal in the queue itself,
+which considerably simplified coding.
+</p>
+
+<p>
+To achieve this signal, a thread may <dfn>close</dfn> a queue.
+Once closed, no new elements may be pushed onto the queue.
+Push operations on a closed queue
+will either return <code>queue_op_status::closed</code>
+(when they have a status return)
+or throw <code>queue_op_status::closed</code>
+(when they do not).
+Elements already on the queue may be popped off.
+When an queue is empty and closed,
+pop operations will either
+return <code>queue_op_status::closed</code>
+(when they have a status return)
+or throw <code>queue_op_status::closed</code>
+(when they do not).
+</p>
+
+<p>
+The operations are as follows.
+</p>
+
+<dl>
+
+<dt><code>void <var>queue</var>::close();</code></dt>
+<dd>
+<p>
+Close the queue.
+</p>
+</dd>
+
+<dt><code>bool <var>queue</var>::is_closed();</code></dt>
+<dd>
+<p>
+Return true iff the queue is closed.
+</p>
+</dd>
+
+<dt><code>queue_op_status
+<var>queue</var>::wait_push(const <var>Element</var>&amp;);</code></dt>
+<dd>
+<p>
+Push the <code><var>Element</var></code> onto the queue.
+If successful, return <code>queue_op_status::success</code>.
+If the queue was closed, return <code>queue_op_status::closed</code>.
+Otherwise, wait for either of the above to become true.
+</p>
+</dd>
+
+<dt><code>queue_op_status
+<var>queue</var>::wait_pop(<var>Element</var>&amp;);</code></dt>
+<dd>
+<p>
+Try to immediately pop the <code><var>Element</var></code> from the queue.
+If successful, return <code>queue_op_status::success</code>.
+If the queue was closed, return <code>queue_op_status::closed</code>.
+Otherwise, wait for either of the above to become true.
+</p>
+</dd>
+
+</dl>
+
+
+<h3><a name="empty_queue">Empty Queues</a></h3>
+
+<p>
+It is sometimes desirable to know if a queue is empty.
+</p>
+
+<dl>
+<dt><code>bool <var>queue</var>::is_empty();</code></dt>
+<dd>
+<p>
+Return true iff the queue is empty.
+</p>
+</dd>
+</dl>
+
+<p>
+This operation is useful only during intervals when
+the queue is known to not be subject to pushes and pops
+from other threads.
+Its primary use case is assertions on the state of the queue
+at the end if its lifetime.
+</p>
+
+
+<h3><a name="queue_names">Queue Names</a></h3>
+
+<p>
+It is sometimes desirable for queues to be able to identify themselves.
+This feature is particularly helpful for run-time diagnotics,
+particularly when 'ends' become dynamically passed around between threads.
+See <a href="#Managed">Managed Indirection</a> below.
+</p>
+
+<dl>
+<dt><code>const char* <var>queue</var>::name();</code></dt>
+<dd>
+<p>
+Return the name string provided as a parameter to queue construction.
+</p>
+</dd>
+</dl>
+
+
+<h3><a name="iterators">Iterators</a></h3>
+
+<p>
+In order to enable the use of existing algorithms with concurrent queues,
+they need to support iterators.
+Output iterators will push to a queue
+and input iterators will pop from a queue.
+Stronger forms of iterators
+are in general not possible with concurrent queues.
+</p>
+
+
+<h2><a name="Binary">Binary Interfaces</a></h2>
+
+<p>
+The standard library is template based,
+but it is often desirable to have a binary interface
+that shields the client from the concrete queue implementation.
+We achieve this capability with type erasure.
+</p>
+
+<h3><a name="virtual">Virtual Interfaces</a></h3>
+
+<p>
+We provide classes that
+collectively provide indirect access to concurrent queues.
+First, a template class <code>queue_front</code>
+provides push access to a queue.
+Second, a template class <code>queue_back</code>
+provides pop access to a queue.
+Third, a template class <code>queue_base</code>,
+derived from both <code>queue_front</code> and <code>queue_back</code>,
+provides full access to a queue.
+Operations on these classes are virtual.
+</p>
+
+<h3><a name="wrapper">Queue Wrapper</a></h3>
+
+<p>
+To obtain a <code>queue_base</code>
+from an non-virtual concurrent queue,
+use the <code>queue_wrap</code> function,
+which takes a pointer to the non-virtual queue and returns
+a pointer to an instance of the template class <code>queue_wrapper</code>,
+which is derived from <code>queue_base</code>.
+In addition, <code>queue_wrapper</code> takes a parameter
+that specifies whether or not ownership of the queue
+is to transfer to the <code>queue_base</code> object or not.
+</p>
+
+
+<h2><a name="Concrete">A Concrete Buffer Queue</a></h2>
+
+<p>
+We provide a concrete concurrent queue
+in the form of a fixed-size <code>buffer_queue</code>.
+It provides the conceptual operations above,
+construction of an empty queue,
+and construction of a queue from a pair of iterators.
+Constructors take a parameter
+specifying the maximum number of elements in the buffer.
+Constructors may also take a parameter
+specifying the name of the queue.
+If the name is not present, it defaults to the empty string.
+</p>
+
+<p>
+The <code>buffer_queue</code>
+deletes the default constructor, the copy constructor,
+and the copy assignment operator.
+We feel that their benefit might not justify their potential confusion.
+</p>
+
+
+<h2><a name="Managed">Managed Indirection</a></h2>
+
+<p>
+Long running servers may have the need to
+reconfigure the relationship between queues and threads.
+The ability to pass 'ends' of queues between threads
+with automatic memory management eases programming.
+</p>
+
+<p>
+To this end, we provide four template classes,
+<code>shared_queue_front</code>,
+<code>shared_queue_back</code>,
+<code>unique_queue_front</code>, and
+<code>unique_queue_back</code>,
+that are <code>shared_ptr</code>/<code>unique_ptr</code> analogs
+of <code>queue_front</code> and <code>queue_back</code>.
+Obtain a pair of these pointers from template functions
+<code>shared_queue_ends</code> and <code>unique_queue_ends</code>.
+</p>
+
+
+<h2><a name="synopsis">Synopsis</a></h2>
+
+<p>
+The synopsis of the binary/virtual interfaces are as follows.
+</p>
+
+<pre>
+<code>template &lt;typename Element&gt;
+class queue_front;
+
+template &lt;typename Element&gt;
+class queue_back;
+
+template &lt;typename Element&gt;
+class queue_front_iter
+:
+    public std::iterator&lt;std::output_iterator_tag, Element,
+                         ptrdiff_t, const Element*, const Element&amp;&gt;
+{
+  public:
+    queue_front_iter( queue_front&lt;Element&gt;* q);
+
+    queue_front_iter&amp; operator *();
+    queue_front_iter&amp; operator ++();
+    queue_front_iter&amp; operator ++(int);
+    queue_front_iter&amp; operator =(const Element&amp; value);
+
+    bool operator ==(const queue_front_iter&lt;Element&gt;&amp; y);
+    bool operator !=(const queue_front_iter&lt;Element&gt;&amp; y);
+};
+
+template &lt;typename Element&gt;
+class queue_back_iter
+:
+    public std::iterator&lt;std::input_iterator_tag, Element,
+                         ptrdiff_t, const Element*, const Element&amp;&gt;
+{
+  public:
+    class value
+    {
+      public:
+        value( Element v);
+        Element operator *() const;
+    };
+
+    queue_back_iter( queue_back&lt;Element&gt;* q);
+
+    const Element&amp; operator *() const;
+    const Element* operator -&gt;() const;
+    queue_back_iter&amp; operator ++();
+    value operator ++(int);
+
+    bool operator ==(const queue_back_iter&lt;Element&gt;&amp; y);
+    bool operator !=(const queue_back_iter&lt;Element&gt;&amp; y);
+};
+
+enum class queue_op_status
+{
+    success = 0,
+    empty,
+    full,
+    closed
+};
+
+template &lt;typename Element&gt;
+class queue_common
+{
+  public:
+    typedef Element&amp; reference;
+    typedef const Element&amp; const_reference;
+    typedef Element value_type;
+
+    virtual void close() = 0;
+    virtual bool is_closed() = 0;
+    virtual bool is_empty() = 0;
+
+    virtual const char* name() = 0;
+
+  protected:
+    virtual ~queue_common();
+};
+
+template &lt;typename Element&gt;
+class queue_front
+:
+    public virtual queue_common&lt;Element&gt;
+{
+  public:
+    typedef queue_front_iter&lt;Element&gt; iterator;
+    typedef const queue_front_iter&lt;Element&gt; const_iterator;
+
+    iterator begin();
+    iterator end();
+    const iterator cbegin();
+    const iterator cend();
+
+    virtual void push(const Element&amp; x) = 0;
+    virtual queue_op_status try_push(const Element&amp; x) = 0;
+    virtual queue_op_status wait_push(const Element&amp; x) = 0;
+};
+
+template &lt;typename Element&gt;
+class queue_back
+:
+    public virtual queue_common&lt;Element&gt;
+{
+  public:
+    typedef queue_back_iter&lt;Element&gt; iterator;
+    typedef queue_back_iter&lt;Element&gt; const_iterator;
+
+    iterator begin();
+    iterator end();
+    const iterator cbegin();
+    const iterator cend();
+
+    virtual Element pop() = 0;
+    virtual queue_op_status try_pop(Element&amp;) = 0;
+    virtual queue_op_status wait_pop(Element&amp;) = 0;
+};
+
+template &lt;typename Element&gt;
+class queue_base
+:
+    public virtual queue_front&lt;Element&gt;, public queue_back&lt;Element&gt;
+{
+  public:
+    virtual ~queue_base();
+};
+
+enum class ownership { transfer, retain };
+
+template &lt;typename Queue&gt;
+class queue_wrapper
+:
+    public virtual queue_base &lt;typename Queue::element_type&gt;
+{
+  public:
+    typedef typename Queue::element_type element_type;
+
+    queue_wrapper(Queue* arg, ownership xfer);
+    virtual ~queue_wrapper();
+    virtual void close();
+    virtual bool is_closed();
+    virtual bool is_empty();
+    virtual const char* name();
+    virtual void push(const element_type&amp; x);
+    virtual queue_op_status try_push(const element_type&amp; x);
+    virtual queue_op_status wait_push(const element_type&amp; x);
+    virtual element_type pop();
+    virtual queue_op_status try_pop(element_type&amp; x);
+    virtual queue_op_status wait_pop(element_type&amp; x);
+};
+
+template &lt;typename Queue&gt;
+queue_wrapper &lt;Queue&gt;* queue_wrap(Queue* arg, ownership xfer);</code>
+</pre>
+
+</body>
+</html>

@@ -1,0 +1,209 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+ "http://www.w3.org/TR/html4/strict.dtd">
+<html><head>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8">
+<title>N3040: Various threads issues in the library (LWG 1151)</title>
+</head>
+<body>
+<table summary="Identifying information for this document.">
+	<tr>
+                <th>Doc. No.:</th>
+                <td>WG21/N3040<br>
+		J16/10-0030</td>
+        </tr>
+        <tr>
+                <th>Date:</th>
+                <td>2010-2-14</td>
+        </tr>
+        <tr>
+                <th>Reply to:</th>
+                <td>Hans-J. Boehm</td>
+        </tr>
+        <tr>
+                <th>Phone:</th>
+                <td>+1-650-857-3406</td>
+        </tr>
+        <tr>
+                <th>Email:</th>
+                <td><a href="mailto:Hans.Boehm@hp.com">Hans.Boehm@hp.com</a></td>
+        </tr>
+</table>
+	
+<H1>N3040: Various threads issues in the library (LWG 1151)</h1>
+<P>
+LWG 1151 (US 63) points out that we had made only an incomplete attempt at
+dealing with threading issues throughout the library.  This is an attempt
+to improve matters by addressing as many of the remaining issues as we
+are currently aware of.  Based on experience with other languages,
+it seems likely that more issues will arise in this area.  But it appears
+to be getting harder to find the holes.
+
+This relies on discussions with many people, including Lawrence Crowl,
+Howard Hinnant, Peter Dimov, Nick Maclaren, and Paul McKenney.
+
+<H2>Communication through I/O</h2>
+<P>
+27.4p4 [iostreams.objects] currently specifies:
+
+<BLOCKQUOTE>
+<P>
+Concurrent access to a synchronized (27.5.2.4) standard iostream object&rsquo;s
+formatted and unformatted input (27.7.1.1) and output (27.7.2.1) functions or a
+standard C stream by multiple threads shall not result in a data race (1.10).
+[ Note: users must still synchronize concurrent use of these objects and streams
+by multiple threads if they wish to avoid interleaved characters. -end note ]
+</blockquote>
+<P>
+This raises the question of whether I can use iostreams to synchronize threads. 
+If I set <I>X</i> to 1 in thread 1, write to a stream <I>f</i>, and then read
+the written value, or one that depends on it in thread 2, is thread 2 guaranteed
+to see the write to <I>X</i> (or a later one)?
+<P>
+The above paragraph appears to apply only to the standard iostreams.
+Any other concurrent access already produces a data races, avoiding the
+question.  It is unclear to me that there is any way, strictly within
+the standard, of reading a value that was written to a standard iostream
+by the same process.  Hence I'm no longer convinced we need to say anything
+here.
+<P>
+If we do need to say something, I think we should be consistent with the
+"sequential consistency for data-race-free programs" rule.  Anything that
+does not introduce a race should ensure the appropriate happens-before
+relationship unless weaker memory ordering is explicitly specified.
+Thus, in the above example case, thread 2 should be guaranteed
+to see the write to <I>X</i>. 
+
+<H2>Additional non-modifying non-const member functions</h2>
+<P>
+A number of standard container member functions are treated as const
+for race detection, in spite of the fact that they are not const
+functions.  The <TT>at()</tt> function was inadvertently omitted from this
+list.  Edit 23.2.2p1 [container.requirements.dataraces] as follows:
+
+<BLOCKQUOTE>
+<P>
+For purposes of avoiding data races (17.6.4.8), implementations
+shall consider the following functions to be
+const: <TT>begin</tt>, <TT>end</tt>, <TT>rbegin</tt>, <TT>rend</tt>,
+<TT>front</tt>, <TT>back</tt>, <TT>data</tt>, <TT>find</tt>,
+<TT>lower_bound</tt>, <TT>upper_bound</tt>, <TT>equal_range</tt>,
+and, except in associative containers, <TT>operator[]</tt><INS>,
+and <TT>at</tt></ins>.
+</blockquote>
+
+<H2>More precise definition of "atomic"</h2>
+<P>
+The current spec is not very clear what it means for an "atomic
+read-modify-write" operation to be "atomic".  Clarification:
+<P>
+Before 29.3p11[atomics.order] add a paragraph:
+<BLOCKQUOTE>
+<P>
+Atomic read-modify-write operations shall always read the last value (in
+the modification order) written before the write associated with the
+read-modify-write operation.
+</blockquote>
+
+<H2>Iterator issues</h2>
+<P>
+The current draft is unclear when iterator operations may conflict with
+accesses to other iterators or to the underlying container.
+<P>
+Proposed resolution:
+<P>
+Add the following paragraph after 17.6.4.8p5 [res.on.data.races]:
+<BLOCKQUOTE>
+<P>
+For 
+iterators obtained from standard library containers and strings, iterator
+increment and decrement operators, and +, - +=, and -= operators, may
+accesses the underlying container, but shall not modify it.
+For <TT>istream_iterator</tt> and
+<TT>ostream_iterator</tt>, they may also modify the underlying streams.
+</blockquote>
+<P>
+There was a question about whether the race behavior of algorithms
+such as equal() is sufficiently described.  Equal() appears to be
+adequately described, since it uses InputIterators, implying that,
+according to 17.6.4.8p5 [res.on.data.races] it is not allowed to update
+anything through the iterators.  Unfortunately, many of the algorithms
+use ForwardIterators only for input, which means they are underspecified.
+An implementation currently could read and write back the objects
+referenced by the iterators, which is clearly unacceptable.
+<P>
+Add after 25.1p3 [algorithms.general]:
+
+<BLOCKQUOTE>
+<P>
+For purposes of determining the existence of data races, algorithms
+modify objects referenced through an iterator argument only when the
+specification requires such modification.
+</blockquote>
+<P>
+Howard Hinnant points out that this is not as clear as it should be
+without more context.  I'm also not sure that it is sufficient to
+deal with something like <TT>nth_element()</tt>, which has a specification that
+already seems less clear than I would like about what is being modified.
+
+<H2>Constructors and destructors of synchronization objects can race</h2>
+<P>
+This arose during discussion of LWG 1218.  LWG 1221 is also related.
+<P>
+I think we all agree that constructors and destructors of all library
+objects, including synchronization objects like mutexes, are not protected
+against data races.  It is the programmer's responsibility to ensure
+that construction happens before any other use, and any other use
+happens before destruction.
+<P>
+The one exception here seem to be the somewhat more liberal condition
+variable rules, which allow a wait to complete after a condition variable
+has been destroyed.
+<P>
+There seems to be some agreement that the standard mostly says all of this
+already.  In particular, the object lifetime rules in 3.8 seem to
+essentially state this, assuming 3.8 is interpreted as referring to
+happens before (1.10) ordering.  Unfortunately, that's not as clear
+as it should be.  I suggest adding the following at the
+beginning of 3.8:
+
+<BLOCKQUOTE>
+<P>
+All statements about the ordering of evaluations in this section,
+using words like "before", "after", and "during", refer to the
+happens before order defined in 1.10[intro.multithread].  [Note: We
+ignore situations in which evaluations are unordered by happens
+before, since these require a data race (1.10)[intro.multithread], which already
+results in undefined behavior --end note]
+</blockquote>
+<P>
+It would also help to add the following to as a second paragraph to
+17.6.3.10 [res.on.objects]:
+<BLOCKQUOTE>
+<P>
+[Note:
+In particular, the program shall ensure that completion of the constructor
+for any library-defined class happens before any other member function
+invocation on that class object, and
+unless otherwise specified, the program shall ensure that completion of
+any member function invocation, other than destruction, on a class object
+happens before destruction of that object.  This applies even
+to objects, such as mutexes, intended for thread synchronization. -- end note]
+</blockquote>
+<P>
+I believe condition variables are the only intended exception to this.
+However, the current precondition, as modified by LWG 1221, does not
+make this clear.  It states "There shall be no thread blocked on *this",
+which is entirely redundant with the default lifetime rules, which
+would require that any wait calls happen before destruction.  I
+suggest adding after 30.5.1p4 [thread.condition.condvar], whether
+or not updated by LWG1221, and after 30.5.2p3:
+
+<BLOCKQUOTE>
+<P>
+This relaxes the usual rules, which would have
+required all wait calls to happen before destruction.  Only the
+notifications to unblock the wait must happen before destruction.
+</blockquote>
+
+</body>
+</html>

@@ -1,0 +1,478 @@
+<html>
+<head>
+  <title>Concurrency Modifications to Basic String</title>
+  <base href="../../papers/2008/" />
+  <meta http-equiv="content-type" content="text/html; charset=us-ascii" />
+  <style type="text/css">
+    /* <![CDATA[*/
+      address {text-align: right}
+      p {text-align:justify}
+      li {text-align:justify}
+      th {text-align:left}
+      ins {background-color:#FFFF99}
+      del {background-color:#FF9999}
+   /* ]]> */
+  </style>
+</head>
+
+<body>
+<h1>Concurrency Modifications to Basic String</h1>
+
+<p>
+ISO/IEC JTC1 SC22 WG21 N2668 = 08-0178 - 2008-06-12
+</p>
+
+<p>
+Alisdair Meredith,
+<a href="mailto:alisdair.meredith@codegear.com">alisdair.meredith@codegear.com</a>
+<br />
+Hans Boehm, 
+<a href="mailto:Hans.Boehm@hp.com">Hans.Boehm@hp.com</a>
+<br />
+Lawrence Crowl,
+<a href="mailto:Lawrence@Crowl.org">Lawrence@Crowl.org</a>,
+<a href="mailto:crowl@google.com">crowl@google.com</a>
+<br />
+Peter Dimov,
+<a href="mailto:pdimov@pdimov.com">pdimov@pdimov.com</a>
+<br />
+Daniel Kr&uuml;gler,
+<a href="mailto:daniel.kruegler@googlemail.com">daniel.kruegler@googlemail.com</a>
+</p>
+
+<p>
+This paper is a modification of
+<a href="../../papers/2008/n2647.html">
+N2647 = 08-0157 - 2008-05-16</a>.
+It reflects the changes directed by the concurrency/library subgroup.
+</p>
+<ul>
+<li>
+Adopt the strong proposal.
+</li>
+<li>
+Remove the adjunct proposals.
+(The subgroup felt these modifications were not concurrency related
+and therefore should be delt with as separate issues.)
+</li>
+</ul>
+
+<h2>Problem</h2>
+
+<p>
+The current definition of <code>basic_string</code>
+allows only very limited concurrent access to strings.
+Such limited concurrency
+will inhibit performance in multi-threaded applications.
+</p>
+
+<h2>Analysis</h2>
+
+<p>
+We categorize string operations as follows:
+</p>
+
+<dl>
+<dt>construction and destruction</dt>
+<dd>
+<p>
+These operations must be single-threaded
+and define the temporal bounds of all other operations on an object.
+However, copy construction may induce a shared representation
+on the argument string in copy-on-write implementations.
+</p>
+</dd>
+
+<dt>mutating</dt>
+<dd>
+<p>
+These operations will (probably) change the state of a string variable
+regardless of the implementation.
+Furthermore, some may introduce a shared representation
+on the argument string in copy-on-write implementations.
+</p>
+
+<blockquote>
+<code>
+operator=
+resize
+reserve
+clear
+operator+=
+append
+assign
+push_back
+insert
+erase
+pop_back
+replace
+swap
+operator&lt;&lt;
+getline
+</code>
+<br>
+(Any library function that accepts a string by non-const reference.)
+</blockquote>
+</dd>
+
+<dt>iterators and element access</dt>
+<dd>
+<p>
+These operations provide pointers or references
+to the internal string representation.
+</p>
+
+<blockquote>
+<code>
+begin
+end
+rbegin
+rend
+operator[]
+at
+front
+back
+</code>
+</blockquote>
+
+<dl>
+<dt>unsharing</dt>
+<dd>
+<p>
+For non-const strings,
+iterator and element access operations
+may require copy-on-write implementation to 'unshare' the string
+to enable write access to the referenced characters.
+</p>
+
+<p>
+Furthermore, the following operations may also require 'unsharing'
+the string data to provide contiguous null-terminated character arrays.
+</p>
+
+<blockquote>
+<code>
+c_str
+data
+</code>
+</blockquote>
+</dd>
+
+<dt>sharing neutral</dt>
+<dd>
+<p>
+For const strings,
+iterators and element access operations
+do not inhibit concurrent accesses,
+nor do references through their results.
+</p>
+</dd>
+</dl>
+</dd>
+</dl>
+
+<p>
+Iterators and references may be invalidated by:
+</p>
+<ol>
+<li>'mutating' operations and</li>
+<li>the first 'unsharing' operation following a 'mutating' operation.</li>
+</ol>
+
+<p>
+Since only the first 'unsharing' operation following a 'mutating'
+must make the string not sharable,
+further reference or iterator creations cannot invalidate anything.
+</p>
+
+<p>
+Thus the only real anomaly seems to be that
+creating the initial non-const reference
+invalidates previously generated const references.
+This anomaly has unfortunate consequences.
+Typically, when <code>v</code> offers "container thread safety", we can do
+</p>
+
+<blockquote><pre><code>#pragma omp parallel for
+for( size_t i = 0, n = v.size(); i &lt; n; ++i ) {
+    v[i] = 0;
+}</code></pre></blockquote>
+
+<p>
+However, for a basic_string v, we must insert
+<code>v[0];</code>
+before the pragma to render the code correct.
+Such a subtlety is difficult to teach and difficult to review.
+</p>
+
+<p>
+Similarly, we would expect to be able to write <code>s[0]+s[1]</code> to
+add the first two characters of a string.  And indeed this is correct if
+either <code>s</code> is a <code>string</code> or <code>const string</code>.
+However similar examples become incorrect if only one access to <code>s
+</code> is as a <code>const string</code>, and the other access is through 
+a non-const reference to the same string.  In that case, the second 
+<code>operator[]</code> invocation may invalidate the first character
+reference before the character value can be obtained.
+</p>
+
+<p>
+As these examples illustrate, this issue is not completely new with
+the introduction of threads, but it is aggravated by it.
+</p>
+
+<p>
+There are also performance implications to the current design.
+In a copy-on-write implementation,
+</p>
+
+<blockquote><pre><code>const string empty("");
+vector&lt;string&gt; v;
+
+#pragma omp parallel for
+for( size_t i = 0, n = v.size(); i &lt; n; ++i ) {
+    v[i] = empty;
+}</code></pre></blockquote>
+
+<p>
+may run very slowly,
+since each iteration writes to the representation of empty,
+and thus is likely to generate a conflict cache miss.
+This issue may be secondary,
+but it argues that it is really hard to write efficient code
+if you do not know whether you have a copy-on-write implementation or not.
+</p>
+
+<h2>General Clarification</h2>
+
+<p>
+Any operation that may change the size of a string,
+or any standard library function that accepts a string by non-const reference,
+may potentially write to the string representation
+and thus is not suitable for concurrent operation.
+</p>
+
+<p>
+The goal is that any operation that returns an internal reference or pointer
+can be called concurrently safely, but any write through the reference or
+pointer is not safe.  However, this is not possible with a shared-buffer
+implementation, such as the classic reference counted variant.
+</p>
+
+<h2>Proposal</h2>
+
+<p>
+We propose to make all iterator and element access operations
+safely concurrently executable.
+</p>
+
+<p>
+We are increasing the stability of operations even in sequential code.
+</p>
+
+<p>
+This change effectively disallows copy-on-write implementations.
+For those implementations using copy-on-write implementations,
+this change would also change the Application Binary Interface (ABI).
+The following table
+indicates whether or not the implementations use copy-on-write.
+Entries marked with a '?' are "best guess" and not confirmed.
+In some cases,
+it has not been verified
+that entries apply to all libraries shipped by a vendor.
+Only one vendor is known to have a problem with this proposal.
+</p>
+
+<center>
+<table>
+<tbody>
+<tr><th>compiler</th><th>library</th><th>'98</th><th>'03</th><th>'0x</th></tr>
+<tr><td>Apple&nbsp;</td><td>libstdc++&nbsp;</td><td>yes&nbsp;</td><td>yes&nbsp;</td><td>no&nbsp;</td></tr>
+<tr><td>CodeWarrior&nbsp;</td><td>CodeWarrior&nbsp;</td><td>yes&nbsp;</td><td>no&nbsp;</td><td>no?&nbsp;</td></tr>
+<tr><td>Comeau&nbsp;</td><td>Dinkumware&nbsp;</td><td>yes&nbsp;</td><td>no&nbsp;</td><td>no&nbsp;</td></tr>
+<tr><td>Comeau&nbsp;</td><td>STLPort&nbsp;</td><td>no?&nbsp;</td><td>no?&nbsp;</td><td>no?&nbsp;</td></tr>
+<tr><td>GNU&nbsp;</td><td>libstdc++&nbsp;</td><td>yes&nbsp;</td><td>yes&nbsp;</td><td>no&nbsp;</td></tr>
+<tr><td>HP&nbsp;</td><td>RW&nbsp;</td><td>yes&nbsp;</td><td>yes&nbsp;</td><td>yes?&nbsp;</td></tr>
+<tr><td>IBM&nbsp;</td><td>Dinkumware&nbsp;</td><td>1 thread?&nbsp;</td><td>1 thread&nbsp;</td><td>no&nbsp;</td></tr>
+<tr><td>Intel/MS&nbsp;</td><td>Dinkumware&nbsp;</td><td>yes&nbsp;</td><td>no&nbsp;</td><td>no&nbsp;</td></tr>
+<tr><td>Intel/Linux&nbsp;</td><td>libstdc++&nbsp;</td><td>yes&nbsp;</td><td>yes&nbsp;</td><td>no&nbsp;</td></tr>
+<tr><td>Microsoft&nbsp;</td><td>Dinkumware&nbsp;</td><td>yes&nbsp;</td><td>no&nbsp;</td><td>no&nbsp;</td></tr>
+<tr><td>Sun&nbsp;</td><td>libCstd/RW&nbsp;</td><td>yes&nbsp;</td><td>yes&nbsp;</td><td>no&nbsp;</td></tr>
+<tr><td>Sun&nbsp;</td><td>STLport&nbsp;</td><td>no&nbsp;</td><td>no&nbsp;</td><td>no&nbsp;</td></tr>
+</tbody>
+</table>
+</center>
+
+<h3>21.3.1 basic_string general requirements [string.require]</h3>
+
+<p>In paragraph 4, edit</p>
+
+<blockquote>
+<p>
+References, pointers, and iterators
+referring to the elements of a <code>basic_string</code> sequence
+may be invalidated by the following uses
+of that <code>basic_string</code> object:
+</p>
+<ul>
+<li>
+<ins>
+As an argument to any standard library function taking a reference to non-
+const <code>basic_string</code> as an argument
+[<i>Footnote:</i>
+For example as an argument to non-member functions
+<code>swap()</code>(21.3.8.8), <code>operator&gt;&gt;()</code> (21.3.8.9), and
+<code>getline()</code> (21.3.8.9),
+or as an argument to <code>basic_string::swap()</code>.
+&mdash;<i>end footnote</i>]
+</ins>
+</li>
+<li>
+<del>
+As an argument to non-member functions
+<code>swap()</code> (21.3.8.8),
+<code>operator&gt;&gt;()</code> (21.3.8.9), and
+<code>getline()</code> (21.3.8.9).
+</del>
+</li>
+<li>
+<del>
+As an argument to <code>basic_string::swap()</code>.
+</del>
+</li>
+<li>
+<del>
+Calling <code>data()</code> and <code>c_str()</code> member functions.
+</del>
+</li>
+<li>
+Calling non-const member functions,
+except <code>operator[]</code>, <code>at</code>,
+<ins><code>front</code>, <code>back</code>,</ins>
+<code>begin</code>, <code>rbegin</code>,
+<code>end</code>, and <code>rend</code>.
+</li>
+<li>
+<del>
+Following construction or any of the above uses,
+except the forms of <code>insert</code> and <code>erase</code>
+that return iterators,
+the first call to non-const member functions
+<code>operator[]</code>, <code>at</code>,
+<code>begin</code>, <code>rbegin</code>,
+<code>end</code>, or <code>rend</code>.
+</del>
+</li>
+</blockquote>
+
+<p>
+Delete paragraph 5.
+</p>
+
+<blockquote>
+<p>
+<del>
+[<i>Note:</i>
+These rules are formulated to allow, but not require,
+a reference counted implementation.
+A reference counted implementation
+must have the same semantics as a non-reference counted implementation.
+[ <i>Example:</i>
+</del>
+</p>
+<blockquote><pre>
+<del>string s1("abc");
+string::iterator i = s1.begin();
+string s2 = s1;
+*i = 'a'; // Must modify only s1</del>
+</pre></blockquote>
+<p>
+<del>
+&mdash;<i>end example</i>]
+&mdash;<i>end note</i>]
+</del>
+</p>
+</blockquote>
+
+
+<h3>21.3.7.1 basic_string accessors [string.accessors]</h3>
+
+<p>
+Edit paragraphs 1 through 4 as follows.
+</p>
+
+<blockquote>
+
+<p>
+<code>const charT* c_str() const;</code>
+<br>
+<ins><code>const charT* data() const;</code></ins>
+</p>
+
+<blockquote>
+
+<p>
+<i>Returns:</i>
+A pointer to the initial element of
+an array of length <code>size() + 1</code>
+whose first <code>size()</code> elements
+equal the corresponding elements of the string controlled by <code>*this</code>
+and whose last element
+is a null character specified by <code>charT()</code>.
+</p>
+
+<p>
+<del>
+<i>Requires:</i>
+The program shall not alter any of the values stored in the array.
+Nor shall the program treat the returned value as a valid pointer value
+after any subsequent call to a non-const member function
+of the class <code>basic_string</code> that designates the same object as this.
+</del>
+</p>
+</blockquote>
+
+<p>
+<del>
+const charT* data() const;
+</del>
+</p>
+
+<blockquote>
+<del>
+<p>
+<i>Returns:</i>
+If <code>size()</code> is nonzero,
+the member returns a pointer to the initial element of an array
+whose first <code>size()</code> elements
+equal the corresponding elements of the string controlled by <code>*this</code>.
+If <code>size()</code> is zero,
+the member returns a non-null pointer
+that is copyable and can have zero added to it.
+</p>
+</del>
+
+<p>
+<i>Requires:</i>
+The program shall not alter any of the values stored in the character array.
+<del>Nor shall the program treat the returned value as a valid pointer value
+after any subsequent call
+to a non-const member function of <code>basic_string</code>
+that designates the same object as <code>this</code>.</del>
+</p>
+</blockquote>
+
+</blockquote>
+
+<h2>Recovering the Loss</h2>
+
+<p>
+The largest potential loss in performance due to a switch away from
+copy-on-write implementations is the increased consumption of memory for
+applications with very large read-mostly strings. However, we believe that for
+those applications ropes are a better technical solution, and recommend a rope
+proposal be considered for inclusion in Library TR2.
+</p>
+
+</body>
+</html>

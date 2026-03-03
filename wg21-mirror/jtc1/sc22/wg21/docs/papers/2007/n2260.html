@@ -1,0 +1,684 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+"http://www.w3.org/TR/html4/strict.dtd">
+<html><head>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8" >
+<title>C++ Data-Dependency Ordering</title>
+</head><body>
+<h1>C++ Data-Dependency Ordering</h1>
+
+<p>ISO/IEC JTC1 SC22 WG21 N2260 = 07-0120 - 2007-05-06
+
+</p><p>Paul E. McKenney, paulmck@linux.vnet.ibm.com
+
+</p><h2>Introduction</h2>
+
+<p> This document presents an interface and minimal implementation
+for preservation of data dependency ordering to expedite access to
+dynamic linked data structures that are read frequently and seldom modified.
+<P>
+This proposal is in two parts:
+<OL>
+<LI>	Interface and minimal implementation to preserve data dependency
+	ordering within the confines of a single function body.
+<LI>	Interface and minimal implementation to preserve data dependency
+	ordering across multiple functions, possibly in multiple
+	compilation units.
+	This is accomplished by annotating arguments and/or
+	return values of the functions involved.
+</OL>
+<P>
+This proposal does not affect library functions.
+Changes to library functions (for example, annotating the Vector templates)
+were considered,
+but rejected because current uses of data dependency ordering are restricted
+to basic operations such as indirection, field selection, array access,
+and casting.
+Longer term experience might indicate that a future
+proposal affecting library classes is warranted, however, there is
+insufficient motivation for such a proposal at this time.
+<P>
+This proposal is expected to have minimal affect to strongly ordered
+machines (e.g., x86) and on weakly ordered machines that do not
+support data dependency ordering (e.g., Alpha).
+The major burden of this proposal would fall on weakly ordered machines
+that order data-dependent operations, such as ARM, Itanium, and PowerPC.
+Even for these architectures, a fully conforming compiler could use
+the same approach as weakly ordered machines that do not support
+data dependency ordering, albeit at a performance penalty.
+<P>
+This proposal enforces only data dependencies, not control dependencies.
+If experience indicates that control dependencies also need to be
+enforced, a separate proposal will be put forward for them.
+<P>
+This proposal is based on
+<A HREF="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2153.pdf">N2153</A>
+by Silvera, Wong, McKenney, and Blainey, on
+<A HREF="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2176.html">N2176</A>
+by Hans Boehm, on
+<A HREF="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2195.html">N2195</A>,
+by Peter Dimov,
+discussions on the
+cpp-threads list, and on discussions
+in the concurrency workgroup at the 2007 Oxford meeting.
+
+</p><h3>Rationale</h3>
+
+<p> 
+
+</p><dl>
+
+<dt>Low-overhead access to read-mostly concurrent data structures</dt>
+<dd> Read-mostly concurrent data structures are quite common both in
+operating-system kernels and in server-style applications.
+Examples include data structures representing outside state
+(such as routing tables), software configuration (modules currently
+loaded), hardware configuration (storage device currently in use),
+and security policies (access control permissions, firewall rules).
+Read-to-write ratios well in excess of a billion to one are quite
+common.
+<P>
+In such cases, use of data dependency ordering has resulted in
+order-of-magnitude speedups and similar improvements in scalability.
+</dd>
+
+<dt>Deterministic access to read-mostly concurrent data structures</dt>
+<dd> Maintaining data dependency ordering enables readers to access
+shared data structures in O(1) time, without the need for locking or for the
+retries that are often required for lock-free data structure algorithms.
+</dd>
+
+</dl>
+
+<p>A simplified example use of data dependency ordering found within
+the Linux kernel looks something like the following:
+<pre>
+struct foo {
+	int a;
+	struct foo *next;
+};
+struct foo *head = NULL;
+
+void insert(int a)
+{
+	struct foo *p = kmalloc(sizeof(*p), GFP_KERNEL); /* cannot fail */
+
+	spin_lock(&amp;mylock);
+	p->a = 1;
+	p->next = head->next;
+	smp_wmb();  /* Can be thought of as a store-release fence. */
+	head->next = p;
+	spin_unlock(&amp;mylock);
+}
+
+int getfirstval(void)
+{
+	int retval;
+
+	q = rcu_dereference(head);  /* see discussion below. */
+	assert(q != NULL);
+	retval = q->a;
+	return retval;
+}
+</pre>
+<P>
+More elaborate examples are described in a
+<A HREF="http://wiki.dinkumware.com/twiki/pub/Wg21oxford/EvolutionWorkingGroup/ParallelCExperience.2007.04.17b.pdf">presentation at the Oxford 2007 meeting</A>
+describing use cases from the Linux kernel beginning on slide 37,
+including traversal of multiple levels of pointers, indexing arrays,
+and casts.
+
+The effect of the above code is to return the value at the head of the
+list with little more (or even no more) overhead than would be required
+if the list were immutable, but while still allowing updates.
+The <TT>rcu_dereference()</TT> API used in <TT>getfirstval()</TT>
+can be implemented in different ways, optimized
+for different classes of machines:
+<OL>
+<LI>	On machines with strong memory ordering (e.g., TSO),
+	<TT>rcu_dereference()</TT>
+	simply prevents the compiler from performing optimizations that
+	would order operations with data dependencies on <TT>q</TT>
+	before the load from <TT>head</TT>.
+	In this case, the code relies on the strong ordering to
+	prevent the assignment to <TT>retval</TT> from seeing the
+	pre-initialized version of the <TT>->a</TT> field.
+<LI>	On machines with weak memory ordering, but that enforce
+	ordering based on data dependencies, <TT>rcu_dereference()</TT>
+	again prevents the compiler from performing optimizations that
+	would order operations with data dependencies on <TT>q</TT>
+	before the load from <TT>head</TT>.
+	However,
+	in this case, the code relies on the the machine's enforcement
+	of data-dependency ordering to
+	prevent the assignment to <TT>retval</TT> from seeing the
+	pre-initialized version of the <TT>->a</TT> field.
+<LI>	On other machines, namely those with weak memory ordering, but
+	with no enforcement of ordering based on data dependencies,
+	<TT>rcu_dereference()</TT> is promoted to a load-acquire
+	operation.
+	Because this prevents <I>all</I> subsequent memory references from
+	being reordered with the load from <TT>head</TT>, it must
+	prevent any subsequent operations depending on <TT>q</TT>
+	from being reordered with the load from <TT>head</TT>.
+<LI>	For completeness, any compiler that avoids optimizations that
+	break dependency chains may simply ignore these primitives.
+</OL>
+<P>
+These machines are not well-supported by any of the prior proposals
+(<A HREF="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2153.pdf">N2153</A>
+presents the need, but not a concrete proposal
+to satisfy this need), and is the subject of the remainder of this document.
+
+<h3>Prior Approaches</h3>
+
+<P>
+<A HREF="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2145.html">N2145</A>
+would require that these machines
+implement <TT>rcu_dereference()</TT> using either an acquire fence or
+a load-acquire.
+In both cases, this prohibits useful classes of compiler optimizations
+that involve code motion that does not break dependencies on the
+load from <TT>head</TT>.
+Worse yet, this requires emitting a heavyweight memory barrier for
+the second class of machines, which can result in unacceptable performance
+degradation.
+<P>
+In
+<A HREF="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2195.html">N2195</A>,
+Peter Dimov proposes an <TT>atomic_load_address()</TT>
+template function that protects a single level of indirection.
+Although this suffices for the very simple example above, it does
+not handle other examples given in a
+<A HREF="http://wiki.dinkumware.com/twiki/pub/Wg21oxford/EvolutionWorkingGroup/ParallelCExperience.2007.04.17b.pdf">presentation at the Oxford 2007 meeting</A>
+describing use cases from the Linux kernel (beginning on slide 37).
+In particular,
+<A HREF="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2195.html">N2195</A>,
+does not support data dependencies that traverse
+multiple levels of indirection nor that traverse array accesses.
+
+
+<h3>Dependency Chains</h3>
+
+<P>
+This proposal requires the programmer to explicitly mark
+the heads of data dependency chains,
+so that the head of a data dependency-chain is an explicitly marked
+load of a pointer or an integer from a shared variable.
+The value loaded is within the data-dependency chain.
+Any value produced by a computation that takes as input a value
+within the data-dependency chain is itself within the data-dependency
+chain, but only if the computation does not cross an unannotated
+function-call argument or function-return boundary.
+<P>
+Given any subsequent load, store, or read-modify-write
+operation by that same thread whose address is taken from the
+data-dependency chain, that operation is said to
+have a data dependency on the head of the data-dependency chain.
+In the case of load and read-modify-write operations, the value
+returned by the operation is within the data-dependency chain.
+In the case of store and read-modify-write operations, the value
+returned by subsequent access to the location stored by this
+same thread is also within the data-dependency chain, but only
+if there no intervening unannotated function-call arguments
+or function-return boundaries have been encountered in the meantime.
+<P>
+The compiler is required to build data-dependency chains before doing
+any optimizations.
+<I>An alternative proposal in
+<A HREF="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2195.html">N2195</A>,
+introduces the notion of dynamic dependencies.
+Use of dynamic dependencies would permit the data-dependency chains to
+be scanned after performing those optimizations that do not break
+dynamic data-dependency chains.
+</I>
+<P>
+A dependency chain is thus ended by the death of the register
+or variable containing a value within the data-dependency chain,
+or when the value flows through an unannotated function argument
+or is passed back as an unannotated function return value.
+<P>
+Compilers can avoid tracing dependency chains by emitting a load-acquire
+for the head of the dependency chain.
+As noted earlier, this can be a reasonable solution
+for strongly ordered machines
+in which a load-acquire operation emits no code, but merely suppresses
+code-motion operations that would reorder subsequent code before
+the head of the dependency chain.
+It is also appropriate for weakly ordered machines that do not
+order data dependencies.
+Compilers can also avoid tracing dependency chains by avoiding those
+optimizations that break these chains.
+<P>
+The pointer or integer at
+the head of the dependency chain must be such that loads and
+stores to it are atomic.
+Some implementations may provide such atomicity given proper
+alignment.
+Other implementations may require that the pointer or integer
+at the head of the dependency chain be declared to be atomic as described in
+<A HREF="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2145.html">N2145</A>.
+This document assumes that the load at the head of the dependency
+chain is an atomic as described in
+<A HREF="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2145.html">N2145</A>.
+
+<h3>Current Approach</h3>
+
+<P>
+As noted earlier, this proposal is in two parts:
+
+<OL>
+<LI>	Preserving dependency ordering within the
+	confines of a single function body.
+<LI>	Preserving dependency
+	ordering across multiple functions, possibly in multiple
+	compilation units.
+</OL>
+
+<P>
+These are addressed in the following sections.
+
+<h3>Single Function Body</h3>
+
+<P>
+The head of each ordered data dependency chain must be marked by the
+programmer.
+The API suggested in the
+<A HREF="http://wiki.dinkumware.com/twiki/pub/Wg21oxford/EvolutionWorkingGroup/ParallelCExperience.2007.04.17b.pdf">presentation at the Oxford 2007 meeting</A>
+is as follows:
+<pre>
+dependence_propagate T *load_dependent_acquire(T **p);
+void store_dependent_release(T **p, T *newval);
+</pre>
+<P>
+
+These are described below, and the <TT>dependence_propagate</TT> keyword
+is described in the following section describing propagating dependencies
+across function boundaries.
+Again, this document assumes that <code>T</code> is of atomic type
+as defined by
+<A HREF="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2145.html">N2145</A>.
+
+<pre>
+dependence_propagate T *load_dependent_acquire(T **p);
+</pre>
+<P>
+
+<I>Returns:</I>  <code>*p</code>.
+<P>
+<I>Constraint:</I>  Acquire semantics only with respect to subsequent
+	dependent operations.
+	Note that this is similar to the <TT>atomic_load_address()</TT>
+	operation in
+	<A HREF="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2195.html">N2195</A>.
+	Note also that this function might well be implemented in
+	conjunction with an attribute, so that compilers for
+	architectures for which dependency ordering is not relevant
+	can simply ignore the attribute.
+
+<pre>
+void store_dependent_release(T **p, T *newval);
+</pre>
+<P>
+
+<I>Effects:</I>  <code>*p = newval</code>.
+<P>
+<I>Constraint:</I>  Release only with respect to earlier accesses dependent
+	on <code>newval</code>.
+	Many implementations might choose to implement this as a
+	store-release operation.
+
+<h3>Multiple Functions</h3>
+
+<P>
+As noted in the previous section, a dependency chain terminates
+when a value is passed into or returned from an unannotated function.
+If a given function's return value is annotated, then dependency chains
+survive being returned from that function.
+If a particular argument of a given function is annotated, then
+dependency chains survive being passed in via that argument.
+If the function has a prototype, then the annotation must be applied
+to the prototype as well as to the function definition itself.
+<P>
+This annotation is expected to be
+implemented as an attribute value for the attribute facility being
+proposed for standardization, however, for expository purposes, it is
+abbreviated as "dependence_propagate".
+<P>
+For example, the following propagates dependencies through argument
+<code>y</code> to the return value:
+<pre>
+dependence_propagate int *f(dependence_propagate int *y)
+{
+        return y;
+}
+</pre>
+<P>
+The following example propagates dependency chains in, but not out:
+<pre>
+int f(dependence_propagate int *y)
+{
+        return *y;
+}
+</pre>
+<P>
+The following propagates dependency chains out, but not in:
+<pre>
+dependence_propagate struct foo *f(int i)
+{
+        return &amp;foo_head[i];
+}
+</pre>
+<P>
+Finally, the following does not propagate dependency chains at all:
+<pre>
+template&lt;T> T *kill_dependency_chain(T *y)
+{
+        return y;
+}
+</pre>
+<P>
+One possible expansion of <TT>dependence_propagate</TT> might be:
+<pre>
+[[dependence_propagate]]
+</pre>
+<P>
+This is to be the subject of N2236, on which Michael Wong is working.
+
+
+<h3>Minimal Implementation</h3>
+
+<P>
+Minimal implementations of <code>load_dependent_acquire()</code> and
+<code>store_dependent_release()</code> are as follows:
+<pre>
+dependency_propagate T *load_dependent_acquire(T **p) {
+	return atomic_load_acquire(p);
+}
+
+void store_dependent_release(T **p, T *newval) {
+	atomic_store_release(p, newval);
+}
+</pre>
+<P>
+The <code>dependency_propagate</code> annotations may be completely
+ignored in this minimal implementation.
+<P>
+This implementation of <code>load_dependent_acquire()</code>
+is likely "good and sufficient" for strongly ordered machines
+(for example, IBM mainframe, MIPS, and SPARC TSO) and for weakly
+ordered machines that do not enforce data dependency ordering
+(for example, Alpha).
+A very similar implementation has been in use in the Linux kernel
+for Alpha for several years.
+Weakly ordered machines that enforce data dependency ordering
+(ARM, Itanium, and PowerPC) will experence memory-fence overhead
+that will be intolerable in many cases.
+
+
+<h3>Behavior on Dependency Examples</h3>
+
+<P>
+In
+<A HREF="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2176.html">N2176</A>,
+Hans Boehm lists a number of example optimizations that can break
+dependency chains, which are discussed in the following sections.
+
+<h4>Example 1</h4><P>
+
+<A HREF="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2176.html">N2176</A>
+example code:
+<pre>
+r1 = x.load_relaxed();
+r2 = *r1;
+</pre><P>
+
+Recoding to this proposal's API:
+<pre>
+r1 = load_dependent_acquire(&amp;x);
+r2 = *r1;
+</pre><P>
+
+Assuming that <code>x</code> is an atomic, the
+<code>load_dependent_acquire</code> will form the head of a dependency
+chain.
+Because there are no function calls, the dependency chain extends to the
+indirection through r1, so the dependency is ordered.
+
+<h4>Example 2</h4><P>
+
+<A HREF="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2176.html">N2176</A>
+example code:
+<pre>
+r1 = x.load_relaxed();
+r3 = &amp;a + r1 - r1;
+r2 = *r3;
+</pre><P>
+
+This could legitimately be optimized to the following, breaking
+the dependency chain:
+<pre>
+r1 = x.load_relaxed();
+r3 = &amp;a;
+r2 = *r3;
+</pre><P>
+
+However, recoding to this proposal's API:
+<pre>
+r1 = load_dependent_acquire(&amp;x);
+r3 = &amp;a + r1 - r1;
+r2 = *r3;
+</pre><P>
+
+Again assuming that <code>x</code> is an atomic, the
+<code>load_dependent_acquire</code> will form the head of a dependency
+chain.
+Because there are no function calls, the dependency chain extends to the
+indirection through r1, so the dependency is ordered.
+Because the dependency chains must be traced prior to optimization,
+if the optimization is performed, a countervailing memory fence
+or artificial data dependency must be inserted.
+
+
+<h4>Example 3</h4><P>
+
+<A HREF="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2176.html">N2176</A>
+example code:
+<pre>
+r1 = x.load_relaxed();
+if (r1 == 0)
+        r2 = *r1;
+else
+	r2 = *(r1 + 1);
+</pre><P>
+
+Recoding to this proposal's API:
+<pre>
+r1 = load_dependent_acquire(&amp;x);
+if (r1 == 0)
+        r2 = *r1;
+else
+	r2 = *(r1 + 1);
+</pre><P>
+
+Assuming that <code>x</code> is an atomic, the
+<code>load_dependent_acquire</code> will form the head of a dependency
+chain.
+Because there are no function calls, the dependency chain extends to the
+indirection through r1, so the dependency is ordered.
+
+
+<h4>Example 3'</h4><P>
+
+<A HREF="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2176.html">N2176</A>
+example code, where <code>x</code> is known to be either 0 or 1:
+<pre>
+if (load_dependent_acquire(&amp;x))
+	...
+else
+	...
+y = 42 * x / 13;
+</pre><P>
+
+This might be optimized to the following:
+<pre>
+if (load_dependent_acquire(&amp;x)) {
+	...
+	y = 3;
+} else {
+	...
+	y = 0;
+}
+</pre><P>
+
+Assuming that <code>x</code> is an atomic, the
+<code>load_dependent_acquire</code> will form the head of a dependency
+chain.
+Because there are no function calls, the dependency chain extends to the
+assignment to y, so the dependency is ordered.
+If the underlying machine preserves control-dependency ordering
+for writes, this optimization is perfectly legal.
+If the underlying machine does not preserve control-dependency
+ordering, then either this optimization must be avoided,
+a memory fence must be emitted after the load of <code>x</code>,
+or an artificial data dependency must be manufactured.
+An example artificial data dependency might be as follows:
+<pre>
+if (r1 = load_dependent_acquire(&amp;x)) {
+	...
+	y = 3;
+} else {
+	...
+	y = 0;
+}
+y = y + r1 - r1;
+</pre><P>
+The compiler would need to decide whether the add and subtract was
+better than the multiply and divide.
+
+
+<h4>Example 4</h4><P>
+
+<A HREF="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2176.html">N2176</A>
+example code:
+<pre>
+r1 = x.load_relaxed();
+if (r1)
+        r2 = y.a;
+else
+	r2 = y.a;
+</pre><P>
+
+This might be optimized to the following in order to break dependency
+chains:
+<pre>
+r1 = x.load_relaxed();
+r2 = y.a;
+</pre><P>
+
+This is a control dependency, so falls outside the scope of this
+proposal.
+
+
+<h4>Example 5</h4><P>
+
+<A HREF="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2176.html">N2176</A>
+example code:
+<pre>
+r1 = load_dependent_acquire(&amp;x);
+if (r1)
+	f(&amp;y);
+else
+	g(&amp;y)
+</pre><P>
+
+Assuming that <code>x</code> is an atomic, the
+<code>load_dependent_acquire</code> will form the head of a dependency
+chain.
+The question is then whether the prototypes and definitions of
+functions <code>f</code> and <code>g</code> have their arguments
+annotated with <code>dependency_propagate</code>.  If they
+are so annotated, then the dependency chains propagate into
+<code>f</code> and <code>g</code>.
+
+<h4>Example 6</h4><P>
+
+<A HREF="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2176.html">N2176</A>
+example code:
+<pre>
+r2 = load_dependent_acquire(&amp;x);
+r3 = r2->a;
+</pre><P>
+
+Without the <code>load_dependent_acquire()</code>, the following
+data-dependency-breaking optimization would be legal:
+<pre>
+r2 = load_dependent_acquire(&amp;x);
+r3 = r1->a;
+if (r1 != r2) r3 = r2->a;
+</pre><P>
+
+However, assuming that <code>x</code> is an atomic, the
+<code>load_dependent_acquire</code> will form the head of a dependency
+chain.
+Because there are no function calls, the dependency chain extends to the
+indirection through r2, so the dependency is ordered and the optimization
+prohibited, at least in absence of a compensating fence or artificially
+generated data dependency.
+
+<h4>Example 7</h4><P>
+
+<A HREF="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2176.html">N2176</A>
+example code:
+<pre>
+r1 = load_dependent_acquire(&amp;x);
+r2 = a[r1->index % a_size];
+</pre><P>
+
+If the variable <code>a_size</code> is known to the compiler to  have
+the value zero, then there might be a temptation to optimize as follows:
+<pre>
+r1 = load_dependent_acquire(&amp;x);
+r2 = a[0];
+</pre><P>
+
+However, again assuming that <code>x</code> is an atomic, the
+<code>load_dependent_acquire</code> will form the head of a dependency
+chain.
+Because there are no function calls, the dependency chain extends to the
+indirection through r1, so the dependency is ordered.
+Therefore, this optimization is prohibited unless accompanied by
+a compensating memory barrier or artificial data dependency.
+
+
+<h3>Alternatives Considered</h3>
+
+<P>
+<UL>
+<LI>	Support for control dependencies.
+	Although control dependencies are extremely intuitive,
+	there are comparatively few known control-dependency use cases, and
+	ARM and PowerPC CPUs only partially support control dependencies.
+	Furthermore, some of the more troublesome optimization issues involving
+	switch statements involve control rather than data dependencies.
+	Therefore, there is no support for control dependencies.
+<LI>	Prohibit dependency-breaking optimizations, thus removing
+	the need for annotations.
+	This faced severe resistance, as a number of people felt that
+	this would prohibit valuable optimizations.
+	Therefore, this proposal
+	requires annotations for function arguments and return values
+	through which data dependencies are permitted to flow.
+	As inter-compilation-unit analysis becomes more common,
+	it is hoped that tools will appear that check annotations
+	or perhaps even produce them automatically.
+	(Full disclosure: this was in fact the original proposal.)
+<LI>	Simply rely on acquire-fence, removing the need for dependency
+	ordering.
+	Although this is a reasonable strategy for many machines,
+	it is inappropriate for weakly ordered machines that support
+	data-dependency ordering.
+</UL>
+
+
+
+</body></html>

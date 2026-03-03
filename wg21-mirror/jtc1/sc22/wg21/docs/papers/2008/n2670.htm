@@ -1,0 +1,502 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html lang="en-us"><head>
+
+
+<meta http-equiv="Content-Type" content="text/html;charset=US-ASCII"><title>N2670: Minimal Support for Garbage Collection and Reachability-Based Leak Detection (revised)</title></head><body>
+<table summary="This table provides identifying information for this document.">
+	<tbody><tr>
+		<th>Doc. No.:</th>
+		<td>WG21/N2670<br>
+		J16/08-0180</td>
+	</tr>
+	<tr>
+		<th>Date:</th>
+		<td>2008-06-13</td>
+	</tr>
+	<tr>
+		<th>Revision of:</th>
+		<td>WG21/N2586<br>
+		J16/08-0096</td>
+	</tr>
+	<tr>
+		<th>Reply to:</th>
+		<td>Hans-J. Boehm</td>
+		<td>Mike Spertus</td>
+		<td>Clark Nelson</td>
+	</tr>
+	<tr>
+		<th>Phone:</th>
+		<td>+1-650-857-3406</td>
+		<td></td>
+	</tr>
+	<tr>
+		<th>Email:</th>
+		<td><a href="mailto:Hans.Boehm@hp.com">Hans.Boehm@hp.com</a></td>
+		<td><a href="mailto:mike_spertus@symantec.com">mike_spertus@symantec.com</a></td>
+		<td><a href="mailto:clark.nelson@intel.com">clark.nelson@intel.com</a></td>
+	</tr>
+</tbody></table>
+<h1>N2670: Minimal Support for Garbage Collection and Reachability-Based Leak Detection (revised)</h1>
+This is a proposal to implement the "Kona garbage
+collection compromise", i.e. motion SP1 in
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2452.html">
+N2452</a> and
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2453.html">
+N2453</a>.
+It borrows a few small pieces from the preceding garbage collection
+proposals, e.g.
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2310.pdf">
+N2310</a>.
+<p>
+Its purpose is to support both garbage collected implementations and
+reachability-based leak detectors.  This is done by giving undefined
+behavior to programs that "hide a pointer"
+by, for example, xor-ing it with another value, and then later turn it
+back into an ordinary pointer and dereference it.  Such programs
+may currently produce incorrect results with conservative garbage collectors,
+since an object referenced only by such a "hidden pointer"
+may be prematurely collected.  For the same reason, reachability-based
+leak detectors may erroneously report that such programs leak
+memory.
+</p><p>
+Note that for programs using the <tt>quick_exit()</tt>
+facility
+(<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2440.htm">
+N2440</a>, voted into the working paper at the Kona meeting),
+reachability-based leak detectors are arguably the only viable form
+of leak detection.
+</p><p>
+For a more general discussion,
+and the reasons to support transparent garbage collection, please see
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2585.pdf">
+N2585</a> and
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2310.pdf">
+N2310</a>.
+
+<!-- EXACTLY WHAT SHOULD BE NOTED AT THIS POINT?
+Note that 
+-->
+</p>
+<h2>Core Language Wording</h2>
+Add a new section as 3.7.3.3:
+<blockquote class="inserted">
+	<h3>3.7.3.3 Safely-derived pointers [basic.stc.dynamic.safety]</h3>
+	<p>A <i>traceable pointer object</i> is:</p>
+	<ul>
+		<li>an object of pointer-to-object type,</li>
+		<li>an object of an integral type that is at least as large as <tt>std::intptr_t</tt>, 
+		or</li>
+		<li>a sequence of elements in an array of character type, where the size 
+		and alignment of the sequence match that of some pointer-to-object type.</li>
+	</ul>
+	<p>A pointer value is a <i>safely-derived pointer</i> to a dynamic object only 
+	if it has pointer-to-object type and it is:</p>
+	<ul>
+		<li>the value returned by a call to the C++ standard library implementation 
+		of <code>::operator new(std::size_t)</code>; <em>[ Footnote:</em>  This section does not impose restrictions on dereferencing 
+pointers to memory not allocated by <code>::operator new</code>. This
+maintains the ability of  many C++ implementations to use binary 
+libraries and components written in other languages. In particular, this 
+applies to C binaries, because dereferencing pointers to memory allocated 
+by <code>malloc</code> is not restricted. <em>&mdash; end footnote ]</em></li>
+		<li>the result of taking the address of a subobject of an lvalue resulting 
+		from dereferencing a safely-derived pointer value;</li>
+		<li>the result of well-defined pointer arithmetic using a safely-derived 
+		pointer value;</li>
+		<li>the result of a well-defined pointer conversion of a safely-derived 
+		pointer value;</li>
+		<li>the result of a <tt>reinterpret_cast</tt> of a safely-derived pointer 
+		value;</li>
+		<li>the result of a <tt>reinterpret_cast</tt> of an integer representation 
+		of a safely-derived pointer value;</li>
+		<li>the value of an object whose value was copied from a traceable pointer 
+		object, where at the time of the copy the source object contained a copy 
+		of a safely-derived pointer value.</li>
+	</ul>
+	<p>An integer value is an <i>integer representation of a safely-derived pointer</i> 
+	only if its type is at least as large as <code>std::intptr_t</code> and it is:</p>
+	<ul>
+		<li>the result of a <tt>reinterpret_cast</tt> of a safely-derived pointer 
+		value;</li>
+		<li>the result of a valid conversion of an integer representation of a safely-derived 
+		pointer value;</li>
+		<li>the value of an object whose value was copied from a traceable pointer 
+		object, where at the time of the copy the source object contained an integer 
+		representation of a safely-derived pointer value; or</li>
+		<li>the result of an additive or bitwise operation, one of whose operands 
+		is an integer representation of a safely-derived pointer value <var>P</var>, 
+		if that result converted by <tt>reinterpret_cast&lt;void *&gt;</tt> would compare 
+		equal to a safely-derived pointer computable from <code>reinterpret_cast&lt;void 
+		*&gt;(<var>P</var>)</code>.</li>
+	</ul>
+	<p>If a pointer value that is not a safely-derived pointer value is dereferenced 
+	or deallocated, and the referenced complete object is of dynamic storage duration 
+	and has not previously been declared reachable ([util.declare_reachable]), the 
+	behavior is undefined. [ Note: This is true even if the unsafely-derived pointer 
+	value might compare equal to some safely-derived pointer value. &#8212; end note ]</p>
+<!--
+	<p>If an implementation might treat a pointer that is not safely derived 
+differently from a pointer that is safely derived, it shall provide at least one implementation-defined source directive, such as an attribute or pragma, for specifying (in a way appropriate to that implementation) that every pointer shall be treated as if it were safely derived.</p>
+-->
+</blockquote>
+Change paragraph 3.9.2p3:
+<blockquote>
+<em>[...]</em>
+A valid value of an object
+pointer type represents either the address of a byte in memory (1.7) or a null pointer (4.10). If an object of type <code>T</code> is
+located at an address <code>A</code>, a pointer of type <var>cv</var> <code>T*</code> whose value is the address <code>A</code> is said to <dfn>point to</dfn> that object, regardless of
+how the value was obtained.
+<em>[ Note:</em> <del>for</del> <ins>For</ins> instance, the address one past the end of an array (5.7) would be 
+considered to point to an unrelated object of the array's element type that might be located 
+at that address. <ins>There are further restrictions on pointers to objects with dynamic storage duration; see [basic.stc.dynamic.safety].</ins> <em>&mdash;end note ]</em> <em>[...]</em></blockquote>
+<h3>Observations and issues:</h3>
+<ol>
+<li>As passed by the LWG straw poll, the proposal should require that there
+be an implementation-dependent way to declare all dynamic storage reachable (thereby
+reverting to C++03 behavior) in source code. We will provide wording (which should be very simple)
+once attributes are voted into (or out) of C++0X.
+</li><li>There are benefits, including some of those from the previous bullet, to having an API
+that indicates whether garbage collection is enabled. This was discussed in LWG, which gave feedback
+that the API should be proposed in a separate paper. See NXXXX for discussion and wording.
+</li><li> This is really an inductive definition on the chain of operations used to
+compute a pointer value.
+</li><li> Although this is very similar in spirit to N2310, The N2310 rules based
+on reachability had a fundamental problem, which is corrected here.  Consider
+<pre>T *p = new ...;
+intptr_t x = reinterpret_cast&lt;intptr_t&gt;(p) ^ 0x555;
+a:
+T *q = reinterpret_cast&lt;T *&gt;(x ^ 0x555);
+T y = *q;
+</pre>
+The newly allocated object <em>N</em> referenced by <tt>p</tt> is always reachable by
+the N2310 definition.  But at the label <tt>a</tt>, <tt>p</tt>
+is dead, and is quite likely to no longer be visible to the garbage collector,
+since the register containing <tt>p</tt> may well have been reused, possibly
+to hold <tt>x</tt>.  This means that if a garbage collection occurs at point
+<tt>a</tt>, <em>N</em> may not appear to be reachable, and thus may be collected
+anyway.
+</li><li> We could probably get closer to the N2310 definitions
+if we allowed pointers that were not safely derived to be dereferenced if a
+safely derived pointer to the same object is stored in a non-stack
+location.  That seems worth considering.  It would technically
+eliminate the need for <tt>declare_reachable()</tt>, since it
+could be implemented by the user.  It would outlaw some kinds
+of dead global dead variable and dead field elimination in
+garbage-collected implementations.
+These are probably rarely practical for C++ in any case. This alternative
+was discussed in Bellevue, where it was agreed by straw poll in Evolution to
+take the approach of this proposal.
+</li><li> Similar issues apply to <tt>declare_reachable</tt> calls.
+The only safe way to ensure that a pointer is always visible to the
+collector is to require that the argument to <tt>declare_reachable</tt>
+was safely derived.  Thus a pointer to the object is guaranteed to
+be visible before the call, and the collector treats the object
+as being reachable after the call. 
+
+</li></ol>
+
+
+<h2>Library Wording</h2>
+Add somewhere near the introduction:
+<blockquote class="inserted">
+Objects constructed by the standard library
+that may hold a user-supplied pointer value, or an integer
+of type intptr_t, shall store them in a traceable pointer
+location (see 3.7.3.3).  [Note:
+Other libraries are strongly encouraged to do the same, since not doing so
+may result in accidental use of pointers that are not safely derived.  Libraries
+that store pointers outside the user's address space should make it
+appear that they are stored and retrieved from a traceable pointer
+location. --end note]
+</blockquote>
+<p>
+Add, possibly between 20.6.7 and 20.6.8:
+</p><blockquote class="inserted">
+<p>
+</p><pre><samp>
+void declare_reachable( void* <var>p</var> )
+</samp></pre>
+<dl>
+<dt><i>Effects:</i>
+</dt><dd>
+If <var>p</var> is not null, the complete object referenced by <i>p</i>
+is subsequently declared reachable (see 3.7.3.3).
+</dd>
+<dt><i>Throws:</i>
+</dt><dd>
+May throw <samp>std::bad_alloc</samp> if the system cannot
+allocate additional memory
+that may be required to track objects declared reachable.
+</dd>
+<dt><i>Requires:</i>
+</dt><dd>
+The argument <samp><var>p</var></samp> shall be a safely derived pointer.
+</dd>
+</dl>
+
+<p>
+</p><pre><samp>
+template &lt; typename T &gt;
+T* undeclare_reachable( T* <var>p</var> ) 
+</samp></pre>
+<dl>
+<dt><i>Returns:</i>
+</dt><dd>
+A safely derived copy of <samp><var>p</var></samp>.  The result will
+compare equal to <samp>p</samp>.
+</dd>
+<dt><i>Effects:</i>
+</dt><dd>
+Once the number of calls to
+<samp>undeclare_reachable(<var>p</var>)</samp> equals
+the number of calls to <samp>declare_reachable(<var>p</var>)</samp> for
+all non-null <var>p</var> referencing 
+the argument is no longer declared reachable (see [above section]).
+When this happens,
+pointers to the object referenced by <samp><var>p</var></samp>
+may not be subsequently dereferenced.
+[Note: Since the returned pointer
+is safely derived, it may be used to access the referenced object, even
+if previously no safely derived pointer existed. -- end note]
+</dd>
+<dt><i>Throws:</i>
+</dt><dd>no exceptions</dd>
+<dt><i>Requires:</i>
+</dt><dd>
+If <var>p</var> is not null, <samp>declare_reachable(<var>p</var>)</samp> was previously called,
+and shall be live from the time of the call until the last
+<samp>undeclare_reachable(<var>p</var>)</samp> call on the
+object.
+</dd>
+</dl>
+<p>
+[Note: It is expected that calls to
+<samp>declare_reachable(<var>p</var>)</samp> will consume
+a small amount of memory until the matching call to
+<samp>undeclare_reachable(<var>p</var>)</samp> is encountered.
+In addition, the referenced object cannot be deallocated
+during this period, and garbage collecting implementations will not be
+able to collect the object while it is declared reachable.
+Long running programs should arrange that calls are matched. -- end note.]
+</p><p>
+</p><pre><samp>
+void declare_no_pointers( char* <var>p</var>, size_t n )
+</samp></pre>
+<dl>
+<dt><i>Effects:</i>
+</dt><dd>
+The <samp><var>n</var></samp> bytes starting at <samp><var>p</var></samp>
+no longer contain traceable pointer locations, independent of their type.
+Hence pointers located there may not be dereferenced if the object they
+point to was created by global operator new and not previously declared
+reachable.  [Note:
+This may be used to inform a garbage collector or leak detector that
+this region of memory need not be traced.]
+</dd>
+<dt><i>Throws:</i>
+</dt><dd>
+Throws no exceptions.  [Note: Under some conditions implementations may need to
+allocate memory.  However the request can be ignored if memory allocation fails.
+-- end note]
+</dd>
+<dt><i>Requires:</i>
+</dt><dd>
+No bytes in the specified range may have been previously registered
+with <samp>declare_no_pointers()</samp>.  If the specified range
+is in an allocated object, then it must be entirely within a
+single allocated object.  The object must be live until the
+corresponding <samp>undeclare_no_pointers()</samp> call.
+[Note: In a garbage-collecting implementation, the fact that
+a region in an object is registered with <samp>declare_no_pointers()</samp>
+should not prevent the object from being collected. --end note]
+</dd>
+</dl>
+<p>
+</p><pre><samp>
+void undeclare_no_pointers( char* <var>p</var>, size_t n )
+</samp></pre>
+<dl>
+<dt><i>Effects:</i>
+</dt><dd>
+Unregisters a range registered with
+<samp>declare_no_pointers()</samp> for destruction.  It must be called
+before the lifetime of the object ends. 
+</dd>
+<dt><i>Throws:</i>
+</dt><dd>no exceptions</dd>
+<dt><i>Requires:</i>
+</dt><dd>
+The same range must previously have been passed
+to <samp>declare_no_pointers()</samp>.
+</dd>
+</dl>
+<pre><samp>
+namespace std {
+  enum class pointer_safety {
+    relaxed, preferred, strict
+  };
+}
+</samp></pre>
+<pre><samp>
+pointer_safety get_pointer_safety()
+</samp></pre>
+<dl>
+<dt><i>Returns:</i>
+</dt><dd>
+<dd>
+  Returns an enumeration value indicating the implementation's treatment of pointers that are not safely derived (See 3.7.3.3). Returns <tt>pointer_safety::relaxed</tt> if pointers that are not safely derived
+will be treated the same as pointers that are safely derived for the duration
+of the program. (See 3.7.3.3)
+Returns <tt>pointer_safety::preferred</tt> if pointers that are not safely derived
+will be treated the same as pointers that are safely derived for the duration of the program but allows the implementation to hint
+that it could be desirable to avoid dereferencing pointers that are not safely derived
+as described in 3.7.3.3. [<b>Example: </b><tt>pointer_safety::preferred</tt> might
+be returned to detect if a leak detector is running to avoid spurious leak reports.--end <b>example</b>]
+Returns <tt>pointer_safety::strict</tt> if pointers that are not safely derived
+might be treated differently than pointers that are safely derived.
+</dd>
+
+<dt><i>Throws:</i>
+</dt><dd>no exceptions</dd>
+</dl>
+</blockquote>
+<p>
+Add to 20.6.8, between paragraphs 4 and 5:
+</p><blockquote class="inserted">
+Storage allocated directly with <samp>malloc()</samp>, <samp>calloc()</samp>, or
+<samp>realloc()</samp> is implicitly declared reachable (see 3.7.3.3)
+on allocation, ceases to be declared reachable on deallocation, and may
+not cease to be declared reachable as the result of an
+<samp>undeclare_reachable()</samp> call.
+[Note: This allows existing C libraries to remain unaffected by restrictions
+on pointers that are not safely derived, at the expense of providing far fewer garbage
+collection and leak detection options for <samp>malloc()</samp>-allocated
+objects.  It also allows <samp>malloc()</samp> to be implemented with a separate
+allocation arena, bypassing the normal <samp>declare_reachable()</samp>
+implementation.  The above functions should never intentionally be used as a
+replacement for <samp>declare_reachable()</samp>, and newly written code
+is strongly encouraged to treat memory allocated with these functions as
+though it were allocated with <samp>operator new</samp>.  --end note]
+</blockquote>
+
+<h3>Observations and issues:</h3>
+<ol>
+<li> Currently <tt>undeclare_reachable</tt> is a template, while
+<tt>declare_reachable</tt> operates on a <tt>void *</tt>.  This is
+intentional, since only the former returns a pointer.  This was discussed
+in Bellevue in the LWG where (at least as understood by the authors) this
+was regarded as a reasonable approach.
+</li><li> It is unclear whether null pointers, and pointers to memory not
+allocated with one of the system memory allocators should be allowed
+as arguments to <tt>declare_reachable</tt>.
+Disallowing the former seems benign, and simplifies matters a bit in
+this formulation.  Disallowing the latter causes problems for clients
+who don't know where the memory came from.
+</li><li> By a similar argument,there are reasons to believe that
+<tt>declare_reachable</tt> and <tt>undeclare_reachable</tt> should
+nest properly.  A client that is passed one and wants to put it
+on an xor-ed list may not know whether the caller has already
+done so.  In this formulation, it's safe to do so again.
+</li><li> It is almost certainly safe to dereference a pointer
+if the object will be correctly declared reachable later even if the
+pointer is not safely derived.  This is
+probably too confusing and useless to guarantee.
+</li><li> There is some argument that <tt>declare_reachable</tt> /
+<tt>undeclare_reachable</tt> should be replaced by an RAII mechanism.
+But the simple version would fail to cover many use cases,
+e.g. an object declared reachable while a pointer to it
+resides in an xor-list container.
+This is designed to be a minimalist proposal, so we leave the RAII
+version to the programmer for now.
+</li><li> The current <tt>no_pointers</tt> is inconsistent with the
+usual STL conventions.  But we probably want to preserve the
+possibility of invoking this on a single integer field that
+is not part of an array.  And there is probably not a standard-conforming
+way to compute the "one past the end" pointer for that case.
+</li><li> Ideally <tt>declare_no_pointers</tt> should be invocable even
+on parts of stack allocated variables.  That does complicate the
+implementation.  Even initially, a garbage-collected implementation will
+have to recognize this case, even if just to ignore it.  We concluded that,
+since a garbage collector will need to know about stack locations anyway,
+this is not an undue burden, though it may involve some cost. 
+</li><li> It is not clear whether <tt>declare_no_pointers</tt>
+needs an inverse operation, or whether that should be implicit at the
+end of the object lifetime.  Hans prefers the latter, but is not sure how
+to implement it if we allow stack-allocated objects to be used.
+We would need a dynamic check on function return, which
+seems highly undesirable.
+</li><li> One of the authors is not enthusiastic about the special treatment of
+<samp>malloc()</samp> allocated memory.
+It clearly handicaps garbage collectors or
+leak detectors, in that such objects cannot be any more reliably
+collected than they can now, and leaks involving such objects cannot
+be reliably identified. On the other hand, we expect that it will
+make straightforward implementations of garbage collection and leak
+detection of objects allocated using operator new (which is the
+normative C++ model implied by the standard) far more reliable with
+existing libraries. Furthermore, this is probably the only thing we
+can do in good conscience without an endorsement from the C committee
+for changing the semantics of malloc-allocated memory.
+</li><li> Sean Parent suggests adding operator new overloads that effectively
+perform a <samp>declare_no_pointers()</samp> call on the entire resulting
+objects.  Aside from convenience, this has the added benefit that it may
+be significantly cheaper to implement than the two separate calls, since
+the object can be placed appropriately.  However, it is clearly less general
+than the separate calls, since it cannot be applied to statically allocated
+storage, stack allocated storage, or a piece of a heap-allocated object.
+The authors strongly approve of this addition.  However, it superficially
+makes the interface much wider than what had been discussed earlier, since
+it involves many new function overloads.  Hence we look for guidance from LWG
+before adding these.
+</li></ol>
+<h3>Observations on Implementations</h3>
+An implementation that does not support garbage collection and implements
+all library-calls described here as no-ops is conforming.  Hence
+a minimal implementation is trivial.  A full implementation supporting
+either garbage collection or more accurate leak detection requires the
+following additions.  We are in the process of implementing the latter two,
+and hope to have the implementation available shortly:
+<ol>
+<li>It must ensure that for programs obeying the restriction on
+safely-derived pointers are compiled such that any safely derived pointer
+remains visible to the garbage collector so long as it might still be
+dereferenced or used in a deallocation.  Existing compilers already
+have this property for nearly all programs.  Existing conservative
+collectors rely on it.  A more careful discussion, including some
+performance results from a simple implementation that guarantees this property,
+can be found in
+<a href="http://portal.acm.org/citation.cfm?doid=249069.231394">
+Boehm, "Simple Garbage-Collector-Safety", PLDI 1996</a>.
+</li><li><tt>declare_reachable()</tt> and <tt>undeclare_reachable()</tt>
+can be implemented by simply maintaining a multiset of
+declared reachable pointers, and making sure that this multiset is
+visible to the garbage collector.
+</li><li>Efficient implementations of <tt>declare_no_pointers()</tt>
+are more challenging, but feasible.  Our existing conservative collectors
+instead implement a facility to provide similar information
+when an object is allocated or, through a separate API, for roots.
+The interface proposed here requires the collector to distinguish
+between various
+cases, including ranges within stack-allocated objects, and does not
+allow the collector to segregate objects based on this kind of information.
+Of course the API proposed here does have the major advantage that
+it allows pointer layout information to be specified in the constructor
+instead of at allocation time, which is much more consistent with the
+usual C++ model.
+<p>Our current implementation strategy is to have
+<tt>declare_no_pointers()</tt> simply record its arguments in a data
+structure that allows efficient lookup of these ranges by address.
+When an address range is scanned, this data structure can be consulted.
+For large address ranges the added cost should be minimal, since it is
+amortized by other scanning overhead.  We expect that when scanning
+small ranges during garbage collection in production code, it may be
+too expensive to always consult this data
+structure.  In the initial implementation, we will ignore
+declare_no_pointers calls made on small objects.  A better long term
+strategy would be, for example, to consider the information only
+on every <i>n</i>th garbage collection.  This might cause objects
+accidentally "referenced" by pointers in such regions to be temporarily
+retained in spite of the <tt>declare_no_pointers</tt> calls.  But
+they would not be retained for an unbounded period of time.
+</p></li></ol>
+</blockquote></body></html>

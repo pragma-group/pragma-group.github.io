@@ -1,0 +1,1112 @@
+<HTML>
+<HEAD>
+<TITLE>A Memory Model for C++: Strawman Proposal</title>
+</head>
+<BODY>
+<table>
+<tr>
+<td align="left">Doc. no.</td>
+<td align="left">N1942=06-0012</td>
+</tr>
+<tr>
+<td align="left">Date:</td>
+<td align="left">2006-02-26</td>
+</tr>
+<tr>
+<td align="left">Reply to:</td>
+<td align="left">Hans Boehm &lt;Hans.Boehm@hp.com&gt;</td>
+</tr>
+</table>
+<H1>A Memory Model for C++: Strawman Proposal</h1>
+<UL>
+<LI><A HREF="#rationale">Rationale for the Overall Approach</a>
+<LI><A HREF="#races">Data Races and our Approach to Memory Consistency</a>
+<LI><A HREF="#examples">Memory Model Examples</a>
+<LI><A HREF="#consequences">Consequences</a>
+<LI><A HREF="#constructors">Constructors</a>
+<LI><A HREF="#local_static">Function local statics</a>
+<LI><A HREF="#volatile">Volatile variables and data members</a>
+<LI><A HREF="#local">Thread-local variables and stack locations</a>
+<LI><A HREF="#library">Library Changes</a>
+<LI><A HREF="#exceptions">Exceptions, signals, cancellation ...</a>
+</ul>
+<P>
+This is an attempt to outline a "memory model" for C++.
+It addresses the multi-threaded semantics of C and C++,
+particularly with respect to memory visibility.  We concentrate
+on the question of what values a load of an object (i.e. an l-value
+to r-value conversion) may observe.
+<P>
+Much of this proposal is still rather informal.  It has benefitted from
+input from many people, including Andrei Alexandrescu, Kevlin Henney,
+Ben Hutchings, Doug Lea, Jeremy Manson, Bill Pugh, Alexander Terekhov,
+Nick Maclaren, and others.  It is mostly an attempt by Hans Boehm
+to turn the discussion results into a semi-coherent document.  It builds
+on the earlier papers we have submitted to the committee:
+<A HREF="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2004/n1680.pdf">
+N1680=04-0120</a>,
+<A HREF="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2005/n1777.pdf">
+N1777=05-0037</a>, and
+<A HREF="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2005/n1876.pdf">
+N1876=05-0136</a>, as well as the work cited there.
+<P>
+We use a style in which the core document is presented in the default
+font and color.  We occasionally insert additional more detailed
+discussion, motivation, and status as bracketed text in a smaller
+green font.  This additional text is not fundamental to understanding
+the proposal.
+<P>
+A more dynamic, evolving, and probably less consistent, version of this
+document, along with further background material, can be found
+<A HREF="http://www.hpl.hp.com/personal/Hans_Boehm/c++mm">here</a>.
+
+<H2><A NAME="rationale">Rationale for the overall approach</a></h2>
+One possible approach to a memory model would be to essentially
+copy <A HREF="http://www.cs.umd.edu/~pugh/java/memoryModel/jsr133.pdf">
+the Java memory model</a>.
+<P>
+The reasons we are not currently pursuing that route, in spite of the
+overlap among the participants are:
+<UL>
+<LI> The Java approach is required to ensure type-safety, and more
+particularly to ensure that no load of a shared pointer can ever
+result in a pointer to an object that was constructed with
+a different type.  C++ does not have this property to start with,
+and hence we are free to continue to violate it.
+<LI> This would be different from the approach taken by pthreads
+(and probably implicitly by other thread libraries) which give
+undefined semantics to any code involving a data race.
+<LI> The Java approach requires ordinary reads to be atomic for
+certain data types, including pointers.  We expect this would be
+problematic on some embedded hardware with narrow memory buses.
+<LI> The Java approach requires a complex model to deal with
+causality.  Our current proposal avoids this for ordinary memory
+operations.  For atomic operations, which we expect to be much less
+frequently used, we use an alternate formulation,
+which is probably harder to formalize completely, but appears
+more easily comprehensible.
+<LI> The current pthreads approach allows some compiler transformations
+that are not legal in Java, but probably moderately common in the
+context of C++.  These produce unexpected results in the presence
+of data races.  But given the pthreads approach of outlawing data
+races, they appear benign, and can improve performance.
+In particular, assuming we have no intervening synchronization
+actions, compilers currently may:
+<OL>
+<LI> "Rematerialize" the contents of a spilled register by reloading
+its value from a global, if single-threaded analysis shows that the
+global may not have been modified in the interim.  This is only
+detectable by programs that involve a data race.  (This means
+that <TT>r1 == r1</tt> may return false if <TT>r1</tt> is a local
+integer loaded via
+a data race. That's OK since the program has undefined behavior.) 
+<LI> Introduce redundant writes to shared globals.  For example,
+if we are
+optimizing a large synchronization-free switch statement for space,
+all branches but one
+contain the assignment <TT>x = 1;</tt>, and the last one
+contains <TT>x = 2;</tt> we can, under suitable additional assumptions,
+put <TT>x = 1;</tt> before the switch statement, and reassign <TT>x</tt>
+in the one exceptional case.
+<LI> Insert code to do the equivalent of
+<TT>if (x != x) &lt;start rogue-o-matic&gt;</tt>
+at any point for any global <TT>x</tt> that is already read
+without intervening synchronization.  That's perhaps not
+very interesting.  But it does point out that analysis in
+current compilers is based on the assumption that there are
+no concurrent modifications to shared variables.  We really have
+no idea what the generated code will do if that assumption is
+violated.  And the behavior cannot necessarily be understood
+by modeling reads of globals to return some sort of nondeterministic
+value.
+</ol>
+None of these transformations are legal in Java.  Variants of all
+of them appear potentially profitable and/or useful as part of a
+debugging facility.
+<LI> The current pthreads approach does not require memory fences
+(sometimes call barriers)
+between the time an object is constructed, and the time it is "published"
+by storing a pointer to it in a location that is accessible to a
+different thread.  Without such a fence, another thread may see
+an apparently valid pointer to an object with an invalid vtable pointer.
+Hence virtual function calls may fail if such a virtual function
+of such an object is invoked from another thread.  This is hard to
+describe without allowing completely undefined behavior for races.
+And we conjecture that it is hard to remedy without significant
+slowdown of constructors.  (Note that in Java, a constructor also
+requires object allocation, and hence more overhead is expected.)
+</ul>
+Hence we are currently pursuing an approach which has been less well
+explored, and is thus probably riskier.  We concentrate on
+precisely defining the notion of a data race (a deficiency
+of the pthread definition), but then largely stick with the pthreads
+approach of leaving the semantics of data races undefined.
+<P>
+This is complicated somewhat by the desire to support "atomic
+operations" which are effectively synchronization operations
+that can legitimately participate in data races.
+<P>
+<P style="color:green">
+<SMALL>[
+This is at least our third attempt at a description of the memory model.
+The first attempt was to define the semantics as sequential
+consistency for programs that had no data races, where a data
+race was defined as consecutive execution of conflicting operations
+in a sequentially consistent execution.  That was nice and simple.
+But it makes it very difficult to
+define synchronization primitives that allow some reordering
+around them.  These include even a pthread-like locking primitive
+that has only "acquire" semantics, i.e. allows preceding memory
+operations to be moved <I>into</i> the critical section.
+Surprisingly, at least for one of us, <TT>pthread_mutex_lock</tt>
+does not have that property, due to the presence of
+<TT>pthread_mutex_trylock</tt>.
+]</small>
+<H2><A NAME="races">Data Races and our Approach to Memory Consistency</a></h2>
+We approach the problem of defining a memory model or multi-threaded
+semantics for C++ as follows:
+<OL>
+<LI> We define a <I>memory location</i> to be a scalar variable,
+data member, or array element, or a maximal sequence of
+contiguous bit-fields in a struct or class.  (This almost
+corresponds to the meaning of "object" in the current standard.)
+<LI> We define an <I>action</i> performed by a thread to be a particular
+program point in the source program, together with the value it produced
+and/or stored. Each action corresponds to either a call, or a
+primitive operation, or an access of a memory location.
+(We view built-in assignments of struct or class objects as
+sequences of assignments to their fields.)
+We are primarily interested in the latter, which we
+classify as either <I>load</i> or <I>store</i> actions.
+Operations provided by the atomic operations library result
+in <I>atomic</i> or <I>synchronization actions</i>, as do locking primitives.
+Each such action may be an
+<I>atomic load</i>, <I>atomic store</i>, both or neither.
+<P style="color:green">
+<SMALL>[
+There is an argument for introducing alternate syntax for
+atomic operations, e.g. by describing variables as
+<TT>__async volatile</tt>.  (It was concluded
+that recycling the plain <TT>volatile</tt> keyword introduces
+a conflict with existing usage, a relatively small, but nonzero,
+fraction of which is demonstrably legitimate.  Whether or
+not that constitutes sufficient reason to leave the
+current largely platform-dependent semantics of <TT>volatile</tt>
+in place remains controversial.)
+Introducing some such syntax
+may make it easier to code idioms like double-checked locking,
+and to use consistent idioms across programming languages.
+Without a better understanding of the form the atomic operations
+library will take, it is unclear whether this argument is
+valid.  The argument against it is simplicity, and elimination
+of an ugly or reused keyword.
+]</small>
+<LI> Below we define a notion of a <I>consistent execution</i>.
+An execution will consist of a set of actions, corresponding to the
+steps performed by each of the threads, together with some relations that
+describe the order in which each thread performs those actions, and the
+ways in which the threads interact.  For an execution to be consistent,
+both the actions and the associated relations have to satisfy a number
+of constraints, described below.
+<P>
+In the absence of
+atomic operations, which may concurrently operate on the same data
+for different threads, this notion is equivalent to
+Lamport's definition of sequential consistency.
+<LI> We define when a consistent execution has a <I>data race</i> on
+a particular input.  Note that the term is used to denote concurrent
+conflicting accesses to a location using ordinary assignments.
+Concurrent accesses through special "atomic operations" do not
+constitute a data race.
+<LI> Programs have undefined semantics on executions on which a data
+race is possible.  We effectively view a data race as an error.
+<LI> If a program cannot encounter a data race on a given input, then
+it is guaranteed to behave in accordance with one of its consistent executions.
+</ol>
+Note that although our semantics is essentially defined in terms of
+sequential consistency, it is <I>much weaker</i> than sequential
+consistency.  We essentially forbid all programs which depend
+implicitly on memory ordering.  Hence we continue to allow substantial
+amounts of memory reordering by either the compiler or hardware.
+<P>
+We now define two kinds of order on memory operations (loads, stores,
+atomic updates) performed by a single thread.  The first one is
+intended to replace the notion of sequence point that is currently used
+in parts of the standard:
+<H3>The <I>is-sequenced-before</i> relation</h3>
+If a memory update or side-effect <I>a</i> <I>is-sequenced-before</i> another
+memory operation or side-effect <I>b</i>,
+then informally <I>a</i> must appear to be completely evaluated
+before <I>b</i> in the sequential execution of a single thread, e.g.
+all accesses and side effects of <I>a</i> must occur before those of
+<I>b</i>.  This
+notion does not directly imply anything about the order in which memory
+updates become visible to other threads.
+<P>
+We will say that a subexpression <I>A</i> of the source program
+<I>is-sequenced-before</i> another subexpression <I>B</i> of the same
+source program to indicate that all side-effects and memory operations
+performed by an execution of <I>A</i> occur-before those performed
+by the corresponding execution of <I>B</i>, i.e. as part of the same
+execution of the smallest expression that includes them both.
+<P>
+We propose roughly that wherever the current standard states
+that there is a sequence
+point between <I>A</i> and <I>B</i>, we instead state
+that <I>A</i> is-sequenced-before <I>B</i>.  This will constitute the
+precise definition of <I>is-sequenced-before</i> on subexpressions, and
+hence on memory actions and side effects.
+<P>
+A very similar change in the specification of intra-thread
+sequencing of operations
+is being simultaneously proposed by Clark Nelson
+in N1944=06-0014, which explores the issue in more detail.
+Our hope is that a proposal along these lines will be accepted,
+and can serve as the precise definition of <I>is-sequenced-before</i>.
+<P style="color:green">
+<SMALL>[
+Based on recent email discussions, at this point there appears to be
+some uncertainty in the interpretation of the current standard, which
+is complicating matters.  The main issue seems to be the
+precise meaning of the restriction on interleaving of function
+calls in arguments.  It appears important to resolve this even in the
+single-threaded case.
+]</small>
+
+
+<H3>The <I>is-inter-thread-ordered-before</i> relation</h3>
+An action <I>A</i> <I>is-inter-thread-ordered-before</i> an action <I>B</i>
+if they are both executed by the <I>same</i> thread, and one
+of them is an atomic or synchronization
+operation that guarantees appropriate inter-thread
+visibility ordering.  We specify these ordering constraints with
+the atomic operations library.
+<P>
+An ordinary memory operation is never inter-thread-ordered-before
+another ordinary memory operation.
+<P>
+Most atomic operations will specify some combination of <I>acquire</i>
+and <I>release</i> ordering constraints, which enforce ordering
+with respect to subsequent and prior memory actions, respectively.
+These constraints are reflected in
+the <I>is-inter-thread-ordered-before</i> relation.
+<P>
+Lock acquisition imposes
+at least an <I>acquire</i> constraint, and lock release will normally
+impose a <I>release</i> constraint.  Whenever an action <I>A</i>
+has an acquire constraint, and <I>A</i> is-sequenced-before <I>B</i>,
+then <I>A</i> is-inter-thread-ordered-before <I>B</i>.  Whenever
+<I>A</i> has a release constraint, and <I>B</i> is-sequenced-before <I>A</i>,
+then <I>B</i> is-inter-thread-ordered-before <I>A</i>.
+
+<H3>The <I>depends-on</i> relation</h3>
+Consider a given execution of a particular thread, i.e. the sequence
+of actions that may be performed by a particular thread as part of
+the execution of the containing program.  If, as a result of changing only
+the value read by an atomic load <I>L</i>, a subsequent atomic store <I>S</i>
+either can no longer occur, or must store a different value, then
+<I>S</i> depends on <I>L</i>.
+<P>
+Note that the definition of <I>depends-on</i> is relative to a particular
+execution, and always involves a dependence of an atomic store on an
+atomic load.  Ordinary memory operation do not <I>depend-on</i> each other.
+We need the <I>depends-on</i> relation only to outlaw certain anomalous
+executions of atomic operations that informally violate causality, i.e.
+in which an atomic operation causes itself to be executed in a
+particular way.
+<P>
+We next discuss relations on actions between threads.
+
+<H3>The <I>communicates-with</i> relation</h3>
+We specify interactions between threads in an execution using
+a <I>communicates-with</i> relation.  Informally, an 
+action <I>A</i> <I>communicates-with</i> another action
+<I>B</i> if <I>B</i> "sees" the result of <I>A</i>.  The
+definition of each kind of atomic operation will specify the other
+operations with which it can communicate.  A store to an
+ordinary variable communicates-with a load that retrieves the
+stored value.
+<P>
+Informally, a lock release communicates-with the next acquisition of
+the same lock.  A barrier (in the <TT>pthread_barrier_wait</tt> sense
+or OpenMP sense)
+communicates-with all corresponding executions of the barrier in
+other threads.  A memory fence (or barrier in the other sense)
+communicates-with the next execution of the fence, usually by
+another thread.  An atomic store communicates-with all atomic loads
+that read the value saved by the store, i.e. for this
+purpose they behave like ordinary loads and stores.
+<P>
+We now have enough machinery to describe the ordering we really use
+to describe memory visibility.
+<H3>The <I>happens-before</i> relation</h3>
+<P style="color:green">
+<SMALL>[
+Note that this definition of happens-before is a bit different
+from that used in Lamport's original 1978 paper ("Time, Clocks, and
+the Ordering of Events in Distributed Systems", CACM 21,7), and eventually
+in the Java model, but it is essentially just an adaptation of
+Lamport's definition to a system in which actions within a thread are
+also not totally ordered.  The detailed style of definition grew out of a
+discussion with Bill Pugh, though we're not yet sure he approves of the
+result.
+]</small>
+<P>
+Given is-sequenced-before, is-inter-thread-ordered-before,
+depends-on and communicates-with relations on a
+set of actions, we define the happens-before relation to be the smallest
+transitively closed relation satisfying the following constraints:
+<UL>
+<LI> If <I>A</i> and <I>B</i> are ordinary (not atomic!) memory references,
+and <I>A</i> is-sequenced-before <I>B</i>, then <I>A</i> happens-before
+<I>B</i>.
+<LI>If <I>A</i> is-inter-thread-ordered-before <I>B</i> (and hence they
+are executed by the same thread,
+at least one of them is an atomic operation with an ordering constraint,
+and <I>A</i> is-sequenced-before <I>B</i>), then <I>A</i> happens-before
+<I>B</i>.
+<LI> If an atomic store <I>B</i> depends-on an earlier atomic
+load <I>A</i> in the same thread, then <I>A</i> happens before <I>B</i>.
+In particular, assuming all assignments are atomic operations,
+there is no happens-before ordering between the load of <TT>x</tt>
+and the store of <TT>y</tt> in
+<TT>r1 = x; y = 1</tt> (<TT>r1</tt> not shared between threads), but there is
+such an ordering between the two halves of <TT>r1 = x; y = r1</tt>.
+<LI>
+If <I>A</i> communicates-with <I>B</i>, then <I>A</i> happens-before
+<I>B</i>.
+</ul>
+<H3>Consistent executions</h3>
+A program execution is a quintuple consisting of 
+<OL>
+<LI>set of thread actions, and corresponding
+<LI>is-sequenced-before,
+<LI>is-inter-thread-ordered-before,
+<LI>depends-on, and
+<LI>communicates-with relations.
+</ol>
+These give rise to a corresponding happens-before relation.  We say
+that an execution is <I>consistent</i> if:
+<OL>
+<LI> The actions of any particular thread (excluding values read
+from potentially shared locations), and the corresponding
+is-sequenced-before relation, is-inter-thread-ordered-before relation,
+and depends-on relation,
+are all consistent with the normal sequential
+semantics as given in the rest of the standard.
+<LI> The communicates-with relation is such that for every ordinary
+load <I>L</i> which sees a value stored by another thread,
+a store <I>S</i> communicates-with
+<I>L</i>, such that <I>S</i> stores the value seen by <I>L</i>
+<LI> The communicates-with relation is consistent with the constraints
+imposed by the definitions of the synchronization primitives.  For example,
+if <I>S</i> is an atomic store which communicates-with an atomic load
+<I>L</i>, then the loaded and stored values must be the same.
+<LI> (intra-thread visibility)
+If a load <I>L</i> sees a store <I>S</i> from the same thread,
+then <I>L</i> must not occur-before <I>S</i>, and there must be
+no intervening store <I>S'</i>
+such that <I>S</i> is-sequenced-before <I>S'</i> and <I>S'</i>
+is-sequenced-before <I>L</i>.  
+<LI> (inter-thread visibility)
+Each load <I>L</i> of any shared variable (including synchronization
+variables) sees a store <I>S</i>, such that <I>L</i> does not
+happen-before <I>S</i> and such that there is no intervening store <I>S'</i>
+such that <I>S</i> happens-before <I>S'</i> and <I>S'</i>
+happens-before <I>L</i>.
+<LI> The happens-before relation is "acyclic", i.e. no action happens-before
+itself.
+<P style="color:green">
+<SMALL>[
+This means we view the relation as normally irreflexive.  If we normally
+want it to be reflexive, we can tweak this slightly.
+]</small>
+</ol>
+Note that if no thread performs any synchronization actions then
+the happens-before relation requires that the actions of a given
+thread effectively occur in "is-sequenced-before" order, which is as
+close as C++ gets to purely sequential execution.  This in this
+case an execution is consistent iff it is sequentially consistent.
+<P>
+If lock/unlock enforce only acquire/release ordering, and there
+is no other form of synchronization, then it is less
+apparent that our definition is equivalent to sequential consistency.
+However, this can be
+<A HREF="http://www.hpl.hp.com/techreports/2005/HPL-2005-217.html">
+proven</a> if there is no <TT>trylock</tt> primitive.
+<P style="color:green">
+<SMALL>[
+At least some of us believe that the most plausible interpretation of the
+existing pthread semantics can be closely approximated by defining the various
+<TT>lock()</tt>
+primitives such that they have both acquire and release semantics.
+This still leaves issues related to failing pthread calls, etc.
+We believe that these introduce no fundamental technical challenges,
+but the details are not currently completely clear.
+]</small>
+<P style="color:green">
+<SMALL>[
+The fact that we insist that we require much stronger ordering
+for ordinary memory accesses than for atomic accesses
+initially seems out of place here.  But, as Bill Pugh points out, simple
+Java-like happens-before consistency is otherwise insufficient.
+(For an example, see 
+<A HREF="#destruction_causality">
+below</a>.)
+And the ordering constraints on ordinary memory actions really only
+affect the definition of a data race; the meaning of data-race-free
+program is not affected, since this ordering is invisible.
+]</small>
+<H3>Data races</h3>
+We define a <I>memory location</i> to be a variable, (non-bitfield)
+data member, array element, or contiguous sequence of bitfields.
+We define two actions to be <I>conflicting</i> if they access the same memory
+location, and at least one of them is a store access.
+<P>
+We define an execution to contain an <I>intra-thread race</i>
+if a thread performs two conflicting actions, and neither is-sequenced-before
+the other.
+<P>
+We define an execution to contain an <I>inter-thread race</i>
+if two threads perform two conflicting actions, and neither happens-before
+the other.
+<P style="color:green">
+<SMALL>[
+I'm not sure this is quite the best way to state this, since
+the "communicates-with" relation on ordinary memory accesses
+contributes to happens-before.  Thus
+"conflicting" actions may "communicate-with" each other, and thus
+"happen-before" each other, and thus no longer conflict.  I think
+this technically doesn't matter because non-conflicting actions on
+ordinary memory normally only imply happens-before relationships
+that must exist anyway.  And if there is an execution with an
+initial conflict that is eliminated by the "communicates-with"
+edge generated by the conflict, then there is an alternate
+consistent execution in which that edge doesn't exist, and there
+is a real conflict.  But I don't like the fact that a subtle argument
+is required to demonstrate that this definition is sane.
+<P style="color:green">
+We do need to include the extra "communicates-with" edges 
+in the requirement that happens-before is acyclic.  Otherwise we
+get nothing like sequential consistency in the data-race-free case.
+]</small>
+<P>
+If, for a given program and input,
+there are consistent executions containing either kind of race,
+then the program has undefined semantics on that input.
+Otherwise the program behaves according to one of its consistent
+executions.
+<P style="color:green">
+<SMALL>[
+Bill Pugh points out that that the notion of "input" here isn't
+well defined for a program that interacts with its environment.
+And we don't want to give undefined semantics to a program just
+because there is some other sequence of interactions with the
+environment that results in a data race.
+We probably want something more along the lines of stating that
+every program behavior either
+<OL style="color:green">
+<LI> corresponds to a consistent execution
+in which loads see stores that happen-before them, or
+<LI> there is a consistent execution with a data race, such
+that calls to library IO functions before
+the data race are consistent with observed behavior.
+</ol>
+<P style="color:green">
+I think the notion of
+"before" in the second clause is easily definable, since we can insist
+that IO operations be included in the
+effectively total order of ordinary variable
+accesses. 
+<P style="color:green">
+It is unclear to me whether this is something that needs to be addressed
+with great precision, since the current standard doesn't appear to, and
+I think the danger of confusion is minimal.
+]</small>
+<P>
+For purposes of the above definitions, object destruction is viewed
+as a store to all its sub-objects, as is assignment to an object through
+a <TT>char *</tt> pointer if the target object
+was constructed as a different type.
+Assignment to a component of a particular union member is treated as
+a store into all components of the other union members.  Different
+threads may not concurrently access different union members.
+
+<H2><A NAME="examples">Discussion and Examples</a></h2>
+
+Unlike the Java memory model, we do not insist on a total order
+between synchronization actions.  Instead we insist only on a
+communicates-with relation, which must be an irreflexive
+partial order.  (This follows from the fact that it is a subset
+of happens-before, which is irreflexive and transitive.)
+This means that synchronization actions such as atomic operations
+are themselves not guaranteed to be seen in a consistent 
+order by all other threads, and may become visible at other
+threads in an order different from the intra-thread is-sequenced-before
+order.
+<H3>Simple Locks</h3>
+In the case of simple locks, this is possible only in that a
+"later" (in is-sequenced-before order) lock acquisition may become visible 
+before an "earlier" unlock action on a different thread.  Thus
+(with hypothetical syntax and <TT>lock</tt> and <TT>unlock</tt>
+primitives that take references and which have only
+acquire and release semantics, respectively):
+<PRE>
+lock(a); x = 1; unlock(a); lock(b); y = 1; unlock(b);
+</pre>
+may appear to another thread to be executed as
+<PRE>
+lock(a); lock(b); y = 1; x = 1; unlock(a); unlock(b);
+</pre>
+Unlike in Java, a <I>hypothetical</i> observer thread
+might see the assignments occur out of order.
+However, so long as <TT>x</tt> and <TT>y</tt> are ordinary variables,
+and the assignments do not reflect atomic operations, this is not
+observable, since such an observer thread would introduce a race.
+<P>
+Note that although our semantics allows the above reordering in a
+particular execution, compilers may <I>not</i> in general
+perform such rearrangements, since that might introduce
+deadlocks.
+<P>
+We claim that for data-race-free programs using only simple locks and
+no atomic operations, our memory model is identical to the Java one.
+<P>
+In the case of simple locks, we effectively insist on a total order
+among synchronization operations, happens-before is an irreflexive
+partial order, and everything behaves as in the Java memory model.
+<H3>Simple Atomic Operations</h3>
+For the remainder of this section, we assume that all variables are
+initialized to zero, variables whose names begin with <I>r</i> are local,
+and all other variables are shared, and that all operations are considered
+to be synchronization operations, and hence may be safely involved
+in data races, even if they are written using simple
+assignment syntax.
+Acquire and release operations will be explicitly specified,
+however.
+<P>
+Next consider <TT>load_acquire</tt> and <TT>store_release</tt>
+primitives, where there must be an action that communicates-with
+every <TT>load_acquire</tt>: either an initialization or a
+<TT>store_release</tt> on the same variable.  But there are no other
+restrictions on communicates-with.
+<P>
+Consider the following example:
+<P>
+<A NAME="acquire_release_example1">
+<TABLE BORDER ALIGN=CENTER>
+	<TR>
+		<TD> Thread1 </td> <TD> Thread2 </td>
+	</tr>
+	<TR>
+		<TD ROWSPAN=2>
+			x = 1; <BR>
+			store_release(&amp;flag, 1); </td>
+		<TD ROWSPAN=2>
+			r1 = load_acquire(&amp;flag); <BR>
+			r2 = x; </td>
+	</tr>
+</table>
+</a>
+<P>
+Due to the acquire and release ordering constraints on the
+references to <TT>flag</tt>, the individual pairs of assignments in each
+thread are ordered by is-inter-thread-ordered-before.
+<P>
+Only two possible actions can communicate-with the <TT>load_acquire</tt>
+in this example: The initialization of the <I>flag</i> variable, or
+the <TT>store_release</tt> action.  It follows that if we get
+<I>r1</i> = 1, then the <TT>store_release</tt> must have
+communicated-with the <TT>load-acquire</tt>.  Given the
+ordering constraints,this implies that the
+assignment to <I>x</i> happens-before the assignment
+to <I>r2</i>.  Hence <I>r1</i> = 1 and <I>r2</i> = 0 is an impossible
+outcome, as desired.
+<P>
+Next consider the following example, under the same ground rules:
+<P>
+<A NAME="acquire_release_example2">
+<TABLE BORDER ALIGN=CENTER>
+	<TR>
+		<TD> Thread1 </td> <TD> Thread2 </td>
+	</tr>
+	<TR>
+		<TD ROWSPAN=2>
+			store_release(&amp;y, 1); <BR>
+			r1 = load_acquire(&amp;x); </td>
+		<TD ROWSPAN=2>
+			store_release(&amp;x, 1); <BR>
+			r2 = load_acquire(&amp;y); </td>
+	</tr>
+</table>
+<P></a>
+There is no is-inter-thread-ordered-before ordering between the
+statements in each thread.
+Initialization operations may synchronize with both <TT>load_acquire</tt>
+operations.  Hence we can get <I>r1</i> = <I>r2</i> = 0, as expected.
+<P>
+We can model memory fences as synchronization operations with both
+acquire and release semantics, which must be totally ordered, and the
+communicates-with relation must respect the total order, i.e.
+each fence instance communicates-with the next fence instance
+in the total order.  Consider:
+<P>
+<TABLE BORDER ALIGN=CENTER>
+	<TR>
+		<TD> Thread1 </td> <TD> Thread2 </td>
+	</tr>
+	<TR>
+		<TD ROWSPAN=5>
+			x = 1; <BR>
+			r1 = z; <BR>
+			fence(); <BR>
+			y = 1; <BR>
+			r2 = w; </td>
+		<TD ROWSPAN=5>
+			w = 1; <BR>
+			r3 = y; <BR>
+			fence(); <BR>
+			z = 1; <BR>
+			r4 = x; </td>
+	</tr>
+</table>
+<P>
+In any given execution either the thread 1 fence communicates-with
+the thread 2 fence, i.e. the thread 1 fence executes first (a),
+or vice-versa (b).  If <I>r3</i> = 1, then we must be in the first case.
+(If thread 2's fence came first, the load of <I>y</i> happens-before
+the store, and hence cannot see the store.)  Hence  <I>r4</i> must also
+be one.  Similarly <I>r1</i> = 1 implies <I>r2</i> = 1.
+<P>
+Next consider the following suggestive example, where
+initially <TT>self_destruct_left</tt> and <TT>self_destruct_right</tt>
+are <TT>false</tt>:
+<A NAME="destruction_causality">
+<TABLE BORDER ALIGN=CENTER>
+	<TR>
+	<TD> Thread1 </td> <TD> Thread2 </td>
+	</tr>
+	<TR>
+		<TD ROWSPAN=5>
+			while (!self_destruct_left); <BR>
+			self_destruct_right = true; <BR>
+			blow_up_port_side_of_ship(); </td>
+		<TD ROWSPAN=5>
+			while (!self_destruct_right); <BR>
+			self_destruct_left = true; <BR>
+			blow_up_starboard_side_of_ship(); </td>
+	</tr>
+</table>
+</a>
+We would like to avoid the situation in which each while-loop
+condition sees the store from the other thread, and the ship
+spontaneously self-destructs without intervention of a third thread.
+<P>
+Assume there is no other thread which sets either of the
+<TT>self_destruct</tt>... variables.  Assume the thread 1 loop
+nonetheless terminates.  This is only possible if it saw the
+store in thread 2.  For such an execution to be intra-thread
+consistent, thread 2's loop must have seen the store from thread1.
+Thus in each case, the store depends-on the load in the while loop in
+the same
+thread, and the store communicates-with the loop in the other thread.
+The happens-before relation must be consistent with all of these
+and transitively closed.  Hence all actions mentioned are in
+a cycle, i.e. happen-before themselves.  Thus such an execution
+is not allowed.
+<P>
+If we use ordinary memory operations instead of atomic operations
+in the above example, then the loads in the while loops are
+sequenced-before the stores in the same thread.  We need the
+same communicates-with relationships as before, thus happens-before
+will again be cyclic, and this version of the program is also safe.
+<P style="color:green">
+<SMALL>[
+Unlike earlier versions of this proposal, the presence of the
+depends-on relation seems to introduce enough of a causality
+requirement here to prevent the anomalous outcome if we use
+unordered atomic operations.  With ordinary memory operations there
+is nothing surprising.  By adding communicates-with relationships
+for all matching cross-thread store-load pairs, and insisting
+that the result not contain cycles, we are essentially insisting
+on sequential consistency.
+Needs more examples.
+]</small>
+
+<H2><A NAME="fields">Member and Bitfield Assignments</a></h2>
+
+As we stated above, struct and class members are normally considered
+to be separate memory locations, and thus assignments to distinct
+fields do not conflict.  The only exception to this is that an
+assignment to a bit-field conflicts with accesses to any other bit-field
+in the same sequence of contiguous bit-fields.  For example, consider the
+declaration:
+<P>
+<PRE>
+struct s {
+  char a;
+  int  b:9;
+  int  c:5;
+  char d;
+  int  e:1;
+};
+</pre>
+<P>
+An assignment to the bit-field <TT>b</tt> conflicts with an access to
+<TT>c</tt>, but no accesses to a different pair of fields conflicts.
+<P>
+Note that in some existing ABIs, fields a,b, c, and d are allocated to the
+same 32-bit word.  With such ABIs, compilers <I>may not</i> implement
+an assignment to <TT>b</tt> as a 32-bit load, followed by an
+in-register bit replacement, followed by a 32-bit store.  Such
+implementations do not produce the correct result if <TT>a</tt> or
+<TT>d</tt> are updated concurrently with <TT>b</tt>.
+<P style="color:green">
+<SMALL>[
+Note that the above example illustrates the most controversial aspect
+of this rule that we have found.  It will take work to make existing
+compilers conform.  For example, gcc on X86 currently does not.
+However, the resulting slowdown in object code appears to be very minor.
+To our knowledge, cases like the above exist, but are rare, in production
+code.  And the necessary overhead amounts to some additional in-register
+computation, and a second store instruction to the same cache line
+as the first.
+<P style="color:green">
+The alternatives would add complexity to the programming task, which
+some of us
+believe we want to avoid unless the benefits are <I>much</i>
+larger than this.
+Consider the slight variant of the above example:
+<PRE style="color:green">
+struct s {
+  something_declared_third_party_header a;
+  int  b:9;
+  int  c:5;
+  char d;
+  int  e:1;
+};
+</pre>
+<P style="color:green">
+Whether or not accesses to <TT>a</tt> and <TT>b</tt> conflict is now
+hard to predict without implementation knowledge of <TT>a</tt>'s type,
+even if we understand the ABI conventions.
+<P style="color:green">
+Probably the only plausible alternative is to allow bit-field accesses to
+conflict with accesses to any other data member in the same struct or
+class, and to thus encourage bit-fields to only appear in a nested
+struct.  But this would add a rather obscure rule to the already
+complicated set that must be understood by threads programmers.
+]</small>
+<P>
+As far as the programmer is concerned, padding bytes are not written
+as part of a bit-field or data member update, i.e. such writes do not
+need to be considered in determining whether there is a data race.
+But we are not aware of
+cases in which a compiler-generated store that includes a padding byte
+would adversely impact correctness.
+<H2><A NAME="consequences">Consequences</a></h2>
+The preceding rules have some significant
+non-obvious consequences.  Here we list some of these rather
+informally.  Proofs would clearly be useful, where they are missing.
+<UL>
+<LI>Programs using no synchronization operations other than simple locks,
+and which allow no data races, behave sequentially consistently.
+This is critical, in that it programmers a much simpler rule to follow,
+which is sufficient in perhaps 98% of all cases.
+An informal
+<A HREF="http://www.hpl.hp.com/personal/Hans_Boehm/c++mm/sc_proof.html">
+proof is here</a>.
+<LI>Compilers may generally <I>move</i> ordinary memory references,
+such that both source and target instruction locations
+appear in the same executions,
+subject to the usual sequential correctness
+constraints, provided the reference is not moved across
+synchronization operations.
+If such movement were observable,
+the observer must see it without an intervening release operation
+in the original thread and corresponding acquire operation in the
+observing thread, or vice-versa.  Thus a load must see a store that
+does not happen-before it, and the program must have invoked undefined
+behavior to start with.
+<LI>By arguments similar to the above, compilers may turn a
+load from a shared memory location into two adjacent loads
+from a memory location and treat the two values interchangeably.
+Using the preceding argument, these reads may then be moved apart.
+Thus if the contents of a register were generated by reading the value
+of a shared global, and then spilled, in the same basic
+block without intervening synchronization operations, it is
+acceptable to reload the register from the shared global.
+<LI>By a similar argument, it is also acceptable
+to duplicate stores.  As was pointed out earlier, this may be profitable
+in code size if a store is repeated in all but one branch of a large
+<TT>switch</tt> statement.
+<LI>Compilers may not generally move operations forward across constructs
+that may block or in some other way provide mutual exclusion (potentially
+infinite loops, lock acquisitions), nor backward out of regions that may
+provide mutual exclusion (lock releases).  Doing so might introduce
+races and cause the operations to occur at a point at which they could
+not occur in a sequentially consistent execution.  Reuse of
+common subexpressions counts as movement in this sense.
+<LI>Compilers should generally ensure that acquire and release operations become
+visible in the specified order, except that a release operation may become
+visible later than a subsequent acquire operation.
+They must also ensure that 
+if release operation <I>R</i> in one thread may affect
+a later acquire operation <I>A</i> in another thread
+then generally any memory operations preceding <I>R</i> should
+be visible to code following <I>A</i>.
+To understand this, consider
+<A HREF="#acquire_release_example1">
+the first <TT>load_acquire</tt>/<TT>store_release</tt> example above</a>.
+On some architectures (we believe current X86 implementations qualify here)
+this is only a compiler constraint.  Other architectures (e.g. PowerPC, Alpha)
+will require some sort of memory fence after an acquire operation and
+before a release operation.  Itanium provides some more direct support
+for <TT>acquire</tt> and <TT>release</tt> operations.
+<LI>Compilers may not generally introduce new stores to potentially
+shared memory locations, which are not otherwise guaranteed to
+be written along the same path,
+since these may race with stores in other
+threads, and potentially cause those other stores to be lost.   This
+is true even if the write writes a value that was previously read
+from the same location.  The only exception is that a write to
+a bit-field may involve reading and rewriting of adjacent bit-fields.
+</ul>
+Here we list some more detailed implications of the last statement:
+<UL>
+<LI>Structure or class data member assignments may not be implemented in a
+way that overwrites data members not assigned to in the source,
+unless the assigned and overwritten members are adjacent bit-fields.
+<LI>Some (many) ABIs provide very weak alignment guarantees for
+bit-fields following, say, a <TT>char</tt> member.  In these cases,
+stores to the bit-field must be implemented with multiple stores,
+rather than by overwriting adjacent fields, as in the discussion above.
+<LI>Compilers may not introduce speculative stores to potentially
+shared locations, for example
+as a result of speculative register promotion.  To our knowledge,
+nearly all optimizing compilers currently perform speculative register
+promotion in ways that would no longer be allowed under this proposal.
+Such optimizations are not currently thread-safe in any real sense.
+In most cases there seem to be alternate transformations that achieve
+similar performance.
+</ul>
+<H2><A NAME="constructors">Constructors</a></h2>
+We make no specific guarantees that initialization performed by
+a constructor will be seen to have been completed when another
+thread accesses the object.  A correct program must use some sort of
+synchronization to make a newly created object visible to another thread.
+Otherwise the store of the object point and the load by the other
+thread constitute a data race, and the program has undefined semantics.
+<P>
+If proper synchronization is used, there is no need for additional guarantees,
+since the synchronization will ensure visibility as needed.
+<P>
+This is consistent with current practice, which does not guarantee
+even vtable visibility in the absence of synchronization, and allows
+insufficiently synchronized programs to crash, jump to the wrong
+member function, etc.
+<H2><A NAME="local_static">Function local statics</a></h2>
+If the declaration of a function local static is preceded by the
+keyword <TT>protected</tt>, then the access to the implicit flag used
+to track whether a function local static has been constructed is
+a synchronization operation.  Otherwise it is not, and it is the
+programmer's responsibility to ensure that neither construction of
+the object not reference to the implicit flag variable introduces
+a data race.
+<P style="color:green">
+<SMALL>[There appeared to be consensus among those
+attending the Lillehammer C++ standards meeting that both options should
+be provided to the programmer.  Subsequent discussion pointed out
+that it is more reasonable than some of us had thought to always
+require thread-safety.  In particular, there seem to be no
+practical cases in which a compiler decision to implement an
+initialization statically breaks ordering guarantees that would
+reasonably be expected.  The down side is that this imposes some
+overhead on uses that do not require synchronization.  On X86, this
+overhead can be significant for the initialization, but probably not
+for later uses.  On some other architectures significant
+overhead may be introduced even for later references.  Currently
+I think this issue is unresolved.
+<P style="color:green">
+The <TT>protected</tt> keyword was chosen arbitrarily, and
+should be considered more carefully.
+]</small>
+<H2><A NAME="volatile">Volatile variables and data members</a></h2>
+Accessed to regular <TT>volatile</tt> variables are not viewed
+as synchronization operations.  <TT>Volatile</tt> implies only
+safety in the presence of implicit or unpredictable actions
+by the same thread.
+<P>
+If the atomic operations library turns out to be insufficiently
+convenient to provide for lock-free inter-thread communication,
+we propose that
+accesses to <TT>__async volatile</tt> variables and data members are
+viewed as synchronization operations.
+<P>
+Loads of such variables would have an acquire ordering constraint,
+and stores would have a release constraint.
+<P style="color:green">
+<SMALL>[
+It seems to make sense to put this on hold until we have a better
+handle on the atomic operations library, so that we can tell
+whether that would be a major inconvenience.
+<P style="color:green">
+The possible reasons to retain this are (1) possibly improved convenience,
+and (2) possibly better consistency in programming idioms across
+languages (in this case Java and C#).  The argument for
+discarding it is simplicity.
+<P style="color:green">
+If we want to retain it, we now have to ask whether there is a total
+order among volatile accesses.
+<P style="color:green">
+Current implementations of <TT>volatile</tt> generally
+use weaker semantics, which do not prevent hardware reordering of
+volatiles.  This appears to have no use in portable code for threads,
+since such
+code cannot take advantage of the fact that operations are reordered
+"only by the hardware".  It is occasionally useful for variables
+that are either modified after a setjmp, that may be accessible through
+multiple memory mappings, or the like.
+]</small>
+<P>
+There are no atomicity guarantees for accesses to <TT>volatile</tt>
+variables.  Accesses to <TT>__async volatile</tt> variables of 
+pointer types, integral types (other than 
+<TT>long long</tt> variants), <TT>bool</tt> type, enumeration types, 
+and type <TT>bool</tt> are atomic.  The same applies to the 
+individual data member accesses in e.g. struct assignments, but not to
+the assignment as a whole.  There is no defined order between these
+individual atomic operations.
+<P style="color:green">
+<SMALL>[We can't talk about async-signal-safety here.
+We might suggest that <TT>__async volatile int</tt> and
+<TT>__async volatile</tt> pointers be async-signal-safe where that's
+possible and meaningful.  My concern here is with uniprocessor
+embedded platforms, which might have to use restartable critical
+sections to implement atomicity, and might misalign things.
+}</small>
+<H2><A NAME="local">Thread-local variables and stack locations</a></h2>
+This issue is addressed more thoroughly in
+<A HREF="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2005/n1874.html">
+Lawrence Crowl's proposal (N1874=05-0134)</a>.  We defer to that
+discussion.
+<H2><A NAME="local">Library Changes and Clarifications</a></h2>
+We need the following kinds of changes to the library specification:
+<H3>Clarify thread safety</h3>
+The library specification needs to be clear as to which pieces of
+the library are thread-safe, and in what sense, and how
+various calls interact with the memory model.  We propose the following
+basic approach, consistent with the approach used by
+the <A HREF="http://www.sgi.com/tech/stl/thread_safety.html">
+SGI STL implementation</a>:
+<UL>
+<LI>Any data types (e.g. containers) implemented by the library are
+thread-safe in the same weak sense as an ordinary scalar
+variable in the base language:
+The client must ensure that an operation that logically updates a piece
+of data may not be executed concurrently with another operation that
+reads or writes the same data.  The implementation must protect
+against accesses to shared data that do not correspond to conflicting
+accesses at the abstract level, i.e. updates that occur in response to
+logical "read" operations, or against accesses to a data structure
+shared by multiple abstract objects.
+For example, implementations of
+"read operations" that maintain an internal shared cache will often
+need internal locks to protect that cache, as will any implementations that
+maintain other forms of per class, as opposed to per object, data.
+<LI>A few operations will provide stronger guarantees, e.g. that
+accesses behave atomically.  In these cases, unless otherwise stated,
+a write operation to a particular piece of shared data
+communicates-with a read of the corresponding data by another thread.
+<LI>Normal race-free library calls, i.e. calls which do not guarantee
+atomicity, introduce no communicates-with relationships.
+This is true even if the implementation uses internal locks.
+(Often such internal locks can be replaced by thread-local states,
+or clever lock-free algorithms, which might no longer guarantee
+memory ordering.)
+<LI>Accesses to external data (e.g. files) are treated as though
+they were accesses to memory data.
+<P style="color:green">
+<SMALL>[
+We need to better understand current conventions here.  Presumably
+a file read is logically a "write" operation, since it updates the
+current position in the file.  But I don't know how much
+locking is done by current C++ I/O implementations.  I suspect it's
+more than we would like.]</small>
+<LI>Operations such as <TT>allocator&lt;T&gt;::allocate()</tt> that
+return freshly allocated memory are <I>not</i> considered to write shared data.
+Hence the implementation, not the client, must either guard against
+concurrent calls, or make them safe, e.g. by using some form of thread-local
+allocation pools.
+</ul>
+We expect that some effort will be required to pin down exactly which
+operations "logically update" shared state.
+<P style="color:green">
+<SMALL>[
+Paragraph 21.3(5), which deals with <TT>basic_string</tt>
+copy-on-write support, will be difficult to support here in any reasonable
+fashion.  I've long advocated stripping it to prohibit copy-on-write
+since I'm not convinced it
+makes sense without threads either.  Unfortunately, removing it
+will drastically change the performance characteristics of existing
+implementations, often for the better, but occasionally for the worse.
+]</small>
+<H3>Add thread-specific library components</h3>
+At least two kinds of additions will be needed:
+<UL>
+<LI>The atomic operations library mentioned elsewhere in this document.
+<LI>Primitives for creating and synchronizing threads.
+</ul>
+In the long term, a library containing basic lock-free and scalable
+data structures is also highly desirable.
+<P>
+All of these are discussed elsewhere.
+<H2><A NAME="exceptions">Exceptions, Signals, and Thread Cancellation</a></h2>
+<P style="color:green">
+<SMALL>[
+It is unclear to what extent this needs to or should be addressed here.
+I think there is agreement that thread cancellation (though
+not <TT>PTHREAD_CANCEL_ASYNCHRONOUS</tt>-style) and exceptions
+should be unified.  But the details are controversial, and that seems
+to be more of a threads API issue.
+<P style="color:green">
+Nick Maclaren argues that we need to say something about the state
+that is visible to an exception handler that was thrown to reflect a
+synchronous error, such as an arithmetic overflow.  Since we are
+effectively respecifying intra-thread memory visibility, there are
+strong interactions with threads issues, and the presence of synchronization
+primitives gives us an opportunity for a meaningful specification that
+is at least somewhat useful to a programmer, I'm inclined
+to agree.  What follows is an approximate restatement of one of the options he
+proposed.
+<P style="color:green">
+This essentially requires that compilers treat operations that may
+generate exceptions as memory operations, and not move them out of critical
+sections etc.  I would be surprised if existing implementations did so.
+<P style="color:green">
+This may need further work, even if we go with substantially this
+statement.  In particular, the handler kind
+of needs to be modelled as a new thread replacing the old one,
+since it can have an inconsistent
+view of updates performed by the original thread.  But on the other hand,
+it potentially has access to local variables whose address was not
+taken, and hence can see otherwise private state of the original thread.
+]</small>
+<P>
+If an action <I>A</i> throws an intra-thread out-of-band exception, then all
+actions that happen-before a synchronization action that happens-before
+<I>A</i> are visible to the exception handler.  Conversely, if <I>A</i>
+happens-before another synchronization action <I>B</i>, then no action
+<I>C</i> such that <I>B</i> happens-before <I>C</i> is visible to the
+exception handler.
+<P>
+For this purpose, there are implicit synchronization actions with
+both acquire and release semantics (effectively memory fences)
+at the beginning and end of each thread execution.
+<P style="color:green">
+<SMALL>[
+I'm not sure whether the preceding paragraph really buys us anything.
+]</small>
+</body>
+</html>
+

@@ -1,0 +1,1071 @@
+<html><head><title>Improving STL Allocators</title>
+
+
+<style>
+p {text-align:justify}
+li {text-align:justify}
+blockquote.note
+{
+    background-color:#E0E0E0;
+    padding-left: 15px;
+    padding-right: 15px;
+    padding-top: 1px;
+    padding-bottom: 1px;
+}
+ins {background-color:#FFFFA0}
+del {background-color:#FFFFA0}
+</style></head><body>
+
+<address align="right">
+Document number: N2045=06-0115<br>
+<br>
+Ion Gazta&ntilde;aga (igaztanaga at gmail dot com)<br>
+2006-06-18
+</address>
+<hr>
+<h1 align="center">Improving STL Allocators</h1>
+
+<h2>Contents</h2>
+
+<ul>
+<li><a href="#Introduction">Introduction</a></li>
+<li><a href="#Problem%201">Problem #1: Wasted unusable memory</a></li>
+<li><a href="#Problem%202">Problem #2: The sandwich effect</a></li>
+<li><a href="#Problem%203">Problem #3: Growth factor and memory handshake</a></li>
+<li><a href="#Problem%204">Problem #4: Cheap vs. Free</a></li>
+<li><a href="#Problem%205">Problem #5: Limited object construction</a></li>
+<li><a href="#Problem%206">Problem #6: Node allocation vs. array allocation</a></li>
+<li><a href="#N1953">Comments on N1953</a></li>
+<li><a href="#Expanding%20backwards">Expanding backwards</a></li>
+<li><a href="#Minimizing%20synchronization">Minimizing synchronization: Expand + Allocate</a></li>
+<li><a href="#ImprovedV2">The improved Version 2 Allocator</a></li>
+<li><a href="#Dependencies">Dependencies</a></li>
+<li><a href="#Implementability">Implementability and Prior Art</a></li>
+<li><a href="#Proposed%20Wording">Proposed Wording</a></li>
+<li><a href="#Acknowledgments">Acknowledgments</a></li>
+<li><a href="#References">References</a></li>
+</ul>
+
+<h2><a name="Introduction"></a>Introduction</h2>
+
+<p>
+Recent papers have shown interest in improving STL allocator performance.
+For some applications the STL allocator interface has some performance drawbacks and recent efforts like 
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/N1953.htm">N1953</a>
+propose an alternative to solve one of the biggest inefficiencies of current STL
+allocators: in-place expansion. However,
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/N1953.htm">N1953</a>
+interface can be further optimized, to achieve better memory use, locking reduction,
+and more performance. This paper adopts the same versioning system as
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/N1953.htm">N1953</a> and
+considers that versioning system a correct approach to allow version 1 and version 2
+allocator usage in STL containers.
+For more information see
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/N1953.htm">N1953</a>.
+However should other language features be added which can better perform this
+functionality (e.g. concepts), this proposal is of course open to that route. 
+The focus of this proposal is on higher performance allocators, and not on the
+details of any given versioning system.
+</p>
+
+<p>As
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/N1953.htm">N1953</a>,
+says, we need to add several pieces to achieve optimal performance with STL allocators:
+</p>
+
+<ol>
+<li>The <tt>allocator</tt> interface must be augmented so that containers
+can ask the proper questions.</li>
+
+<li>The containers must know whether they have a new allocator (with the
+expanded interface) or not, so they can continue to work with today's
+allocators, and also take advantage of an enhanced allocator interface.</li>
+
+<li>An C-level interface which augments the current <tt>malloc</tt> interface
+should be introduced. This is not mandatory, but it's recommendable.</li>
+</ol>
+
+Let's start revising some problems related to current STL allocators:
+
+<h2><a name="Problem%201"></a>Problem #1: Wasted unusable memory</h2>
+<p>
+As we know, due to alignment or internal fragmentation issues, memory allocation
+algorithms usually allocate some extra bytes that can't be used with current
+allocator interface. Sometimes, this wasted space is important for small allocations.
+</p>
+
+<p>
+Dynamic strings like <tt>std::string</tt> can request 24 characters and it's not
+uncommon (depending on the memory allocation algorithm) to round that request to 32
+or even 64 characters. In some fast allocation algorithms like the Kingsley algorithm, the
+memory waste can be big. If we knew the real capacity of the allocated buffer, we could
+avoid expensive new allocations + copies. 
+</p>
+
+<p>
+<b>Conclusion #1: We need a way to obtain the real size of the allocated memory buffer
+to avoid memory waste.</b>
+</p>
+
+<h2><a name="Problem%202"></a>Problem #2: The sandwich effect</h2>
+
+<p>
+Apart from the unusable memory waste, there is another big memory waste with current
+allocators. This problem is frequent in resource constricted environments, and it's
+also known as the <tt>sandwich effect</tt>:
+</p>
+
+<p>
+Suppose a fixed  size memory buffer (for example a big memory chunk taken from the
+operating system, like a memory page) where we construct a <tt>vector</tt>. Let's calculate
+the biggest use factor of the vector with current allocator approach, supposing a k growth
+factor:
+</p>
+
+<blockquote><pre>
+ -----------------------------------
+| current_memory | k*current_memory | = B bytes
+ -----------------------------------
+</pre></blockquote>
+
+<p>
+This figure shows the optimal position of a vector (in the beginning of the segment).
+The biggest successful reallocation would be to take the rest of the segment, so if
+<tt>current_memory</tt> has N bytes:
+</p>
+<p>
+<tt>N + k*N = B</tt>
+</p>
+
+<p>
+The use factor (maximum vector capacity/segment size) is:
+</p>
+
+<pre>
+kN/B -> kN/(N + kN) -> <b>k/(1+k)</b>
+</pre>
+
+<p>
+So with k=1.5, the use factor is <b>0.6</b>. This means that with a <tt>vector</tt> using
+current allocator interface we can only
+use the <b>60%</b> of a segment's capacity, due to missing expansion functions. And
+this is only <b>the best case</b> since the vector is placed in the beginning of the
+segment and we suppose that growing factor matches exactly the whole segment.
+If the vector is not in the beginning of the segment,
+the use factor is <b>lower</b>:
+</p>
+
+<blockquote><pre>
+ ------------------------------------
+| B/2            | current_memory |  | = B bytes
+ ------------------------------------
+</pre></blockquote>
+
+<p>
+If the vector is placed in the middle of the segment, the maximum size is when the
+reallocation takes the lower half of the memory so the use factor would be <b>0.5</b>.
+And this is an optimistic supposition, since we are supposing that growth factor
+will lead exactly to the maximum free space.
+The consequence is that we must allocate more segments than
+necessary because we don't have
+a way to expand <tt>current_memory</tt>.
+</p>
+
+<p><b>
+Conclusion #2: We need an interface that allows forward and backwards expansion of memory, to 
+achieve a 100% use factor.
+</b></p>
+
+<h2><a name="Problem%203"></a>Problem #3: Growth factor and memory handshake</h2>
+<p>
+When the capacity of a <tt>vector</tt> is equal to the <tt>vector</tt>'s size, and we want
+to insert new N objects, we have to allocate a new memory buffer and copy the data.
+This is an expensive operation and to avoid
+too many allocations, normally a growth factor is applied to the current capacity.
+</p>
+
+<p>
+In resource constricted environments a common growth factor (for example 1.5),
+can be too big to succeed. On the other hand, maybe there is memory for N new 
+objects (usually N is smaller than the current capacity). 
+The same would happen if we had expansion functions in the allocator interface. We can try to
+guess a correct expansion size, but the most efficient approach is to request a <tt>minimum size</tt>
+and a <tt>preferred size</tt>. The allocator will try to expand to <tt>preferred size</tt>
+but if it's not possible it can try to expand it between <tt>minimum size</tt> and
+<tt>preferred size</tt>. Normally we would prefer an expansion between <tt>minimum size</tt>
+and <tt>preferred size</tt> than a new allocation. So with the current allocator's interface
+we are mixing three concepts:
+</p>
+
+<ol>
+<li><tt>minimum size</tt>: The minimum memory size we need to succeed. In this case, current capacity + N</li>
+<li><tt>preferred size</tt>: The memory size we would like to achieve if it's possible. In this case, capacity*1.5</li>
+<li><tt>received size</tt>: The actual size of the buffer that the allocator has allocated.
+A size that will be bigger or equal than <tt>minimum_size</tt> and that can be bigger
+than <tt>preferred size</tt> due to alignment or algorithmic issues.</li>
+</ol>
+
+<p>
+The best approach is to request both <tt>minimum_size</tt> and <tt>preferred_size</tt>
+sizes in the same function and obtain the actual size in <tt>received_size</tt> in return,
+so that the allocator can
+use just one memory lookup (and mutex locking in multithreaded environments). The algorithm
+tries to find a buffer of size <tt>preferred size</tt>, if it can't, it can return the biggest
+block found if its size is at least <tt>minimum size</tt>. When expanding, it will try
+to expand it first to <tt>preferred size</tt>. If this fails, it will expand it as much 
+as it can, as long as the new size is bigger than <tt>minimum_size</tt>.
+</p>
+
+
+<p><b>
+Conclusion #3: We need an atomic handshake with the memory allocator that understands
+<tt>minimum size</tt>, <tt>preferred size</tt> and <tt>received size</tt> concepts both
+in new buffer allocation and buffer expansion.
+</b></p>
+
+<h2><a name="Problem%204"></a>Problem #4: Cheap vs. Free</h2>
+<p>
+The adoption of move semantics will offer an impressive performance boost to containers.
+<tt>std::vector</tt>'s and other containers' reallocation will be cheaper, since object movement
+during reallocations can be compared with POD copying.
+Some might argue that move semantics are enough to achieve good vector performance in
+reallocations, so that memory expansion functions are not necessary.
+</p>
+
+<p>
+However, even moving an object normally has cost
+proportional to the object's <tt>sizeof</tt>. Some optimizations for copy operations,
+actually increase the cost of move operations. For example, it's common to apply
+<tt>small string optimization</tt> technique to <tt>std::string</tt>. The internal
+buffer is commonly between 8 and 32 bytes. Moving <tt>std::string</tt> objects, with
+this optimization activated and no dynamic allocated memory, is cheap but not free and
+proportional to the internal buffer size.  An even more extreme example is
+<tt>vector&lt;fstream&gt;</tt>.  On gcc the <tt>sizeof(fstream)</tt> is 680 bytes, indicating
+a relatively expensive move operation.
+When a vector of objects grows,
+the move operation is not so cheap if the contained objects' size is not small.
+On the other hand, forward memory expansion is almost free.
+</p>
+
+<p><b>
+Conclusion #4: Move semantics and memory expansion are complementary. Move semantics are not
+enough to obtain optimal performance.
+</b></p>
+
+<h2><a name="Problem%205"></a>Problem #5: Limited object construction</h2>
+<p>
+The current allocator interface has a limited
+object construction function. The <tt>construct</tt>
+member is defined taking a copy of the object to construct:
+</p>
+
+<blockquote><pre>
+void construct(pointer p, const value_type &amp;v);
+</pre></blockquote>
+
+<p>
+Some STL container implementations (for example Dinkumware and Freescale) try to
+construct contained objects using the <tt>construct</tt> function. The standard allows
+supposing <tt>allocator::pointer</tt> is equal to <tt>value_type *</tt>, and some
+implementation choose placement new to construct objects. But to allow advanced
+pointer types (for example, relative pointers for shared memory) these popular
+implementations choose <tt>construct</tt> when initializing raw memory.
+</p>
+
+<p>
+This causes an overhead in node containers like <tt>list</tt> or <tt>map</tt>: since the actual
+allocated object is a node containing the value instead of the value alone, the
+construction function needs a copy of the node, not a copy of the value:
+</p>
+
+<blockquote><pre>
+void construct(node_pointer p, const node_type &amp;node);
+</pre></blockquote>
+
+<p>
+That would require creating a temporary node from the user's value
+to initialize the new node in the allocated node memory. Since this is highly inefficient,
+these implementations choose another approach: they store several allocators and they choose to
+construct the node using several partial constructions. For example, <tt>std::map</tt> needs in Dinkumware implementation 3 allocators: 
+one to allocate the node, one to construct the <tt>value_type</tt> part of the node, and one
+to construct the pointers stored in the node (used to build the tree).
+For unordered containers this approach would need 4 allocators, since we have to allocate and
+construct also the bucked array. With empty allocators, the space overhead is not much,
+but with stateful allocators (for example, containing only a pointer to a private heap),
+this would grow the size of an empty <tt>map</tt> typically from 2 words to 5 words. This also
+complicates the implementation, that has to manage many objects in constructors,
+swappings, etc...
+</p>
+
+<p>
+Actually, in node containers like <tt>std::list</tt> and <tt>std::map</tt> we only need 1 allocator,
+the rest of the allocators are the result of a limited <tt>construct</tt> function.
+</p>
+
+<p><b>
+Conclusion #5: We need to improve <tt>construct</tt> function to achieve the same functionality
+as a placement new, including many constructor arguments and perfect forwarding. This will allow
+in-place construction of objects, and a reduction of allocators in node containers.
+Variadic templates plus perfect forwarding are a perfect combination to achieve proposed full
+placement new functionality in allocators.
+</b></p>
+
+<h2><a name="Problem%206"></a>Problem #6: Node allocation vs. Array allocation</h2>
+
+<p>
+C++ has always taken in care the performance improvement that can be achieved when we
+use different ways to allocate one instance of an object or an array of N objects. This
+is why we have <tt>new</tt> and <tt>new[]</tt> functions. Single instance allocation does
+not need to store the number of allocated objects to know how many destructors it must call.
+</p>
+
+<p>
+Currently, STL allocators mix both concepts. Current node allocators use node pooling
+when <tt>allocate(size_type size, pointer hint = 0)</tt> specifies <tt>size == 1</tt>,
+and those node containers use normal array allocation when the <tt>size != 1</tt>. This
+works because of the absence of expansion functions. A common node allocator can't easily
+know the size of the allocated object with just a pointer to an object. After all, node
+pooling technique erases all size information to achieve optimal memory use, just like
+<tt>operator new</tt>.
+</p>
+
+<p>
+This would disallow upgrading node allocators to version 2 allocators. If a node allocator
+uses a pooling technique (for example, segregated storage) when 1 object is requested
+and forwards request to <tt>operator new</tt> when N objects are requested, how can it
+implement a safe memory expansion or memory size obtaining function?
+</p>
+
+<p>
+This would lead to a limitation: <b>node allocators can only be version 1 allocators</b>.
+After all, <tt>std::map</tt> and <tt>std::list</tt> are <b>pure node containers</b>
+(they only allocate nodes), so we might think this is an optimal choice.
+However, we can't forget <b>hybrid node containers</b> (node containers that
+use auxiliary array data), for example, <tt>unordered_map</tt>. If we limit node allocators
+to version 1 allocators, <tt>unordered_map</tt> couldn't use expansion functions for its
+bucket array, obtaining a suboptimal rehash function.
+</p>
+
+<p><b>
+Conclusion #6: If we want maximum performance, we must separate node allocation and
+array allocation functions, just like <tt>new</tt> and <tt>new[]</tt>. Otherwise, we
+can't add expansion functionality to node allocators and we can have suboptimal memory
+management in containers like <tt>unordered_map</tt> or any container that mixes nodes
+and arrays.
+</b></p>
+
+<h2><a name="N1953"></a>Comments on N1953</h2>
+
+<p>
+The <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/N1953.htm">N1953</a>
+proposal is a good proposal to solve some of the problems of the current STL allocator interface.
+It offers expansion functions (including <tt>minimum size</tt> and <tt>preferred size</tt>
+concepts), offers the possibility to obtain the actual size of the buffer and it has 
+shrinking features. However, it doesn't solve some problems  of the current
+allocator interface:
+</p>
+
+<ol>
+<li>It doesn't separate node and array allocation. The proposed interface would make
+node allocators version 1 only allocators.</li>
+
+<li>The <tt>minimum size</tt> and <tt>preferred size</tt> concepts are only applied
+to expansion function. Allocation function has only one request size.</li>
+
+<li>Only proposes forward expansion. Backwards or even both direction expansion
+is an interesting feature to minimize memory use and improve performance.</li>
+
+<li>Defines functions that do similar things mixing failure modes (exception vs. null return).
+This can be confusing: <tt>allocate</tt> is similar to <tt>request</tt> but the latter
+returns 0 when failure and also can return a suggested size.
+<tt>resize</tt> is similar to <tt>expand</tt> but the first can shrink and return a hint.
+</li>
+</ol>
+
+The versioning system is a good system to detect new allocation features and this paper
+uses this approach. However, new C++ features like concepts can
+make this versioning system obsolete.
+
+<h2><a name="Expanding%20backwards"></a>Expanding backwards</h2>
+
+<p>
+As mentioned, this paper proposes the possibility of backwards expansion of
+memory combined with usual forward expansion. There are several reasons to
+propose it:
+
+</p>
+
+<ol>
+<li><b>Constant time allocation</b>: Backwards expansion, like forward expansion, can
+be implemented as a constant time O(1) operation. Usual memory algorithms can have
+fast access to the previous block of memory of the current buffer. If the previous block
+is free, and if it's big enough to hold the requested size when combined with the
+current buffer (or even combining backwards and forward expansion), it can speed up allocations.</li>
+
+<li><b>Reduced memory use and fragmentation:</b> The backwards expansion avoids the
+<tt>sandwich effect</tt> and makes possible a 100% use factor of a memory segment.
+Otherwise, the initial position of the buffer would limit the use factor of the segment.</li>
+
+<li><b>Improved locality:</b> Even we have to move the objects again when expanding
+backwards to the beginning of the buffer (like when allocating a new buffer), this operation
+is likely to be faster than copying to a new location, because both source and destination
+are closer. They can even share the same memory page, reducing overhead.</li>
+</ol>
+
+<p>
+However, backwards expansion can't be applied with <tt>vector</tt> operations that require
+<b>strong exception guarantee</b> if the values have throwing constructor/assignment. It can
+be used with move-capable values, if we require non-throwing move-capable values
+in STL containers. This requires an optional backwards expansion possibility that
+should be activated on demand by containers.
+</p>
+
+
+<h2><a name="Minimizing%20synchronization"></a>Minimizing synchronization: Expand + Allocate</h2>
+
+<p>
+Checking for expansion is usually a fast operation: check if the adjacent block is free,
+and if so, merge blocks. In multithreaded systems, however, there is need to apply
+locks to protect memory operations (when using non lock-free algorithms).
+In some systems (like multiprocessor machines) locking is an expensive operation due to
+memory synchronization, so checking for expansion is cheaper than the locking mechanism.
+If the expansion fails, we usually try to allocate a new buffer, and we need to
+use locking again.
+</p>
+
+<p>
+We can merge both locking needs into one locking, and improve performance. To achieve this,
+we need an interface that can offer an atomic <b>expand or allocate</b> feature.
+</p>
+
+<h2><a name="ImprovedV2"></a>The improved Version 2 Allocator</h2>
+
+<p>
+The "version 2" allocator interface is a strict superset of the current (version 1)
+allocator interface. This allows version 2 allocators to be used with containers
+(and any other objects) which only expect the version 1 interface.  This fact also
+allows the presentation of the version 2 interface without repeating the current
+interface.
+</p>
+
+<blockquote><pre>
+
+namespace std {
+
+enum allocation_type
+{
+    //Bitwise OR (|) combinable values
+    allocate_new        = ...,
+    expand_fwd          = ...,
+    expand_bwd          = ...,
+    shrink_in_place     = ...,
+    nothrow_allocation  = ...
+};
+
+template &lt;class T&gt;
+class allocator
+{
+public:
+    ...
+    // as today
+    ...
+    // plus:
+
+    //Version identifier, see N1953
+    typedef version_type&lt;allocator, 2&gt; version;
+
+    //Returns the size of an array
+    size_type size(pointer p) const throw();
+
+    //An array allocation handshake function
+    std::pair&lt;pointer, bool&gt;
+        allocation_command(std::allocation_type command, size_type limit_size
+                          ,size_type preferred_size,     size_type&amp; received_size
+                          ,pointer reuse = 0);
+
+    //Node allocation function
+    pointer allocate_one()
+
+    //Node deallocation function
+    void    deallocate_one() throw();
+
+    //Default construction function
+    void construct(pointer p);
+
+    //General purpose in-place construction function
+    template&lt;... Args&gt;
+    void construct(pointer p, Args &amp;&amp;... args);
+};
+
+}  //namespace std {
+
+</pre></blockquote>
+
+<p>
+The <tt>size</tt> function allows the client to ask how many elements a previously
+allocated array pointer actually points to. 
+The amount returned may be greater than
+the number which was requested via a previous <tt>allocate</tt> or
+<tt>allocation_command</tt>. Clients such as
+<tt>string</tt> or <tt>vector</tt> can use this information to add to their capacity
+at no cost.
+</p>
+
+<p>
+The <tt>allocation_command</tt> function is an advanced handshake function to
+achieve allocation or expansion of memory. It can be also used to request a shrink
+command. The user specifies the allocation methods that wants to try in the <tt>command</tt>
+parameter: new allocation, forward expansion, backwards expansion or shrinking.
+The commands can be combined using a bitwise OR operation, obtaining atomic 
+allocation features.
+
+It's also possible to disable exception throwing and obtain failures via null pointer.
+The user also specifies the <tt>limit_size</tt> to succeed (the minimum size in case
+of an expansion/allocation, the maximum size in case of a shrinking), the
+<tt>preferred_size</tt> of the operation and the pointer of the memory to be
+expanded/shrunk if an expansion or a
+shrinking has been requested. The allocator always returns the actual size of the memory in
+<tt>received_size</tt> parameter. When success, the function returns the new address
+in the first member of the returned pair and returns <tt>true</tt> in the second
+member if an expansion has occurred. On failure, it throws an exception if
+the user hasn't specified <tt>std::nothrow_allocation</tt> in the <tt>command</tt> parameter,
+otherwise returns 0 in the first member of the pair. On failure, the function also
+returns (in the <tt>received_size</tt> parameter) a suggested <tt>limit_size</tt>
+that might succeed in the future.
+</p>
+
+<p>
+The <tt>allocate_one</tt> member function is a function requesting the allocation
+of just one node. The pointer returned by this function can't be used for expansion
+or size guessing. It's the equivalent of <tt>operator new</tt> for allocators.
+Throws an exception on failure. The returned pointer can only be deallocated
+using <tt>deallocate_one</tt>.
+</p>
+
+<p>
+The <tt>deallocate_one</tt> member function is a function requesting the deallocation
+of just one node has been allocated using <tt>allocate_one</tt>.
+It's the equivalent of <tt>operator delete</tt> for allocators.
+</p>
+
+<p>
+The <tt>construct(pointer p)</tt> member function will construct a default constructed
+element in the address pointed by p. It will throw if the default constructor
+throws.
+</p>
+
+<p>
+The <tt>construct(pointer p, Args &amp;&amp;... args)</tt> member function will be equivalent to
+a placement new construction: 
+</p>
+
+<blockquote><pre>
+new((void*)p) value_type(std::forward&lt;Args&gt;(args)...);
+</pre></blockquote>
+
+<p>
+It will throw if the equivalent constructor throws.
+</p>
+
+<h2><a name="Dependencies"></a>Dependencies</h2>
+
+<p>
+Like
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/N1953.htm">N1953</a>,
+this paper proposes the specification of the versioning system in terms of
+<tt>std::tr1::integral_constant</tt> (part of the type traits library) as if
+<tt>integral_constant</tt> was already part of the working draft. This dependency
+can be easily removed.
+</p>
+
+<p>
+This paper proposes an advanced <tt>construct</tt> function using rvalue reference
+(<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n1952.htm">N1952</a>),
+and variadic templates
+(<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2004/N1704.pdf">N1704</a>)
+as if they were already part of the working draft. The paper shows a clear
+non-metaprogramming common use case for variadic templates: perfect forwarding with
+in-place construction. Currently there is no generic way to implement a generic
+in-place construction in C++. Rvalue reference plus variadic templates is an elegant
+solution to achieve this. 
+</p>
+
+<p>
+If variadic templates are not available, the following limited function can be used:
+</p>
+
+<blockquote><pre>
+template&lt;class ConvertibleToValue&gt;
+void construct(ConvertibleToValue &amp;&amp;convertible_to_value);
+</pre></blockquote>
+
+<p>
+If rvalue reference is not available, the following more limiting function
+is proposed:
+</p>
+
+<blockquote><pre>
+template&lt;class ConvertibleToValue&gt;
+void construct(const ConvertibleToValue &amp;convertible_to_value);
+</pre></blockquote>
+
+<h2><a name="Implementability"></a>Implementability and Prior Art</h2>
+
+<p>
+The proposed interface has been implemented in Boost.Interprocess library for
+shared memory and memory mapped capable allocators and containers. The time needed
+to implement the proposed interface was 50 man-hours, including modifications of 
+the shared memory allocation algorithm, STL interface allocator and the vector container.
+</p>
+
+<p>
+An implementation of C <i>realloc</i> function can be easily changed to implement
+the allocation algorithm of <i>allocation_command</i>. The time to implement the
+needed allocation algorithm based on realloc code is estimated in less than 40
+man-hours.
+</p>
+
+<p>
+The code to handle backwards + forward expansion in <i>vector</i> is a more generalized
+case of an insertion in a <i>deque</i> container. Library vendors might need
+less than <i>30</i> man-hours to implement it.
+</p>
+
+<p>
+Overall, size and speed improvement is big. The performance gain is impressive 
+in initialization patterns, when a vector
+can be filled with repeated <i>push_back</i> calls, without a single reallocation,
+since with no other thread requesting memory, all expanding calls succeed. In
+resource constrained memories, like shared memory, the size savings are huge since
+the allocator can avoid the sandwich effect and the vector can use all the adjacent
+existing memory.
+</p>
+
+<h2><a name="Proposed%20Wording"></a>Proposed Wording</h2>
+
+<p>
+This wording is a modified wording from 
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/N1953.htm">N1953</a>,
+so the implementation is required to provide versioning infrastructure, but is
+not required to provide containers that recognize version allocators or 
+a <tt>std::allocator</tt> which meets the version 2 specification.
+This wording only specifies the syntax and behavior for these optimizations.
+</p>
+
+<blockquote class="note">
+<p>
+Modify the &lt;utility&gt; synopsis in 20.2:
+</p>
+</blockquote>
+
+<blockquote><pre>namespace std {
+  //<i>  <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/lib-utilities.html#lib.operators">lib.operators</a>, operators:</i>
+  namespace rel_ops {
+    template&lt;class T&gt; bool operator!=(const T&amp;, const T&amp;);
+    template&lt;class T&gt; bool operator&gt; (const T&amp;, const T&amp;);
+    template&lt;class T&gt; bool operator&lt;=(const T&amp;, const T&amp;);
+    template&lt;class T&gt; bool operator&gt;=(const T&amp;, const T&amp;);
+  }
+  
+  //<i>  <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/lib-utilities.html#lib.pairs">lib.pairs</a>, pairs:</i>
+  template &lt;class T1, class T2&gt; struct pair;
+  template &lt;class T1, class T2&gt;
+    bool operator==(const pair&lt;T1,T2&gt;&amp;, const pair&lt;T1,T2&gt;&amp;);
+  template &lt;class T1, class T2&gt;
+    bool operator&lt; (const pair&lt;T1,T2&gt;&amp;, const pair&lt;T1,T2&gt;&amp;);
+  template &lt;class T1, class T2&gt;
+    bool operator!=(const pair&lt;T1,T2&gt;&amp;, const pair&lt;T1,T2&gt;&amp;);
+  template &lt;class T1, class T2&gt;
+    bool operator&gt; (const pair&lt;T1,T2&gt;&amp;, const pair&lt;T1,T2&gt;&amp;);
+  template &lt;class T1, class T2&gt;
+    bool operator&gt;=(const pair&lt;T1,T2&gt;&amp;, const pair&lt;T1,T2&gt;&amp;);
+  template &lt;class T1, class T2&gt;
+    bool operator&lt;=(const pair&lt;T1,T2&gt;&amp;, const pair&lt;T1,T2&gt;&amp;);
+  template &lt;class T1, class T2&gt; pair&lt;T1,T2&gt; make_pair(T1, T2);
+
+  //<i>  <a href="">lib.versioning</a>, version:</i>
+  template &lt;class T, unsigned V&gt; struct version_type;
+  template &lt;class T&gt; struct version;
+}
+</pre></blockquote>
+
+<blockquote class="note">
+<p>
+Add new section: 20.2.3:
+</p>
+</blockquote>
+
+<h3>20.2.3 - Versioning [lib.versioning]</h3>
+
+<p>
+<b>-1-</b> A standardized infrastructure for giving class types an easily extracted
+version number is defined.  Existing class types which lack explicit version numbers
+are automatically assigned a version number of 1 by this system.  This system
+allows classes to communicate versioned interfaces to each other.
+</p>
+
+<h4>20.2.3.1 - version_type</h4>
+
+<p>
+<b>-1-</b> The library provides a template which can be used to explicitly declare
+a version number for an user-defined class or struct.
+</p>
+
+<blockquote><pre>template &lt;class T, unsigned V&gt;
+struct version_type
+    : public integral_constant&lt;unsigned, V&gt;
+{
+    typedef T type;
+
+    version_type(const version_type&lt;T, 0&gt;&amp;);
+};
+</pre></blockquote>
+
+<p>
+<b>-2-</b> It is unspecified whether the <tt>version_type</tt> constructor has
+a definition.
+</p>
+
+<h4>20.2.3.2 - version</h4>
+
+<blockquote><pre>template &lt;class T&gt; struct version;
+</pre></blockquote>
+
+<p>
+<b>-1-</b> <tt>version</tt> publicly derives from
+<tt>integral_constant&lt;unsigned, 1&gt;</tt> for
+all types <tt>T</tt> except for the case that <tt>T</tt> is a struct or class and
+meets all of the following requirements:
+</p>
+
+<ul>
+<li><tt>T</tt> has a nested type named <tt>version</tt>.</li>
+<li><tt>std::version_type&lt;T, 0&gt;</tt> is implicitly convertible to
+<tt>T::version</tt> .</li>
+</ul>
+
+<p>
+For types <tt>T</tt> meeting the above requirements, <tt>version&lt;T&gt;</tt>
+will publicly derive from <tt>integral_constant&lt;unsigned, T::version::value&gt;</tt>.
+</p>
+
+<p>
+<b>-2-</b> In the case that <tt>T</tt> is a reference type, <tt>version</tt> will
+drop the reference and instead operate on the referenced type.
+</p>
+
+<p>
+<b>-3-</b> In the case that <tt>T</tt> is a <i>cv</i>-qualified type, <tt>version</tt> will
+ensure that the same value will be returned as for a non-<i>cv</i>-qualified <tt>T</tt>.
+</p>
+
+<p>
+<b>-4-</b> [<i>Example:</i>
+</p>
+
+<blockquote><pre>struct A {};
+const unsigned vA = std::version&lt;A&gt;::value;  // vA == 1
+
+struct B {
+    typedef std::version_type&lt;B, 2&gt; version;
+};
+const unsigned vB  = std::version&lt;      B &gt;::value; // vB  == 2
+const unsigned vBr = std::version&lt;const B&amp;&gt;::value; // vBr == 2
+
+struct C : public B {};
+const unsigned vC = std::version&lt;C&gt;::value;  // vC == 1
+</pre></blockquote>
+
+<p>
+<i>-- end example</i>]
+</p>
+
+<blockquote class="note">
+<p>
+Add new section 20.1.6.1 - Optional Allocator requirements:
+</p>
+</blockquote>
+
+<h4>20.1.6.1 - Optional Allocator requirements [lib.allocator.requirements.optional]</h4>
+
+<p>
+<b>-1-</b> Allocators may choose to implement an extended API in addition to
+those requirements defined in
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/lib.allocator.requirements">lib.allocator.requirements</a>.  If such an
+allocator declares its intention to conform to this extended interface, it must
+implement all of it.
+</p>
+
+<p>
+<b>-2-</b> An allocator (named <tt>Alloc</tt> for example) declares its intent
+to conform to this optional interface by having the following nested declaration:
+</p>
+
+<blockquote><pre>class Alloc
+{
+public:
+    typedef std::version_type&lt;Alloc, 2&gt; version;
+    /* ... */
+};
+</pre></blockquote>
+
+<p>
+<b>-3-</b> Allocators having this nested <tt>version</tt> type will define the
+following additional member functions:
+</p>
+
+<blockquote><pre>size_type size(pointer <i>p</i>) const throw();
+</pre></blockquote>
+
+<p>
+<b>-4- Requires:</b> <tt><i>p</i></tt> is non-null and has been returned by a previous
+call to <tt>allocate</tt> or <tt>allocation_command</tt>, and has not yet been deallocated
+by <tt>deallocate</tt>.
+</p>
+
+<p>
+<b>-5- Returns:</b>  The returned value indicates that the client can store
+valid values of <tt>T</tt> to the range <tt>[ptr, ptr + <i>returned-value</i>)</tt>
+without fear of corrupting the heap.
+</p>
+
+<p>
+<b>-6- Throws:</b>  Nothing.
+</p>
+
+<blockquote><pre>
+std::pair&lt;pointer, bool&gt;
+   allocation_command(std::allocation_type <i>command</i>, size_type <i>limit_size</i>
+                     ,size_type <i>preferred_size</i>,     size_type&amp; <i>received_size</i>
+                     ,pointer <i>reuse</i> = 0);
+</pre></blockquote>
+
+<p>
+<b>-7- Requires:</b> If the parameter <tt><i>command</i></tt> contains the value
+<tt><i>std::shrink_in_place</i></tt> it can't contain any of these values:
+<tt><i>std::expand_fwd</i></tt>, <tt><i>std::expand_bwd</i></tt>. If
+the parameter <tt><i>command</i></tt> contains <tt><i>std::expand_fwd</i></tt> or
+<tt><i>std::expand_bwd</i></tt>, the parameter <tt><i>reuse</i></tt> must be non-null
+and returned by a previous
+call to <tt>allocate</tt> or <tt>allocation_command</tt>, and not yet been deallocated
+by <tt>deallocate</tt>. If the parameter <tt><i>command</i></tt> contains the value
+<tt><i>std::shrink_in_place</i></tt>, the parameter <tt><i>limit_size</i></tt> must be
+equal or greater than the parameter <tt><i>preferred_size</i></tt>.
+If the parameter <tt><i>command</i></tt> contains any of these values:
+<tt><i>std::expand_fwd</i></tt> or <tt><i>std::expand_bwd</i></tt>, 
+the parameter <tt><i>limit_size</i></tt> must be
+equal or less than the parameter <tt><i>preferred_size</i></tt>.
+</p>
+
+<p>
+<b>-8- Effects:</b> If the parameter <tt><i>command</i></tt> contains the
+value <tt><i>std::shrink_in_place</i></tt>, the allocator will try to reduce
+the size of the memory block referenced by pointer <tt><i>reuse</i></tt> to
+the value <tt><i>preferred_size</i></tt> moving only the end of the block.
+If it's not possible, it will try to
+reduce the size of the memory block as much as possible
+as long as this results in <tt><i>size(p)</i> &lt;= <i>limit_size</i></tt>.
+Success is reported only if this results in <tt><i>preferred_size</i>
+&lt;= <i>size(p)</i></tt> and <tt><i>size(p)</i> &lt;= <i>limit_size</i></tt>.
+</p>
+
+<p>
+If the parameter <tt><i>command</i></tt> only contains the value
+<tt><i>std::expand_fwd</i></tt> (with optional additional
+<tt><i>std::nothrow_allocation</i></tt>), the allocator will try to increase
+the size of the memory block referenced by pointer <tt><i>reuse</i></tt> moving only the end
+of the block to
+the value <tt><i>preferred_size</i></tt>. If it's not possible, it will try to
+increase the size of the memory block as much as possible
+as long as this results in <tt><i>size(p)</i> &gt;= <i>limit_size</i></tt>.
+Success is reported only if this results in 
+<tt><i>limit_size</i> &lt;= <i>size(p)</i></tt>.
+</p>
+
+<p>
+If the parameter <tt><i>command</i></tt> only contains the value
+<tt><i>std::expand_bwd</i></tt> (with optional additional
+<tt><i>std::nothrow_allocation</i></tt>), the allocator will try to increase
+the size of the memory block referenced by pointer <tt><i>reuse</i></tt>
+only moving the start of the block to a returned new position <tt><i>new_ptr</i></tt>.
+If it's not possible, it will try to
+move the start of the block as much as possible as long as this results in 
+<tt><i>size(new_ptr)</i> &gt;= <i>limit_size</i></tt>.
+Success is reported only if this results in 
+<tt><i>limit_size</i> &lt;= <i>size(new_ptr)</i></tt>.
+</p>
+
+<p>
+If the parameter <tt><i>command</i></tt> only contains the value
+<tt><i>std::allocate_new</i></tt> (with optional additional
+<tt><i>std::nothrow_allocation</i></tt>), the allocator will try to allocate
+memory for <tt><i>preferred_size</i></tt> objects. If it's not possible
+it will try to allocate memory for at least <tt><i>limit_size</i></tt>
+objects.
+</p>
+
+<p>
+If the parameter <tt><i>command</i></tt> only contains a combination of 
+<tt><i>std::expand_fwd</i></tt> and <tt><i>std::allocate_new</i></tt>,
+(with optional additional <tt><i>std::nothrow_allocation</i></tt>)
+the allocator will try first the forward expansion. If this fails,
+it would try a new allocation.
+</p>
+
+<p>
+If the parameter <tt><i>command</i></tt> only contains a combination of 
+<tt><i>std::expand_bwd</i></tt> and <tt><i>std::allocate_new</i></tt>
+(with optional additional <tt><i>std::nothrow_allocation</i></tt>),
+the allocator will try first to obtain <tt><i>preferred_size</i></tt>
+objects using both methods if necessary. If this fails, it will try
+to obtain <tt><i>limit_size</i></tt> objects using both methods
+if necessary.
+</p>
+
+<p>
+If the parameter <tt><i>command</i></tt> only contains a combination of 
+<tt><i>std::expand_fwd</i></tt> and <tt><i>std::expand_bwd</i></tt>
+(with optional additional <tt><i>std::nothrow_allocation</i></tt>),
+the allocator will try first forward expansion. If this fails it will
+try to obtain <tt><i>preferred_size</i></tt> objects using backwards
+expansion or a combination of forward and backwards expansion. If this fails,
+it will try to obtain <tt><i>limit_size</i></tt> objects using both methods
+if necessary.
+</p>
+
+<p>
+If the parameter <tt><i>command</i></tt> only contains a combination of 
+<tt><i>std::allocation_new</i></tt>,
+<tt><i>std::expand_fwd</i></tt> and <tt><i>std::expand_bwd</i></tt>,
+(with optional additional <tt><i>std::nothrow_allocation</i></tt>)
+the allocator will try first forward expansion. If this fails it will
+try to obtain <tt><i>preferred_size</i></tt> objects using new allocation,
+backwards expansion or a combination of forward and backwards expansion. 
+If this fails, it will try to obtain <tt><i>limit_size</i></tt> objects
+using the same methods.
+</p>
+
+<p>
+The allocator always writes the size or the expanded/allocated/shrunk
+memory block in <tt><i>received_size</i></tt>. On failure the allocator
+writes in <tt><i>received_size</i></tt> a possibly successful
+<tt><i>limit_size</i></tt> parameter for a new call.
+</p>
+
+<p>
+<b>-9- Throws:</b> Throws an exception if two conditions are met:
+</p>
+<ul>
+<li>The allocator is unable to allocate/expand/shrink the memory or
+there is an error in preconditions</li>
+<li>The parameter <tt><i>command</i></tt> does not contain <tt><i>std::nothrow_allocation</i></tt>.</li>
+</ul>
+
+<p>
+<b>-10- Returns:</b> The address of the allocated memory or the new address of the
+expanded memory as the first member of the pair. If the parameter <tt><i>command</i></tt>
+contains <tt><i>std::nothrow_allocation</i></tt> the first member will be 0 if
+the allocation/expansion fails or there is an error in preconditions. The second
+member of the pair will be <tt>false</tt> if the memory has been allocated, <tt>true</tt>
+if the memory has been expanded. If the first member is 0, the second member has an undefined
+value.
+</p>
+
+<blockquote><pre>pointer allocate_one();
+</pre></blockquote>
+
+<p>
+<b>-11- Effects:</b> Returns memory just for one object. 
+[<i>Note:</i> The allocator does not need to store information about the size of
+the memory block. The memory returned by this function can't be used
+with <tt>size</tt>, <tt>allocation_command</tt>, <tt>allocate</tt> and
+<tt>deallocate</tt> deallocate functions. Otherwise the behavior is undefined<i>-- end note</i>]
+</p>
+
+<p>
+<b>-12- Throws:</b> An exception if memory can't be allocated.
+</p>
+
+<blockquote><pre>void deallocate_one(pointer <i>p</i>) throw();
+</pre></blockquote>
+
+<p>
+<b>-13- Requires:</b> <tt><i>p</i></tt> is non-null and has been returned by a previous
+call to <tt>allocate_one</tt>, and has not yet been deallocated
+by <tt>deallocate_one</tt>.
+</p>
+
+<p>
+<b>-14- Effects:</b> Deallocates memory allocated with <tt>allocate_one</tt>.
+[<i>Note:</i> If this function is used to deallocate memory obtained with other
+allocation functions, behavior is undefined.<i>-- end note</i>]
+</p>
+
+<p>
+<b>-15- Throws:</b> Nothing.
+</p>
+
+<blockquote><pre>void construct(<i>pointer</i> p);
+</pre></blockquote>
+
+<p>
+<b>-16- Requires:</b> <tt><i>p</i></tt> has been returned by a previous
+allocation function or is contained in an array allocated by previous allocation function
+and the memory hasn't been initialized.
+</p>
+
+<p>
+<b>-17- Effects:</b> Default constructs an object in the address pointed by <tt><i>p</i></tt>.
+</p>
+
+<p>
+<b>-18- Throws:</b> If the default construction of the value throws, throws the exception
+thrown by the constructor.
+</p>
+
+
+<blockquote><pre>template &lt;...Args&gt;
+void construct(<i>pointer</i> p, <i>Args</i> &amp;&amp;... args);
+</pre></blockquote>
+
+<p>
+<b>-19- Requires:</b> <tt><i>p</i></tt> has been returned by a previous
+allocation function or is contained in an array allocated by previous allocation function
+and the memory hasn't been initialized.
+</p>
+
+<p>
+<b>-20- Effects:</b> Equivalent to the following placement new if p is a raw pointer:
+</p>
+
+<blockquote><pre>
+new((void*)p) value_type(std::forward&lt;Args&gt;(args)...);
+</pre></blockquote>
+
+<p>
+<b>-21- Throws:</b> If the equivalent constructor of the value throws, throws the exception
+thrown by the constructor.
+</p>
+
+<h2><a name="Acknowledgments"></a>Acknowledgments</h2>
+
+<p>
+Thanks to:
+
+<ul>
+
+<li>Howard Hinnant for his explanations, support and improvements.</li>
+
+<li>Douglas Gregor for his help with the variadic templatized construct function.</li>
+
+</ul>
+</p>
+
+<h2><a name="References"></a>References</h2>
+
+<ul>
+<li><a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/N1953.htm">N1953</a>: Upgrading the Interface of Allocators using API Versioning</li>
+<li><a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n1952.htm">N1952</a>: A Proposal to Add an Rvalue Reference to the C++ Language. Proposed Wording. Revision 2</li>
+<li><a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2004/N1704.pdf">N1704</a>: Variadic Templates: Exploring the Design Space</li>
+</ul>
+</body></html>

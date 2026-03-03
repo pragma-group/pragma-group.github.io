@@ -1,0 +1,1056 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<html>
+  <head>
+    <title>N2627: An Asynchronous Future Value (Revision 1)</title>
+  </head>
+
+  <body>
+
+<table>
+  <tr>
+    <td align="left">Document Number:</td>
+    <td align="left">N2627=08-0137</td>
+  </tr>
+  <tr>
+    <td align="left">Date:</td>
+    <td align="left">2008-05-19</td>
+  </tr>
+  <tr>
+    <td align="left">Project:</td>
+    <td align="left">Programming Language C++</td>
+  </tr>
+</table>
+<p>
+Detlef Vollmann &lt;<a href="mailto:dv@vollmann.ch">dv@vollmann.ch</a>&gt;<br>
+Howard Hinnant &lt;<a href="mailto:howard.hinnant@gmail.com">howard.hinnant@gmail.com&gt;</a><br>
+Anthony Williams &lt;<a href="mailto:anthony@justsoftwaresolutions.co.uk">anthony@justsoftwaresolutions.co.uk</a>&gt;<br>
+</p>
+<h1>N2627: An Asynchronous Future Value (revised)</h1>
+This is a proposal to implement the "Kona concurrency compromise",
+i.e. motion SP2 in
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2452.html">
+N2452</a> and
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2453.html">
+N2453</a>:
+<p>
+'WG21 resolves that for this revision of the C++ standard (aka "C++0x")
+the scope of concurrency extensions shall be constrained as follows:
+</p>
+<ul>
+  <li>Include a memory model, atomic operations, threads,
+      locks, condition variables, and asynchronous future values.</li>
+  <li>Exclude thread pools, task launching, and reader-writer locks.'</li>
+</ul>
+
+This proposal is a revision of
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2008/n2561.html">
+N2561</a>
+and tries to merge three earlier papers:
+<ul>
+  <li>
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n2094.html">
+N2094</a> Howard Hinnant: Multithreading API for C++0X - A Layered Approach,
+  </li>
+  <li>
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2185.html">
+N2185</a> Peter Dimov: Proposed Text for Parallel Task Execution,
+  </li>
+  <li>
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2276.html">
+N2276</a> Anthony Williams: Thread Pools and Futures.
+  </li>
+</ul>
+It tries to provide a minimal mechanism that's useful to transfer
+some result from a function run asynchronously in another thread to
+the calling thread.
+But this minimal mechanism should not
+hinder any future development on mechanisms like thread pools
+or task launching.
+
+
+<h2>State of Proposal</h2>
+<p>
+This paper is a revision of
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2008/n2561.html">
+N2561</a>
+and is the result of quite some discussion among the authors and also
+with a number of other people commenting.
+</p>
+<p>
+Anthony Williams has implemented a prototype for an earlier version
+of this propsal, available at
+<a href="http://www.justsoftwaresolutions.co.uk/threading/updated-implementation-of-c++-futures.html">
+http://www.justsoftwaresolutions.co.uk/threading/updated-implementation-of-c++-futures.html</a>.
+<p>
+The authors would like to thank all who contributed comments to the
+discussion about this proposal:<br>
+Peter Dimov<br>
+Jeffrey Yasskin<br>
+Lawrence Crowl<br>
+Hans Boehm<br>
+Herb Sutter<br>
+Bjarne Stroustrup<br>
+</p>
+
+
+<h2>Introduction</h2>
+<p>
+The three papers that serve as base for the original paper N2561 all propose
+essentially the same machanism for transferring results from
+one thread to the other, but differ in some minor aspects.
+This paper is a joint effort to provide a proposal to implement
+the "concurrency compromise".<br>
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n2094.html">
+N2094</a>
+provides some background information on the design decisions though
+this proposal differs from N2094 in naming and structuring.<br>
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2276.html">
+N2276</a>
+provides proposed wording, but this proposal again is a bit differently
+structured.
+</p>
+<p>
+The mechanism here and its definition is kept minimal.
+A consequence of this is that little additions would make it more useful
+for one purpose.
+But such additions would probably disallow other additions to make it
+more useful for other purposes.<br>
+So the only purpose this proposal explicitely supports is to capture
+the result (a return value or an exception) of a function running in
+a thread in something called <code>promise</code> and provide something
+called <code>future</code> to wait for the result and retrieve it.
+</p>
+
+<h2>Overview</h2>
+<h3>Building Blocks</h3>
+<p>
+This paper proposes a kind of return buffer that takes a value
+(or an exception)
+in one (sub-)thread and provides the value in another (controlling) thread.
+This buffer provides essentially two interfaces:
+</p>
+<ul>
+ <li>
+an interface to assign a value as class <code>promise</code> and
+ </li>
+ <li>
+an interface to wait for, query and retrieve the value (or exception)
+from the buffer as classes <code>unique_future</code> and
+<code>shared_future</code>.
+ </li>
+</ul>
+<p>
+Internally, a promise and its associated future(s) share a common
+<em>value buffer</em>, called <em>associated state</em>.
+ Multiple <code>shared_future</code>s can share the same associated state.
+
+<p>
+While a <code>unique_future</code> provides move semantics where
+the value (or exception) can be retrieved only once,
+the <code>shared_future</code> provides copy semantics where
+the value can be retrieved arbitrarily often.
+</p>
+
+<p>
+A typical procedure for working with <em>promises</em> and
+<em>futures</em> looks like:
+</p>
+<ol>
+ <li>control thread creates a <em>promise</em>,</li>
+ <li>control thread gets associated <em>future</em> from <em>promise</em>,</li>
+ <li>control thread starts sub-thread,</li>
+ <li>sub-thread calls actual function and assigns the return value to
+the <em>promise</em>,</li>
+ <li>control thread waits for <em>future</em> to become <em>ready</em>,</li>
+ <li>control thread retrieves value from <em>future</em>.</li>
+</ol>
+
+
+<p>Also proposed is a <code>packaged_task</code> that wraps one
+callable object and provides another one that can be started
+in its own thread and assigns the return
+value (or exception) to a return buffer that can be accessed
+through one of the <em>future</em> classes.
+</p>
+
+<p>
+With a <em>packaged_task</em> a typical procedure looks like:
+</p>
+<ol>
+ <li>control thread creates a <em>packaged_task</em> with
+a callable object,</li>
+ <li>control thread gets associated <em>future</em>
+from <em>packaged_task</em>,</li>
+ <li>control thread starts sub-thread, which invokes the
+<em>packaged_task</em>,</li>
+ <li><em>packaged_task</em> calls the callable function
+and assigns the return value,</li>
+ <li>control thread waits for <em>future</em> to become <em>ready</em>,</li>
+ <li>control thread retrieves value from <em>future</em>.</li>
+</ol>
+
+<h3>Omissions</h3>
+<p>
+There are some interfaces missing from this proposal that were
+in former proposals, and it's worth to say that explicitely:
+</p>
+<dl>
+<dt>assignment / default construction:
+<dd>With assignment a future is not thread safe any more in the sense
+that the same future (not different <code>shared_future</code>s
+sharing the same internal buffer) could be modified in different threads.
+Whether such kind of thread safety should be provided is an open
+question, but to avoid any final decision assignment is left out
+from this proposal.
+<dt><code>unique_future::was_moved()</code>:
+<dd><code>was_moved()</code> might have consequences for the exception
+safety of <code>get()</code>.  But note that the exception safety
+of <code>unique_future::get()</code> is not guaranteed here to
+allow for possible later addition of <code>was_moved()</code>.
+<dt><code>try_get()/timed_get()</code>:
+<dd>These functions have different signatures for normal value
+types, references and <code>void</code>.
+</dl>
+
+<h2>Proposed Text</h2>
+
+<pre>
+namespace std
+{
+    template &lt;typename R&gt; class unique_future;
+
+    template &lt;typename R&gt; class shared_future;
+
+    template &lt;typename R&gt; class promise;
+
+    template &lt;typename R&gt; class packaged_task;
+}
+</pre>
+
+<h3>Exception Classes</h3>
+<pre>
+namespace std
+{
+    class broken_promise:
+        public std::logic_error
+    {
+    public:
+        broken_promise();
+    };
+    class future_already_retrieved:
+        public std::logic_error
+    {
+    public:
+        future_already_retrieved();
+    };
+    class promise_already_satisfied:
+        public std::logic_error
+    {
+    public:
+        promise_already_satisfied();
+    };
+
+    class task_already_started:
+        public std::logic_error
+    {
+    public:
+        task_already_started();
+    };
+    class task_moved:
+        public std::logic_error
+    {
+    public:
+        task_moved();
+    };
+}
+</pre>
+
+<h3>Class template <code>unique_future</code></h3>
+<pre>
+namespace std
+{
+template &lt;typename R&gt;
+class unique_future
+{
+public:
+    unique_future(unique_future &amp;&amp;);
+    unique_future(unique_future const &amp; rhs) = delete;
+
+    ~unique_future();
+
+    unique_future&amp; operator=(unique_future const &amp; rhs) = delete;
+
+    // retrieving the value
+    R&amp;&amp; get();
+
+    // functions to check state, and wait for ready
+    bool is_ready() const;
+    bool has_exception() const;
+    bool has_value() const;
+
+    void wait() const;
+    bool timed_wait(some_rel_time rel_time) const;
+    bool timed_wait_until(some_abs_time abs_time) const;
+};
+}
+</pre>
+
+
+<pre>
+    unique_future(const unique_future&amp;&amp; rhs);
+</pre>
+
+<p><strong>Effects:</strong>
+MoveConstructs a <code>unique_future</code> whose associated state is the same
+as the state of <code>rhs</code> before.
+The associated state is the state and the (possibly not yet evaluated)
+result (value or exception) associated with the <code>promise</code>
+or <code>packaged_task</code> that provided the original future.
+</p>
+
+<p><strong>Postconditions:</strong>
+<code>rhs</code> can be safely destroyed.
+</p>
+
+<pre>
+    ~unique_future();
+</pre>
+
+<p><strong>Effects:</strong>
+destroys <code>*this</code> and its associated state if no other object
+refers to that.
+</p>
+
+<pre>
+    R&amp;&amp; get();
+    R&amp; unique_future&lt;R&amp;&gt;::get();
+    void unique_future&lt;void&gt;::get();
+</pre>
+
+<p><strong>Effects:</strong>
+Retrieves the value stored in the associated state.
+</p>
+
+<p><strong>Sychronization:</strong>
+If <code>*this</code> is associated with a <code>promise</code>,
+the completion of <code>set_value()</code> or <code>set_exception()</code>
+to that <code>promise</code>
+happens before ([intro.multithread])
+<code>get()</code> returns.<br>
+If <code>*this</code> is associated with a <code>packaged_task</code>,
+the completion of the call to the <code>operator()()</code>
+happens before ([intro.multithread]) <code>get()</code> returns.
+</p>
+
+<p><strong>Returns:</strong>
+If the result type R is a reference, returns the stored reference.
+If R is void, there is no return value.
+Otherwise, returns an rvalue-reference to the value stored in the
+asynchronous result. 
+</p>
+
+<p><strong>Throws:</strong>
+the stored exception, if an exception was stored and not retrieved before.
+</p>
+
+<p>[Note: The return value of <code>is_ready</code> is unspecified
+after a call to <code>get()</code>. -- end note]
+</p>
+<p>[Note: It is unspecified what happens when get() is called a second time
+on the same <code>unique_future</code>. -- end note]
+</p>
+
+
+<pre>
+    bool is_ready() const;
+</pre>
+
+<p><strong>Returns:</strong>
+<code>true</code> if the associated state holds a value or an exception
+ready for retrieval.
+</p>
+
+
+<pre>
+    bool has_exception() const;
+</pre>
+
+<p><strong>Returns:</strong>
+<code>true</code> if <code>is_ready() == true</code> and the
+associated state contains an exception,
+<code>false</code> otherwise.
+</p>
+
+
+<pre>
+    bool has_value() const;
+</pre>
+
+<p><strong>Returns:</strong>
+<code>true</code> if <code>is_ready() == true</code> and the
+associated state contains a value,
+<code>false</code> otherwise.
+</p>
+
+
+<pre>
+    void wait() const;
+</pre>
+
+<p><strong>Effects:</strong>
+Blocks until <code>*this</code> is ready.
+</p>
+
+<p><strong>Sychronization:</strong>
+If <code>*this</code> is associated with a <code>promise</code>,
+the completion of <code>set_value()</code> or <code>set_exception()</code>
+to that <code>promise</code>
+happens before ([intro.multithread])
+<code>get()</code> returns.<br>
+If <code>*this</code> is associated with a <code>packaged_task</code>,
+the completion of the call to the <code>operator()()</code>
+happens before ([intro.multithread]) <code>get()</code> returns.
+</p>
+
+<p><strong>Postconditions:</strong>
+<code>is_ready() == true</code>.
+</p>
+
+
+<pre>
+    bool timed_wait(some_rel_time rel_time) const;
+</pre>
+
+<p><strong>Effects:</strong>
+Blocks until <code>*this</code> is ready
+or until <code>rel_time</code> elapsed.
+</p>
+
+<p><strong>Returns:</strong>
+<code>true</code> if the function returns because <code>*this</code>
+is ready, <code>false</code> otherwise.
+</p>
+
+<p><strong>Postconditions:</strong>
+<code>is_ready()</code> equals the return value.
+</p>
+
+
+<pre>
+    bool timed_wait_until(some_abs_time abs_time);
+</pre>
+
+<p>Same as <code>timed_wait()</code>, except that it blocks until
+<code>abs_time</code> is reached if the associated state is not ready.
+</p>
+
+<p>[Editorial note: The names and signatures of <code>timed_wait()</code>
+and <code>timed_wait_until()</code> should mirror those of the
+respective member functions of <code>condition_variable</code>
+[thread.condition.condvar].
+</p>
+
+
+<h3>Class template <code>shared_future</code></h3>
+<pre>
+namespace std
+{
+template &lt;typename R&gt;
+class shared_future
+{
+public:
+    shared_future(shared_future const &amp; rhs);
+
+    shared_future(unique_future&lt;R&gt; &amp;&amp;);
+    shared_future(const unique_future&lt;R&gt; &amp;) = delete;
+
+    ~shared_future();
+
+    shared_future &amp; operator=(shared_future const &amp; rhs) = delete;
+
+    // retrieving the value
+    R const &amp; get() const;
+
+    // functions to check state, and wait for ready
+    bool is_ready() const;
+    bool has_exception() const;
+    bool has_value() const;
+
+    void wait() const;
+    bool timed_wait(some_rel_time rel_time) const;
+    bool timed_wait_until(some_abs_time abs_time) const;
+};
+}
+</pre>
+
+
+<pre>
+    shared_future(const shared_future&amp; rhs);
+</pre>
+
+<p><strong>Effects:</strong>
+CopyConstructs a <code>shared_future</code> whose associated state is the same
+as the state of <code>rhs</code> before.
+The associated state is the state and the (possibly not yet evaluated)
+result (value or exception) associated with the <code>promise</code>
+or <code>packaged_task</code> that provided the original future.
+</p>
+
+
+<pre>
+    shared_future(const unique_future&amp;&amp; rhs);
+</pre>
+
+<p><strong>Effects:</strong>
+MoveConstructs a <code>shared_future</code> whose associated state is the same
+as the state of <code>rhs</code> before.
+</p>
+
+<p><strong>Postconditions:</strong>
+<code>rhs</code> can be safely destroyed.
+</p>
+
+<pre>
+    ~shared_future();
+</pre>
+
+<p><strong>Effects:</strong>
+destroys <code>*this</code> and its associated state if no other object
+refers to that.
+</p>
+
+<pre>
+    R const &amp; get();
+    R&amp; shared_future&lt;R&amp;&gt;::get();
+    void shared_future&lt;void&gt;::get();
+</pre>
+
+<p><strong>Effects:</strong>
+retrieves the value stored in the associated state.
+</p>
+
+<p><strong>Sychronization:</strong>
+If <code>*this</code> is associated with a <code>promise</code>,
+the completion of <code>set_value()</code> or <code>set_exception()</code>
+to that <code>promise</code>
+happens before ([intro.multithread])
+<code>get()</code> returns.<br>
+If <code>*this</code> is associated with a <code>packaged_task</code>,
+the completion of the call to the <code>operator()()</code>
+happens before ([intro.multithread]) <code>get()</code> returns.
+</p>
+
+<p><strong>Returns:</strong>
+If the result type R is a reference, returns the stored reference.
+If R is void, there is no return value.
+Otherwise, returns a const reference to the value stored in the
+asynchronous result. 
+</p>
+
+<p><strong>Throws:</strong>
+the stored exception, if an exception was stored and not retrieved before.
+</p>
+
+
+<pre>
+    bool is_ready() const;
+</pre>
+
+<p><strong>Returns:</strong>
+<code>true</code> if the associated state holds a value or an exception
+ready for retrieval.
+</p>
+
+
+<pre>
+    bool has_exception() const;
+</pre>
+
+<p><strong>Returns:</strong>
+<code>true</code> if <code>is_ready() == true</code> and the
+associated state contains an exception,
+<code>false</code> otherwise.
+</p>
+
+
+<pre>
+    bool has_value() const;
+</pre>
+
+<p><strong>Returns:</strong>
+<code>true</code> if <code>is_ready() == true</code> and the
+associated state contains a value,
+<code>false</code> otherwise.
+</p>
+
+
+<pre>
+    void wait() const;
+</pre>
+
+<p><strong>Effects:</strong>
+Blocks until <code>*this</code> is ready.
+</p>
+
+<p><strong>Sychronization:</strong>
+If <code>*this</code> is associated with a <code>promise</code>,
+the completion of <code>set_value()</code> or <code>set_exception()</code>
+to that <code>promise</code>
+happens before ([intro.multithread])
+<code>get()</code> returns.<br>
+If <code>*this</code> is associated with a <code>packaged_task</code>,
+the completion of the call to the <code>operator()()</code>
+happens before ([intro.multithread]) <code>get()</code> returns.
+</p>
+
+<p><strong>Postconditions:</strong>
+<code>is_ready() == true</code>.
+</p>
+
+
+<pre>
+    bool timed_wait(some_rel_time rel_time) const;
+</pre>
+
+<p><strong>Effects:</strong>
+Blocks until <code>*this</code> is ready
+or until <code>rel_time</code> elapsed.
+</p>
+
+<p><strong>Returns:</strong>
+<code>true</code> if the functions returns because <code>*this</code>
+is ready, <code>false</code> otherwise.
+</p>
+
+<p><strong>Postconditions:</strong>
+<code>is_ready()</code> equals the return value.
+</p>
+
+
+<pre>
+    bool timed_wait_until(some_abs_time abs_time);
+</pre>
+
+<p>Same as <code>timed_wait()</code>, except that it blocks until
+<code>abs_time</code> is reached if the associated state is not ready.
+</p>
+
+<p>[Editorial note: The names and signatures of <code>timed_wait()</code>
+and <code>timed_wait_until()</code> should mirror those of the
+respective member functions of <code>condition_variable</code>
+[thread.condition.condvar].
+</p>
+
+
+<h3>Class template <code>promise</code></h3>
+<pre>
+namespace std
+{
+template &lt;typename R&gt;
+class promise
+{
+public:
+    promise();
+    template &lt;class Allocator&gt;
+        promise(allocator_arg_t, Allocator const A&amp;);
+    promise(promise &amp;&amp; rhs);
+    template &lt;class Allocator&gt;
+        promise(allocator_arg_t, Allocator const A&amp;,
+                promise &amp; rhs);
+    promise(promise const &amp; rhs) = delete;
+    ~promise();
+
+    // Assignment
+    promise &amp; operator=(promise &amp;&amp; rhs);
+    promise &amp; operator=(promise const &amp; rhs) = delete;
+    void swap(promise&amp; other);
+
+    // Result retrieval
+    unique_future&lt;R&gt; get_future();
+
+    void set_value(R const &amp; r);
+    void set_value(R &amp;&amp; r);
+    void set_exception(exception_ptr p);
+};
+
+template &lt;typename R, class Alloc&gt;
+    struct uses_allocator&amp;promise&lt;R&gt;, Alloc&gt;;
+
+template &lt;typename R&gt;
+    struct constructible_with_allocator_prefix&lt;promise&lt;T2&gt;&gt;;
+}
+</pre>
+
+<pre>
+template &lt;typename R, class Alloc&gt;
+    struct uses_allocator&amp;promise&lt;R&gt;, Alloc&gt;
+     : true_type { };
+</pre>
+
+<p><strong>Requires:</strong>
+Alloc shall be an Allocator ([allocator.requirements] 20.1.2)
+</p>
+
+<p><strong>Remarks:</strong>
+Specialization of this trait informs other library components that
+<code>promise</code> can be constructed with an allocator, even
+though it does not have an allocator_type associated type.
+</p>
+
+<pre>
+template &lt;typename R&gt;
+    struct constructible_with_allocator_prefix&lt;promise&lt;T2&gt;&gt;
+     : true_type { };
+</pre>
+
+<p><strong>Remarks:</strong>
+Specialization of this trait informs other library components that a
+<code>promise</code> can always be constructed with an allocator
+prefix argument.
+</p>
+
+
+
+<pre>
+    promise();
+    template &lt;class Allocator&gt;
+        promise(allocator_arg_t, Allocator const &amp;a);
+</pre>
+
+<p><strong>Effects:</strong>
+constructs a <code>promise</code> and an associated state, using <code>a</code>
+if given for allocating the memory for the associated state.
+</p>
+
+
+<pre>
+    promise(promise &amp;&amp; rhs);
+    template &lt;class Allocator&gt;
+        promise(allocator_arg_t, Allocator const A&amp;,
+                promise &amp; rhs);
+</pre>
+
+<p><strong>Effects:</strong>
+MoveConstructs a <code>promise</code> whose associated state is the same
+as the state of <code>rhs</code> before.
+</p>
+
+<p><strong>Postcondition:</strong>
+<code>rhs</code> has no associated state.
+</p>
+
+
+<pre>
+    ~promise();
+</pre>
+
+<p><strong>Effects:</strong>
+destroys <code>*this</code> and its associated state if no other object
+refers to it.
+If another object refers to the associated state and that state is not
+ready, sets that state to ready and stores a <code>broken_promise</code>
+exception as result.
+</p>
+
+
+<pre>
+    promise &amp; operator=(promise &amp;&amp; rhs);
+</pre>
+
+<p><strong>Effects:</strong>
+MoveAssigns its associated state to <code>rhs</code>.
+</p>
+
+<p><strong>Postcondition:</strong>
+<code>*this</code> has no associated state.
+</p>
+
+<p><strong>Returns:</strong>
+<code>*this</code>.
+</p>
+
+<p><strong>Throws:</strong>
+nothing.
+</p>
+
+
+<pre>
+    void swap(promise&amp; other);
+</pre>
+
+<p><strong>Effects:</strong>
+<code>swap(*this, other);</code>
+</p>
+
+<p><strong>Throws:</strong>
+nothing.
+</p>
+
+
+<pre>
+    unique_future&lt;R&gt; get_future();
+</pre>
+
+<p><strong>Returns:</strong>
+a <code>unique_future&lt;R&gt;</code> with the same associated state
+as <code>*this</code>.
+</p>
+
+<p><strong>Throws:</strong>
+<code>future_already_retrieved</code> if <code>*this</code> has no
+associated state.
+</p>
+
+
+<pre>
+    void set_value(R const &amp; r);
+    void set_value(R &amp;&amp; r);
+    void promise&lt;R&amp;&gt;::set_value(R &amp; r);
+    void promise&lt;void&gt;::set_value();
+</pre>
+
+<p><strong>Effects:</strong>
+stores <code>r</code> in the associated state and sets that state to ready.
+Any blocking waits on the associated state are woken up.
+</p>
+
+<p><strong>Throws:</strong>
+<code>promise_already_satisfied</code> if its associated state is already
+ready.
+</p>
+
+
+
+<pre>
+    void set_exception(exception_ptr p);
+</pre>
+
+<p><strong>Effects:</strong>
+stores <code>p</code> in the associated state sets that state to ready.
+Any blocking waits on the associated state are woken up.
+</p>
+
+<p><strong>Throws:</strong>
+<code>promise_already_satisfied</code> if its associated state is already
+ready.
+</p>
+
+
+
+
+<h3>Class template <code>packaged_task</code></h3>
+<pre>
+namespace std
+{
+template&lt;typename R&gt;
+class packaged_task
+{
+public:
+    // construction and destruction
+    template &lt;class F&gt;
+        explicit packaged_task(F const&amp; f);
+    template &lt;class F, class Allocator&gt;
+        packaged_task(allocator_arg_t, Allocator a, F const&amp; f);
+
+    template &lt;class F&gt;
+        explicit packaged_task(F&amp;&amp; f);
+    template &lt;class F, class Allocator&gt;
+        packaged_task(allocator_arg_t, Allocator a, F&amp;&amp; f);
+
+    explicit packaged_task(R(*f)());
+    template &lt;class Allocator&gt;
+        packaged_task(allocator_arg_t, Allocator a, R(*f)());
+
+    packaged_task(packaged_task&amp;&amp; other);
+    template &lt;class Allocator&gt;
+        packaged_task(allocator_arg_t, Allocator a,
+                      packaged_task&amp;&amp; other);
+
+    packaged_task(packaged_task&amp;) = delete;
+    ~packaged_task();
+
+    // assignment
+    packaged_task&amp; operator=(packaged_task&amp;&amp; other);
+    packaged_task&amp; operator=(packaged_task&amp;) = delete;
+
+    void swap(packaged_task&amp; other);
+
+    // result retrieval
+    unique_future&lt;R&gt; get_future();
+
+    // execution
+    void operator()();
+};
+
+template &lt;typename R, class Alloc&gt;
+    struct uses_allocator&amp;packaged_task&lt;R&gt;, Alloc&gt;;
+
+template &lt;typename R&gt;
+    struct constructible_with_allocator_prefix&lt;packaged_task&lt;T2&gt;&gt;;
+}</pre>
+
+<pre>
+template &lt;typename R, class Alloc&gt;
+    struct uses_allocator&amp;packaged_task&lt;R&gt;, Alloc&gt;
+     : true_type { };
+</pre>
+
+<p><strong>Requires:</strong>
+Alloc shall be an Allocator ([allocator.requirements] 20.1.2)
+</p>
+
+<p><strong>Remarks:</strong>
+Specialization of this trait informs other library components that
+<code>packaged_task</code> can be constructed with an allocator, even though it
+does not have an allocator_type associated type.
+</p>
+
+<pre>
+template &lt;typename R&gt;
+    struct constructible_with_allocator_prefix&lt;packaged_task&lt;T2&gt;&gt;
+     : true_type { };
+</pre>
+
+<p><strong>Remarks:</strong>
+Specialization of this trait informs other library components that a
+<code>packaged_task</code> can always be constructed with an
+allocator prefix argument.
+</p>
+
+
+
+<pre>
+    template &lt;class F&gt;
+        explicit packaged_task(F const&amp; f);
+    template &lt;class F, class Allocator&gt;
+        packaged_task(allocator_arg_t, Allocator a, F const&amp; f);
+
+    template &lt;class F&gt;
+        explicit packaged_task(F&amp;&amp; f);
+    template &lt;class F, class Allocator&gt;
+        packaged_task(allocator_arg_t, Allocator a, F&amp;&amp; f);
+
+    explicit packaged_task(R(*f)());
+    template &lt;class Allocator&gt;
+        packaged_task(allocator_arg_t, Allocator a, R(*f)());
+</pre>
+
+<p><strong>Requires:</strong>
+<code>f()</code> is a valid expression with a return type convertible
+to <code>R</code>.
+Invoking a copy of <code>f</code> shall behave the same as invoking
+<code>f</code>.
+</p>
+
+<p><strong>Effects:</strong>
+constructs a <code>packaged_task</code> with a copy of <code>f</code>
+and a new associated state.
+Any dynamic memory allocated is allocated through <code>a</code>
+if given.
+</p>
+
+
+<pre>
+    packaged_task(packaged_task&amp;&amp; other);
+    template &lt;class Allocator&gt;
+        packaged_task(allocator_arg_t, Allocator a,
+                      packaged_task&amp;&amp; other);
+</pre>
+
+<p><strong>Effects:</strong>
+MoveConstructs a <code>packaged_task</code> whose associated state and
+function object is the same as the state of <code>rhs</code> before.
+</p>
+
+<p><strong>Postcondition:</strong>
+<code>rhs</code> has no associated state.
+</p>
+
+
+<pre>
+    ~packaged_task();
+</pre>
+
+<p><strong>Effects:</strong>
+destroys <code>*this</code> and its associated state if no other object
+refers to it.
+If another object refers to the associated state and that state is not
+ready, sets that state to ready and stores a <code>broken_promise</code>
+exception as result.
+</p>
+
+<p><strong>Throws:</strong>
+nothing.
+</p>
+
+
+<pre>
+    packaged_task&amp; operator=(packaged_task&amp;&amp; other);
+</pre>
+
+<p><strong>Effects:</strong>
+MoveAssigns its associated state to <code>rhs</code>.
+</p>
+
+<p><strong>Postcondition:</strong>
+<code>*this</code> has no associated state.
+</p>
+
+<p><strong>Returns:</strong>
+<code>*this</code>.
+</p>
+
+<p><strong>Throws:</strong>
+nothing.
+</p>
+
+
+<pre>
+    void swap(packaged_task&amp; other);
+</pre>
+
+<p><strong>Effects:</strong>
+<code>swap(*this, other);</code>
+</p>
+
+<p><strong>Throws:</strong>
+nothing.
+</p>
+
+
+<pre>
+    unique_future&lt;R&gt; get_future();
+</pre>
+
+<p><strong>Returns:</strong>
+a <code>unique_future&lt;R&gt;</code> with the same associated
+state as <code>*this</code>.
+</p>
+
+<p><strong>Throws:</strong>
+<code>future_already_retrieved</code> if <code>*this</code> has no
+associated state.
+</p>
+
+
+<pre>
+    void operator()();
+</pre>
+
+<p><strong>Effects:</strong>
+invokes the stored function object,
+stores the result in the associated state and sets that state to ready.
+Any blocking waits on the associated state are woken up.
+</p>
+
+<p><strong>Throws:</strong>
+<code>task_moved</code> if <code>*this</code> has no associated state.
+<code>task_already_started</code> if the function was already called.
+</p>
+
+
+
+
+  </body>
+</html>
+

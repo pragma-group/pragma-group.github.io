@@ -1,0 +1,971 @@
+<html><head><title>Simplifying And Extending Mutex and Scoped Lock Types For C++ Multi-Threading Library</title>
+
+
+<style>
+p {text-align:justify}
+li {text-align:justify}
+blockquote.note
+{
+    background-color:#E0E0E0;
+    padding-left: 15px;
+    padding-right: 15px;
+    padding-top: 1px;
+    padding-bottom: 1px;
+}
+ins {background-color:#FFFFA0}
+del {background-color:#FFFFA0}
+</style></head><body>
+
+<address align="right">
+Document number: N2043=06-0113<br>
+<br>
+Ion Gazta&ntilde;aga (igaztanaga at gmail dot com)<br>
+2006-06-18
+</address>
+<hr>
+<h1 align="center">Simplifying And Extending Mutex and Scoped Lock Types For C++ Multi-Threading Library</h1>
+
+<h2>Contents</h2>
+
+<ul>
+<li><a href="#Introduction">Introduction</a></li>
+<li><a href="#CommonMutexOperations">Common mutex operations</a></li>
+<li><a href="#SimplifyingMutexTypes">Simplifying mutex types</a></li>
+<li><a href="#ShouldMutexThrow">Should Mutex Operations Throw?</a></li>
+<li><a href="#SimplifiedInterface">Simplified mutex types</a></li>
+<li><a href="#NullMutex">Null Mutex</a></li>
+<li><a href="#SimplifyingScopedLockTypes">Simplifying scoped lock types</a></li>
+<li><a href="#ScopedLockInterface">Scoped Lock interface</a></li>
+<li><a href="#ConditionVariablesAndMutexTypes">Condition Variables And Mutex Types</a></li>
+<li><a href="#ItsAboutTime">It's about time</a></li>
+<li><a href="#EmbeddedWorldLimitations">Embedded World Limitations</a></li>
+<li><a href="#InterprocessSynchronization">Interprocess Synchronization</a></li>
+<li><a href="#SemaphoreTypes">Do We Need Semaphore Types?</a></li>
+<li><a href="#PriorArt">Prior Art</a></li>
+<li><a href="#Acknowledgments">Acknowledgments</a></li>
+<li><a href="#References">References</a></li>
+</ul>
+
+<h2><a name="Introduction"></a>Introduction</h2>
+
+<p>
+Recent "A Multi-threading Library for Standard C++, Revision 1"
+(<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2005/N1907.htm">N1907</a>)
+paper proposes mutex and scoped lock types based on 
+<a href="http://www.boost.org/libs/thread/doc/index.html">Boost.Threads</a>
+library. This paper is an effort to analyze the 6 mutex types and 3 scoped lock types
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2005/N1907.htm">N1907</a>
+proposes to suggest a simplification. The paper also proposes new mutex types
+to complete a C++ thread synchronization library.
+</p>
+
+<h2><a name="SimplifyingMutexTypes"></a>Simplifying mutex types</h2>
+<p>
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2005/N1907.htm">N1907</a>
+divides mutex types depending on:
+</p>
+
+<ul>
+<li>Recursive locking.</li>
+<li>Lock/TryLock/TimedLock operations.</li>
+</ul>
+
+<p>
+Do we need so many mutex types? The 
+<a href="http://www.boost.org/libs/thread/doc/index.html">Boost.Threads</a>
+implementation is probably conditioned by the fact that
+POSIX mutex operations had no timed operations. 
+<a href="http://www.boost.org/libs/thread/doc/index.html">Boost.Threads</a>'
+timed mutexes are implemented combining mutex and condition
+variables. Due to this limitation, <i>timed_mutex</i> implementation has a performance penalty comparing to <i>mutex</i>
+and <i>try_mutex</i>, since mutex locking and try locking are natively implemented in POSIX threads.
+</p>
+
+<p>
+However, times are changing and POSIX offers optional timed functions (_POSIX_TIMEOUTS option)
+from IEEE Std 1003.1-2001 that are currently present in most popular operating systems. The 
+<a href="http://www.boost.org/libs/thread/doc/index.html">Boost.Threads</a>
+timed mutexes implementation is rather old (2001-2003) and we can suppose that for C++ TR2 and future C++ standard,
+timeout functions will be present in all systems. Note that the lack of timed functions was a UNIX issue,
+since Windows supports timed functions.
+</p>
+
+<p>
+Based on this argumentation, this paper proposes unifying all 
+<a href="http://www.boost.org/libs/thread/doc/index.html">Boost.Threads</a>
+mutex types into 2 types, <b>mutex</b> and
+<b>recursive_mutex</b>, that would have the same capabilities as
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2005/N1907.htm">N1907</a>'s <b>timed_mutex</b>
+and <b>recursive_timed_mutex</b>.
+</p>
+
+<p>
+It's possible that C++ could get more mutex types like process-shared mutexes (recursive and non-recursive)
+or read-write mutexes. Following current 
+<a href="http://www.boost.org/libs/thread/doc/index.html">Boost.Threads</a>' interface, 6 mutex types would 
+become then 12 mutex types with their process-shared counterparts. This paper proposes reducing 6 mutex
+types to 2 mutex types and the addition of a <i>null_mutex</i>.
+</p>
+
+<p>
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2005/N1907.htm">N1907</a>'s mutex types
+have no public locking interface. The entire locking interface is private, giving friendship access to some
+scoped lock types, so mutex locking is <b>only</b> possible using scoped locks.
+Many users find private locking functions too limiting and this paper proposes making
+locking functions public. 
+Scoped locks will still be the preferred way to lock
+mutexes but the user should have the possibility to use mutexes directly to build advanced synchronization
+utilities based on mutexes, where scoped locking pattern is not used.
+
+</p>
+
+<h2><a name="CommonMutexOperations"></a>Common mutex operations</h2>
+<p>This paper proposes standardizing the syntax and effects of common mutex operations so that a user can implement his own mutex and use synchronization classes like <i>scoped_lock</i>. This is similar to STL containers: the standard implements some containers that follow an interface, and the user can write his own containers and use STL algorithms and utilities.
+This is the proposed interface for common operations:
+</p>
+
+<p>
+<b>void lock()</b>
+</p>
+
+<ul>
+<li><b>Effects:</b> The calling thread tries to obtain ownership of the mutex, and if another thread has ownership
+of the mutex, it waits until it can obtain the ownership. If a thread takes ownership of the mutex
+the mutex must be unlocked by the same mutex. If the mutex supports recursive locking, the mutex
+must be unlocked the same number of times it is locked.</li>
+</ul>
+
+<p>
+<b>bool try_lock()</b>
+</p>
+
+<ul>
+<li><b>Effects:</b> The calling thread tries to obtain ownership of the mutex, and if another thread has ownership
+of the mutex returns immediately. If the mutex supports recursive locking, the mutex
+must be unlocked the same number of times it is locked.</li>
+
+<li><b>Returns:</b> If the thread acquires ownership of the mutex, returns true, if the another thread
+has ownership of the mutex, returns false.</li>
+</ul>
+
+<p>
+<b>bool timed_lock(const absolute_time&amp; abs_time)</b>
+</p>
+
+<ul>
+<li><b>Effects:</b> The calling thread will try to obtain exclusive ownership of the mutex if it can do so
+in until the specified time is reached. If the mutex supports recursive locking, the mutex
+must be unlocked the same number of times it is locked.</li>
+
+<li><b>Returns:</b> If the thread acquires ownership of the mutex, returns true, if the timeout
+expires returns false.</li>
+</ul>
+
+<p>
+<b>void unlock()</b>
+</p>
+
+<ul>
+<li><b>Effects:</b> The calling thread releases the exclusive ownership of the mutex. If the mutex supports
+recursive locking, the mutex must be unlocked the same number of times it is locked.</li>
+</ul>
+
+<p>Like 
+<a href="http://www.boost.org/libs/thread/doc/index.html">Boost.Threads</a>
+mutexes, we can specify 3 mutex models:
+</p>
+
+<ul>
+<li><b><i>BlockingMutex</i>:</b> A mutex that only supports <i>lock()</i> and <i>unlock()</i> operations.</li>
+<li><b><i>TryMutex</i>:</b> A mutex that supports operations of a <i>BlockingMutex</i>, plus <i>try_lock()</i>.</li>
+<li><b><i>TimedMutex</i>:</b> A mutex that supports operations of a <i>TryMutex</i>, plus <i>timed_lock()</i>.</li>
+</ul>
+
+<p>
+This paper proposes that standardized mutex types should be implementations of a <i>TimedMutex</i> model.
+</p>
+
+<h2><a name="ShouldMutexThrow"></a>Should Mutex Operations Throw?</h2>
+<p>
+We can standardize also if proposed mutex operations throw on failure. The question is, can mutex operations fail?
+If we revise
+<a href="http://www.boost.org/libs/thread/doc/index.html">Boost.Threads</a>
+implementation, we'll see that no locking/unlocking operation throws. If we revise the most popular mutex
+implementations we can see the following failure errors:
+</p>
+
+<p>In Windows platforms, using <tt><i>CRITICAL_SECTION</i></tt> feature can't return any error:</p>
+<ul>
+<li><tt><i>void EnterCriticalSection(LPCRITICAL_SECTION lpCriticalSection)</i></tt> locking function
+does not return any value.</li>
+<li><tt><i>void LeaveCriticalSection(LPCRITICAL_SECTION lpCriticalSection)</i></tt> unlocking function
+does not return any value.</li>
+</ul>
+
+<p>In POSIX platforms <tt><i>int pthread_mutex_lock(pthread_mutex_t *mutex)</i></tt>, 
+<tt><i>int pthread_mutex_trylock(pthread_mutex_t *mutex)</i></tt> and
+<tt><i>int pthread_mutex_unlock(pthread_mutex_t *mutex)</i></tt> functions
+can return the following errors:
+</p>
+<ul>
+<li>EINVAL: The mutex was created with the protocol attribute having the value PTHREAD_PRIO_PROTECT 
+and the calling thread's priority is higher than the mutex's current priority ceiling.</li>
+<li>EBUSY: The mutex could not be acquired because it was already locked.</li>
+<li>EINVAL: The value specified by mutex does not refer to an initialized mutex object.</li>
+<li>EAGAIN: The mutex could not be acquired because the maximum number of recursive 
+locks for mutex has been exceeded.</li>
+<li>EDEADLK: The current thread already owns the mutex.</li>
+<li>EPERM: The current thread does not own the mutex.</li>
+</ul>
+
+<p>EBUSY and EPERM are logic errors that can be perfectly avoided using ScopedLocks, and even if the
+user obtains that error because of bad coding, what can the user do to solve it? The only way is to
+solve this error to recompile the application.</p>
+
+<p>EINVAL error can't happen in C++ since all mutexes are initialized in the constructor, and there is no
+way to call locking functions from another object type, since locking functions are member functions.
+If this error occurs it can show a memory corruption problem, so the only safe bet is to kill the application.
+</p>
+
+<p>EAGAIN can happen if recursive locking exceeds its limits. This is the only possible runtime error.
+However, it's possible to implement locking mutexes without locking limitation. Even if the underlying
+implementation returns this error, 
+<a href="http://www.boost.org/libs/thread/doc/index.html">Boost.Threads</a> asserts on this error in 
+debug mode and ignores it release mode.</p>
+
+<p>In conclusion, although we can obtain error return values for mutex operations, it's not clear if those
+are useful to force a throwing interface in the standatd C++ mutex interface. Non-throwing interface
+can simplify code and improve space-time in resource constricted environments like embedded systems.
+When ScopedLock pattern is used, unlocking is executed in the destructor, and since throwing
+exceptions in destructors is discouraged the unlocking exception will be ignored.
+This paper makes no formal proposal about throwing semantics of locking operations, but suggests that
+we need a deep analysis to know if mutex errors are possible and if they can be handled by the user.</p>
+
+<h2><a name="SimplifiedMutexInterface"></a>Simplified Mutex Interface</h2>
+
+<p>This paper proposes the simplification of 
+<a href="http://www.boost.org/libs/thread/doc/index.html">Boost.Threads</a> types into
+two mutex types following the <i>TimedMutex</i> model:</p>
+
+<blockquote><pre>class mutex
+{
+   //Non-copyable
+   mutex(const mutex &amp;m);
+
+   //Non-assignable
+   mutex &amp;operator=(const mutex &amp;m);
+
+   public:
+
+   //Constructs the mutex in unlocked state
+   mutex();
+
+   //Destroys the mutex
+   ~mutex();
+
+   //Obtains exclusive ownership of the mutex
+   void lock();
+
+   //Will attempt to obtain exclusive ownership of the mutex
+   bool try_lock();
+
+   //Will attempt to obtain exclusive ownership of the mutex if it can do
+   //so within the specified time interval
+   bool timed_lock(const <i>absolute_time</i> &amp;abs_time);
+
+   //Will release exclusive ownership of the mutex
+   void unlock();
+};</pre></blockquote>
+
+<blockquote><pre>class recursive_mutex
+{
+   //Non-copyable
+   recursive_mutex(const recursive_mutex &amp;m);
+
+   //Non-assignable
+   recursive_mutex &amp;operator=(const recursive_mutex &amp;m);
+
+   public:
+
+   //Constructs the mutex in unlocked state
+   recursive_mutex();
+
+   //Destroys the mutex
+   ~recursive_mutex();
+
+   //Obtains exclusive ownership of the mutex
+   void lock();
+
+   //Will attempt to obtain exclusive ownership of the mutex
+   bool try_lock();
+
+   //Will attempt to obtain exclusive ownership of the mutex if it can do
+   //so within the specified time interval
+   bool timed_lock(const <i>absolute_time</i> &amp;abs_time);
+
+   //Will release exclusive ownership of the mutex
+   void unlock();
+};</pre></blockquote>
+
+<p>Proposed mutex types are non-copyable and non-assignable. Since <tt>pthread_mutex_t</tt> type is
+not defined as copyable (unlike for example, file handles), this paper also suggests making mutex
+types non-movable. </p>
+
+<h2><a name="NullMutex"></a>Null Mutex</h2>
+
+<p>
+When programming generic code, many times we search the configurability of locking policies.
+When configuring a class to avoid locking, a common pattern is to develop a class that simulates
+a mutex (let's call it Null Mutex), but returns immediately simulating success in locking operations.
+These operations are commonly inline functions that can be optimized away by the compiler. This paper suggests 
+including a Null Mutex class in C++ multithreading library, with the following operations:</p>
+
+<blockquote><pre>class null_mutex
+{
+   //Non-copyable
+   null_mutex(const recursive_mutex &amp;m);
+
+   //Non-assignable
+   null_mutex &amp;operator=(const recursive_mutex &amp;m);
+
+   public:
+
+   //Constructor (empty)
+   null_mutex()
+   {}
+
+   //Destructor (empty)
+   ~null_mutex()
+   {}
+
+   //Obtains exclusive ownership of the mutex (empty)
+   void lock()
+   {}
+
+   //Will attempt to obtain exclusive ownership of
+   //the mutex (always succeeds)
+   bool try_lock()
+   {  return true;   }
+
+   //Will attempt to obtain exclusive ownership of the mutex if it
+   //can do so within the specified time interval. (always succeeds)
+   bool timed_lock(const absolute_time &amp;<i>abs_time</i>)
+   {  return true;   }
+
+   //Will release exclusive ownership of the mutex (empty)
+   void unlock()
+   {}
+};</pre></blockquote>
+
+<h2><a name="SimplifyingScopedLockTypes"></a>Simplifying scoped lock types</h2>
+<p>
+Like mutexes, 
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2005/N1907.htm">N1907</a>
+offers 3 <i>scoped_lock</i> types. To know which scoped locks are suitable for a given mutex, each mutex
+defines via typedef the allowed scoped locks.  In 
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2005/N1907.htm">N1907</a> a mutex only
+grants locking capability (via friend declaration) to those <i>scoped_lock</i>s. 
+For example, 
+<a href="http://www.boost.org/libs/thread/doc/index.html">Boost.Threads</a>'
+<b>timed_mutex</b> defines 3 scoped lock types internally:</p>
+
+<blockquote><pre>  typedef implementation-defined scoped_lock;      
+  typedef implementation-defined scoped_try_lock;  
+  typedef implementation-defined scoped_timed_lock;
+</pre></blockquote>
+
+<p>
+This paper proposes an independent <i>scoped_lock</i> that can lock any object that implements
+a <i>BlockingMutex</i>, <i>TryMutex</i> or <i>TimedMutex</i> model. A
+single templatized locker can have all locking operations. A mutex does not need to implement all
+operations (for example, timed operations) to be used with the locker. If the user tries to use a non-implemented
+functionality a compile-time error will be generated saying that the mutex type has
+not the requested operation. The proposed locker would have overloaded constructors
+to initialize the locker without locking the mutex or executing a <i>lock()</i>, <i>try_lock()</i>,
+or <i>timed_lock()</i> operation.
+</p>
+
+<p>
+Additionally, there are situations where we want to leave the mutex locked (implementing more complex
+synchronization classes, for example) but we want to reverse locking operations if an exception occurs.
+This is similar to a memory allocation: we use an <i>auto_ptr</i> object to avoid leaks if an exception
+is thrown after obtaining the memory, but we want to <i>release()</i> that <i>auto_ptr</i> when all
+steps have been successfully completed.</p>
+
+<h2><a name="ScopedLockInterface"></a>Scoped Lock interface</h2>
+
+<p>The interface of the proposed <i>scoped_lock</i> is presented here with a possible implementation
+The operations are easy to understand and
+<i>scoped_lock</i> can lock any object that implements a <i>BlockingMutex</i>, <i>TryMutex</i> or <i>TimedMutex</i> interface. 
+<i>scoped_lock</i> can be perfectly
+used with a mutex that has no <i>timed_lock</i> or <i>try_lock</i> capabilities, as long as the functions
+requiring those functionalities are not called.
+</p>
+
+<blockquote><pre>//Types to specify scoped_lock's constructors behaviour
+static dont_lock_t   dont_lock;
+static try_to_lock_t try_to_lock;
+
+//The scoped lock class
+template &lt;class Mutex&gt;
+class scoped_lock
+{
+   private:
+   typedef scoped_lock&lt;Mutex&gt; this_type;
+   typedef bool this_type::*unspecified_bool_type;
+
+   //Non-copyable
+   scoped_lock(scoped_lock const&amp;);
+   //Non-assignable
+   scoped_lock&amp; operator=  (scoped_lock const&amp;);
+
+   public:
+   typedef Mutex mutex_type;
+
+   //Constructs the scoped_lock and locks the mutex using lock()
+   explicit scoped_lock(mutex_type&amp; m)
+      : mp_mutex(&amp;m), m_locked(false)
+   {  mp_mutex->lock();   m_locked = true;  }
+
+   //Constructs the scoped_lock but doesn't lock the mutex 
+   scoped_lock(mutex_type&amp; m, dont_lock_t)
+      : mp_mutex(&amp;m), m_locked(false)
+   {}
+
+   //Constructs the scoped_lock and tries to lock the mutex 
+   //using try_lock()
+   scoped_lock(mutex_type&amp; m, try_to_lock_t)
+      : mp_mutex(&amp;m), m_locked(mp_mutex->try_lock())
+   {}
+
+   //Constructs the scoped_lock and tries to lock the mutex 
+   //using timed_lock()
+   scoped_lock(mutex_type&amp; m, const absolute_time &amp;abs_time)
+      : mp_mutex(&amp;m), m_locked(mp_mutex->timed_lock(abs_time))
+   {}
+
+   //Destroys the scoped_lock. If the mutex was not released and
+   //the mutex is locked, unlocks it using unlock() function
+   ~scoped_lock()
+   {
+      try{  if(m_locked &amp;&amp;amp; mp_mutex)   mp_mutex->unlock();  }
+      catch(...){}
+   }
+
+   //Locks the mutex using. If it was locked throws an exception
+   void lock()
+   {  
+      if(!mp_mutex || m_locked)
+         throw lock_exception();
+      mp_mutex->lock();
+      m_locked = true;
+   }
+
+   //Try to lock the mutex. If it was locked throw an exception
+   bool try_lock()
+   {  
+      if(!mp_mutex || m_locked)
+         throw lock_exception();
+      m_locked = mp_mutex->try_lock();
+      return m_locked;
+   }
+
+   //Timed lock the mutex. If it was locked throw an exception
+   bool timed_lock(const absolute_time &amp;<i>abs_time</i>)
+   {  
+      if(!mp_mutex || m_locked)
+         throw lock_exception();
+      m_locked = mp_mutex->timed_lock(abs_time);
+      return m_locked;
+   }
+
+   //Unlock the mutex. If it was already unlocked throw an exception
+   void unlock()
+   {
+      if(!mp_mutex || !m_locked)
+         throw lock_exception();
+      mp_mutex->unlock();
+      m_locked = false;
+   }
+
+   //Return true if the mutex is locked
+   bool locked() const
+   {  return m_locked;  }
+
+   //If the mutex is locked return a true bool type, otherwise false
+   operator unspecified_bool_type() const
+   {  return m_locked? &amp;this_type::m_locked : 0;   }
+
+   //Returns a pointer to the contained mutex
+   mutex_type* mutex() const
+   {  return  mp_mutex;  }
+
+   //Releases the contained mutex. The lock has lost ownership of
+   //the mutex and will not try to unlock it in the destructor
+   mutex_type* release()
+   {
+      mutex_type *mut = mp_mutex;
+      mp_mutex = 0;
+      return mut;   
+   }
+ 
+   private:
+   mutex_type *mp_mutex; 
+   bool        m_locked;
+};</pre></blockquote>
+
+
+<h2><a name="ItsAboutTime"></a>It's About Time</h2>
+<p>
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2005/N1907.htm">N1907</a> and
+<a href="http://www.boost.org/libs/thread/doc/index.html">Boost.Threads</a> use a <tt><i>xtime</i></tt>
+class representing absolute time. <tt><i>xtime</i></tt> was supposed to be a temporary solution
+until a general time library was accepted in Boost. Recent Boost.Threads discussions have considered 
+<a href="http://www.boost.org/doc/html/date_time.html">Boost.Date_Time</a> 
+as a better solution and this library is being proposed for TR2 
+(<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2005/n1900.pdf">N1900</a>)
+However, some might argue that locking operations should use an <b>elapsed time</b>
+instead of an <b>absolute time</b>.
+</p>
+
+<p>
+Both approaches have strong and weak points. An elapsed time is more intuitive for the user, that does not need
+to obtain the current time, add some elapsed time and pass it to the timed operation. However, elapsed times are
+not appropriate for realtime systems, since the scheduler can put
+the thread on hold at any moment so it's difficult to obtain a predictable sleep time.
+We can have also spurious wakeups in condition variables, so we would need to recompute the elapsed
+time each wakeup, and we might not know how much time we have already waited. Windows uses elapsed times.
+</p>
+
+<p>
+However, absolute times based on the realtime clock can have also problems if the date is changed. Time
+synchronization is common in real-time systems and changing the system's time while waiting can
+provoke many problems since POSIX states that relative time waits based on the realtime clock shouldn't
+modify their behaviour, whereas absolute-time based services should follow the new absolute time.
+POSIX mutexes use absolute times based only in the real-time clock.
+</p>
+
+<p>
+So there is no portable solution nowadays. The ideal would be to have all possible approaches, having
+elapsed time and absolute time waiting functions and encapsulating the timer type in the time structure
+so that one can use relative times based on the realtime clock or absolute times based on the realtime
+clock or a monotonic system time that can't be changed. In general, it seems that absolute times are
+better to simplify the coding of timed complex functions that call several timed operations,
+since the user does not need to recompute the elapsed time after each timed operation.
+We should also see if a monitonic clock is better suited than the realtime clock.</p>
+
+<p>
+Any portable solution will lead to changes in all operating systems (POSIX or Windows). This paper
+proposes absolute times as a better approach, but time management is an unresolved core issue in C++.
+</p>
+
+<p>Both elapsed and absolute times will need high resolution time representation. Although microsecond
+representation might be enough for current applications, this paper, following the POSIX <tt>timespec</tt>
+structure proposes <b>nanosecond</b> resolution for standard C++ time representations.</p>
+
+<h2><a name="ConditionVariablesAndMutexTypes"></a>Condition Variables And Mutex Types</h2>
+
+<p>Proposed <a href="http://www.boost.org/libs/thread/doc/index.html">Boost.Threads</a> condition variables
+wait operations are defined taking a ScopedLock as argument. The wait operation is described like this:
+</p>
+<blockquote><pre>template &lt;class Lock&gt;
+    void wait(Lock&amp; lock);</pre></blockquote>
+<p><i>
+The first member function atomically unlocks lock and blocks until the condition object is signalled by a call
+to notify_one or to notify_all. When the calling thread becomes unblocked it locks the lock object lock before
+it returns.</i></p>
+
+<p>Although the lock is a template argument, the truth is that only <tt><i>boost::mutex</i></tt> can be used as
+it's internal real mutex type.
+<a href="http://www.boost.org/libs/thread/doc/index.html">Boost.Threads</a> condition variables don't work
+with <tt><i>boost::timed_mutex</i></tt>, so that the following non-blocking pattern can't be implemented in Boost:<p>
+
+<blockquote><pre>int func(int expected_state, const xtime &amp;timeout)
+{
+   //Try to lock until timeout reaches
+   boost::timed_mutex::scoped_timed_lock lock(m_mutex, timeout);
+
+   if (lock.locked() == true){
+      while (m_expected_state != expected_state){
+
+         //Try to wait until timeout reaches
+         if (!m_condition.timed_wait(lock, timeout)){
+            // Timed out on condition
+            return TimedOut;
+         }
+      }
+      // Change the progress state
+   }
+   else{
+      // mutex timed out
+      return TimedOut;
+   }
+   return Success;
+}</pre></blockquote>
+
+<p>This paper proposes that TryLock and TimedLock mutexes should be compatible with condition variables.
+Since this paper proposes unifying Mutex and ScopedLock types, and the proposed simplified mutex follows 
+the TimedMutex model, we can implement this pattern replacing the boost timed scoped lock with:</p>
+<pre>std::scoped_lock&lt;std::mutex&gt; lock(m_mutex, timeout);</pre>
+
+<h2><a name="EmbeddedWorldLimitations"></a>Embedded/Real Time Limitations</h2>
+<p>
+Embedded World/Realtime systems are increasingly using C++ and threads and mutexes are common operations
+in those systems. The problem is that in those systems exceptions are disabled for performance or predictability
+reasons. As "Technical Report on C++ Performance" states, exceptions can be unsuitable for these systems.
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/N1934.htm">Filesystem Proposal (N1934)</a> offers
+overloaded functions taking an extra <tt><i>system_error_code&amp; ec</i></tt> argument.
+</p>
+
+<p>Basic synchronization utilities like mutexes and condition variables could also offer this overload with
+functions that can throw, to extend C++ synchronization classes to environments without exceptions.</p>
+
+<h2><a name="InterprocessSynchronization"></a>Interprocess Synchronization</h2>
+<p>
+Along with multithreading synchronization classes, this paper also proposes adopting synchronization classes 
+that can be shared between processes through shared memory or memory mapped files, to synchronize threads
+from different processes.
+These synchronization classes are essential to develop more complex interprocess communication channels,
+an important missing feature in standard C++. This paper proposes that C++ interprocess synchronization
+classes should mirror C++ thread synchronization classes. Since they implement the same interface, utilities
+like <tt><i>scoped_lock</i></tt> can be used both with thread and process synchronization classes.
+Lifetime requirements of shared memory and memory mapped files will derive in special construction and
+destruction requirements, as we will see in the next chapter.</p>
+
+<p><tt><i>interprocess_mutex</i></tt> and <tt><i>interprocess_recursive_mutex</i></tt> are the interprocess 
+equivalents of <tt><i>mutex</i></tt> and <tt><i>recursive_mutex</i></tt> classes:</p>
+
+<blockquote><pre>class interprocess_mutex
+{
+   //Non-copyable
+   interprocess_mutex(const interprocess_mutex &amp;m);
+
+   //Non-assignable
+   interprocess_mutex &amp;operator=(const interprocess_mutex &amp;m);
+
+   public:
+
+   //Constructs the interprocess_mutex in unlocked state
+   interprocess_mutex();
+
+   //Destroys the interprocess_mutex
+   ~interprocess_mutex();
+
+   //Obtains exclusive ownership of the interprocess_mutex
+   void lock();
+
+   //Will attempt to obtain exclusive ownership of the interprocess_mutex
+   bool try_lock();
+
+   //Will attempt to obtain exclusive ownership of the interprocess_mutex if it can do
+   //so within the specified time interval
+   bool timed_lock(const <i>absolute_time</i> &amp;abs_time);
+
+   //Will release exclusive ownership of the interprocess_mutex
+   void unlock();
+};</pre></blockquote>
+
+<blockquote><pre>class interprocess_recursive_mutex
+{
+   //Non-copyable
+   interprocess_recursive_mutex(const interprocess_recursive_mutex &amp;m);
+
+   //Non-assignable
+   interprocess_recursive_mutex &amp;operator=(const interprocess_recursive_mutex &amp;m);
+
+   public:
+
+   //Constructs the interprocess_recursive_mutex in unlocked state
+   interprocess_recursive_mutex();
+
+   //Destroys the interprocess_recursive_mutex
+   ~interprocess_recursive_mutex();
+
+   //Obtains exclusive ownership of the interprocess_mutex
+   void lock();
+
+   //Will attempt to obtain exclusive ownership of the interprocess_recursive_mutex
+   bool try_lock();
+
+   //Will attempt to obtain exclusive ownership of the interprocess_recursive_mutex 
+   //if it can do so within the specified time interval
+   bool timed_lock(const <i>absolute_time</i> &amp;abs_time);
+
+   //Will release exclusive ownership of the interprocess_recursive_mutex
+   void unlock();
+};</pre></blockquote>
+
+<p><tt><i>interprocess_condition</i></tt> is the interprocess equivalent of <tt><i>condition</i></tt> 
+and can only be used with locks locking <tt><i>interprocess_mutex</i></tt> mutex type:</p>
+
+<blockquote><pre>class interprocess_condition
+{
+   //Non-copyable
+   interprocess_condition(const interprocess_recursive_mutex &amp;m);
+
+   //Non-assignable
+   interprocess_condition &amp;operator=(const interprocess_recursive_mutex &amp;m);
+
+   public:
+
+   //Constructs the interprocess_condition
+   interprocess_condition();
+
+   //Destroys the interprocess_condition
+   ~interprocess_condition();
+
+   //Atomically unlocks lock and blocks until the condition object is signalled by a 
+   //call to notify_one or to notify_all. When the calling thread becomes unblocked 
+   //it locks the lock object lock before it returns.
+   template &lt;class Lock&gt;
+       bool wait(Lock&amp; lock);
+
+   //The second member function atomically unlocks lock and blocks until the condition 
+   //object is signalled by a call to notify_one or to notify_all and the predicate pred() 
+   //returns true (that is, the function incorporates the loop that is needed to avoid 
+   //spurious wakeups). When the calling thread becomes unblocked it locks the lock object 
+   //lock before it returns.
+   template &lt;class Lock, class Pred&gt;>
+       bool wait(Lock&amp; lock, Pred pred);
+
+   //Atomically unlocks lock and blocks until the condition object is signalled by a call 
+   //to notify_one or to notify_all, or until after the time specified by the time abs_time. 
+   //When the calling thread becomes unblocked it locks the lock object lock before it returns. 
+   //The function returns false if it returned because the time had passed, otherwise it returns true.
+   template &lt;class Lock&gt;
+       bool timed_wait(Lock&amp; lock, const absolute_time&amp; abs_time);
+
+   //Atomically unlocks lock and blocks until the condition object is signalled by a call to 
+   //notify_one or to notify_all and the predicate pred() returns true (that is, the 
+   //function incorporates the loop that is needed to avoid spurious wakeups), or until after 
+   //the time specified by abs_time. When the calling thread becomes unblocked it 
+   //locks the lock object lock before it returns. The function returns false if it returned 
+   //because the abs_time had passed, otherwise it returns true.
+   template &lt;class Lock, class Pred&gt;>
+       bool timed_wait(Lock&amp; lock, const absolute_time&amp; abs_time, Pred pred);
+
+   //Unblocks one of the threads of a process that is blocked on the 
+   //condition object at the time of the call. If no threads are blocked 
+   //on the object at the time of the call the function does nothing.
+   void notify_one();
+
+   //Unblocks all of the threads of all processes that are blocked on the
+   //condition object at the time of the call. If no threads are blocked
+   //on the object at the time of the call the function does nothing.
+   void notify_all();
+};</pre></blockquote>
+
+<h2><a name="InterprocessSynchronizationConstruction"></a>Interprocess Synchronization With Memory Mapped Files</h2>
+<p>
+The lifetime requirements for synchronization objects to be constructed in shared memory or
+memory mapped files are harder than those for their thread counterparts.
+Specially, if we accept in standard C++ the possibility to construct synchronization objects in persistent
+memory-backends, like memory mapped files.
+</p>
+
+<p>With thread		synchronization objects, we can apply normal C++ constructor and
+destructor semantics. The constructor can allocate synchronization resources from the operating
+system and the destructor can release them. If a process crashes, the OS can also free them safely.
+So far, so good.</p>
+
+<p>With shared memory, although it's more difficult, we can apply the same logic. The destruction
+semantics, however, are trickier. When a process crashes, the operating system can't free the
+resources, because other processes might be using the synchronization object. Process crashing
+happens frecuently in our systems, because of programming errors or due to explicit user "kill"
+requests. So interprocess mechanisms should be freed by the operating system when the memory where
+the interprocess synchronization object is placed is destroyed. This forces synchronization object designers 
+to have (quasi) trivial destructors in process-shared synchronization objects and pass destruction
+guarantees to the OS support.</p>
+
+<p>If we implement an interprocess_mutex that can leak resources when the shared memory is destroyed, we have quite a big problem there. Even an ordered destruction without process crashing would require quite a big job for the users: make sure that this process is the only process attached to the memory, destroy the synchronization resources,
+and destroy the shared memory, all atomically. It's clear that it's easier just to destroy the shared memory.
+So a trivial destructor (or quasi trivial, just with some debugging code, for example) is a basic need
+for robust interprocess synchronization objects.</p>
+
+<p>Now let's analyze memory mapped files (and some shared memory implementations that might have
+filesystem persistence). Like shared memory, the OS should destroy the objects when
+the memory mapped file is unmapped by all the processes. But memory mapped files have filesystem
+persistence so let's imagine that we want to implement a persistent message queue using
+interprocess synchronization objects constructed in a fixed size file:
+</p>
+
+<ul>
+<li>A server process creates the file, maps it and constructs the synchronization objects using placement new.</li>
+<li>The server exits since there are no requests in a long time.</li>
+<li>A client process opens the file, maps it and starts writing persistent messages for the server.</li>
+<li>The operating system is rebooted. The kernel has no synchronization objects constructed.</li>
+<li>To make the queue useful again the first process using the queue (server or client) must
+    re-create the synchronization object. So it must synchronize file access using an external synchronization
+	object to check if interprocess synchronization mechanisms are already constructed (this may be difficult to know) and must construct them.</li>
+</ul>
+
+<p>This is a complicated problem to solve. So as a consequence this paper proposes that when the file is 
+   remapped, all the synchronization objects should be ready to be used. Since the operating system does not
+   know the contents of a file, and where the synchronization objects were constructed, this will require a <b>handle-free</b> implementation of synchronization objects.
+</p>
+
+<p>A <b>handle-free</b> implementation means that instead of handling an opaque <b>kernel handle</b>, requiring
+initialization and cross-process global handles, operating system objects should be allocated on demand, when
+the first synchronization operation is requested. This will transform interprocess synchronization objects'
+constructors to a fairly simple POD-filling code (initializing atomic variables values, and setting constant
+data such marking the object as recursive or requesting a scheduling algorithm).</p>
+
+<p>Although this might seem complicated, systems that implement process-shared mechanisms (for example POSIX
+system supporting the PTHREAD_PROCESS_SHARED atribute) have all the needed operating system functions to
+implement this. For example, the Linux kernel has a basic synchronization objects called <b><a href="http://en.wikipedia.org/wiki/Futex">futex</a></li></b> that is essential to implement this filesystem
+persistence behaviour.
+</p>
+
+<p>To sum up, this paper proposes the following lifetime requirements for interprocess synchronization objects:</p>
+<ul>
+<li>The user is not required to call the destructor of the interprocess synchronization objects constructed in a
+memory segment. The operating system will free the resources when the segment is not available to any process.</li>
+<li>The user is not required to call the constructor when the interprocess synchronization object was previously
+constructed, even if the system restarts.</li>
+</ul>
+
+<p>These two requirements are not hard to achieve, since systems implementing POSIX process-shared synchronization
+mechanism implement this behaviour. To emulate this behaviour in systems without process-shared synchronization
+objects, atomic operations and spin-locks can be used, until those operating systems implement the needed
+operating system resources.
+</p>
+
+<h2><a name="SemaphoreTypes"></a>Do We Need Semaphore Types?</h2>
+<p>The original <a href="http://www.boost.org/libs/thread/doc/index.html">Boost.Threads</a>
+library had a semaphore class but it was removed because it was considered <i>error prone</i>.
+As the <a href="http://www.boost.org/doc/html/threads/faq.html">FAQ</a> of the library states:</p>
+
+<blockquote>
+<p><i>11.  Why has class semaphore disappeared?</i></p>
+<p><i>Semaphore was removed as too error prone. The same effect can be achieved with 
+greater safety by the combination of a mutex and a condition variable.</i></p>
+</blockquote>
+
+<p>Certainly, the semaphore interface can be emulated with a condition and a mutex, but
+this emulation can't be used for important system programming tasks, like device driver
+implementations, signal handling or interrupt handlers.</p>
+
+<p>Condition variables can't be used in interrupt handlers because interrupt handlers should never
+block and thus, they shouldn't acquire locks.
+The <i>post()</i> semaphore operation turns out to be the only synchronization operation that can be safely used
+in an interrupt handler. Shared variables protected by locks cannot be safely accessed in interrupt handlers. 
+Typically, a dedicated device thread gets woken up by the interrupt handler:</p>
+
+<blockquote><pre>
+semaphore sem(/*count*/0);
+mutex     mut;
+
+void interrupt_handler()
+{
+   //...
+   sem.post();
+   return from interrupt handler
+}
+
+void dedicated_device_thread
+{
+   while (1) {
+      sem.wait();
+      scoped_lock(mut);
+      //Deal with interrupt...
+   }
+}</pre></blockquote>
+
+<p>Event if a semaphore can be simulated with a mutex/condition combination, a simulated post() operation can block and a semaphore is <b>much more efficient</b> than a condition variable, since it requires far less operations and it's usually natively supported by the operating systems. For several real-time and time critical patterns a semaphore offers the needed synchronization with the best performance.</p>
+
+<p>This paper acknowledges that semaphores should be only used in situations where mutex and condition variable combination can't offer enough performance or the function notifying an event can't be blocked. Because of this, this paper proposes standardizing a semaphore interface that can be optionally implemented by vendors (this is likely to happen in embedded C++ implementations). All embedded and realtime operating systems offer semaphore operations, so this shows the importance of semaphore classes for programming non-blocking critical tasks. The proposed interface is:
+</p>
+
+<p>
+<b>void post()</b>
+</p>
+
+<ul>
+<li><b>Effects:</b> Increments the semaphore count. If there are processes/threads
+blocked waiting for the semaphore, then one of these processes will return successfully from
+its wait function.</li>
+</ul>
+
+<p>
+<b>void wait()</b>
+</p>
+
+<ul>
+<li><b>Effects:</b> Decrements the semaphore. If the semaphore value is
+not greater than zero, then the calling process/thread blocks until it can decrement the counter.</li>
+</ul>
+
+<p>
+<b>bool try_wait()</b>
+</p>
+
+<ul>
+<li><b>Effects:</b> Decrements the semaphore if the semaphore's value is
+greater than zero and returns true. If the value is not greater than zero returns false.</li>
+</ul>
+
+<p>
+<b>bool timed_wait(const absolute_time &amp;abs_time)</b>
+</p>
+
+<ul>
+<li><b>Effects:</b> Decrements the semaphore if the semaphore's value 
+is greater than zero and returns true. Otherwise, waits for the semaphore to the 
+posted or the timeout expires. If the timeout expires, the function returns false. If the 
+semaphore is posted the function returns true.</li>
+</ul>
+
+<p>The standard semaphore class would have the following interface:</p>
+
+<blockquote><pre>class semaphore
+{
+   semaphore(const semaphore &amp;);
+   semaphore &amp;operator =(const semaphore &amp;);
+
+   public:
+
+   semaphore(int initial_count);
+
+   ~semaphore();
+
+   void post();
+
+   void wait();
+
+   bool try_wait();
+
+   bool timed_wait(const absolute_time &amp;abs_time);
+};</pre></blockquote>
+
+<p>The <tt>semaphore</tt> class can also have its <tt>interprocess_semaphore</tt> counterpart.</p>
+
+<h2><a name="PriorArt"></a>Prior Art</h2>
+<p>
+The interprocess synchronization classes have been developed under the <a href="http://ice.prohosting.com/newfunk/boost/libs/shmem/doc/html/index.html">Shmem</a> library and they
+are being improved for the Boost.Interprocess library.
+Process-shared mutex, condition variables and semaphores are native in POSIX operating systems
+supporting process-shared synchronization objects and spin-locks are used in Windows operating systems.
+These basic interprocess synchronization classes can be used to implement more complex
+interprocess communication channels, like message queues.
+</p>
+
+<h2><a name="Acknowledgments"></a>Acknowledgments</h2>
+
+<p>
+Thanks to Howard Hinnant for his explanations, support and improvements. Thanks to Boost mailing list members
+participating in Shmem/Interprocess review process, where mutex and lock simplification was suggested.</p>
+
+<h2><a name="References"></a>References</h2>
+
+<ul>
+<li><a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2005/N1907.htm">N1907</a>:  Multi-threading Library for Standard C++, Revision 1.</li>
+<li><a href="http://www.boost.org/libs/thread/doc/index.html">Boost.Threads</a> library</li>
+<li><a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2005/n1900.pdf">N1900</a>: Proposal to Add Date-Time to the C++ Standard Library</li>
+<li><a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n1952.htm">N1952</a>: A Proposal to Add an Rvalue Reference to the C++ Language. Proposed Wording. Revision 2</li>
+<li><a href="people.redhat.com/~drepper/futex.pdf">Futexes Are Tricky</a></li>
+<li><a href="http://ds9a.nl/futex-manpages/">Futex Manpages</a></li>
+<li><a href="http://www.linux.org.uk/~ajh/ols2002_proceedings.pdf.gz">Fuss, futexes and furwocks: Fast Userlevel Locking in Linux</a></li>
+<li><a href="http://ice.prohosting.com/newfunk/boost/libs/shmem/doc/html/index.html">Shmem</a> library</li>
+</ul>
+
+</body></html>

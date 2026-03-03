@@ -1,0 +1,789 @@
+﻿<html>
+<head>
+    <title>Improved support for bidirectional fences</title>
+    <meta content="http://schemas.microsoft.com/intellisense/ie5" name="vs_targetSchema" />
+    <meta http-equiv="Content-Language" content="en-us" />
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+</head>
+<body bgcolor="#ffffff">
+    <address>
+        Document number: N2633=08-0143</address>
+    <address>
+        Programming Language C++, Library/Concurrency Subgroup</address>
+    <address>
+        &nbsp;</address>
+    <address>
+        Peter Dimov, &lt;<a href="mailto:pdimov@pdimov.com">pdimov@pdimov.com</a>&gt;</address>
+    <address>
+        &nbsp;</address>
+    <address>
+        2008-05-16</address>
+    <h1>
+        Improved support for bidirectional fences</h1>
+    <ul>
+        <li><a href="#background">Background</a></li>
+        <li><a href="#current">Current Approach</a></li>
+        <li><a href="#alternative">Suggested Alternative</a></li>
+        <li><a href="#proposed">Proposed Text</a></li>
+    </ul>
+    <h2>
+        <a name="background">I. Background</a></h2>
+    <p>
+        Relaxed (non-sequentially consistent) memory models are typically specified in terms
+        of either acquire/release semantics that introduce ordering between two synchronizing
+        operations from separate threads, or bidirectional fences that introduce ordering
+        between two operations from the same thread. The C++ memory model chooses the first
+        approach, for good reasons. Nevertheless, many existing hardware platforms are actually
+        based on the second and rely on fences, also called memory barriers. The canonical
+        fence-based architecture is Sun SPARC in RMO mode, and the IBM POWER architecture
+        is widely available. Even the poster child for the acquire/release model, the Intel
+        IA-64 architecture, includes a bidirectional full fence instruction, <em>mf</em>,
+        and so does the x86/x64 architecture (<em>mfence</em>).</p>
+    <p>
+        A fence is a primitive that enforces ordering between preceding loads or stores
+        and subsequent loads or stores. In SPARC RMO terms the various combinations are
+        called #LoadLoad, #LoadStore, #StoreLoad and #StoreStore and can be combined, leading
+        to a total of 16 combinations (one of which is a no-op, and another is a full fence).
+        In practice, the #StoreLoad barrier is the most expensive and its cost is essentially
+        the same as a full fence; the others are relatively cheap even in combination. These
+        costs have allowed the designers of the POWER architecture to simplify the full
+        set into two instructions, LWSYNC (#LoadLoad | #LoadStore | #StoreStore) and SYNC
+        (a full fence). We'll use <em>lwsync</em> from now on as a generic way to refer
+        to the relatively cheap fence.</p>
+    <p>
+        (Another possibility is to provide an <em>acquire fence</em>, #LoadLoad | #LoadStore,
+        a <em>release fence</em>, #LoadStore | #StoreStore, and an <em>acquire+release fence</em>,
+        #LoadLoad | #LoadStore | #StoreStore. This corresponds better to the existing terminology
+        in the C++ memory model and we'll return to it later on.)</p>
+    <p>
+        While it's trivial to map the acquire/release model to a bidirectional fence model,
+        albeit with a slight theoretical loss in performance, the reverse is not true. This
+        has led to a pressure to include fence primitives into the C++ memory model; see
+        for example N2153 that makes a fine case. This pressure has led to the addition
+        of a <em>fence</em> member function to all atomic types and to the definition of
+        a global atomic object called <em>atomic_global_fence_compatibility</em>.</p>
+    <p>
+        The motivation for having fence primitives in C++ is fourfold:</p>
+    <ol>
+        <li>It's hard to port existing code that is written for a specific fence-based architecture
+            to the C++ acquire/release memory model. We want C++ to provide a way for rewriting
+            such code in a manner that increases portability without sacrificing efficiency.</li>
+        <li>Some programmers may be familiar with a fence-based memory model and, ideally, we
+            want to help them be immediately productive in C++.</li>
+        <li>In many real-world cases, the programmer knows <em>exactly</em> what sequence of
+            instructions he wants to produce on the target hardware. We want to enable these
+            programmers to achieve their goals while still writing portable code. (Stated simply,
+            we want the programmer to be able to emit a <em>lwsync</em> instruction without
+            sacrificing portability and theoretical correctness.)</li>
+        <li>There are situations in which a fence-based formulation on the source level leads
+            to more efficient code.</li>
+    </ol>
+    <p>
+        The rest of this paper explains why the existing mechanism in the working draft
+        does not meet these challenges, and proposes an alternative that does.</p>
+    <h2>
+        <a name="current">II. Current Approach</a></h2>
+    <p>
+        The current working draft, N2588, has adopted a mechanism put forward in N2324 that
+        consists of atomic types supporting a dedicated "fence" operation. On the memory
+        model level, this is a read-modify-write operation that leaves the value unchanged.
+        This is an elegant attempt to provide a solution to the conditional synchronization
+        problem described in N2153/N2237 without introducing a separate primitive (which
+        corresponds to our point 4 above). It also aims to address points 1-3, but as a
+        secondary goal.</p>
+    <p>
+        At first glance, a programmer and an implementer would reasonably expect these fence
+        operations to be implemented as follows:</p>
+    <p>
+        <strong>Table 1:</strong></p>
+    <table border="1" cellpadding="3" cellspacing="0">
+        <tr>
+            <td>
+            </td>
+            <td>
+                POWER</td>
+            <td>
+                x86, x64</td>
+        </tr>
+        <tr>
+            <td>
+                <code>x.fence(memory_order_acquire)</code></td>
+            <td>
+                LWSYNC</td>
+            <td>
+                <em>no-op</em></td>
+        </tr>
+        <tr>
+            <td>
+                <code>x.fence(memory_order_release)</code></td>
+            <td>
+                LWSYNC</td>
+            <td>
+                <em>no-op</em></td>
+        </tr>
+        <tr>
+            <td>
+                <code>x.fence(memory_order_acq_rel)</code></td>
+            <td>
+                LWSYNC</td>
+            <td>
+                <em>no-op</em></td>
+        </tr>
+        <tr>
+            <td>
+                <code>x.fence(memory_order_seq_cst)</code></td>
+            <td>
+                SYNC</td>
+            <td>
+                mfence, or a locked instruction</td>
+        </tr>
+    </table>
+    <p>
+        This implementation turns out to not match the specification. Consider the following</p>
+    <p>
+        <strong>Example 1:</strong></p>
+    <table border="0" cellpadding="3" cellspacing="0">
+        <tr>
+            <td>
+                Thread 1:</td>
+            <td>
+                &nbsp;&nbsp;&nbsp;</td>
+            <td>
+                Thread 2:</td>
+        </tr>
+        <tr>
+            <td>
+                <pre>x.store( 1, memory_order_relaxed );
+z.fence( memory_order_acq_rel );
+r1 = y.load( memory_order_relaxed );</pre>
+            </td>
+            <td>
+                &nbsp;</td>
+            <td>
+                <pre>y.store( 1, memory_order_relaxed );
+z.fence( memory_order_acq_rel );
+r2 = x.load( memory_order_relaxed );</pre>
+            </td>
+        </tr>
+    </table>
+    <p>
+        Since read-modify-write operations on a single location <code>z</code> form a total
+        order (1.10/5) and since <code>z.fence</code> is a RMW operation, we must conclude
+        that one of the two <code>z.fence</code> calls precedes the other in this order.
+        As the example is symmetrical, we can arbitrarily pick an order without sacrificing
+        generality; let for example the fence operation in thread 1 precede the fence operation
+        in thread 2. Since the fences in our example have both acquire and release semantics
+        due to the <code>memory_order_acq_rel</code> constraint, they <em>synchronize-with</em>
+        each other, and hence, the fence in thread 1 <em>happens before</em> the fence in
+        thread 2. This, in turn, implies that the <code>x.store</code> in thread 1 happens
+        before <code>x.load</code> in thread 2, and that <code>r2</code> must be 1.</p>
+    <p>
+        In other words, non-sequentially consistent outcomes are prohibited by the fences.</p>
+    <p>
+        If we now look at our table above, we see that the intended LWSYNC or no-op implementation
+        of <code>z.fence(memory_order_acq_rel)</code> is not enough to prohibit the non-sequentially
+        consistent outcome of <code>r1 == r2 == 0</code>. We must conclude that <code>z.fence(memory_order_acq_rel)</code>
+        must be implemented as SYNC or mfence:</p>
+    <p>
+        <strong>Table 2:</strong></p>
+    <table border="1" cellpadding="3" cellspacing="0">
+        <tr>
+            <td>
+            </td>
+            <td>
+                POWER</td>
+            <td>
+                x86, x64</td>
+        </tr>
+        <tr>
+            <td>
+                <code>x.fence(memory_order_acquire)</code></td>
+            <td>
+                LWSYNC</td>
+            <td>
+                <em>no-op</em></td>
+        </tr>
+        <tr>
+            <td>
+                <code>x.fence(memory_order_release)</code></td>
+            <td>
+                LWSYNC</td>
+            <td>
+                <em>no-op</em></td>
+        </tr>
+        <tr>
+            <td>
+                <code>x.fence(memory_order_acq_rel)</code></td>
+            <td>
+                SYNC</td>
+            <td>
+                mfence, or a locked instruction</td>
+        </tr>
+        <tr>
+            <td>
+                <code>x.fence(memory_order_seq_cst)</code></td>
+            <td>
+                SYNC</td>
+            <td>
+                mfence, or a locked instruction</td>
+        </tr>
+    </table>
+    <p>
+        No problem, we'll just use acquire or release when we need <em>lwsync</em>, right?</p>
+    <p>
+        <strong>Example 2:</strong></p>
+    <table border="0" cellpadding="3" cellspacing="0">
+        <tr>
+            <td>
+                Thread 1:</td>
+            <td>
+                &nbsp;&nbsp;&nbsp;</td>
+            <td>
+                Thread 2:</td>
+        </tr>
+        <tr>
+            <td>
+                <pre>x.store( 1, memory_order_relaxed );
+z.fence( memory_order_release );
+z.fence( memory_order_acquire );
+r1 = y.load( memory_order_relaxed );</pre>
+            </td>
+            <td>
+                &nbsp;</td>
+            <td>
+                <pre>y.store( 1, memory_order_relaxed );
+z.fence( memory_order_release );
+z.fence( memory_order_acquire );
+r2 = x.load( memory_order_relaxed );</pre>
+            </td>
+        </tr>
+    </table>
+    <p>
+        Again, we have a total order over the operations on <code>z</code>. No matter how
+        we reorder the four fences, one of the release fences will precede the acquire fence
+        in the other thread, the two will <em>synchronize-with</em> each other, and order
+        one of the stores with its corresponding load, as happened in example 1.</p>
+    <p>
+        Therefore, the acquire and release fences can't both be LWSYNC or a no-op, as this
+        would again allow the <code>r1 == r2 == 0</code> outcome that the memory model tells
+        us cannot occur. We are forced to update our implementation table once again:</p>
+    <p>
+        <strong>Table 3:</strong></p>
+    <table border="1" cellpadding="3" cellspacing="0">
+        <tr>
+            <td>
+            </td>
+            <td>
+                POWER</td>
+            <td>
+                x86, x64</td>
+        </tr>
+        <tr>
+            <td>
+                <code>x.fence(memory_order_acquire)</code></td>
+            <td>
+                SYNC or LWSYNC</td>
+            <td>
+                mfence or <em>no-op</em></td>
+        </tr>
+        <tr>
+            <td>
+                <code>x.fence(memory_order_release)</code></td>
+            <td>
+                LWSYNC or SYNC</td>
+            <td>
+                <em>no-op</em> or mfence</td>
+        </tr>
+        <tr>
+            <td>
+                <code>x.fence(memory_order_acq_rel)</code></td>
+            <td>
+                SYNC</td>
+            <td>
+                mfence</td>
+        </tr>
+        <tr>
+            <td>
+                <code>x.fence(memory_order_seq_cst)</code></td>
+            <td>
+                SYNC</td>
+            <td>
+                mfence</td>
+        </tr>
+    </table>
+    <p>
+        This looks disturbing enough, but we aren't done yet. Since fences are read-modify-write
+        operation, they can synchronize with acquire loads and release stores:</p>
+    <p>
+        <strong>Example 3:</strong></p>
+    <table border="0" cellpadding="3" cellspacing="0">
+        <tr>
+            <td>
+                Thread 1:</td>
+            <td>
+                &nbsp;&nbsp;&nbsp;</td>
+            <td>
+                Thread 2:</td>
+        </tr>
+        <tr>
+            <td>
+                <pre>x.store( 1, memory_order_relaxed );
+z.fetch_add( 0, memory_order_release );
+z.fence( memory_order_acquire );
+r1 = y.load( memory_order_relaxed );</pre>
+            </td>
+            <td>
+                &nbsp;</td>
+            <td>
+                <pre>y.store( 1, memory_order_relaxed );
+z.fetch_add( 0, memory_order_release );
+z.fence( memory_order_acquire );
+r2 = x.load( memory_order_relaxed );</pre>
+            </td>
+        </tr>
+    </table>
+    <p>
+        <strong>Example 4:</strong></p>
+    <table border="0" cellpadding="3" cellspacing="0">
+        <tr>
+            <td>
+                Thread 1:</td>
+            <td>
+                &nbsp;&nbsp;&nbsp;</td>
+            <td>
+                Thread 2:</td>
+        </tr>
+        <tr>
+            <td>
+                <pre>x.store( 1, memory_order_relaxed );
+z.fence( memory_order_release );
+z.load( memory_order_acquire );
+r1 = y.load( memory_order_relaxed );</pre>
+            </td>
+            <td>
+                &nbsp;</td>
+            <td>
+                <pre>y.store( 1, memory_order_relaxed );
+z.fence( memory_order_release );
+z.load( memory_order_acquire );
+r2 = x.load( memory_order_relaxed );</pre>
+            </td>
+        </tr>
+    </table>
+    <p>
+        Using a similar reasoning as with example 2, and observing the release sequence
+        rules in 1.10/6 and 1.10/7, we can reasonably conclude that both acquire and release
+        fences need to map to SYNC. To be fair, an implementer on the POWER platform still
+        does have the option to use LWSYNC for one of the fences, at the cost of moving
+        the SYNC to the load or to the fetch_add, respectively. This is unlikely, as it
+        will decrease the performance of a primary primitive in favor of a secondary one.
+        Our final implementation table now looks like:</p>
+    <p>
+        <strong>Table 4:</strong></p>
+    <table border="1" cellpadding="3" cellspacing="0">
+        <tr>
+            <td>
+            </td>
+            <td>
+                POWER</td>
+            <td>
+                x86, x64</td>
+        </tr>
+        <tr>
+            <td>
+                <code>x.fence(memory_order_acquire)</code></td>
+            <td>
+                SYNC</td>
+            <td>
+                mfence</td>
+        </tr>
+        <tr>
+            <td>
+                <code>x.fence(memory_order_release)</code></td>
+            <td>
+                SYNC</td>
+            <td>
+                mfence</td>
+        </tr>
+        <tr>
+            <td>
+                <code>x.fence(memory_order_acq_rel)</code></td>
+            <td>
+                SYNC</td>
+            <td>
+                mfence</td>
+        </tr>
+        <tr>
+            <td>
+                <code>x.fence(memory_order_seq_cst)</code></td>
+            <td>
+                SYNC</td>
+            <td>
+                mfence</td>
+        </tr>
+    </table>
+    <p>
+        In short, on the currently popular platforms the fence primitive is an overengineered
+        way to insert an expensive full fence, and its argument plays no part. This makes
+        it extremely unattractive, especially on the x86/x64 platform. It is quite likely
+        that implementations will deliberately ignore the specification and just provide
+        the obvious implementation in Table 1, which is what programmers expect and can
+        make use of.</p>
+    <p>
+        Again, to be fair, we must acknowledge the possibility of a new hardware being able
+        to take advantage of the current specification and somehow implement the primitive
+        in a more performant way. This however doesn't help. Any program that uses fences
+        will suffer severe performance penalties when ported to, for example, x86/x64; this
+        in practice renders the fence primitive non-portable and platform-dependent.</p>
+    <p>
+        Other surprising properties of the specification concern the <code>atomic_global_fence_compatibility</code>
+        atomic object. It is provided as a migration path for programs using traditional
+        address-free fences, such as in the typical</p>
+    <p>
+        <strong>Example 5:</strong></p>
+    <table border="0" cellpadding="3" cellspacing="0">
+        <tr>
+            <td>
+                Thread 1:</td>
+            <td>
+                &nbsp;&nbsp;&nbsp;</td>
+            <td>
+                Thread 2:</td>
+        </tr>
+        <tr>
+            <td>
+                <pre>x = 1; // non-atomic
+
+atomic_global_fence_compatibility
+    .fence( memory_order_acq_rel );
+
+y.store( 1, memory_order_relaxed );</pre>
+            </td>
+            <td>
+                &nbsp;</td>
+            <td>
+                <pre>if( y.load( memory_order_relaxed ) == 1 )
+{
+    atomic_global_fence_compatibility
+        .fence( memory_order_acq_rel );
+
+    assert( x == 1 );
+}</pre>
+            </td>
+        </tr>
+    </table>
+    <p>
+        (We can assume that the original version of the code contained a #StoreStore or
+        stronger fence in thread 1, and a #LoadLoad or stronger fence in thread 2.)</p>
+    <p>
+        This port works, but it's important to understand why. As before, there is a total
+        order on the operations on <code>atomic_global_fence_compatibility</code>, and we
+        must examine both possibilities.</p>
+    <p>
+        If the fence in thread 1 precedes the fence in thread 2, we conclude from the release
+        semantics of the former and the acquire semantics of the latter that the store to
+        x in thread 1 happens before the load from x in thread 2, the assert passes, and
+        all is well.</p>
+    <p>
+        If, on the other hand, the fence in thread 2 precedes the fence in thread 1, we
+        conclude in a similar manner that the load from y happens before the store to y,
+        which means that the branch isn't taken and the assert is not executed. Note, however,
+        that now we used the acquire semantics of the fence in thread 1 and the release
+        semantics of the fence in thread 2.</p>
+    <p>
+        In short, we needed both fences to have both acquire and release semantics, otherwise
+        we wouldn't be able to conclude our analysis and prove that the example is correct
+        and the assertion never fails. Even though the original code contained only #StoreStore
+        and #LoadLoad, two of the most cheap fences, we were forced to employ <code>memory_order_acq_rel</code>
+        to achieve equivalent semantics.</p>
+    <p>
+        It would be reasonable to assume that programmers may be tempted to try <code>memory_order_acquire</code>
+        or <code>memory_order_release</code> instead; they are provided as options, so they
+        must be useful for <em>something</em>! But this is a trap and would lead to incorrect
+        code, at least according to the specification. (The code may well work in practice,
+        as suggested by table 4, but it isn't <em>guaranteed</em> to.)</p>
+    <p>
+        The obvious alternative fomulation:</p>
+    <blockquote>
+        <code>void atomic_global_fence();</code></blockquote>
+    <p>
+        provides equivalent functionality to the current</p>
+    <blockquote>
+        <code>extern const atomic_flag atomic_global_fence_compatibility;</code></blockquote>
+    <p>
+        while at the same time being better named and much less error prone. The aim of
+        the explicit global variable <code>atomic_global_fence_compatibility</code> is to
+        render the dependency on a single location explicit, highlighting the potential
+        performance problem and encouraging users to migrate their algorithms away from
+        a global fence formulation and into a form that is more friendly to the C++ memory
+        model. It is questionable whether the the benefits of this approach outweigh its
+        obvious downsides, and the long and inconvenient name that has been chosen is certain
+        to lead to its shortening or wrapping, hiding it from view and subverting the intent.</p>
+    <p>
+        Having concluded our analysis, we can now revisit our criteria 1-4:</p>
+    <ol>
+        <li>It is possible to port existing code to use the currently supplied fence primitive,
+            but this would generally come at a significant performance cost due to the fact
+            that all fences are heavyweight full fences. This will discourage the porting efforts
+            and potentially lead to less availability of standard and portable code.</li>
+        <li>Programmers that are familiar with fence-based architectures will find the innovative
+            concept of per-variable fences odd. The <code>atomic_global_fence_compatibility</code>
+            alternative is error prone, suboptimal and is, in fact, designed to discourage people
+            from using it. Some of these programmers will be slow to migrate to the C++ memory
+            model. (Others will of course bite the bullet and learn the new acquire/release
+            style; but the point is that they could've been writing code using their old skills
+            <em>while learning</em>.)</li>
+        <li>The programmer has no way of emitting a <em>lwsync</em>, that is, a fence weaker
+            than a full fence. This is especially problematic. Programmers are very good at
+            solving problems; when they need to emit a fence instruction, they will find a way
+            to do it, for example by using a dummy atomic load on a randomly chosen variable.
+            Ideally, we want to let them express their intent directly, without abusing an unrelated
+            primitive and producing code that looks portable on the surface, compiles, runs,
+            and sometimes fails in subtle and mysterious ways.</li>
+        <li>The fact that all fences are mapped to SYNC/mfence often negates all performance
+            gains that could theoretically be achieved by conditional or separate synchronization.
+            Consider for example the multiple lock release example from N2153 (shown here in
+            its original form): </li>
+    </ol>
+    <blockquote>
+        <pre>do_work(A,B);
+release_fence();
+lock_A.store_raw(LOCK_UNLOCKED);
+lock_B.store_raw(LOCK_UNLOCKED);</pre>
+    </blockquote>
+    <blockquote>
+        and its formulation in terms of the current working draft primitives:</blockquote>
+    <blockquote>
+        <pre>do_work(A,B);
+
+lock_A.fence( memory_order_release );
+lock_B.fence( memory_order_release );
+
+lock_A.store( LOCK_UNLOCKED, memory_order_relaxed );
+lock_B.store( LOCK_UNLOCKED, memory_order_relaxed );</pre>
+    </blockquote>
+    <blockquote>
+        The ideal outcome on a x86 platform, where all stores already have release semantics,
+        would be for the fences to disappear completely. Alas, this is not what would happen;
+        as a look at table 4 demonstrates, a typical implementation would emit two <em>mfence</em>
+        instructions (one of which may be eliminated by the peephole optimizer), with a
+        predictably undesirable performance consequences.</blockquote>
+    <h2>
+        <a name="alternative">III. Suggested Alternative</a></h2>
+    <p>
+        The alternative proposed in this paper isn't new. It has been suggested, with a
+        slightly different syntax, in N2153 (N2237), N2195 and N2262. It consists of a single
+        function, <em>atomic_memory_fence</em>:</p>
+    <p>
+        <code>void atomic_memory_fence( memory_order mo );</code></p>
+    <p>
+        and its intended implementation on some platforms of interest is shown in the following
+        table:</p>
+    <table border="1" cellspacing="0" cellpadding="3">
+        <tr>
+            <td>
+                <em>mo</em></td>
+            <td>
+                SPARC RMO</td>
+            <td>
+                POWER</td>
+            <td>
+                IA-64</td>
+            <td>
+                x86, x64</td>
+        </tr>
+        <tr>
+            <td>
+                memory_order_relaxed</td>
+            <td>
+                <em>no-op</em></td>
+            <td>
+                <em>no-op</em></td>
+            <td>
+                <em>no-op</em></td>
+            <td>
+                <em>no-op</em></td>
+        </tr>
+        <tr>
+            <td>
+                memory_order_acquire</td>
+            <td>
+                #LoadLoad | #LoadStore</td>
+            <td>
+                LWSYNC</td>
+            <td>
+                mf</td>
+            <td>
+                <em>no-op</em></td>
+        </tr>
+        <tr>
+            <td>
+                memory_order_release</td>
+            <td>
+                #LoadStore | #StoreStore</td>
+            <td>
+                LWSYNC</td>
+            <td>
+                mf</td>
+            <td>
+                <em>no-op</em></td>
+        </tr>
+        <tr>
+            <td>
+                memory_order_acq_rel</td>
+            <td>
+                #LoadLoad | #LoadStore | #StoreStore</td>
+            <td>
+                LWSYNC</td>
+            <td>
+                mf</td>
+            <td>
+                <em>no-op</em></td>
+        </tr>
+        <tr>
+            <td>
+                memory_order_seq_cst</td>
+            <td>
+                #LoadLoad | #LoadStore | #StoreLoad | #StoreStore</td>
+            <td>
+                SYNC</td>
+            <td>
+                mf</td>
+            <td>
+                mfence, or a locked instruction</td>
+        </tr>
+    </table>
+    <p>
+        What <em>is</em> new is that this paper proposes a specification of <em>atomic_memory_fence</em>
+        that describes the intended semantics within the framework of the C++ memory model.</p>
+    <p>
+        This primitive meets our criteria 1-4 above, for the following reasons:</p>
+    <ol>
+        <li>Existing code written in terms of SPARC or POWER barriers can easily be ported to
+            the C++ model by consulting with the table above and choosing a row appropriately.
+            In the SPARC case, one chooses the first row that encompasses the barrier used in
+            the ported code; in the POWER case, one can either use <em>memory_order_acq_rel</em>
+            for all LWSYNCs, or use knowledge of the algorithm being implemented to replace
+            some LWSYNCs with a theoretically weaker <em>memory_order_acquire</em> or <em>memory_order_release</em>
+            fence.</li>
+        <li>For the same reason, programmers fluent in SPARCese or POWERian can immediately
+            put their knowledge into use.</li>
+        <li>The programmer can easily emit a LWSYNC instruction, or, stated equivalently, insert
+            an <em>lwsync</em> fence, by using <code>atomic_memory_fence(memory_order_acq_rel)</code>.</li>
+        <li>Since the primitive is based on N2153/N2237/N2262, it addresses all performance-related
+            use cases presented therein.</li>
+    </ol>
+    <p>
+        In addition,</p>
+    <p>
+        <code>void atomic_compiler_fence( memory_order mo );</code></p>
+    <p>
+        is proposed as a companion primitive that only restricts the compiler optimizations
+        and reorderings in the exact same way an <code>atomic_memory_fence</code> does,
+        without actually emitting a hardware fence instruction. This primitive supports
+        our use case 3 above; it is intended to allow a programmer that already knows what
+        instructions are to be emitted to communicate this knowledge to the compiler.</p>
+    <p>
+        The theoretical justification of <code>atomic_compiler_fence</code> is that it allows
+        the programmer to specify the order in which relaxed writes to atomic variables
+        become visible to a signal handler executed in the same thread.</p>
+    <h2>
+        <a name="proposed">IV. Proposed text</a></h2>
+    <p>
+        Remove the</p>
+    <blockquote>
+        <code>void fence(memory_order) const volatile;</code></blockquote>
+    <p>
+        members from all types in <em>[atomics]</em>.</p>
+    <p>
+        Remove the</p>
+    <blockquote>
+        <code>void atomic_flag_fence(const volatile atomic_flag *object, memory_order order);</code></blockquote>
+    <p>
+        function.</p>
+    <p>
+        Remove the</p>
+    <blockquote>
+        <code>void atomic_memory_fence(const volatile atomic_<em>type</em>*, memory_order);</code></blockquote>
+    <p>
+        functions.</p>
+    <p>
+        Remove the definition</p>
+    <blockquote>
+        <code>extern const atomic_flag atomic_global_fence_compatibility;</code></blockquote>
+    <p>
+        Add</p>
+    <blockquote>
+        <code>// 29.5, fences</code><br />
+        <code>void atomic_memory_fence(memory_order);</code><br />
+        <code>void atomic_compiler_fence(memory_order);</code>
+    </blockquote>
+    <p>
+        to the synopsis of <code>&lt;cstdatomic&gt;</code>.</p>
+    <p>
+        Add a new section, <em>[atomic.fences]</em>, with the following contents:</p>
+    <blockquote>
+        <h3>
+            29.5 Fences</h3>
+    </blockquote>
+    <blockquote>
+        This section introduces synchronization primitives called <em>fences</em>. Fences
+        can have acquire semantics, release semantics, or both. A fence with acquire semantics
+        is called an <em>acquire fence</em>. A fence with release semantics is called a
+        <em>release fence</em>.</blockquote>
+    <blockquote>
+        A <em>release fence</em> <em>R</em> synchronizes with an <em>acquire fence</em>
+        <em>A</em> if a load that is sequenced before <em>A</em> observes the value written
+        by a store sequenced after <em>R</em>, or a value written by any side effect in
+        the <em>release sequence</em> (1.10/6) that store would produce had it been a release
+        operation.</blockquote>
+    <blockquote>
+        A <em>release fence</em> <em>R</em> synchronizes with an acquire operation <em>A</em>
+        if <em>A</em> observes the value written by a store sequenced after <em>R</em>,
+        or a value written by any side effect in the release sequence that store would produce
+        had it been a release operation.</blockquote>
+    <blockquote>
+        A release operation <em>R</em> synchronizes with an <em>acquire fence</em> <em>A</em>
+        if a load, sequenced before <em>A</em>, observes the value written by <em>R</em>,
+        or a value written by any side effect in the release sequence headed by <em>R</em>.</blockquote>
+    <blockquote>
+        Fences can be sequentially consistent. A sequentially consistent fence has both
+        acquire and release semantics. Sequentially consistent fences participate in the
+        single total order <em>S</em> over all <code>memory_order_seq_cst</code> operations
+        (29.1/2). Each sequentially consistent fence synchronizes with the sequentially
+        consistent fence that follows it in <em>S</em>.</blockquote>
+    <blockquote>
+        <code>void atomic_memory_fence(memory_order mo);</code></blockquote>
+    <blockquote>
+        <em>Effects:</em> Depending on the value of <code>mo</code>, this operation:
+        <ul>
+            <li>has no effects, if <code>mo == memory_order_relaxed;</code></li>
+            <li>is an acquire fence, if <code>mo == memory_order_acquire;</code></li>
+            <li>is a release fence, if <code>mo == memory_order_release;</code></li>
+            <li>is both an acquire fence and a release fence, if <code>mo == memory_order_acq_rel;</code></li>
+            <li>is a sequentially consistent fence, if <code>mo == memory_order_seq_cst;</code></li>
+        </ul>
+    </blockquote>
+    <blockquote>
+        <code>void atomic_compiler_fence(memory_order mo);</code></blockquote>
+    <blockquote>
+        <em>Effects:</em> equivalent to <code>atomic_memory_fence(mo)</code>, except that
+        synchronizes with relationships are established only between a thread and a signal
+        handler executed in the same thread.</blockquote>
+    <blockquote>
+        [<em>Note:</em> <code>atomic_compiler_fence</code> can be used to specify the order
+        in which actions performed by the thread become visible to the signal
+        handler. <em>&mdash; end note</em>]</blockquote>
+    <blockquote>
+        [<em>Note:</em> Compiler optimizations or reorderings of loads and stores are inhibited
+        in the same way as with <code>atomic_memory_fence</code>,
+        but the hardware fence instructions that <code>atomic_memory_fence</code> would
+        have inserted are not emitted. <em>&mdash; end note</em>]</blockquote>
+    <hr />
+    <p>
+        <em>Thanks to Hans Boehm, Lawrence Crowl, Paul McKenney and Raul Silvera for reviewing
+            this paper.</em></p>
+    <p>
+        <em>--end</em></p>
+</body>
+</html>

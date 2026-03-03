@@ -1,0 +1,501 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html lang="en-us">
+<HEAD>
+<meta http-equiv="Content-Type" content="text/html;charset=US-ASCII" >
+<TITLE>Optimization-robust finalization</title>
+<BODY>
+<table summary="This table provides identifying information for this document.">
+	<tr>
+		<th>Doc. No.:</th>
+		<td>WG21/N2261<br />
+		J16/07-0121</td>
+	</tr>
+	<tr>
+		<th>Date:</th>
+		<td>2007-05-04</td>
+	</tr>
+	<tr>
+		<th>Reply to:</th>
+		<td>Hans-J. Boehm</td>
+		<td>Mike Spertus</td>
+	</tr>
+	<tr>
+		<th>Phone:</th>
+		<td>+1-650-857-3406</td>
+		<td></td>
+	</tr>
+	<tr>
+		<th>Email:</th>
+		<td><a href="mailto:Hans.Boehm@hp.com">Hans.Boehm@hp.com</a></td>
+		<td><a href="mailto:mike_spertus@symantec.com">mike_spertus@symantec.com</a></td>
+	</tr>
+</table>
+<H1>Optimization-robust finalization</h1>
+<I>Finalization</i> is a
+facility that allows the garbage collector to
+report object reachability information back to the application,
+typically by letting it know that an object is no longer
+reachable, and may thus be collected soon.  This potentially allows
+the application to reclaim resources that are logically associated
+with the object, but are not just memory reachable from the object.
+<P>
+We describe a possible finalization facility that could be added to
+C++0x, either as part of the language or by a later TR.
+We believe that garbage collection
+in C++0x is useful with or without such a facility, and that such
+a facility is rarely needed.  However, several issues have been
+raised that are difficult to address without finalization.
+<P>
+Here we outline those issues and the solution space.
+<H2>Issues best addressed with finalization</h2>
+Recent discussions on the committee reflector and at the
+Oxford meeting have brought out a number of issues that are
+more difficult or impossible to address in the absence of finalization.
+We list some of them here in order to motivate the rest of the
+discussion.
+<DL>
+<DT><B>Non-prompt reclamation of external resources</b>
+<DD>Many C++ programs manipulate objects that should be explicitly destroyed
+when they are no longer needed, but timeliness is not critical.  Indeed,
+there is some reason to believe that if the timing is critical, it is
+probably easy to determine when the destructor should be invoked, and
+hence explicit destruction is not a problem.
+<P>
+Common cases in which explicit destruction is needed, but timing is
+unimportant, include:
+<UL>
+<LI>Locks embedded in objects.  It is fairly common to use per-object
+locks for thread synchronization.  For example, Java provides explicit
+syntax to support this.  Though locks must be acquired and released
+at well defined points, and we expect this to happen using constructors
+and destructors for function-scope objects, the same is not true for
+deallocating the lock resource itself.  For some very common operating
+systems, the lock resource consists of more than just memory in the object.
+Since locks in objects can easily be pervasive, it is unclear that it
+will always be significantly easier to explicitly deallocate these locks
+than it would be to explicitly deallocate the whole data structure.
+Thus, again, without finalization we may lose much of the benefit
+of garbage collection.
+<LI>Opaque objects returned by a third-party library whose interface
+explicitly or implicitly calls for them to be properly destroyed before they
+are dropped.  This may turn out to be a common-scenario.
+<LI>Objects that include pointers to a reference counted data structure,
+where the count is used for more than just memory deallocation, e.g. to
+avoid copies when a data structure that is potentially, but not actually,
+shared, is updated.
+</ul>
+<DT><B>Mixing non-garbage collected and garbage collected memory</b>
+<DD>
+Sean Parent has provided a long list of reasons why it would be
+  valuable (9125 on the ext-reflector) to just collect a particular
+  class or set of classes. This is not allowed in the
+  current garbage collection proposal N2287=07-0147 because 
+  mixing non-garbage collected and garbage collected
+  memory without finalization is likely to cause memory leaks.
+<p>
+<tt>class A {<br>
+&nbsp;&nbsp;vector&lt;B&gt; v;<br>
+};</tt>
+<p>
+
+Suppose <tt>A</tt> is garbage collected and <tt>B</tt> is not. When an
+object of type <tt>A</tt> is garbage collected, unless a finalizer is
+run, all the (non-garbage collected) memory allocated by the
+vector <tt>A::v</tt> will be leaked. However, a finalizer can 
+invoke <tt>A::~A()</tt> to clean up the vector.
+
+<DT><B>Leak diagnostics for external resources</b>
+<DD>It would be very useful to report "leaked" objects associated
+with external ("non-memory")
+resources.  It would be ideal to have the compiler detect such
+problems statically.  But this is no easier than ordinary static
+leak detection for programs intended to deallocate memory explicitly.
+And that is still a somewhat elusive goal.
+<P>
+Dynamically, such objects are relatively easy to detect: It is not
+difficult to add code to report not-yet-deallocated instances at process
+shutdown.  This requires no real language extensions beyond perhaps
+the addition of a simple library class.  But it reports such leaks
+only at process termination, and it does not easily accommodate
+static data structures whose resources are only intended to be reclaimed
+by the operating system at process termination.
+<P>
+It would clearly be preferable to detect such objects when they become
+unreachable without having been deallocated, for all the same reasons that
+such tools are commonly preferred for detecting memory leaks in
+non-garbage-collected programs.  Finalization provides precisely
+the required facility, though one could invent more convenient
+syntax.  Typically an object <I>A</i> requiring explicit deletion would be
+made to point to a "finalizable" object <I>B</i>.  <I>A</i>s destructor
+would explicitly destroy <I>B</I>.  If <I>B</i> is not explicitly
+destroyed, it will be notified that it has become unreachable by
+calling its <I>finalizer</i>, which could then report the error.
+<P>
+(One might instead directly make <I>A</i> finalizable.  This is
+probably less convenient in practice, since we cannot simply add a
+field of a library-defined class.  It also raises issues related
+to finalization cycles that are probably best avoided.)
+<DT><B>Distributed garbage collection</b>
+<DD>Distributed garbage collection is usually based on a pointer
+representation in which a remote pointer is represented by a
+local pointer to a proxy object.  When the local proxy becomes
+unreachable, the remote object is notified that the reference no
+longer exists.  This is accomplished by associating a finalizer
+with the proxy object, which is notified when the object 
+becomes unreachable.
+<P>
+In this case it again seems undesirable to revert
+to explicit deletion in order to deal with an external resource, namely
+the remote reference.  It may be possible to introduce remote
+references into arbitrary user data structures.  Hence it is not obvious
+that remote references can be explicitly deleted with much less effort
+than would be required to explicitly delete all the user's data structures.
+</dl>
+Note that in all cases, we can explicitly invoke the necessary
+destructors at program termination, by maintaining a set of objects
+that still need to be destroyed.  Indeed, if we need to guarantee
+destructor invocation before termination, we need to maintain
+this data structure even with finalization.  But without finalization
+we have no way to turn the garbage collector's knowledge about
+object reachability into earlier destructor invocations.  And by
+delaying destructor invocations we also need to retain the associated
+memory objects (now reachable from the table) until process exit,
+effectively interfering with collector operation.
+<H2>The real problem with finalization</h2>
+Finalization generally has a bad reputation.  We believe this is
+partially due to some unfortunate design decisions incorporated into
+some other recent languages.  These problems were not shared by
+some older languages, such as Modula-3, Cedar, or Smalltalk.
+(And in the case of Java, java.lang.ref provides similar
+functionality to the original Java finalizers, with many fewer problems.)
+We plan to learn from these mistakes.
+<P>
+However one major issue remains for all of these.
+Traditional finalization in garbage collected
+languages is defined in terms of object reachability. But
+objects can easily become "unreachable" earlier than the programmer
+expects, due to compiler optimizations.  An object may be logically in use
+long past the last point at which the memory associated with the object
+is accessed or referenced by any pointers visible to the garbage collector.
+<P>
+In the worst case, the compiler might
+decide to store all the fields of an object in registers, and then observe
+that the "this" pointer for the newly allocated memory is dead
+immediately after the allocation, and hence not save it anywhere.
+The garbage collector, even if run immediately after the
+allocation, would then discover that the memory object is no longer
+reachable, and run the finalizer immediately, in spite of the fact that
+the object fields are still in use, and in fact may remain in use after
+the finalizer has run.
+<P>
+A more typical case is the one in which we have a finalizable object
+<I>F</i> that relies on some external state vector <TT>E</tt> which is
+cleaned up by its finalizer.  Each object instance includes a data member
+<TT>i</tt> that is used to locate the appropriate entry of <TT>E</tt>.  A
+typical member function <TT>m</tt> might behave like:
+
+<PRE>
+void m()
+{
+   my_index = i;
+  l:
+   perform operation on E[my_index];
+}
+</pre>
+
+The finalizer for <TT>F</tt>
+cleans up and invalidates <TT>E[i]</tt>.
+<P>
+Consider what happens when <TT>m()</tt> is the last call on <TT>F</tt>,
+and the garbage collector is triggered at the label l.  Although the
+external state <TT>E[i]</tt> is still accessible, none of the object
+fields are still needed at this point.  As a result, the object pointer
+(the "this" pointer) may itself be dead, in spite of the fact that one of
+the object's methods is currently still running.
+<P>
+A possible result is that the collector enqueues <TT>F</tt> for
+finalization, and the finalizer runs, all before the call to <TT>m()</tt>,
+and the operation on <TT>E[my_index]</tt> completes.  When it finally does
+complete, <TT>E[my_index]</tt> has been invalidated by the finalizer, and
+<TT>m()</tt> sees invalid data.
+<P>
+This kind of failure is rare, but not unheard of, in practice.  It is
+particularly rare on 32-bit X86 hardware, since the small number of
+registers tends to force an object's <TT>this</tt> pointer onto the memory
+stack, where it is unlikely to be overwritten.  Hence it is likely, but
+not guaranteed, that it will be visible to the garbage collector while an
+object's methods are executing, whether or not the <TT>this</tt> pointer
+is actually still live.
+<P>
+We have seen a lot of finalizer code that is incorrect for this
+reason, but are only aware of one actual failure.  It may be
+telling that this failure was observed very shortly after a
+talk on the subject.  The issue may just be too obscure for
+failures to be reported correctly.
+
+<H2>Possible Solutions</h2>
+We believe that at least three possible solutions to this problem are
+worth considering:
+<H3>Solution 1: No elimination of pointer dead variables.</h3>
+A straightforward solution to this problem is to preserve all
+pointer variables until the end of their scope.  This is
+essentially analogous to the current C++ solution for destructors.
+Unlike that solution however, it effects ordinary pointers and references
+and not just objects with nontrivial destructors.  Thus it would
+prevent the compiler from eliminating many dead variables.
+<P> 
+We believe this solution is worth considering, particularly since C++
+already requires that the lifetimes of variables with nontrivial
+destructors (e.g. smart pointers) be similarly extended.
+We are however concerned that this is too large and pervasive a cost
+for what should be a very rarely used feature.  Java chose not
+to follow this route for that reason.  However, we are not aware of
+empirical evaluations of its cost.
+<P>
+Expert intuitions seem to be that the cost should be low, except possibly
+on architectures with small architected register sets, such as 32-bit X86.
+
+<H3>Solution 2: Limiting pointer dead variable elimination</h3>
+It is tempting to require preservation of only <TT>this</tt> pointers
+instead.  But that introduces a very subtle semantic difference between
+member functions and static member functions or stand-alone functions
+that explicitly
+take the object as a first parameter.  We believe that solutions along
+these lines are too difficult to explain and justify.
+<P>
+A more interesting, though untested, alternative is the following.
+Assume that finalizable
+objects must inherit from a class <TT>finalizable</tt>.  We say that
+a pointer is <I>finalizer essential</i> if its static target type
+inherits form class <TT>finalizable</tt>.  We then insist that no
+finalizable object be finalized before the end of the last lifetime of a
+finalizer essential pointer to it.
+<P>
+The crucial observation behind this is that any access to an external
+resource (e.g. <TT>E</tt> in the example) requires a pointer to
+a class that refers to the external resource.  A pointer to
+a less derived class is insufficient. 
+So long as the finalizer is introduced at the same
+stage in the class derivation process that introduces the external resource,
+this will also be a finalizer essential pointer.
+And the finalizer must generally be introduced at the same point
+as the external resource to ensure proper reclamation of the resource.
+<P>
+The reachability condition here is enforceable by generating code
+that keeps a pointer <I>p</i>
+visible to the garbage collector, so long as
+<OL>
+<LI> <I>p</i> is either itself finalizer essential, or
+<LI> <I>p</i> might be converted to a finalizer-essential pointer,
+e.g. by a cast or as a result of being passed as a parameter or
+returned, or
+<LI> <I>p</i> might be dereferenced, thus possibly eventually yielding
+a finalizer essential pointer.
+</ol>
+It appears unlikely that a pointer satisfying either of the last two
+conditions would be determined to be dead in any case.  Thus this largely
+reduces the problem to keeping pointers to clearly finalizable
+objects live.
+<P>
+Note that this approach works correctly whether or not
+the external resource is
+introduced by putting it in a separate finalizable leaf object introduced
+for the purpose, though not in this form if the external resource
+index is copied to both objects.
+
+<H3>Solution 3: Full optimization with programmer assistance</h3>
+The solution adopted by Java 5 instead is to let the programmer
+explicitly declare that an object must still be viewed as reachable,
+and hence not yet finalizable, at certain program points, such as
+at the end of our method <TT>m()</tt> above.  (Currently the
+mechanism for making this declaration is suboptimal.)
+<P>
+We pursue a similar approach, but further observe that, once
+these explicit "liveness" declarations are required, we no longer
+need to define finalization in terms of reachability at all.
+Such an object <TT>x</tt> becomes <I>eligible</i> for finalization
+once there can be no further calls to
+its <TT>delay_finalization()</tt> function.  More precisely,
+this happens when there is no longer any way to extend the current
+execution, such that both
+<OL>
+<LI>There is another call to the objects <TT>x.delay_finalization()</tt>
+method, and
+<LI>There is no invocation of <TT>x.finalize()</tt>.
+</ol>
+(The second clause is required, since a finalizer may "resurrect"
+an object and again perform <TT>delay_finalization()</tt> calls on it.)
+<P>
+Note that although this criterion doesn't mention "reachability" at all,
+in fact the only circumstance under which a production runtime will normally
+be able to determine that further calls to <TT>x.delay_finalization()</tt>
+are impossible, is when <TT>x</tt> is unreachable.  A typical
+implementation of <TT>delay_finalization()</tt> would simply ensure
+that the <TT>this</tt> pointer is visible to the garbage collector
+at the point of the call, i.e. after all prior memory accesses.
+An implementation as an opaque no-op member function would be
+sufficient but not optimal.
+<P>
+The characteristics of this approach are:
+<UL>
+<LI>No impact on compilation, other than the (near trivial) implementation
+of the <TT>delay_finalization</tt> call we introduce below.  In
+particular, the compilation of "ordinary" code is completely unaffected.
+<LI>In return, it is moderately clumsy to use, and requires some
+care, on the rare occasions when it is required. 
+<LI>Although the usage rules lead to somewhat clumsy code, we believe they
+are straightforward to understand and follow.  There is certainly no
+longer a need to understand the compiler's dead variable elimination.
+<LI>We conjecture that it is possible to effectively test code using
+such a finalization mechanism.  But this requires tools we have not
+yet built.
+</ul>
+<H2>A More Specific Proposal</h2>
+This proposal assumes solution 3 from above.  It can easily be adapted
+for one of the other two.
+<P>
+There are two common ways to expose a finalization interface:
+<OL>
+<LI>Provide a facility to invoke a method, traditionally called
+<TT>finalize</tt> on an object when the object itself becomes unreachable.
+<LI>When object <I>P</i> becomes unreachable, invoke a method on
+a <I>executor</i> object <I>Q</i>.  The executor does not get access to
+the original object <I>P</i>, which may already have been reclaimed.
+(Java.lang.ref is a well-known example of this approach.)
+</ol>
+Although these appear quite different at first glance, the second can
+generally be easily emulated by the first by having the main object <I>P</i>
+point to the executor <I>Q</I>, and making only <I>Q</i> finalizable.
+<I>Q</I> becomes unreachable when <I>P</i> does.  <I>P</i> can
+be immediately reclaimed, leaving only <I>Q</i>, which would have
+just enough information to clean up.  (This does not quite apply
+in Java, due to ordering issues, which our proposal does not share.)
+<P>
+Arguably, the reverse emulation is also possible, with some added overhead.
+<P>
+We somewhat arbitrarily adhere to our original proposal, which chose the
+first style.  The second style may be a bit easier for programmers to
+think about, and is also worth considering.
+<P>
+As defined, our facility does not allow the construction of "weak hash maps"
+which allow keys to be reclaimed when they are otherwise inaccessible,since
+that would require that we allow finalization on arbitrary objects,
+which is inconsistent with either of the last two approaches from the
+preceding section.
+<P>
+Weak hash maps are also a useful facility.
+But we believe that it can be designed
+separately in such a way that clean-up of keys is transparent
+to the application.  User code cannot tell whether a key has
+been reclaimed.  Thus the problems described below are not
+encountered.
+<P>
+In this proposal, 
+<I>finalization-capable</i> objects inherit for a class std::finalizable:
+<PRE>
+class finalizable {
+    public:
+	virtual void finalize() = 0;
+	delay_finalization();
+	virtual ~finalizable(); // Disables the object for finalization
+}
+</pre>
+<P>
+This makes it rather intrusive to add finalization to an existing class.
+However, as we pointed out above,
+the same thing can generally be accomplished by instead adding
+a pointer to a small finalizable class to the original class, with only the
+small newly introduced class inheriting from <TT>class finalizable</tt>.
+<P>
+Neither solutions 1 nor 3 from above require that all finalizable objects
+inherit from a fixed class, but solution 2 does.
+<P>
+A finalization-capable object can be <I>enabled for finalization</i>
+by a library call, as described below.
+<P>
+Once an object is enabled for finalization,
+we require the programmer to specify
+whenever a function has finished accessing external object state
+that might be invalidated by finalization.  This is done by
+invoking its <TT>delay_finalization()</tt> function. (Again this
+assumes solution 3 above.)
+<P>
+As with other finalization systems, there is no guarantee that once
+an object is eligible for finalization, it will actually be finalized.
+In our case, it is more apparent than usual why this is the case:
+It is blatantly undecidable whether an object is eligible for finalization.
+<P>
+Finalization-capable objects need to be enabled for finalization, i.e.
+registered for cleanup actions, using the
+function <TT>register_for_finalization()</tt>:
+<PRE>
+class finalization_queue {
+public:
+        int finalize_all();
+...
+}
+
+void
+register_for_finalization(std::finalizable *obj,
+        std::finalization_queue &amp;q = std::system_finalization_queue>);
+
+void
+unregister_for_finalization(std::finalizable *obj);
+	// implicitly invokes obj->delay_finalization();
+</pre>
+When an object passed to register for finalization becomes eligible for
+finalization, it may be pushed onto the back of the supplied
+std::finalization queue.
+The client may later finalize all the elements on the queue with
+<TT>q.finalize_all()</tt>,
+which returns the number of elements actually finalized.
+The default system finalization queue periodically calls its
+<TT>finalize_all()</tt>
+method once immediately after the return from main() and,
+if threads are sup ported, periodically from a thread holding
+no user-visible locks.
+<P>
+It is safe to make multiple concurrent calls to <TT>finalize_all()</tt>.
+<P>
+If an object that is already registered for finalization is registered a second
+time, the resulting behavior is undefined except that an object that has
+already been enqueued may be re-registered for finalization.
+<P>
+If multiple subobjects corresponding to the same allocated section of
+memory are registered for finalization, the finalizers are invoked
+in reverse order of registration.
+<P>
+Some subtle properties of this proposal:
+<OL>
+<LI> We effectively
+require topologically ordered finalization, an intentional
+difference from Java and C#.  In particular, an object is ineligible
+for finalization while its <TT>delay_finalization()</tt> function
+may still be called from a <EM>different</em> object's finalizer.
+<LI> Since the destructor of a finalizable object unregisters it for
+finalization, which implicitly invokes <TT>delay_finalization()</tt>,
+explicitly destroyed objects are never finalized.  That means, for
+example, that objects that must be explicitly destroyed may have
+a finalizer that reports an error if it is ever invoked.
+</ol>
+<H2>Testing</h2>
+A consequence of using solution 3 above is that we should be able
+may be able to test some programs for premature finalization bugs.
+<P>
+For
+sufficiently deterministic programs, it should be possible to
+provide an alternate runtime that checkpoints the program state at
+<TT>delay_finalization()</tt> calls.  Once an object is found to be
+eligible for finalization, we could then roll back execution to the last
+<TT>delay_finalization()</tt> call on that object, effectively
+running the finalizer <EM>at the earliest possible time</em>.
+<P>
+We have no experience with such an implementation, and it is hard to
+evaluate how practical it would be.  But it does have the potential
+of identifying incorrect finalizer uses during testing, at least
+if the finalizer is used in a library that can be called from a
+deterministic test harness.  Thus in addition to greatly clarifying
+the rules for finalizer use, we have a reasonable chance of being
+able to test for violations.
+</body>
+</html>

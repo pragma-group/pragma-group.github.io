@@ -1,0 +1,480 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<html>
+  <head>
+    <meta name="generator" content=
+    "HTML Tidy for Windows (vers 1st August 2002), see www.w3.org">
+    <meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+    <link rel="stylesheet" type="text/css" href="boost.css">
+
+    <title>Qualified Namespaces</title>
+  </head>
+
+  <body link="#0000ff" vlink="#800080">
+    Document number: N1408=02-0066 <br>
+    Date: 2 November 2002 <br>
+    Project: Programming Language C++ <br>
+    Reply-to: David Abrahams &lt;<a href=
+    "mailto:dave@boost-consulting.com">dave@boost-consulting.com</a>&gt; 
+
+    <h1>Proposal for new Namespaces and Lookup Rules</h1>
+
+    <p>This proposal describes several problems with the current
+    implementation of namespaces and name lookup rules, and outlines one way
+    to solve those problems. One aim of the proposed solution is to maintain
+    backward-compatibility while providing a "transition plan" for developers
+    (and even standard library implementors) wishing to use the new
+    facility.</p>
+
+    <h2>Why Bother?</h2>
+    Before the introduction of namespaces to C++, it was a common practice to
+    apply "prefixes" to all names with external linkage, in an attempt to
+    avoid unpredictable collisions between code in applications and the
+    libraries they linked to. As long as the prefixes were reasonably long,
+    this practice worked reasonably well. The major disadvantage was
+    aesthetic: there was no way to avoid using the prefix within user code or
+    even within the context of the library's own definition. 
+
+    <p>Namespaces allowed users and library writers a way to partition the
+    set of all names so that the use of qualification (the namespace
+    mechanism's replacement for prefixing) could be avoided for names defined
+    in local or enclosing contexts. Via using-declarations and
+    using-directives, we also provided a mechanism for selective use of
+    unqualified names from other contexts, thus combining convenience with
+    protection.</p>
+
+    <p>This mechanism works well for types, however, due to the liberal way
+    that argument-dependent lookup is applied, the replacement of prefixing
+    by namespaces fails to deliver the convenience and protection seemingly
+    promised even for ordinary function calls. A conscientious programmer
+    must resort to qualifying calls to functions in her own namespace if the
+    any argument could come from any other namespace:</p>
+
+    <h3>Example 1</h3>
+<pre>
+// main.cpp:
+#include "lib1.hpp"
+namespace user
+{
+   void f(lib1::class1);
+
+   void g()
+   {
+      lib1::class1 x;
+      f(x);  // call to user::f(x) intended, but might be ambiguous
+   }
+}
+</pre>
+    In the example above, the potential for damage is limited due to the fact
+    that library headers change infrequently, but for functions defined in
+    header files, the situation can be much more volatile: 
+
+    <h3>Example 2</h3>
+<pre>
+// lib1.hpp
+#include "lib2/part1.hpp"
+namespace lib1
+{
+   void f(lib2::base);
+   inline void g(lib2::derived x)
+   {
+      f(x); // might call lib2::f(x)
+   }
+}
+</pre>
+    The additional problem in example 2 is that lib1.hpp may be #included in
+    many different contexts in a user's program. Even if lib2 never changes,
+    the another of lib2's headers may expose a function
+    lib2::f(lib2::derived) which can be seen by lib1::g() depending on its
+    context. The result is that even for a single version of lib1 and lib2,
+    the author of lib1 might not uncover the problem during testing. Where
+    function templates are involved, the problem is particularly acute. 
+
+    <h3>Example 3</h3>
+<pre>
+// lib2.hpp (no #includes)
+namespace lib2
+{
+   template &lt;class T&gt;
+   void f(T);
+
+   template &lt;class T&gt;
+   void g(T x)
+   {
+      f(x); // might call any f defined in the namespace of T
+   }
+}
+</pre>
+    According to 14.4.6.2, which function are to be considered candidates to
+    be called by f depends on what's visible at g's point of instantiation,
+    and if two translation units resolve f differently for a given T, the
+    behavior is undefined. Controlling visibility is difficult in C++ due to
+    separate compilation, so much so that one of the most controversial and
+    hard-to-implement features (export) was introduced to deal with the
+    problem. It is worth noting, however, that export only helps to deal with
+    the resolution of qualified function names, which is arguably a much
+    smaller problem. Consider: 
+
+    <ol>
+      <li>In order to ensure predictable overload resolution, namespace
+      authors are likely to expose all overloads of one name in a given
+      namespace which can accept the same number of arguments from the same
+      header file.</li>
+
+      <li>It is usually possible for the author of a generic library to
+      ensure that all overloads of a given function from a single known
+      namespace are seen, by #including the appropriate headers, before a
+      function template is defined, but it's impossible to ensure that the
+      same set of overloads in <em>all</em> namespaces are visible before a
+      function template is instantiated unless you control all the
+      instantiations.</li>
+    </ol>
+    Furthermore, library writers are unlikely to invite users to overload
+    functions in the library's namespace, since: 
+
+    <dl>
+      <dd>
+        <b>a.</b> It is syntactically heavy and inconvenient for users to
+        define overloads in other namespaces: 
+<pre>
+ // user.hpp
+ namespace user
+ {
+    class my_class;
+ }                           // * Extra commented lines required to
+                             // * produce overloads in lib:: and
+ namespace lib               // * return to user::. Moves f() away
+ {                           // * from my_class.
+    void f(user::my_class)   // also explicit qualification of my_class
+ }                           // *
+                             // *
+ namespace user              // *
+ {                           // *
+</pre>
+      </dd>
+
+      <dd>
+        <b>b.</b> Qualified lookups of names from function templates are
+        subject to dangerous order dependencies, since qualified names bind
+        at the point of definition. 
+<pre>
+ // lib.hpp
+ namespace lib
+ {
+    template &lt;class T&gt; void f(T);
+    template &lt;class T&gt; void g(T x)
+    {
+       lib::f(x);  // binds only to <em>visible</em> fs
+    }
+ }
+
+ // user.cpp
+ #include "lib.hpp"
+ #include "user.hpp" // overload is too late; f already bound!
+
+ int main()
+ {
+    user::my_class x;
+    lib::g(x);  // calls lib::f(), not user::f()!
+ }
+</pre>
+      </dd>
+    </dl>
+    Export solves problem b. by neutralizing user-defined names in the
+    library namespace as a customization technique, so the set of names found
+    by the library's qualified lookups can be determined by its vendor when
+    the exported template is compiled. However, though point-of-use binding
+    was intended to provide syntax checking at definition time, it can only
+    be applied for dependent names retroactively, after the template is
+    actually instantiated. Ignoring the part of the instantiation context
+    which follows the definition context is a burden for implementors and
+    doesn't serve users; the core working group is talking about removing
+    this special-case behavior. In any case, a user has to go out of her way
+    to add definitions to a library's namespace, so export seems to protect
+    only against malicious attacks. 
+
+    <p>Compared with the situation before namespaces, however, we seem to
+    have opened code up to unintentional attacks. In a world of prefixed
+    names, a library writer's own test code would be unlikely to compile
+    correctly if a prefix were ommitted, so once the choice to use prefixes
+    was made, the compiler would enforce qualification. Today, a library
+    author must exercise extreme vigilance to be sure that, except where she
+    explicitly intends to create a point of customization, all calls whose
+    arguments could come from any other namespace are qualified. Since
+    unqualified calls are perfectly legal, she gets no support from the
+    compiler. Since they are perfectly easy, and will pass all but the most
+    sadistic tests, there is little incentive other than her good conscience
+    to add qualification. These errors are the sort that show up only after
+    libraries are deployed.</p>
+
+    <p>Because of problem (b) above we have today only one
+    reasonably-convenient way to allow customization of algorithms in generic
+    libraries: libraries must call the customizable algorithm
+    <em>without</em> qualification, and must declare explicitly which names
+    are being used that way by which functions; users must take care to avoid
+    defining these names in their own namespaces except where the intention
+    is to customize a given library. If two library implementors happen to
+    choose the same function name as a point-of-customization with different
+    semantics, the upshot is at best confusing: the user may need to create
+    two overloads of the same name in his own namespace with different
+    semantics. Since the name is the same, it's quite likely that the
+    semantics will be similar, but not identical. In the worst case, the
+    functions have identical signatures, and the libraries simply refuse to
+    interoperate in the user's application.</p>
+
+    <h2>A Solution</h2>
+    The solution I'll propose here centers around a different kind of
+    namespace with new lookup rules, on the assumption that breaking
+    backward-compatibility of existing namespaces is unacceptable. I would
+    dearly love to find a solution which didn't involve major language
+    changes, but I don't see any alternative which allows the compiler to
+    help library authors prevent unintended argument-dependent lookups. The
+    new entity is provisionally called a "qualified namespace", and is
+    declared by following the namespace name with "::", as follows: 
+<pre>
+namespace new_std::
+{
+    // declarations and definitions
+}
+</pre>
+    The lookup rules in a qualified namespace differ from those in an
+    old-style namespace as follows: 
+
+    <dl>
+      <dt>I</dt>
+
+      <dd>By default, argument-dependent lookup does not take effect for
+      arbitrary unqualified calls.</dd>
+
+      <dt>II</dt>
+
+      <dd>
+        Dependent name lookups which do not use argument-dependent lookup
+        must match some declaration at template definition time, but binding
+        to actual function implementations occurs at instantiation time: 
+<pre>
+namespace new_std::
+{
+
+   template &lt;class Iterator&gt;
+   void iter_swap(Iterator x, Iterator y)
+   {
+      swap(*x,*y); // error: no swap defined
+   }
+
+   template &lt;class T&gt; void swap(T&amp;, T&amp;);
+
+   template &lt;class Iterator&gt;
+   void sort(Iterator start, Iterator finish)
+   {
+      ...
+      swap(*a, *b); // OK: the swap above could match
+      ...
+   }
+}
+</pre>
+
+        <p>Binding at instantiation time removes the order-dependencies that
+        motivated export and restores overloading in an algorithm's
+        namespace-of-definition to viability as a customization
+        technique.</p>
+
+        <p>Overloading in the algorithm's namespace solves the library
+        interoperability problems implied by asking users to provide
+        overloads for each library in her own namespace.</p>
+
+        <p>Requiring a match at definition time allows template definitions
+        to be syntax-checked before instantiation. Since nobody will be using
+        argument-dependent lookup by mistake in a qualified namespace, it
+        should be possible in practice to check syntax much more thoroughly
+        in a qualified namespace than in an unqualified one.</p>
+      </dd>
+
+      <dt>III</dt>
+
+      <dd>
+        In order to make generic library customization convenient, I propose
+        to allow "remote" definition of previously-declared names. 
+<pre>
+namespace newstd::
+{
+   template &lt;class T&gt; class complex;
+   template &lt;class T&gt; void swap(T&amp;,T&amp;);
+}
+
+namespace user
+{
+   class fixedpoint
+   {
+      ...
+   };
+
+   // Specialize newstd::complex
+   template &lt;&gt; class newstd::complex&lt;fixedpoint&gt;
+   {
+     ...
+   }
+
+   void newstd::swap(fixedpoint&amp;, fixedpoint&amp;);   // OK
+
+   // illegal by current rules, and also under new rules:
+   // unspecialized template not known
+   template &lt;&gt; class newstd::vector&lt;fixedpoint&gt;;
+
+   // illegal by new rule: no known iter_swap() function in newstd::
+   void newstd::iter_swap(fixedpoint&amp;, fixedpoint&amp;);
+}
+</pre>
+        For function overloads, a declaration of a function with the same
+        number of arguments in the target namespace must already be visible: 
+<pre>
+namespace user
+{
+   void newstd::swap(fixedpoint&amp;, fixedpoint&amp;, int); // illegal
+}
+</pre>
+        The same technique applies to the "Barton &amp; Nackman trick",
+        allowing it to be used to provide customizations for qualified
+        namespaces: 
+<pre>
+namespace user
+{
+   class fixedpoint
+   {
+      ...
+      friend fixedpoint newstd::math::sin(fixedpoint)
+      {
+         ...
+      }
+   };
+}
+</pre>
+        Friend functions defined in this way would not be subject to the
+        usual restrictions which prevent them from being found other than
+        through argument-dependent lookup.
+      </dd>
+
+      <dt>IV</dt>
+
+      <dd>
+        In order to provide a migration path from old-style to qualified
+        namespaces, argument-dependent lookup can be enabled for
+        <em>specific</em> names through the use of an "unqualified
+        using-declaration": 
+<pre>
+namespace new_std::
+{
+   using swap; // allows argument-dependent lookup of "swap" from
+               // within new_std
+
+   template &lt;class Iterator&gt;
+   void sort(Iterator start, Iterator finish)
+   {
+      ...
+      swap(*a, *b); // uses argument-dependent lookup
+      ...
+   }
+}
+</pre>
+        The "unqualified using-declaration" can also be used within a the
+        function template definition, further limiting the scope of its
+        effect: 
+<pre>
+namespace new_std::
+{
+   template &lt;class Iterator&gt;
+   void sort(Iterator start, Iterator finish)
+   {
+      using swap; // allows argument-dependent lookup of "swap" from
+                  // within new_std::sort
+
+      ...
+      swap(*a, *b); // uses argument-dependent lookup
+      ...
+   }
+}
+</pre>
+      </dd>
+
+      <dt>V</dt>
+
+      <dd>
+        What about the operators? It is my preference to treat uses of
+        operators within a qualified namespace the same as we treat any other
+        function. Argument-dependent lookup could be explicitly enabled
+        through the use of unqualified using-declarations: 
+<pre>
+template &lt;class T&gt;
+T square(T x)
+{
+   using operator*;
+   return x * x;
+}
+</pre>
+        Those seeking to conveniently enable argument-dependent lookups for
+        all operators within a qualified namespace could easily create a
+        header file which does so: 
+<pre>
+namespace mymath::
+{
+   #include "using_ops.hpp"
+}
+</pre>
+      </dd>
+    </dl>
+
+    <h2>Implications for Namespace std and Other Libraries</h2>
+    Currently there seems to be momentum towards allowing algorithms in
+    namespace std to call other selected algorithms, most notably swap(),
+    without qualification so they can be found via argument-dependent lookup.
+    If we follow that course, implications for std are minimal, and authors
+    of generic libraries in other namespaces must always add a
+    using-declaration to bring the generalized algorithm into scope at the
+    point of use: 
+<pre>
+namespace lib1
+{
+  template&lt;class Iterator&gt;
+  void lib1_permutation(Iterator start, Iterator finish)
+  {
+     ...
+     using std::swap; // so we can swap built-in types
+     swap(x, y);
+     ...
+  }
+}
+</pre>
+    It is worth noting that when a generalized version of an algorithm
+    exists, as in the case of swap, that algorithm <em>is</em> effectively
+    associated with a namespace. The using-declaration becomes a clumsy form
+    of qualification which indicates the algorithm's home. 
+
+    <p>If we choose to follow the course of using argument-dependent lookup
+    to allow customization in namespace std, the proposal above at least
+    allows implementors to migrate the standard library to a safer qualified
+    namespace without breaking backward compatibility. The list of names and
+    call contexts where argument-dependent lookup takes effect could simply
+    be encoded in unqualified using-declarations.</p>
+
+    <p>If we choose <em>not</em> to allow argument-dependent lookup in
+    namespace std, std could still become a qualified namespace, and
+    implementations could drop their qualification of calls to algorithms
+    like swap. We could grant permission to create overloads in std::
+    consistent with the standard versions of the same function, allowing
+    users to customize exactly the intended standard library algorithm. Other
+    libraries would call standard algorithms with qualification as usual, and
+    would not need to rely on argument-dependent lookup to resolve the
+    calls.</p>
+
+    <h2>Conclusion</h2>
+    The future of C++ lies in its power to make great libraries, so the
+    issues of library interoperability, customization, and robustness must be
+    taken seriously. If we compare the C++ standard library with the
+    libraries of languages like Java or Python, it's easy to see that the
+    potential to increase the number of namespaces competing for an
+    unqualified name is enormous. This proposal puts the compiler's static
+    checking at the service of library authors and allows users to
+    conveniently and precisely express the notion of algorithm customization.
+  </body>
+</html>
+

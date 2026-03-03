@@ -1,0 +1,360 @@
+<DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=US-ASCII">
+<title>Remove std::reference_closure</title>
+</head>
+<body>
+<h1>Remove <code>std::reference_closure</code></h1>
+
+<p>
+ISO/IEC JTC1 SC22 WG21 N2845 = 09-0035 - 2009-03-05 
+</p>
+
+<p>
+Lawrence Crowl, crowl@google.com, Lawrence@Crowl.org
+<br>
+Douglas Gregor, doug.gregor@gmail.com
+<br>
+David Abrahams, dave@boostpro.com
+</p>
+
+<p>
+<a href="#Introduction">Introduction</a><br>
+<a href="#Issues">Issues</a><br>
+<a href="#Benchmark">Benchmark</a><br>
+<a href="#Optimization"><code>std::function</code> Optimization</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Small">Small Function Object</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Direct">Direct Copy Call</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Move">Move Semantics</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#LLVM">Use LLVM</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Results">Results</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Sources">Sources</a><br>
+<a href="#Future">Future Optimization</a><br>
+<a href="#Conclusion">Conclusion</a><br>
+<a href="#Proposal">Proposal</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#expr.prim.lambda">5.1.1 Lambda expressions [expr.prim.lambda]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#func.referenceclosure">20.6.18 Class template <code>reference_closure</code> [func.referenceclosure]</a><br>
+</ul>
+
+<h2><a name="Introduction">Introduction</a></h2>
+
+<p>
+The specification of lambda expressions
+adopted with
+<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2008/n2550.pdf">
+N2550 Lambda Expressions and Closures:
+Wording for Monomorphic Lambdas (Revision 4)</a>
+included a specification that closures consisting only of references
+be implemented as 
+a class derived from <code>std::reference_closure</code>.
+The intent of this specification was to
+enable improved performance of an class of closures across binary interfaces.
+</p>
+
+<p>
+<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2009/n2830.pdf">
+N2830 Problems with reference_closure</a>
+proposed that <code>std::reference_closure</code> be removed from the language
+and provided some evidence for that position.
+<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2009/n2839.html">
+N2839 Response to "Problems with reference_closure"</a>
+disputed some of that evidence
+and argued for keeping <code>std::reference_closure</code>.
+This paper provides new
+techniques for aggressive optimization of <code>std::function</code>
+and corresponding benchmark results
+that show that the relative cost of <code>std::function</code>
+to <code>std::reference_closure</code>
+can be much lower than previous evidence suggested.
+This new evidence enables a consensus agreement to remove
+<code>std::reference_closure</code>.
+</p>
+
+<p>
+This paper summarizes the issues,
+describes the new <code>std::function</code> optimization techniques,
+presents the benchmark results,
+and proposes changes to the working draft.
+</p>
+
+<h2><a name="Issues">Issues</a></h2>
+
+<p>
+Closures have anonymous types,
+and are hence not suitable for binary interfaces.
+The expected development model for binary interfaces using closures
+is to first represent the closures with <code>std::function</code>.
+When there is evidence of a need for additional performance,
+an additional overloaded interface
+uses <code>std::reference_closure</code>
+to handle the appropriate subset more efficiently.
+</p>
+
+<p>
+There are problems with taking this approach.
+</p>
+<ul>
+<li>
+The user must write the additional overloads.
+This work can be ameliorated by having both versions
+use a common templated implementation.
+</li>
+<li>
+Not all closure types are handled by <code>std::reference_closure</code>.
+This lack of support
+could be ameliorated by changing the lambda,
+but the workaround is not generally applicable.
+</li>
+<li>
+The closure type must be derived from <code>std::reference_closure</code>,
+which requires the closure type to contain a function pointer
+that it might not otherwise require.
+This unused space can be ameliorated by
+a compiler that does function cloning and parameter propogation.
+</li>
+</ul>
+</p>
+
+<p>
+There are problems with <em>not</em> taking this approach.
+</p>
+<ul>
+<li>
+There is no indication in use of the <code>std::function</code> parameter type
+that the closure will not be used past completion of the function.
+That is, there is no obvious guarantee
+that the closure type will be used
+only during its lifetime.
+So, there is a risk of use after destruction.
+This risk can be ameliorated by
+passing the <code>std::function</code> by reference.
+</li>
+<li>
+Implementations of <code>std::function</code>
+are slower than implementations of <code>std::reference_closure</code>.
+</li>
+</ul>
+
+<h2><a name="Benchmark">Benchmark</a></h2>
+
+<p>
+Since the purpose of <code>std::reference_closure</code> is performance,
+a benchmark is appropriate.
+The benchmark measures the penalties of using lambdas
+as a control abstraction,
+and early results for that benchmark
+influenced the decision to adopt <code>std::reference_closure</code>.
+</p>
+
+<p>
+The basis of the benchmark is that:
+</p>
+<ul>
+<li>
+Users form lambdas to describe tasks,
+e.g, <code>[&amp;]()&nbsp;{&nbsp;do_some_work();&nbsp;}</code>.
+</li>
+<li>
+The lambdas are passed into a parallel scheduling library as tasks.
+</li>
+<li>
+The parallel scheduling library executes the tasks,
+often predominately in a serial context.
+(That is, the exploited parallelism
+may be much lower than the possible parallelism.)
+</li>
+</ul>
+
+<p>
+The benchmark itself consists of a many repetitions of the following.
+</p>
+<blockquote>
+<table border=1>
+<tr><th valign=top align=left>Logical Action</th>
+<th valign=top align=left>Representation Operation</th></tr>
+<tr><td valign=top>Build the closure object.</td><td valign=top>n/a</td></tr>
+<tr><td valign=top>Pass the closure to the task scheduler as a "callback".</td>
+<td valign=top>construct</td></tr>
+<tr><td valign=top>Copy the callback to the execution engine.</td>
+<td valign=top>copy</td></tr>
+<tr><td valign=top>Invoke the callback to the original closure object.</td>
+<td valign=top>indirect call</td></tr>
+</table>
+</blockquote>
+
+<p>
+The benchmark environment consists of:
+</p>
+<ul>
+<li>Mac OS 10.5.6</li>
+<li>2.66GHz MacBook Pro</li>
+<li>Apple GCC 4.0.1</li>
+<li>Apple libstdc++ 4.0</li>
+<li>TR1 implementation of std::function</li>
+</ul>
+
+<p>
+The initial results are
+similar to those obtained at the adoption
+of <code>std::reference_closure</code>.
+Those results show <code>std::function</code>
+with 23.5 times the overhead of <code>std::reference_closure</code>.
+
+<h2><a name="Optimization"><code>std::function</code> Optimization</a></h2>
+
+<p>
+The methodology of the optimization work is:
+</p>
+<ul>
+<li>Ensure that the benchmark is testing what it is meant to test.</li>
+<li>Optimize the hot path in <code>std::function</code>
+without a loss of generality.</li>
+</ul>
+
+<h3><a name="Small">Small Function Object</a></h3>
+
+<p>
+The implementation of <code>std::function</code>
+has a "small function object" optimization.
+This optimization eliminates a <code>malloc</code> and <code>free</code> pair
+on each copy.
+Unfortunately, this optimization was not enabled.
+Specializing the trait corrected the problem.
+We anticipate that in C++0x implementation, the problem will not arise.
+</p>
+
+<h3><a name="Direct">Direct Copy Call</a></h3>
+
+<p>
+The implementation of <code>std::function</code>'s copy constructor
+uses an indirect call.
+This call is needed for the general case.
+When the "small function object" has a trivial copy constructor,
+the implementation can simply copy the bits
+and avoid that call.
+</p>
+
+<h3><a name="Move">Move Semantics</a></h3>
+
+<p>
+The benchmark copies the callback.
+In C++0x, we would move from it,
+which eliminates a single branc in the copy (move) operation.
+</p>
+
+<h3><a name="LLVM">Use LLVM</a></h3>
+
+<p>
+The LLVM compiler generated somewhat better code than the GCC compiler.
+</p>
+
+<h3><a name="Results">Results</a></h3>
+
+<p>
+The results of the benchmark ranged
+from an overhead factor of 1.6 for the 32-bit architecture
+to 2.2 for the 64-bit architecture.
+(The difference is probably mostly because
+the 64-bit architecture passes small structs in registers.)
+
+<h3><a name="Sources">Sources</a></h3>
+
+<p>
+The benchmark is in Boost Subversion at
+<a href="http://svn.boost.org/svn/boost/sandbox/reference_closure">
+http://svn.boost.org/svn/boost/sandbox/reference_closure</a>.
+</p>
+
+<p>
+The optimized <code>std::tr1::function</code>
+is on the committee's Wiki (functional/functional_iterate.h).
+This version can drop in to Apple GCC 4.0.1.
+An unencumbered version of the optimized <code>std::tr1::function</code>
+will be available in the Boost repository.
+</p>
+
+
+<h2><a name="Future">Future Optimization</a></h2>
+
+<p>
+The compiled implementation of <code>std::reference_closure</code>
+is generally fairly good.
+However, it has some unnecessary memory operations
+and could yield performance improvements with optimizer attention.
+</p>
+
+<p>
+The implementation of <code>std::function</code>
+throws an exception if its function pointer is null.
+This implies testing that pointer for null,
+which is expensive.
+The implementation could use a pointer to a function that throws
+rather than a null pointer,
+thus saving the branch.
+</p>
+
+<h2><a name="Conclusion">Conclusion</a></h2>
+
+<p>
+We conclude that <code>std::function</code>
+has and will likely continue to have double the overhead
+of <code>std::reference_closure</code>.
+However, there are significant compiler implementation
+and user programability costs
+associated with a second, logically equivalent,
+binary representation for closures.
+On balance, we recommend removing <code>std::reference_closure</code>.
+
+<h2><a name="Proposal">Proposal</a></h2>
+
+<p>
+We propose to remove <code>std::reference_closure</code>
+from the standard.
+</p>
+
+<h3><a name="expr.prim.lambda">5.1.1 Lambda expressions [expr.prim.lambda]</a></h3>
+
+<p>
+Remove paragraph 12.
+</p>
+<blockquote>
+<p>
+<del>If every name in the effective capture set
+is preceded by <code>&amp;</code>
+and the lambda expression is not mutable,
+<code>F</code> is publicly derived from
+<code>std::reference_closure&lt;R(P)&gt;</code> (20.6.18),
+where <code>R</code> is the return type and
+<code>P</code> is the <var>parameter-type-list</var> of the lambda expression.
+Converting an object of type <code>F</code>
+to type <code>std::reference_closure&lt;R(P)&gt;</code>
+and invoking its function call operator
+shall have the same effect as
+invoking the function call operator of <code>F</code>.
+[<i>Note:</i>
+This requirement effectively means that such <code>F</code>’s
+must be implemented using a pair of
+a function pointer and a static scope pointer.
+&mdash;<i>end note</i>]</del>
+</p>
+</blockquote>
+
+<h3><a name="func.referenceclosure">20.6.18 Class template <code>reference_closure</code> [func.referenceclosure]</a></h3>
+
+<p>
+Remove the entire section
+20.6.18 (from N2800) Class template <code>reference_closure</code>
+[func.referenceclosure],
+including
+</p>
+<ul>
+<li>20.6.18.1 Construct, copy, destroy [func.referenceclosure.cons]</li>
+<li>20.6.18.2 Observer [func.referenceclosure.obs]</li>
+<li>20.6.18.3 Invocation [func.referenceclosure.invoke]</li>
+<li>20.6.18.4 Comparison [func.referenceclosure.compare]</li>
+</ul>
+
+</body>
+</html>

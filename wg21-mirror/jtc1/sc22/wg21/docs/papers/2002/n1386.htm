@@ -1,0 +1,1907 @@
+<HTML>
+<HEAD>
+<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=windows-1252">
+<META NAME="Generator" CONTENT="Microsoft Word 97">
+<TITLE>regex_proposal</TITLE>
+<META NAME="Version" CONTENT="8.0.3410">
+<META NAME="Date" CONTENT="10/11/96">
+<META NAME="Template" CONTENT="C:\Program Files\Microsoft Office\Office\HTML.DOT">
+</HEAD>
+<BODY TEXT="#000000" LINK="#0000ff" VLINK="#800080" BGCOLOR="#ffffff">
+
+<H1>A Proposal to add Regular Expressions to the Standard Library</H1>
+<P>Doc. no.: J16/02-0044 = WG21/N1386<BR>
+Date: 06 September 2002<BR>
+Project: Programming Language C++ <BR>
+Subgroup: Library<BR>
+Wiki: <A HREF="http://www.research.att.com/~ark/cgi-bin/lwg-wiki/wiki?RegularExpressions">http://www.research.att.com/~ark/cgi-bin/lwg-wiki/wiki?RegularExpressions</A><BR>
+Reply to: John Maddock &lt;<A HREF="mailto:john_maddock@compuserve.com"><FONT COLOR="#0000ff"><EM>john_maddock@compuserve.com</FONT></EM></A>&gt; </P>
+<H2>Forward</H2>
+<P>This proposal is based heavily on the Boost regular expression library, although GRETA is also discussed. The proposal represents widespread existing practice; the Boost regex library is in use on over twenty compiler/platform combinations, and is one of the most visited libraries on the Boost web site. The proposal is necessarily long and quite detailed and covers many difficult and contentious issues. The intent is to provide a concrete "straw man" proposal for discussion along with a clear discussion of the design issues involved, and not necessarily the final form that a proposal will take. In short, regard this as target practice!</P>
+<H2>Contents</H2>
+<PRE><A HREF="#motivation">Motivation</A>
+   <A HREF="#target_audience">Target Audience</A>
+<A HREF="#impact_std">Impact on the standard</A>
+<A HREF="#design">Design</A>
+   <A HREF="#design_summary">Summary of key design decisions</A>
+   <A HREF="#limitation_summary">Summary of key limitations imposed by the design</A>
+   <A HREF="#syntax_discussion">Regular expression syntax (and complexity)</A>
+      <A HREF="#complexity_discussion">Regular expression algorithms</A>
+   <A HREF="#regex_object_discussion">Regular expression representation</A>
+   <A HREF="#traits_discussion">Regular expression traits classes</A>
+   <A HREF="#matches_discussion">Representing regular expression matches</A>
+   <A HREF="#algorithm_discussion">Algorithms</A>
+   <A HREF="#regex_iterator_discussion">Repeated regular expression searches</A>
+   <A HREF="#iterator_discussion">Iterator requirements</A>
+<A HREF="#proposed_text">Proposed text</A>
+   <A HREF="#regex_traits">Regular Expression Traits</A>
+   <A HREF="#synopsis">Header &lt;regex&gt; synopsis</A>
+   <A HREF="#supporting">Supporting Types</A>
+   <A HREF="#basic_regex">Template class basic_regex</A>
+   <A HREF="#sub_match">Template class sub_match</A>
+   <A HREF="#match_results">Template class match_results</A>
+   <A HREF="#algorithms">Regular expression algorithms</A>
+   <A HREF="#iterators">Regular expression Iterators</A></PRE>
+<H2><A NAME="motivation"></A>I. Motivation </H2>
+<P>Regular expressions should be familiar to many programmers; a regular expression is a string used as a pattern to select specific strings from a set of character strings. Regular expressions are used by many familiar unix utilities, including egrep, grep, lex, and sed[1], and are supported directly in many programming languages including awk[1], perl[2], C#[3], and ECMAScript[4] (also known as JavaScript), and indeed are often used ubiquitously wherever text processing occurs.</P>
+<P>Until recently most regular expression libraries were implemented in C, no doubt helped by the fact that the POSIX standard provides a standardised regular expression API[1]. Well known C implementations include the GNU regex library[5], the RX library[6], Henry Spencer's regex library[7] (which forms part of the BSD distribution), and PCRE[8] (for perl like regular expressions). Most early C++ implementations were simple wrappers around the C API's[9][10], although these add a measure of safety (by using the Resource Acquisition is Initialisation principle), as well an object oriented interface. However wrapper classes and C API's alike suffer from a key defect when interfacing with the C++ standard library: they are limited to searching narrow character strings held in a <CODE>const char*.</P>
+</CODE><P>Native C++ implementations can overcome the limitations suffered by C libraries, and there are two main candidates for standardisation: the Boost regex library[11] (formerly regex++), and GRETA[12]. Both these libraries support narrow and wide character regular expressions, and iterator-based searches. GRETA implements the regular expression algorithms as member functions of the regular expression class, while the Boost library make these separate non-member functions. GRETA is based on perl regular expressions, where as the Boost library uses POSIX regular expression matching rules, albeit with some perl compatible extensions.</P>
+<H3><A NAME="target_audience"></A>Target audience</H3>
+<P>The are essentially three possible target audiences for a regular expression library:</P>
+<B><P>End Users:</B> regular expression may be used by the end user of a program - typically this would be in a text editor for search (and replace) operations. These users would require that the expression is localised to use their native character set, and never exhibit the kind of exponential search times that some regular expression engines can produce under worst case conditions. Typically this means that the regular expression recognised by the engine has to be restricted to some kind of safe subset of the syntax recognised by programming tools such as perl.</P>
+<B><P>Programmers:</B> this section includes all users of scripting languages like perl[2], awk[1], and ECMAScript[4]. In these cases the regular expressions are authored by the programmer, and these are converted to a state machine at run time. Typically these users require an expressive regular expression syntax, at the expense of worst case performance. Localisation of the syntax is not normally required, although the state machine itself should usually honour the run time locale (for example when matching an alphanumeric character).</P>
+<B><P>Programmers (code generators):</B> this section of users include those using tools like lex[1], which convert one or more regular expressions into a C or C++ source file. Here the expressions are written by the programmer, and then converted to a state machine at compile time. There is no localisation, either of the syntax or of the way in which the state machine behaves at runtime. The generated state machines are usually highly optimised; as a result the regular expressions may take some time to be analysed by the generator program, and are typically quite restricted in the syntax they accept.</P>
+<P>This proposal concentrates on the second group; that is to say a rich regular expression syntax, generally used by programmers, and interpreted at run time. However, thought has been given to the other possible user types, and the design by no means rule these out completely.</P>
+<H2><A NAME="impact_std"></A>II. Impact on the Standard</H2>
+<P>This is a pure library proposal, it does not add any new language features, or alter any existing standard library headers.</P>
+<H2><A NAME="design"></A>III. Design</H2>
+<H3>Overview</H3>
+<P>This proposal consists of a pair of classes, and a set of algorithms that operate on instances of those classes. Regular expressions are represented by instances of the <CODE>basic_regex </CODE>class template, matches against a regular expression are represented by instances of the <CODE>match_results </CODE>class template. The algorithms <CODE>regex_match </CODE>and <CODE>regex_search </CODE>take as input a regular expression and a character string, and fill in a <CODE>match_results </CODE>structure if a match is found. For search and replace operations the algorithm <CODE>regex_replace </CODE>performs formatted search and replace on a character string, producing a new string as output. Finally, for repeated find operations, there are two iterator types; one enumerates a sequence of full regular expression matches, the other a sequence of strings.</P>
+<H3><A NAME="design_summary"></A>Summary of key design decisions</H3>
+<B><P>Regular expression syntax</B>: ECMAScript (<A HREF="#syntax_discussion">discussion</A>).</P>
+<B><P>Complexity</B>: None specified (<A HREF="#complexity_discussion">discussion</A>).</P>
+<B><P>Regular Expression Object</B>: A template class modelled after <CODE>basic_string</CODE>; the regular expression object does not have access to the iterator type that will be searched (<A HREF="#regex_object_discussion">discussion</A>).</P>
+<B><P>Traits class</B>: Regular expression objects may be customised via a traits class template parameter (<FONT COLOR="#ff0000">TODO</FONT>).</P>
+<B><P>Character types</B>: both narrow and wide character strings are supported.</P>
+<B><P>Representation of regular expression matches</B>: a container of sub-expression matches, what matched each marked sub-expression in the regular expression is reported back to the user (<A HREF="#matches_discussion">discussion</A>).</P>
+<B><P>Regular expression algorithms</B>: iterator based non-member functions for searching for a match, and for finding an exact match (<A HREF="#algorithm_discussion">discussion</A>).</P>
+<B><P>Search and replace</B>: ECMAScript-like search and replace via a non-member function to transform one string to another (<A HREF="#replace_discussion">discussion</A>).</P>
+<B><P>Repeated searches</B>: an iterator type to enumerate all of the regular expression matches within another iterator sequence (<A HREF="#regex_iterator_discussion">discussion</A>).</P>
+<B><P>Splitting a string</B>: an iterator type that enumerates one or more strings for each regular expression match within another iterator sequence (<A HREF="#split_discussion">discussion</A>).</P>
+<H3><A NAME="limitation_summary"></A>Summary of key limitations imposed by the design</H3>
+<B><P>Regular expression syntax</B>: whatever syntax is chosen will severely limit the choice of state machine used along with any complexity guarantees given. The choice of ECMAScript regular expressions implies that some regular expressions can only be matched by a backtracking Non-deterministic Finite Automata (NFA), other algorithms may be used for some subsets of ECMAScript regular expressions (<A HREF="#syntax_discussion">discussion</A>).</P>
+<B><P>Regular expression object type</B>: the fact that the regular expression object is templated on the character type, and not on an iterator type, may make some implementation choices more difficult. In practice this choice seems to have no impact on performance (<A HREF="#regex_object_discussion">discussion</A>).</P>
+<B><P>Regular expression traits class</B>: the traits class design will be a major constraining factor on the kinds of internal representations that a regular expression state machine may use. No design is presented here, and both GRETA and Boost designs are considered defective (they are sufficient for their own needs but are not necessarily flexible enough), more work need to be done here.</P>
+<B><P>Support for wide characters</B>: much regular expression theoretical work is based on small finite character sets, and can therefore not be applied to wide character strings, however wide character string support is considered essential. This constraint may be mitigated to some degree by providing a specialisation for <CODE>basic_regex&lt;char&gt; </CODE>and then overloading its associated non-member algorithms (<A HREF="#regex_object_discussion">discussion</A>).</P>
+<B><P>Sub-expression matching</B>: User feedback suggests that support for matching marked sub-expressions is essential. However, this can have a negative impact on the kinds of algorithms that may be employed. This is mitigated to some degree in this proposal by providing overloaded forms of the key algorithms that do not report what matched, allowing alternative algorithms to be used in these cases for some expressions (<A HREF="#algorithm_discussion">discussion</A>).</P>
+<B><P>Iterator type</B>: support for forward iterators would allow for multibyte character support via iterator adapters, however this would also preclude some perl-like features, and may have negative performance implications. This proposal requires support for random access iterators, however this choice needs more investigation and may need to be changed at a later date (<A HREF="#iterator_discussion">discussion</A>).</P>
+<H3><A NAME="syntax_discussion"></A>Regular expression syntax (and complexity)</H3>
+<P>The complexity of converting a character string to a state machine, and the complexity of searching for a match to that machine, are deeply dependent upon the syntax used to represent the regular expression. There are three ways in which the regular expression syntax can be specified:</P>
+<OL>
+
+<LI>Leave the manner in which the string representation is interpreted as implementation defined. This makes it impossible for programmers to include portable regular expressions in their code.</LI>
+<LI>Define completely within the standard how the regular expression finite state machine is interpreted. This option incurs a lot of work, and possibly duplicates information that has already been standardised elsewhere.</LI>
+<LI>Make a normative reference to another standard. There are only really two pertinent standards available: IEEE Std 1003.1-2001: POSIX, Chapter 9 Regular Expressions[1], and ECMA-262: ECMAScript Language Specification[4].</LI></OL>
+
+<P>The following brief summary indicates the main differences between the regular expression syntaxes that have been standardised. It is assumed that the reader is already familiar with one or more of these.</P>
+<H5>POSIX-basic</H5>
+<P>The basic POSIX regular expression syntax is most often encountered in Unix utilities such as grep or sed.</P>
+<P>Only the characters <CODE>.[\*^$</CODE> are special. Other features are accessed as escape sequences, for example grouping is accomplished with <CODE>\(</CODE> and <CODE>\)</CODE>, quantified repeats using <CODE>\{</CODE> and <CODE>\} </CODE>and alternation with <CODE>\|</CODE>. </P>
+<P>Bracket expressions (contained in <CODE>[]</CODE>), have access to the full range of POSIX features including named collating elements and equivalence classes, however escape sequences within bracket expressions are not valid (unlike in perl).</P>
+<P>There are no + or ? quantifiers.</P>
+<P>Back-references to previously marked sub-expressions (with <CODE>\(</CODE> and <CODE>\)</CODE>) are allowed. This last option means that pattern recognition is almost certainly an NP-Complete problem[13]. </P>
+<P>Expressions are matched using the "leftmost longest" rule.</P>
+<H5>POSIX-extended</H5>
+<P>The extended POSIX regular expression syntax is used by the Unix utilities egrep and awk[1].</P>
+<P>The extended POSIX regular expression syntax is generally more natural in use than the basic syntax, the characters <CODE>.[]{}+*?|\^$ </CODE>are all special, escape sequences are used to make special characters ordinary (in other words there are no special escape sequences defined by the POSIX standard, however such sequences are allowed as compatible extensions).</P>
+<P>Expressions are matched using the "leftmost longest" rule[1].</P>
+<P>Back-references are not allowed in POSIX extended regular expressions, as a result a POSIX extended regular expression can be converted to a Deterministic Finite Automata (DFA) if required.</P>
+<P>The following features are supported by both POSIX-extended and POSIX-basic regular expressions but not by ECMAScript:</P>
+
+<UL>
+<LI>Named collating elements, for example "[[.left-square-bracket.][.right-square-bracket.]]" would match either '[' or ']'. </LI>
+<LI>Primary equivalence classes, for example "[[=a=]]" would match any character whose primary collation key is the same as the primary collation key for 'a', i.e. '&agrave;', '&aacute;', '&acirc;', '&atilde;', '&auml;', '&aring;', 'A', '&Agrave;', '&Aacute;', '&Acirc;', '&Atilde;', '&Auml;', or '&Aring;'. </LI></UL>
+
+<H5>ECMAScript</H5>
+<P>ECMAScript[4] is based on the perl regular expression syntax[2], which in turn is loosely based on the POSIX extended syntax[1]. ECMAScript is also known as JavaScript or JScript.</P>
+<P>Unlike the POSIX regular expression syntaxes, ECMAScript does not use the "leftmost longest" rule to determine the best possible match, instead the regular expression is treated as a directed graph, and a depth first search is performed, with the first match found being returned. The following examples illustrate the main differences between the two:</P>
+<P><div align="center"></P>
+<P ALIGN="CENTER"><CENTER><TABLE BORDER CELLSPACING=1 CELLPADDING=7 >
+<TR><TD WIDTH="25%" VALIGN="TOP">
+<P>Expression</TD>
+<TD WIDTH="25%" VALIGN="TOP">
+<P>Text</TD>
+<TD WIDTH="25%" VALIGN="TOP">
+<P>POSIX leftmost longest match</TD>
+<TD WIDTH="25%" VALIGN="TOP">
+<P>ECMAScript depth first search match</TD>
+</TR>
+<TR><TD WIDTH="25%" VALIGN="TOP">
+<CODE><P>a|ab</CODE></TD>
+<TD WIDTH="25%" VALIGN="TOP">
+<CODE><P>xaby</CODE></TD>
+<TD WIDTH="25%" VALIGN="TOP">
+<CODE><P>"ab"</CODE></TD>
+<TD WIDTH="25%" VALIGN="TOP">
+<CODE><P>"a"</CODE></TD>
+</TR>
+<TR><TD WIDTH="25%" VALIGN="TOP">
+<CODE><P>.*([[:alnum:]]+).*</CODE></TD>
+<TD WIDTH="25%" VALIGN="TOP">
+<CODE><P>" abc def xyz "</CODE></TD>
+<TD WIDTH="25%" VALIGN="TOP">
+<P>$0 = " abc def xyz "<BR>
+$1 = "abc"</TD>
+<TD WIDTH="25%" VALIGN="TOP">
+<P>$0 = " abc def xyz "<BR>
+$1 = "z"</TD>
+</TR>
+<TR><TD WIDTH="25%" VALIGN="TOP">
+<CODE><P>.*(a|xayy)</CODE></TD>
+<TD WIDTH="25%" VALIGN="TOP">
+<CODE><P>zzxayyzz</CODE></TD>
+<TD WIDTH="25%" VALIGN="TOP">
+<CODE><P>"zzxayy"</CODE></TD>
+<TD WIDTH="25%" VALIGN="TOP">
+<CODE><P>"zzxa"</CODE></TD>
+</TR>
+</TABLE>
+</CENTER></P>
+
+<P ALIGN="CENTER"></div></P>
+<P>These differences between ECMAScript matching rules, and POSIX matching rules, mean that these two regular expression syntaxes differ not only in the features offered, but also in the form that the state machine takes and/or the algorithms used to traverse the state machine.</P>
+<P>The following features are&nbsp;supported by ECMAScript, but not by the POSIX-basic or POSIX-extended syntaxes:</P>
+
+<UL>
+<LI>Non-greedy repeats: for example "a+?" will match the shortest possible sequence of repeating a's. </LI>
+<LI>Non-marking parenthesis: the form "(?:sub)" can be use to logically group the expression "sub" without marking it for future reference. </LI>
+<LI>Forward lookahead asserts: the form "(?=sub)" matches zero characters that are followed by "sub", and the form "(?!sub)" matches zero characters that are not followed by "sub". </LI>
+<LI>The word boundary assertions \b and \B match zero characters at a word boundary, or not at a word boundary respectively. </LI></UL>
+
+<P>The main advantage offered by ECMAScript is that the richer syntax makes it very much easier to author patterns that will match sections of mark-up languages. For example to match a "&lt;font&gt;…&lt;/font&gt;" section using the POSIX syntax is much more complicated than it first seems, the obvious expression:</P>
+<CODE><P>"&lt;font[^&gt;]*&gt;.*&lt;/font&gt;"</P>
+</CODE><P>would match everything from the first occurrence of "&lt;font" to the last occurrence of "&lt;/font&gt;", including any intervening &lt;font&gt; or &lt;/font&gt; tags. It is possible to do the right thing using something much more complex like:</P>
+<CODE><P>"&lt;font[^&gt;]*&gt;([^&lt;]|&lt;[^/]|&lt;/[^f]|&lt;/f[^o]|&lt;/fo[^n]|&lt;/fon[^t]|&lt;/font[^&gt;])*&lt;/font&gt;"</P>
+</CODE><P>which is not especially memorable (nor even a general solution). Where as the ECMAScript equivalent:</P>
+<CODE><P>"&lt;font[^&gt;]*&gt;.*?&lt;/font&gt;"</P>
+</CODE><P>is very much easier. I've seen suggestions that a POSIX-like syntax, but using a "leftmost shortest" matching rule would be a better a way of handling mark-up languages[14], but while this is true, it still doesn't approach the flexibility of ECMAScript in this important area.</P>
+<H4>Perl</H4>
+<P>Perl 5 regular expressions offer the same facilities as ECMAScript, as well as several additional features such as independent sub-expressions, zero width look-behind assertions, and interpreted sub-expressions. The latter feature allows recursive regular expressions; something that can only be fully implemented when regular expressions are an intrinsic part of the language, and have access to the program's variables. Given that perl isn't standardised, the perl syntax probably isn't a good candidate for the C++ standard. It is also worth noting that the perl regular expression syntax will undergo a complete rewrite in perl 6[15].</P>
+<H4>Recommendation</H4>
+<P>This proposal recommends that support for ECMAScript syntax is required, while support for the POSIX syntax is optional. This choice is different to the one made by Boost, but is based on a very clear bias in user expectations (and feedback), in particular for features like "non-greedy repeats" which simply do not fit well into the POSIX "leftmost longest" model. This choice is also the same as that made by almost all of the newer programming languages: not only perl and JavaScript, but also Python, PHP, and Microsoft's .NET framework.</P>
+<H3><A NAME="complexity_discussion"></A>Regular expression algorithms</H3>
+<P>The main state machine representations and algorithms used for implementing regular expressions are shown below, along with their complexities [16][17]:</P>
+<P><div align="center"></P>
+<P ALIGN="CENTER"><CENTER><TABLE BORDER CELLSPACING=1 CELLPADDING=7 >
+<TR><TD WIDTH="20%" VALIGN="TOP">
+<P>Finite state machine / algorithm</TD>
+<TD WIDTH="20%" VALIGN="TOP">
+<P>Size of machine for M character expression</TD>
+<TD WIDTH="20%" VALIGN="TOP">
+<P>Pattern recognition complexity, for an N character text, and S states.</TD>
+<TD WIDTH="41%" VALIGN="TOP">
+<P>Comments</TD>
+</TR>
+<TR><TD WIDTH="20%" VALIGN="TOP">
+<P>DFA</TD>
+<TD WIDTH="20%" VALIGN="TOP">
+<P>O(2<SUP>M</SUP>)</TD>
+<TD WIDTH="20%" VALIGN="TOP">
+<P>O(N)</TD>
+<TD WIDTH="41%" VALIGN="TOP">
+<P>May have a high cost for the construction of the finite state machine, typically only used by code generators such as lex.</TD>
+</TR>
+<TR><TD WIDTH="20%" VALIGN="TOP">
+<P>Bit-parallel non-backtracking NFA </TD>
+<TD WIDTH="20%" VALIGN="TOP">
+<P>O(M) for most expressions, but O(2<SUP>M</SUP>) for nested bounded-repeats.</TD>
+<TD WIDTH="20%" VALIGN="TOP">
+<P>O(1+(S/B))N</TD>
+<TD WIDTH="41%" VALIGN="TOP">
+<P>Only applicable to narrow character regular expressions and does not report what matched. If B (the number of bits in a machine word) is greater than S (a reasonably common experience), then performance is O(N).</TD>
+</TR>
+<TR><TD WIDTH="20%" VALIGN="TOP">
+<P>Non backtracking NFA</TD>
+<TD WIDTH="20%" VALIGN="TOP">
+<P>O(M) for most expressions, but O(2<SUP>M</SUP>) for nested bounded-repeats.</TD>
+<TD WIDTH="20%" VALIGN="TOP">
+<P>O(SN)</TD>
+<TD WIDTH="41%" VALIGN="TOP">
+<P>Typically used for POSIX-extended regular expression engines, especially tools like egrep where the expression is to be authored by an "end user" rather than a programmer.</TD>
+</TR>
+<TR><TD WIDTH="20%" VALIGN="TOP">
+<P>Backtracking NFA</TD>
+<TD WIDTH="20%" VALIGN="TOP">
+<P>O(M)</TD>
+<TD WIDTH="20%" VALIGN="TOP">
+<P>O(2<SUP>N</SUP>)</TD>
+<TD WIDTH="41%" VALIGN="TOP">
+<P>Typically used for ECMAScript regular expressions, and for POSIX-basic expressions that contain back-references.</TD>
+</TR>
+</TABLE>
+</CENTER></P>
+
+<P ALIGN="CENTER"></div></P>
+<P>The main lesson from this table is that unless the standard defines the regular expression grammar used, the complexity of the regular expression algorithms can not be specified. One option that could be explored is to allow for the runtime monitoring of algorithm complexity. That is, the stated algorithm complexity is enforced not by using an algorithm that has the stated complexity, but by monitoring the number of states in the machine that are visited, and throwing an exception if the number visited exceeds some threshold. This option allows for the use of richer regular expression grammars, while at the same time preventing the state machine from executing eternally (this is currently being tested with the Boost.regex library).&nbsp;</P>
+<P>Please also note that for carefully limited regular expression grammars, and for narrow character strings, there are many clever algorithms and/or heuristics available with much better performance (and in some cases worst case complexity as well) than the ones given here[18][19].</P>
+<P>This proposal does not make any performance guarantees, given that this is essentially impossible for ECMAScript regular expressions.</P>
+<H3><A NAME="regex_object_discussion"></A>Regular expression representation</H3>
+<P>In most programming languages, regular expressions are represented as a character strings. Ultimately though, a regular expression is a finite state machine, the character string is just is a user-friendly representation. This leads to the first design decision: regular expressions will be represented by a type that is constructible from a character string. This allows the data structure representing the finite state machine (DFA or NFA etc) to be completely opaque to the end user. This form also ensures that character strings are converted to a state machine only once (whereas if regular expression were represented by <CODE>basic_string </CODE>then the transformation to a state machine would have to occur every time the expression was used). On the other hand, since character strings and regular expressions are so closely related, the regular expression type should "look like" a <CODE>basic_string</CODE>, in particular the member functions should make the underlying character string representation easily accessible. There are some limits to this; other than <CODE>basic_regex&lt;&gt;::assign</CODE>, member functions will be limited to those that do not modify the string. This limitation arises from the fact that one can not arbitrarily modify a regular expression and expect the result to still be a valid expression, nor can one make arbitrary changes to the underlying state machine without repeating any static analysis that may have been performed on the machine. One reviewer has asked for arbitrary modification to the machine to be allowed, in order to support emacs-style incremental searches. However, it is not clear what kind of impact this would have on the state machine representation, or even whether this is possible for regular expressions. As a result this is not part of this proposal, and experience with Boost so far is that not one user has ever asked for this feature.</P>
+<P>The GRETA and Boost regular expression libraries use slightly different forms for the regular expression object. Boost uses:</P>
+<PRE>template &lt;class charT, 
+          class traits = regex_traits&lt;charT&gt;, 
+          class Allocator = allocator&lt;charT&gt; &gt;
+class reg_expression;</PRE>
+<P>While GRETA uses:</P>
+<PRE>template&lt; typename ConstIterator, 
+          typename traits = perl_syntax&lt;iterator_traits&lt;ConstIterator&gt;::value_type&gt; &gt;
+class basic_rpattern;</PRE>
+<P>There are two main differences here: Boost has an Allocator template parameter, where as GRETA does not; and GRETA is templated on the iterator type that will be searched rather than on the character type. In addition, GRETA uses member functions for regular expression search and match operations, where as Boost uses non-member functions. This proposal follows the Boost interface for the following reasons:</P>
+
+<UL>
+<LI>The class will need to allocate memory: it is in effect both a container of characters, and a container of states, as such an allocator parameter is appropriate. </LI>
+<LI>The Boost interface closely models that of <CODE>basic_string</CODE>. This is a deliberate design decision; the <CODE>basic_string </CODE>interface is well known and understood, following the same interface design decisions (in particular using the same template arguments) makes the library both easier to learn, and easier to teach. I believe that it is hard to overstate the importance of this. </LI>
+<LI>With the Boost interface, the same regular expression object can be used with multiple iterator types, where as GRETA requires a different regular expression type for each iterator type that is to be searched. Although most programs do not in general use regular expressions with a large number of different iterator types, it is none the less annoying to have to typedef a different regular expression type for each particular iterator type to be operated upon. In contrast, most Boost users will only ever use the typedefs <CODE>boost::regex</CODE> or <CODE>boost::wregex </CODE>(see discussion below), again in a manner completely analogous to the standard string classes. </LI>
+<LI>There are some implemenation techniques that offer significant performance enhancements but which can only be readily applied to narrow character strings, there is therefore a need to be able to specialize <CODE>basic_regex&lt;char&gt; </CODE>if these techniques are to be used. This is harder (though not necessarily impossible) if the interface is iterator based. </LI>
+<LI>If the regular expression type is templated only on the character type, then it is possible to create a code generator that takes a regular expression string as input, and outputs C++ code containing a pre-computed state machine for that expression. In comparison if the GRETA approach were taken then the code generator would have to be recompiled for each iterator type supported. This option is not yet supported by the Boost code, but it is something that users request from time to time, often because they want the their regular expressions to be obfuscated, and not embedded in the executable as character strings. </LI>
+<LI>One can imagine compilers that would (perhaps as a compatible extension), replace regular expression objects that are initialised with a string literal, with a pre-computed state machine. I believe that a compiler can only do this if the range of state machine types that it can generate is bounded (for example to narrow and wide character regular expressions), and not dependent upon a (possibly user defined) iterator type. </LI></UL>
+
+<P>As with all design decisions there are some compromises involved. In particular, the GRETA implementation by default uses a recursive depth first search; each state in the machine is represented by a polymorphic object, so the iterator type needs to be known by the machine in order for iterators to be passed through virtual function calls. However there is a one to one transformation from a virtual function call, to a call through a function pointer looked up in a table indexed by the object's type. A refactored version of Boost regex uses this technique to implement the same algorithm that GRETA uses, the result has been found to be faster than either Boost or GRETA so far, and this implementation will probably be used in a future Boost version[21]. In other words, although there are some implementation choices that do not fit easily into the Boost interface, there are no algorithms that can not fit into this interface, either in theory or practice.</P>
+<P>There is one other restriction worth pointing out; the Boost interface does not easily allow an implementation to generate self-modifying machine code for the state machine. That would require the state machine to be fixed to a finite number of iterator types, and in practice there appear to be no regex implementations that make this design choice in any case. If this option were required, then full construction of the state machine would have to be delayed until it was required (and the iterator type was known to be one that is supported), the result could then be cached in the regular expression object (and indexed by a <CODE>const typeinfo*</CODE>).</P>
+<P>This proposal has made some small modifications the Boost interface where experience has indicated that the existing version is imperfect, in particular the name of the regular expression object has been changed from <CODE>reg_expression </CODE>to <CODE>basic_regex</CODE>, to make the <CODE>basic_string </CODE>analogy clearer. The actual class used to represent the regular expression is:</P>
+<PRE>template &lt;class charT, class traits = regex_traits&lt;charT&gt;, class Allocator = allocator&lt;charT&gt; &gt;
+class basic_regex;</PRE>
+<P>In many cases there are multiple ways in which a character string can be converted to a state machine, the most important of these is to tell the state machine whether it should regard the text as case sensitive or not, but other options are possible: for example hints on optimisations and/or the expression syntax to use (for example POSIX basic or extended, perl or JavaScript etc). So in addition to a string, the form of the state machine is determined by a series of flags (represented by a bitmask type), these flags should take on well defined default values which results in any given string producing the same behaviour on all implementations. </P>
+<P>In the Boost reference implementation these flags are defined as members of a non-template base class to <CODE>basic_expression</CODE>, called <CODE>regbase</CODE>. Originally this base class had several members in addition to these constants (in a design rather similar to <CODE>std::ios_base</CODE>), but as time has gone on these members have either been removed or moved to other locations (either the traits class or the <CODE>basic_regex </CODE>class), so that leaves a base class with no purpose other than to hold some symbolic constants. At the same time there are other symbolic constants used elsewhere by the regular expression library, which in the Boost implementation are defined at namespace scope. To tidy all this up, this proposal adds these to the nested namespace <CODE>std::re</CODE>, whose only purpose is to hold the symbolic constants used by the regular expression library:</P>
+<PRE>namespace std{ namespace re{
+typedef bitmask_type syntax_type;
+// default syntax, the same on all implementations:
+static const syntax_type normal = 0;
+// case insensitivity:
+static const syntax_type icase = 1;
+// possibly other flags follow.
+
+// Other flag types follow...
+} }</PRE>
+<P>One of the more controversial aspects of this proposal will be which flags to include here, as this depends heavily upon the regular expression syntax we standardise upon. As a preliminary choice, this proposal suggests that ECMAScript regular expression must be supported, and that POSIX style regular expression are an optional extra.</P>
+<P>The proposal does not document any member functions for accessing the internal state machine representation. Obviously such member functions will exist, but their form will depend upon the implementation. In most cases these member functions will be declared <I>private</I>, and one or more non-member functions will be declared as friends.</P>
+<P>When constructing a state machine, one must recognise that not all strings are valid regular expressions, in this proposal the regular expression object throws an exception derived from <CODE>runtime_error</CODE> when the string is not a valid expression.</P>
+<P>Finally as with <CODE>basic_string</CODE>, most users will only be using one of two typedefs of <CODE>basic_regex</CODE>:</P>
+<PRE>typedef basic_regex&lt;char&gt; regex;
+typedef basic_regex&lt;wchar_t&gt; wregex;</PRE>
+<H3><A NAME="traits_discussion"></A>Regular expression traits classes</H3>
+<FONT COLOR="#ff0000"><P>TODO: </FONT>the traits class design will be a major constraining factor on the kinds of internal representations that a regular expression state machine may use. No design is presented here, and both GRETA and Boost designs are considered defective (they are sufficient for their own needs but are not necessarily flexible enough). More work needs to be done here in order to ensure that the traits class offers the kinds of localisation and customisation facilities that users expect.</P>
+<H3><A NAME="matches_discussion"></A>Representing regular expression matches</H3>
+<P>Many of the regular expression algorithms report what matched the expression. Unlike matches against a normal sequence of characters, regular expression matches can be of variable length, and can even match the null string. Furthermore, the end of sequence iterator can not be used to indicate that no match was found, as a null string at the end of a sequence can be a valid regular expression match.</P>
+<P>Regular expressions also contain marked sub-expressions, each of which has its own "sub-match" in addition to what matched the whole expression. Further more, each of these sub-expression matches can be either matched or non-matched depending upon the context. For example, consider the expression:</P>
+<PRE>(^[[:space:]]*)|([[:space:]]*$)</PRE>
+<P>Here the expression contains two marked sub-expressions (which we'll call $1 and $2 using perl terminology), both the expression as a whole and the two marked sub-expressions can match variable quantities of text, and either $1 or $2 can be matched, but never both at once. The expression can also match the null string at either the end or the start of the text being searched.</P>
+<P>In order to represent this range of possibilities, each match found must be represented as a collection of sub-expression matches, with each sub-expression match represented by a pair of iterators. A Boolean flag is needed to indicate whether a sub-expression participated in the match or not; ideally one would use singular iterators for this, but not all iterators are required to have singular values (nor are is it guaranteed by the standard that one can compare two iterators if one of them is singular), so this option is prohibited.</P>
+<P>This proposal uses:</P>
+<PRE>template &lt;class Iterator&gt;
+struct sub_match : public std::pair&lt;Iterator, Iterator&gt;
+{
+   bool matched;
+
+   typename iterator_traits&lt;Iterator&gt;::distance_type length()const;
+   operator basic_string&lt;typename iterator_traits&lt;Iterator&gt;::value_type&gt;()const;
+};</PRE>
+<P>to represent matched sub-expressions. This is the simplest solution, however experience with Boost has shown that some users new to C++ get confused by the "pair of iterators" concept, and just assume that the <CODE>first</CODE> member contains a null terminated string representing the match. An alternative and more object oriented approach would be to develop this into a fully fledged substring class, perhaps as part of a wider strings library (the author has some code for this, but it is not yet ready for primetime). However there are also dangers to this approach; a substring class would still be a pair of iterators internally, there is therefore a potential for the string to which the substring refers to be destroyed before the substring object, leaving invalidated iterators behind. Of course this is still a possible problem with the "pair of iterators" approach, however at least it is obvious that they are iterators and not something that looks like it may be a "real" string.</P>
+<P>There are two options for representing a collection of sub_matches: either to use an existing container class, or provide a new container. This proposal takes the latter option - providing a new container called <CODE>match_results -</CODE> for the following reasons:</P>
+
+<UL>
+<LI>The <CODE>match_results </CODE>type adds a number of member functions that are useful for this particular concept, these include prefix() and suffix() (for returning what perl calls $` and $'), position(n) and length(n) provide the position and length of sub-expression <I>n</I>, and str(n) returns a copy of sub-expression <I>n</I> as a string. </LI>
+<LI>The <CODE>match_results</CODE> type does not contain any member functions for modifying its contents - that is the sole responsibility of the regular expression algorithms - and not the end user. In fact the <CODE>match_results</CODE> type models a "const sequence". </LI>
+<LI>The regular expression algorithms may need to copy and/or cache instances of <CODE>match_results</CODE> internally; for some algorithms significant performance benefit may be obtained by carefully managing the memory used by the class. </LI>
+<LI>A regular expression match can be reformatted to create a new string based upon a format string (using either the perl or the sed syntax); this is achieved using the <CODE>format</CODE> member function. This is actually a separate algorithm in the Boost regex library (called <CODE>regex_format</CODE>), however there appears to be no benefit in making this a non-member function. </LI></UL>
+
+<P>Finally there are some typedefs of the <CODE>match_results</CODE> type to simplify usage:</P>
+<PRE>typedef match_results&lt;const char*&gt; cmatch;
+typedef match_results&lt;const wchar_t*&gt; wcmatch;
+typedef match_results&lt;string::const_iterator&gt; smatch;
+typedef match_results&lt;wstring::const_iterator&gt; wsmatch;</PRE>
+<H3><A NAME="algorithm_discussion"></A>Algorithms</H3>
+<P>In this proposal regular expression algorithms are present as iterator-based non-member functions that operate upon instances of <CODE>basic_regex</CODE> and <CODE>match_results</CODE>. As previously discussed this maintains the independence of the regular expression type from the iterator type. Each algorithm is overloaded for three common cases: where the source text is a pair of iterators, or a null terminated string, or an instance of <CODE>basic_string</CODE>. In addition, the algorithms are split into two types: those that report what matched using an instance of the <CODE>match_results </CODE>class, and those that simply indicate whether there was a match or not. Although the latter option may not seem that useful for those used to tools such as perl, in practice it does have important uses, and can be implemented using algorithms that are significantly more efficient than those that report what matched. Indeed for long searches and a limited subset of regular expressions there are algorithms that offer better than O(N) average case performance[22]. Typical uses here include search engines (grep etc), or data input validation (where you just want to compare the string against a regular expression based filter). Note however, that the worst case performance of the "non-reporting" algorithms is still likely to be the same as the "reporting" ones, it's the real world performance that can differ. For this reason the "non-reporting" algorithms represent an opportunity for the vendor to optimise the implementation, there is no enforceable requirement that they do so (indeed Boost does not currently optimise these at present). The regular expression algorithms all also take a series of flags - expressed as a combination of bitmasks - to indicate things like whether the string being searched represents the start/end of a line etc. These flags are all defined in the nested namespace <CODE>std::re</CODE>, and are of type <CODE>std::re::match_flag_type</CODE>.</P>
+<P>The first two algorithms are <CODE>regex_search </CODE>and <CODE>regex_match</CODE>. The former will find an occurrence of a regular expression within a string, while the latter will determine whether a regular expression matches the string exactly and is mainly used for data input validation. Note that the effect of <CODE>regex_match </CODE>can be obtained by using <CODE>regex_search </CODE>with an expression that is suitably anchored at either end. However, from the programmers point of view, the advantage of using <CODE>regex_match </CODE>is that it is obvious from reading the code that it requires an exact match against the expression, and not just an occurrence somewhere within the string. </P>
+<P>The names of the algorithms in this proposal are based upon the names Boost uses and all have a "regex_" prefix, which may cause some controversy (as may the naming used in general in this proposal). This proposal does not use overly generic names like match/compare/search/find here, as the possibility for ambiguous overloads occurring should be obvious. An alternative is to use a generic name, but placed in a nested namespace (let's say <CODE>std::re</CODE>). This may be an appropriate option, but ambiguities can still occur either as a result of Koenig lookup, or a using directive. Many people may see the latter as an evil, but experience suggests that statements such as:</P>
+<PRE>using namespace whatever;</PRE>
+<P>are remarkably common in practice. For this reason the "regex_" prefixed names that Boost regex uses are retained in this proposal. Here are the twelve forms for <CODE>regex_match </CODE>and <CODE>regex_search</CODE>:</P>
+<PRE>template &lt;class RandomAccessIterator, class Allocator, class charT,
+          class traits, class Allocator2&gt;
+bool regex_match(RandomAccessIterator first, RandomAccessIterator last,
+                 match_results&lt;RandomAccessIterator, Allocator&gt;&amp; m,
+                 const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e,
+                 match_flag_type flags = match_default);
+template &lt;class RandomAccessIterator, class charT, class traits, class Allocator2&gt;
+bool regex_match(RandomAccessIterator first, RandomAccessIterator last,
+                 const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e,
+                 match_flag_type flags = match_default);
+template &lt;class charT, class Allocator, class traits, class Allocator2&gt;
+bool regex_match(const charT* str, match_results&lt;const charT*, Allocator&gt;&amp; m,
+                 const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e,
+                 match_flag_type flags = match_default);
+template &lt;class ST, class SA, class Allocator, class charT,
+          class traits, class Allocator2&gt;
+bool regex_match(const basic_string&lt;charT, ST, SA&gt;&amp; s,
+                 match_results&lt;typename basic_string&lt;charT, ST, SA&gt;::const_iterator, Allocator&gt;&amp; m, 
+                 const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e, 
+                 match_flag_type flags = match_default);
+template &lt;class charT, class traits, class Allocator2&gt;
+bool regex_match(const charT* str,
+                 const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e,
+                 match_flag_type flags = match_default);
+template &lt;class ST, class SA, class charT, class traits, class Allocator2&gt;
+bool regex_match(const basic_string&lt;charT, ST, SA&gt;&amp; s,
+                 const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e,
+                 match_flag_type flags = match_default);
+
+template &lt;class RandomAccessIterator, class Allocator, class charT,
+          class traits, class Allocator2&gt;
+bool regex_search(RandomAccessIterator first, RandomAccessIterator last,
+                  match_results&lt;RandomAccessIterator, Allocator&gt;&amp; m,
+                  const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e,
+                  match_flag_type flags = match_default);
+template &lt;class charT, class Allocator, class traits, class Allocator2&gt;
+bool regex_search(const charT* str, match_results&lt;const charT*, Allocator&gt;&amp; m,
+                  const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e,
+                  match_flag_type flags = match_default);
+template &lt;class ST, class SA, class Allocator, class charT,
+          class traits, class Allocator2&gt;
+bool regex_search(const basic_string&lt;charT, ST, SA&gt;&amp; s,
+                  match_results&lt;typename basic_string&lt;charT, ST, SA&gt;::const_iterator, Allocator&gt;&amp; m,
+                  const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e,
+                  match_flag_type flags = match_default);
+template &lt;class RandomAccessIterator, class Allocator, class charT,
+          class traits&gt;
+bool regex_search(RandomAccessIterator first, RandomAccessIterator last,
+                  const reg_expression&lt;charT, traits, Allocator&gt;&amp; e,
+                  match_flag_type flags = match_default);
+template &lt;class charT, class Allocator, class traits&gt;
+bool regex_search(const charT* str
+                  const reg_expression&lt;charT, traits, Allocator&gt;&amp; e,
+                  match_flag_type flags = match_default);
+template &lt;class ST, class SA, class Allocator, class charT,
+          class traits&gt;
+bool regex_search(const basic_string&lt;charT, ST, SA&gt;&amp; s,
+                  const reg_expression&lt;charT, traits, Allocator&gt;&amp; e,
+                  match_flag_type flags = match_default);</PRE>
+<P>The algorithms <CODE>regex_match</CODE> and <CODE>regex_search </CODE>both support a feature not commonly seen in regular expression libraries: a partial match. When the flag <CODE>std::re::match_partial </CODE>is set in the flags passed to the algorithm, then a result of <CODE>true</CODE> may be returned if one or more characters were matched, and the state machine then ran out of text to match against while there were still states to be matched. Partial matches answer the question: "could a match have been found if more input was provided?". They have proven to be extremely useful in two situations: for data input validation, where validation occurs a character at a time as the input is entered, and for long searches through texts that are too long to be loaded into memory and therefore have to be buffered (in this case the partial match allows the code to determine whether a match could occur at an overlap between two buffers)[23].</P>
+<P><A NAME="replace_discussion"></A>Many tools such as perl or sed offer algorithms for performing search and replace operations on a string. These take an input text, find all occurrences of a regular expression within it, and replace whatever matched with the result of merging a format string with what matched. The equivalent in the Boost library is the algorithm <CODE>regex_merge</CODE>; there are two main forms, one sends the new text string to an output iterator, while the other returns a <CODE>basic_string&lt;&gt; </CODE>object. In this proposal this algorithm has been renamed <CODE>regex_replace </CODE>in order to make it a little more memorable:</P>
+<PRE>template &lt;class OutputIterator, class RandomAccessIterator, class traits,
+          class Allocator, class charT&gt;
+OutputIterator regex_replace(OutputIterator out,
+                           RandomAccessIterator first,
+                           RandomAccessIterator last,
+                           const reg_expression&lt;charT, traits, Allocator&gt;&amp; e,
+                           const basic_string&lt;charT&gt;&amp; fmt,
+                           unsigned int flags = match_default);
+template &lt;class traits, class Allocator, class charT&gt;
+basic_string&lt;charT&gt; regex_replace(const basic_string&lt;charT&gt;&amp; s,
+                            const reg_expression&lt;charT, traits, Allocator&gt;&amp; e,
+                            const basic_string&lt;charT&gt;&amp; fmt,
+                            unsigned int flags = match_default);</PRE>
+<H3><A NAME="regex_iterator_discussion"></A>Repeated regular expression searches</H3>
+<P>It is common practice to want to find all of the (non-overlapping) occurrences of a regular expression within a text. Boost uses the algorithm <CODE>regex_grep</CODE> for this; this algorithm searches through the text, and for each match found calls a unary predicate with the results of the match. However there is a sense in which this is the wrong interface; basically it provides a "push" interface, where as the standard library normally uses "pull" interfaces in the form of iterators. Of course, one could just call <CODE>regex_search </CODE>repeatedly, however these algorithms often have to do some housekeeping tasks (memory allocation is a typical example) each time they are called. By providing a separate interface for finding all the occurrences of an expression, the implementation can ensure that these housekeeping tasks occur only once, rather than once for each occurrence of the expression. This proposal does not provide the <CODE>regex_grep </CODE>interface that Boost does, instead it provides a <CODE>regex_iterator</CODE>, whose value_type is an instance of the <CODE>match_results </CODE>class template.</P>
+<PRE>template &lt;class RandomAccessIterator, 
+          class charT = iterator_traits&lt;RandomAccessIterator&gt;::value_type,
+          class traits = regex_traits&lt;charT&gt;,
+          class Allocator = allocator&lt;charT&gt; &gt;
+class regex_iterator;</PRE>
+<P><A NAME="split_discussion"></A>Another common task is a perl-like split operation; to find all the non-overlapping occurrences of an expression within a text, and for each occurrence spit out one or more new strings (usually one new string for each marked sub-expression). In Boost regex this is accomplished using the <CODE>regex_split</CODE> algorithm, however like <CODE>regex_grep</CODE> this algorithm has a "push" rather than a "pull" interface. In addition the semantics of the perl split function (on which the Boost algorithm is modelled) are rather strange; giving different behaviour depending upon whether there are any marked sub-expressions or not. For these reasons, in this proposal an iterator-based interface (<CODE>regex_token_iterator</CODE>) is provided that actually has a much more flexible interface than the Boost <CODE>regex_split </CODE>function. The iterator can be constructed with an integer argument indicating the index of the sub-expression to enumerate for each match, in which case the iterator will enumerate one string for each match found. Alternatively the iterator can be constructed from an array literal, containing a list of the sub-expressions to iterate, in which case there will be several strings enumerated for each match found. </P>
+<PRE>template &lt;class RandomAccessIterator, 
+          class charT = iterator_traits&lt;RandomAccessIterator&gt;::value_type,
+          class traits = regex_traits&lt;charT&gt;,
+          class Allocator = allocator&lt;charT&gt; &gt;
+class regex_token_iterator;</PRE>
+<P>Typical usage would be for example:</P>
+<PRE>extern std::string   text;
+extern std::regex    re;
+//
+// This iterator will enumerate one string for each occurrence of re in text,
+// each string will be equivalent to what perl calls $` (i.e. field splitting):
+std::regex_token_iterator&lt;std::string::const_iterator&gt; it1(text.begin(), text.end(), re, -1);
+//
+// This iterator will enumerate one string for each occurrence of re in text,
+// each string will be equivalent to what perl calls $&amp; (the whole match):
+std::regex_token_iterator&lt;std::string::const_iterator&gt; it1(text.begin(), text.end(), re, 0);
+//
+// This iterator will enumerate three string's for each occurrence of re in text,
+// these will be what perl calls $1, $2 and $5 :
+std::regex_token_iterator&lt;std::string::const_iterator&gt; it1(text.begin(), text.end(), re, {1,2,5});</PRE>
+<H3><A NAME="iterator_discussion"></A>Iterator requirements</H3>
+<P>While all the algorithms discussed so far are iterator-based, no mention has been made so far of iterator requirements. The following options are available along with their pro's and con's:</P>
+<B><P>InputIterator</B>: this is discounted as an option, input iterators can not indicate what matched (as many of the algorithms must do), nor can they be used to match back-references.</P>
+<B><P>ForwardIterator</B>: this is a real option, forward iterators can be used to indicate what matched. In addition there is in practice a real world use case: multibyte character sequences can be converted to a single wide character "on the fly" using a forward iterator adapter. Note that multi-byte sequences can not usually be represented by a bi-directional or random access iterator. There are downsides as well: requiring forward iterator support places a burden on the implementation, in particular matching boundary conditions (such as ^ or $) require that the implementation remembers the last character visited as well as the current position. In addition perl-style backtracking algorithms become much less efficient for single character repeats (a very common construct), since every backtrack-position has to be saved, rather than computed by decrementing an iterator. There are also some perl features (zero width look-behind assertions) that can not be matched using forward iterators, however these features are not required by the ECMAScript standard. It is unclear just how much of a burden forward iterator support would be in practice; some experimental evidence would be of help here.</P>
+<B><P>BidirectionalIterator</B>: This requirement is much easier to implement, but it offers no real benefits.</P>
+<B><P>RandomAccessIterator</B>: As with bidirectional iterators, this requirement is easy to implement, it also offers the potential for significant performance gains: for POSIX style matches, computing "leftmost longest" matches is much more efficient, while for perl style matches, skipping through greedy ".*" repeats are much more efficient, and for some expressions Boyer-Moore like search heuristics are possible.</P>
+<P>Of the two template libraries discussed here, Boost requires bidirectional iterators, while GRETA doesn't document it's requirements (but appears to also require bidirectional iterators). In practice there are only two requirements worth considering - random access iterators (on grounds of efficiency), or forward iterators (on grounds of user friendliness). Experience with Boost suggests that the bidirectional iterator requirement option offers only the disadvantages of random access iterators, but without their potential performance gains. In addition, practice suggests that there are no containers that are likely to be used with character strings that have a bidirectional interface, rather than a random access one. This proposal currently documents that all iterators must be random access, this can be tightened to a requirement to support forward iterators if practice shows that this is indeed possible (in the meantime implementations should be encouraged to support the widest range of iterator types possible).</P>
+<P>&nbsp;</P>
+<P><HR></P>
+<H1 ALIGN="CENTER"><A NAME="proposed_text"></A>Proposed Text</H1>
+<P><HR></P>
+<H2>Forward</H2>
+<H3>FW.1 Normative References</H3>
+<FONT COLOR="#ff0000"><P>TODO</P>
+</FONT><H3>FW.2 Definitions</H3>
+<FONT COLOR="#ff0000"><P>TODO</P>
+</FONT><H2>Regular Expressions</H2>
+<P>This clause describes components used by C++ programs to describe regular expressions, and perform search and replace operations on character strings using those expressions.</P>
+<H6 ALIGN="CENTER">Table RE1 - Regular Expression Summary</H6>
+<P><div align="center"></P>
+<P ALIGN="CENTER"><CENTER><TABLE BORDER CELLSPACING=1 CELLPADDING=7 >
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>Clause</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>Header</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P><A HREF="#regex_traits">Regular Expression Traits</A></TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>&lt;regex&gt;</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P><A HREF="#synopsis">Header &lt;regex&gt; synopsis</A></TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>&lt;regex&gt;</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P><A HREF="#supporting">Supporting Types</A></TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>&lt;regex&gt;</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P><A HREF="#basic_regex">Template class basic_regex</A></TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>&lt;regex&gt;</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P><A HREF="#sub_match">Template class sub_match</A></TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>&lt;regex&gt;</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P><A HREF="#match_results">Template class match_results</A></TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>&lt;regex&gt;</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P><A HREF="#algorithms">Regular expression algorithms</A></TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>&lt;regex&gt;</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P><A HREF="#iterators">Regular expression Iterators</A></TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>&lt;regex&gt;</TD>
+</TR>
+</TABLE>
+</CENTER></P>
+
+<P ALIGN="CENTER"></div></P>
+<H3><A NAME="regex_traits"></A>RE.1 Regular Expression Traits</H3>
+<H4><A NAME="Requirements"></A>RE.1.1 Regular Expression Traits Requirements</H4>
+<FONT COLOR="#ff0000"><P>TODO</P>
+</FONT><H4>RE.1.2 Regular expression Traits Classes</H4>
+<FONT COLOR="#ff0000"><P>TODO</P>
+</FONT><H3><A NAME="Unary_type_traits"></A>RE.2 Regular Expressions</H3>
+<P>The header &lt;regex&gt; defines a basic regular expression class template and its traits that can handle all char-like (lib.strings) template arguments.</P>
+<P>The header &lt;regex&gt; defines a container-like class template that holds the result of a regular expression match.</P>
+<P>The header &lt;regex&gt; defines a series of algorithms that allow an iterator sequence to be operated upon by a regular expression.</P>
+<P>The header &lt;regex&gt; defines two specific template classes, <CODE>regex</CODE> and <CODE>wregex</CODE> and their special traits. </P>
+<P>The header &lt;regex&gt; also defines two iterator types for enumerating regular expression matches.</P>
+<H4><A NAME="synopsis"></A>Header &lt;regex&gt; synopsis</H4>
+<PRE>namespace std{
+
+namespace re{
+
+typedef bitmask_type syntax_option_type;
+typedef bitmask_type match_flag_type;
+typedef implementation defined syntax_type;
+
+} // namespace re
+
+class bad_expression;
+
+template &lt;class charT&gt;
+struct regex_traits;
+
+template &lt;class charT,
+          class traits = regex_traits&lt;charT&gt;,
+          class Allocator = allocator&lt;charT&gt; &gt;
+class basic_regex;
+
+template &lt;class charT, class traits, class Allocator&gt;
+bool operator == (const basic_regex&lt;charT, traits, Allocator&gt;&amp; lhs,
+                  const basic_regex&lt;charT, traits, Allocator&gt;&amp; rhs);
+template &lt;class charT, class traits, class Allocator&gt;
+bool operator != (const basic_regex&lt;charT, traits, Allocator&gt;&amp; lhs,
+                  const basic_regex&lt;charT, traits, Allocator&gt;&amp; rhs);
+template &lt;class charT, class traits, class Allocator&gt;
+bool operator &lt; (const basic_regex&lt;charT, traits, Allocator&gt;&amp; lhs,
+                 const basic_regex&lt;charT, traits, Allocator&gt;&amp; rhs);
+template &lt;class charT, class traits, class Allocator&gt;
+bool operator &lt;= (const basic_regex&lt;charT, traits, Allocator&gt;&amp; lhs,
+                  const basic_regex&lt;charT, traits, Allocator&gt;&amp; rhs);
+template &lt;class charT, class traits, class Allocator&gt;
+bool operator &gt;= (const basic_regex&lt;charT, traits, Allocator&gt;&amp; lhs,
+                  const basic_regex&lt;charT, traits, Allocator&gt;&amp; rhs);
+template &lt;class charT, class traits, class Allocator&gt;
+bool operator &gt; (const basic_regex&lt;charT, traits, Allocator&gt;&amp; lhs,
+                 const basic_regex&lt;charT, traits, Allocator&gt;&amp; rhs);
+
+template &lt;class charT, class io_traits, class re_traits, class Allocator&gt;
+basic_ostream&lt;charT, io_traits&gt;&amp;
+   operator &lt;&lt; (basic_ostream&lt;charT, io_traits&gt;&amp; os,
+                const basic_regex&lt;charT, re_traits, Allocator&gt;&amp; e);
+
+template &lt;class charT, class traits, class Allocator&gt;
+void swap(basic_regex&lt;charT, traits, Allocator&gt;&amp; e1,
+          basic_regex&lt;charT, traits, Allocator&gt;&amp; e2);
+
+typedef basic_regex&lt;char&gt; regex;
+typedef basic_regex&lt;wchar_t&gt; wregex;
+
+template &lt;class RandomAccessIterator&gt;
+class sub_match;
+
+template &lt;class RandomAccessIterator&gt;
+bool operator == (const sub_match&lt;RandomAccessIterator&gt;&amp; lhs,
+                  const sub_match&lt;RandomAccessIterator&gt;&amp; rhs);
+template &lt;class RandomAccessIterator&gt;
+bool operator != (const sub_match&lt;RandomAccessIterator&gt;&amp; lhs,
+                  const sub_match&lt;RandomAccessIterator&gt;&amp; rhs);
+template &lt;class RandomAccessIterator&gt;
+bool operator &lt; (const sub_match&lt;RandomAccessIterator&gt;&amp; lhs,
+                 const sub_match&lt;RandomAccessIterator&gt;&amp; rhs);
+template &lt;class RandomAccessIterator&gt;
+bool operator &lt;= (const sub_match&lt;RandomAccessIterator&gt;&amp; lhs,
+                  const sub_match&lt;RandomAccessIterator&gt;&amp; rhs);
+template &lt;class RandomAccessIterator&gt;
+bool operator &gt;= (const sub_match&lt;RandomAccessIterator&gt;&amp; lhs,
+                  const sub_match&lt;RandomAccessIterator&gt;&amp; rhs);
+template &lt;class RandomAccessIterator&gt;
+bool operator &gt; (const sub_match&lt;RandomAccessIterator&gt;&amp; lhs,
+                 const sub_match&lt;RandomAccessIterator&gt;&amp; rhs);
+
+template &lt;class charT, class traits, class RandomAccessIterator&gt;
+basic_ostream&lt;charT, traits&gt;&amp;
+   operator &lt;&lt; (basic_ostream&lt;charT, traits&gt;&amp; os,
+                const sub_match&lt;RandomAccessIterator&gt;&amp; m);
+
+template &lt;class RandomAccessIterator,
+          class Allocator = allocator&lt;
+               typename iterator_traits&lt;RandomAccessIterator&gt;::value_type &gt; &gt;
+class match_results;
+
+template &lt;class RandomAccessIterator, class Allocator&gt;
+bool operator == (const match_results&lt;RandomAccessIterator, Allocator&gt;&amp; m1,
+                  const match_results&lt;RandomAccessIterator, Allocator&gt;&amp; m2);
+template &lt;class RandomAccessIterator, class Allocator&gt;
+bool operator != (const match_results&lt;RandomAccessIterator, Allocator&gt;&amp; m1,
+                  const match_results&lt;RandomAccessIterator, Allocator&gt;&amp; m2);
+
+template &lt;class charT, class traits, class RandomAccessIterator, class Allocator&gt;
+basic_ostream&lt;charT, traits&gt;&amp;
+   operator &lt;&lt; (basic_ostream&lt;charT, traits&gt;&amp; os,
+                const match_results&lt;RandomAccessIterator, Allocator&gt;&amp; m);
+
+template &lt;class RandomAccessIterator, class Allocator&gt;
+void swap(match_results&lt;RandomAccessIterator, Allocator&gt;&amp; m1,
+          match_results&lt;RandomAccessIterator, Allocator&gt;&amp; m2);
+
+typedef match_results&lt;const char*&gt; cmatch;
+typedef match_results&lt;const wchar_t*&gt; wcmatch;
+typedef match_results&lt;string::const_iterator&gt; smatch;
+typedef match_results&lt;wstring::const_iterator&gt; wsmatch;
+
+template &lt;class RandomAccessIterator, class Allocator, class charT,
+          class traits, class Allocator2&gt;
+bool regex_match(RandomAccessIterator first, RandomAccessIterator last,
+                 match_results&lt;RandomAccessIterator, Allocator&gt;&amp; m,
+                 const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e,
+                 match_flag_type flags = match_default);
+template &lt;class RandomAccessIterator, class charT, class traits, class Allocator2&gt;
+bool regex_match(RandomAccessIterator first, RandomAccessIterator last,
+                 const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e,
+                 match_flag_type flags = match_default);
+template &lt;class charT, class Allocator, class traits, class Allocator2&gt;
+bool regex_match(const charT* str, match_results&lt;const charT*, Allocator&gt;&amp; m,
+                 const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e,
+                 match_flag_type flags = match_default);
+template &lt;class ST, class SA, class Allocator, class charT,
+          class traits, class Allocator2&gt;
+bool regex_match(const basic_string&lt;charT, ST, SA&gt;&amp; s,
+                 match_results&lt;typename basic_string&lt;charT, ST, SA&gt;::const_iterator, Allocator&gt;&amp; m, 
+                 const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e, 
+                 match_flag_type flags = match_default);
+template &lt;class charT, class traits, class Allocator2&gt;
+bool regex_match(const charT* str,
+                 const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e,
+                 match_flag_type flags = match_default);
+template &lt;class ST, class SA, class charT, class traits, class Allocator2&gt;
+bool regex_match(const basic_string&lt;charT, ST, SA&gt;&amp; s,
+                 const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e,
+                 match_flag_type flags = match_default);
+
+template &lt;class RandomAccessIterator, class Allocator, class charT,
+          class traits, class Allocator2&gt;
+bool regex_search(RandomAccessIterator first, RandomAccessIterator last,
+                  match_results&lt;RandomAccessIterator, Allocator&gt;&amp; m,
+                  const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e,
+                  match_flag_type flags = match_default);
+template &lt;class charT, class Allocator, class traits, class Allocator2&gt;
+bool regex_search(const charT* str, match_results&lt;const charT*, Allocator&gt;&amp; m,
+                  const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e,
+                  match_flag_type flags = match_default);
+template &lt;class RandomAccessIterator, class Allocator, class charT,
+          class traits&gt;
+bool regex_search(RandomAccessIterator first, RandomAccessIterator last,
+                  const reg_expression&lt;charT, traits, Allocator&gt;&amp; e,
+                  match_flag_type flags = match_default);
+template &lt;class charT, class Allocator, class traits&gt;
+bool regex_search(const charT* str
+                  const reg_expression&lt;charT, traits, Allocator&gt;&amp; e,
+                  match_flag_type flags = match_default);
+template &lt;class ST, class SA, class Allocator, class charT,
+          class traits&gt;
+bool regex_search(const basic_string&lt;charT, ST, SA&gt;&amp; s,
+                  const reg_expression&lt;charT, traits, Allocator&gt;&amp; e,
+                  match_flag_type flags = match_default);
+template &lt;class ST, class SA, class Allocator, class charT,
+          class traits, class Allocator2&gt;
+bool regex_search(const basic_string&lt;charT, ST, SA&gt;&amp; s,
+                  match_results&lt;typename basic_string&lt;charT, ST, SA&gt;::const_iterator, Allocator&gt;&amp; m,
+                  const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e,
+                  match_flag_type flags = match_default);
+
+template &lt;class OutputIterator, class RandomAccessIterator, class traits,
+          class Allocator, class charT&gt;
+OutputIterator regex_replace(OutputIterator out,
+                           RandomAccessIterator first,
+                           RandomAccessIterator last,
+                           const reg_expression&lt;charT, traits, Allocator&gt;&amp; e,
+                           const basic_string&lt;charT&gt;&amp; fmt,
+                           match_flag_type flags = match_default);
+template &lt;class traits, class Allocator, class charT&gt;
+basic_string&lt;charT&gt; regex_replace(const basic_string&lt;charT&gt;&amp; s,
+                            const reg_expression&lt;charT, traits, Allocator&gt;&amp; e,
+                            const basic_string&lt;charT&gt;&amp; fmt,
+                            match_flag_type flags = match_default);
+
+// regular expression iterators:
+template &lt;class RandomAccessIterator, 
+          class charT = iterator_traits&lt;RandomAccessIterator&gt;::value_type,
+          class traits = regex_traits&lt;charT&gt;,
+          class Allocator = allocator&lt;charT&gt; &gt;
+class regex_iterator;
+template &lt;class RandomAccessIterator, 
+          class charT = iterator_traits&lt;RandomAccessIterator&gt;::value_type,
+          class traits = regex_traits&lt;charT&gt;,
+          class Allocator = allocator&lt;charT&gt; &gt;
+class regex_token_iterator;
+
+} // namespace std</PRE>
+<P>&nbsp;</P>
+<H3><A NAME="supporting"></A>RE.3 Supporting Types</H3>
+<H4>RE.3.1 Namespace std::re</H4>
+<P>The namespace <CODE>std::re</CODE> acts as a repository for the symbolic constants used by the regular expression library.</P>
+<P>The namespace <CODE>std::re</CODE> defines two types: <CODE>syntax_option_type </CODE>and <CODE>match_flag_type</CODE>, along with a series of constants of these types.</P>
+<H5>RE.3.1.1 Bitmask Type syntax_option_type</H5>
+<PRE>namespace std{ namespace re{
+
+typedef bitmask_type syntax_option_type;
+// these flags are required:
+static const syntax_option_type normal;
+static const syntax_option_type icase;
+static const syntax_option_type nosubs;
+static const syntax_option_type optimize;
+static const syntax_option_type ECMAScript = normal;
+static const syntax_option_type JavaScript = normal;
+static const syntax_option_type JScript = normal;
+// these flags are optional, if the functionality is supported
+// then the flags shall take these names.
+static const syntax_option_type basic;
+static const syntax_option_type extended;
+static const syntax_option_type emacs;
+static const syntax_option_type awk;
+static const syntax_option_type grep;
+static const syntax_option_type egrep;
+static const syntax_option_type sed;
+static const syntax_option_type perl;
+
+} // namespace re
+} // namespace std</PRE>
+<P>The type <CODE>syntax_option_type</CODE> is an implementation defined bitmask type (17.3.2.1.2).</P>
+<FONT COLOR="#ff0000"><P>TODO</FONT>: Document these values.</P>
+<H5>RE.3.1.2 Bitmask Type match_flag_type</H5>
+<PRE>namespace std{ namespace re{
+
+typedef bitmask_type match_flag_type;
+
+static const match_flag_type match_default;
+static const match_flag_type match_not_bol;
+static const match_flag_type match_not_eol;
+static const match_flag_type match_not_bow;
+static const match_flag_type match_not_eow;
+static const match_flag_type match_any;
+static const match_flag_type match_not_null;
+static const match_flag_type match_continuous;
+static const match_flag_type match_partial;
+static const match_flag_type format_default;
+static const match_flag_type format_sed;
+static const match_flag_type format_perl;
+static const match_flag_type format_no_copy;
+static const match_flag_type format_first_only;
+
+} // namespace re
+} // namespace std</PRE>
+<P>The type <CODE>match_flag_type</CODE> is an implementation defined bitmask type (17.3.2.1.2).</P>
+<FONT COLOR="#ff0000"><P>TODO</FONT>: Document these values.</P>
+<H3>RE.3.2 Class bad_expression</H3>
+<PRE>class bad_expression : public runtime_error
+{
+public:
+   explicit bad_expression(const string&amp; what_arg);
+};</PRE>
+<P>The class <CODE>bad_expression</CODE> defines the type of objects thrown as exceptions to report errors during the conversion from a string representing a regular expression to a finite state machine. </P>
+<PRE>bad_expression(const string&amp; what_arg<B>);</B> </PRE>
+<B><P>Effects:</B> Constructs an object of class <CODE>bad_expression</CODE>. </P>
+<B><P>Postcondition:</B> <CODE>strcmp(what(), what_arg.c_str()) == 0</CODE>. </P>
+<H4>RE.3.3 Template class regex_traits</H4>
+<FONT COLOR="#ff0000"><P>TODO</P>
+</FONT><H3><A NAME="basic_regex"></A>RE.4 Template class basic_regex</H3>
+<P>For a char-like type <CODE>charT</CODE>, the template class <CODE>basic_regex</CODE> describes objects that represent a finite state machine constructed from a sequence of <CODE>charT</CODE>'s which are interpreted as a regular expression. In the rest of this clause, <CODE>charT</CODE> denotes such a given char-like type. Storage for the regular expression is allocated and freed as necessary by the member functions of class <CODE>basic_regex</CODE>. </P>
+<P>The template class <CODE>basic_regex</CODE> conforms to the requirements of a Sequence, as specified in (lib.sequence.reqmts), except that only operations defined for <CODE>const</CODE>-qualified Sequences are supported.</P>
+<P>Objects of type <I>specialization of basic_regex</I> are responsible for converting the sequence of <CODE>charT</CODE> objects to an internal finite state machine representation. It is not specified what form this finite state machine takes, nor how it is accessed by algorithms that operate on regular expressions (implementations will typically declare some template functions as friends of <CODE>basic_regex</CODE> to achieve this).</P><DIR>
+<DIR>
+<DIR>
+<DIR>
+
+<FONT COLOR="#ff0000"><P>[- Author's note, what follows is preliminary and based on the Boost regex_traits design, this will almost certainly change - </P>
+</FONT><P>Objects of type <I>specialization of basic_regex</I> store within themselves a default-constructed instance of their <CODE>traits</CODE> template parameter, henceforth referred to as <I>traits_inst</I>. This <I>traits_inst </I>object is used to support localisation of the regular expression, no basic_regex object shall call any locale dependent C or C++ API, including the formatted string input functions, instead it shall call the appropriate traits member function to achieve the required effect.</P>
+<P>Before an object of type <I>specialization of basic_regex</I> calls any <CODE>traits</CODE> member function, it shall first construct an object of type <CODE>traits::sentry </CODE>from it; values returned from traits member functions may be cached between calls provided <CODE>traits::imbue </CODE>is not called.</P>
+<P>The transformation from a sequence of characters to a finite state machine is accomplished by first by transforming the sequence of characters to the sequence of tokens obtained by calling <CODE>traits_inst.syntax_type(c)</CODE> for each input character c. The regular expression grammar is then applied to the sequence of tokens in order to construct the finite state machine (this is to allow the regular expression syntax to be localised to a specific character set; for example to use Far Eastern ideographs, rather than Latin characters). </P>
+<P>Where the regular expression grammar requires the conversion of a sequence of characters to an integral value, this is accomplished by calling <CODE>traits::toi</CODE>.</P>
+<P>Where the regular expression grammar requires the conversion of a sequence of characters representing a named collating element to the character(s) it represents, this is accomplished by calling <CODE>traits::</CODE><FONT FACE="Courier New" SIZE=2>lookup_collatename</FONT>.</P>
+<P>Where the regular expression grammar requires the conversion of a sequence of characters representing a named character class to an internal representation, this is accomplished by calling <CODE>traits::lookup_classname</CODE>. The results from subsequent calls to this function can be bitwise OR'ed together and subsequently passed to <CODE>traist::is_class</CODE>.</P>
+<P>During matching of a regular expression finite state machine against a sequence of characters, two characters <I>c</I> and <I>d </I>are compared using <CODE>traits_inst.translate(c, getflags() &amp; re::icase) == traits_inst.translate(d, getflags() &amp; re::icase)</CODE>.</P>
+<P>During matching of a regular expression finite state machine against a sequence of characters, comparison of collating elements is conducted by first converting each collating element to a sort key using <CODE>traits::transform</CODE>, and then comparing the sort keys. </P>
+<P>During matching of a regular expression finite state machine against a sequence of characters, testing whether a collating element is a member of a primary equivalence class is conducted by first converting the collating element and the equivalence class to a sort keys using <CODE>traits::transform_primary</CODE>, and then comparing the sort keys for equality.</P>
+<FONT COLOR="#ff0000"><P>- end author's note ]</P></DIR>
+</DIR>
+</DIR>
+</DIR>
+
+</FONT><P>The functions described in this clause can report errors by throwing exceptions of type <CODE>bad_expression</CODE>.</P>
+<PRE>namespace std{
+
+template &lt;class charT,
+          class traits = regex_traits&lt;charT&gt;,
+          class Allocator = allocator&lt;charT&gt; &gt;
+class basic_regex
+{
+public:
+   // types:
+   typedef          charT                           value_type;
+   typedef          implementation defined          const_iterator;
+   typedef          const_iterator                  iterator;
+   typedef typename Allocator::reference            reference;
+   typedef typename Allocator::const_reference      const_reference;
+   typedef typename Allocator::difference_type      difference_type;
+   typedef typename Allocator::size_type            size_type;
+   typedef          Allocator                       allocator_type;
+   typedef          re::syntax_option_type          flag_type;
+   typedef typename traits::locale_type             locale_type;
+
+   // construct/copy/destroy:
+   explicit basic_regex(const Allocator&amp; a = Allocator());
+   explicit basic_regex(const charT* p, flag_type f = re::normal,
+                        const Allocator&amp; a = Allocator());
+   basic_regex(const charT* p1, const charT* p2, flag_type f = re::normal,
+               const Allocator&amp; a = Allocator());
+   basic_regex(const charT* p, size_type len, flag_type f,
+               const Allocator&amp; a = Allocator());
+   basic_regex(const basic_regex&amp;);
+   template &lt;class ST, class SA&gt;
+   explicit basic_regex(const basic_string&lt;charT, ST, SA&gt;&amp; p,
+                        flag_type f = re::normal,
+                        const Allocator&amp; a = Allocator());
+   template &lt;class InputIterator&gt;
+   basic_regex(InputIterator first, inputIterator last,
+               flag_type f = re::normal,
+               const Allocator&amp; a = Allocator());
+
+   ~basic_regex();
+   basic_regex&amp; operator=(const basic_regex&amp;);
+   basic_regex&amp; operator=(const charT* ptr);
+   template &lt;class ST, class SA&gt;
+   basic_regex&amp; operator=(const basic_string&lt;charT, ST, SA&gt;&amp; p);
+
+   // iterators:
+   const_iterator begin() const;
+   const_iterator end() const;
+   // capacity:
+   size_type size() const;
+   size_type max_size() const;
+   bool empty() const;
+   unsigned mark_count() const;
+
+   //
+   // modifiers:
+   basic_regex&amp; assign(const basic_regex&amp; that);
+   basic_regex&amp; assign(const charT* ptr, flag_type f = re::normal);
+   basic_regex&amp; assign(const charT* first, const charT* last,
+                       flag_type f = re::normal);
+   template &lt;class string_traits, class A&gt;
+   basic_regex&amp; assign(const basic_string&lt;charT, string_traits, A&gt;&amp; s,
+                       flag_type f = re::normal);
+   template &lt;class InputIterator&gt;
+   basic_regex&amp; assign(InputIterator first, InputIterator last,
+                       flag_type f = re::normal);
+
+   // const operations:
+   Allocator get_allocator() const;
+   flag_type getflags() const;
+   basic_string&lt;charT&gt; str() const;
+   int compare(basic_regex&amp;) const;
+   // locale:
+   locale_type imbue(locale_type loc);
+   locale_type getloc() const;
+   // swap
+   void swap(basic_regex&amp;) throw();
+};
+
+} // namespace std</PRE>
+<H4>RE.4.1 basic_regex constructors</H4>
+<P>In all <CODE>basic_regex</CODE> constructors, a copy of the <CODE>Allocator</CODE> argument is used for any memory allocation performed by the constructor or member functions during the lifetime of the object. </P>
+<PRE>basic_regex(const Allocator&amp; a = Allocator());</PRE>
+<B><P>Effects:</B> Constructs an object of class <CODE>basic_regex</CODE>. The postconditions of this function are indicated in Table RE3:</P>
+<I><H6 ALIGN="CENTER">Table RE3--</I>basic_regex(const Allocator&amp;) <I>effects</H6>
+<P><div align="center"></P></I>
+<P ALIGN="CENTER"><CENTER><TABLE BORDER CELLSPACING=1 CELLPADDING=7 >
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P><B>Element</B></TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<B><P>Value</B></TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>empty()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>true</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>size()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>0</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>str()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>basic_string&lt;charT&gt;()</TD>
+</TR>
+</TABLE>
+</CENTER></P>
+
+<P ALIGN="CENTER"></div></P>
+<PRE>basic_regex(const charT* p, flag_type f = re::normal, const Allocator&amp; a = Allocator());</PRE>
+<B><P>Requires:</B> <I>p</I> shall not be a null pointer.</P>
+<B><P>Throws: </B><CODE>bad_expression</CODE> if <I>p</I> is not a valid regular expression.</P>
+<B><P>Effects:</B> Constructs an object of class <CODE>basic_regex</CODE>; the object's internal finite state machine is constructed from the regular expression contained in the null-terminated string <I>p</I>, and interpreted according to the flags specified in <I>f</I>. The postconditions of this function are indicated in Table RE4:</P>
+<I><H6 ALIGN="CENTER">Table RE4--</I>basic_regex(const charT* p, flag_type f, const Allocator&amp;) <I>effects</H6>
+<P><div align="center"></P></I>
+<P ALIGN="CENTER"><CENTER><TABLE BORDER CELLSPACING=1 CELLPADDING=7 >
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P><B>Element</B></TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<B><P>Value</B></TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>empty()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>false</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>size()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>char_traits&lt;charT&gt;::length(p)</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>str()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>basic_string&lt;charT&gt;(p)</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>getflags()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>f</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>mark_count()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>The number of marked sub-expressions within the expression.</TD>
+</TR>
+</TABLE>
+</CENTER></P>
+
+<P ALIGN="CENTER"></div></P>
+<PRE>basic_regex(const charT* p1, const charT* p2, flag_type f = re::normal, const Allocator&amp; a = Allocator());</PRE>
+<B><P>Requires:</B> <I>p1 </I>and<I> p2</I> are not null pointers, <CODE>p1 &lt; p2</CODE>.</P>
+<B><P>Throws: </B><CODE>bad_expression</CODE> if [p1,p2) is not a valid regular expression.</P>
+<B><P>Effects:</B> Constructs an object of class <CODE>basic_regex</CODE>; the object's internal finite state machine is constructed from the regular expression contained in the sequence of characters [p1,p2), and interpreted according the flags specified in <I>f</I>. The postconditions of this function are indicated in Table RE5:</P>
+<I><H6 ALIGN="CENTER">Table RE5--</I>basic_regex(const charT* p1, const charT* p2, flag_type f, const Allocator&amp;) <I>effects</H6>
+<P><div align="center"></P></I>
+<P ALIGN="CENTER"><CENTER><TABLE BORDER CELLSPACING=1 CELLPADDING=7 >
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P><B>Element</B></TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<B><P>Value</B></TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>empty()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>false</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>size()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>std::distance(p1,p2)</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>str()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>basic_string&lt;charT&gt;(p1,p2)</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>getflags()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>f</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>mark_count()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>The number of marked sub-expressions within the expression.</TD>
+</TR>
+</TABLE>
+</CENTER></P>
+
+<P ALIGN="CENTER"></div></P>
+<PRE>basic_regex(const charT* p, size_type len, flag_type f, const Allocator&amp; a = Allocator());</PRE>
+<B><P>Requires:</B> <I>p</I> shall not be a null pointer, <CODE>len &lt; max_size()</CODE>.</P>
+<B><P>Throws: </B><CODE>bad_expression</CODE> if <I>p</I> is not a valid regular expression.</P>
+<B><P>Effects:</B> Constructs an object of class <CODE>basic_regex</CODE>; the object's internal finite state machine is constructed from the regular expression contained in the sequence of characters [p, p+len), and interpreted according the flags specified in <I>f</I>. The postconditions of this function are indicated in Table RE6:</P>
+<I><H6 ALIGN="CENTER">Table RE6--</I>basic_regex(const charT* p1, size_type len, flag_type f, const Allocator&amp;) <I>effects</H6>
+<P><div align="center"></P></I>
+<P ALIGN="CENTER"><CENTER><TABLE BORDER CELLSPACING=1 CELLPADDING=7 >
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P><B>Element</B></TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<B><P>Value</B></TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>empty()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>false</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>size()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>len</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>str()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>basic_string&lt;charT&gt;(p, len)</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>getflags()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>f</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>mark_count()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>The number of marked sub-expressions within the expression.</TD>
+</TR>
+</TABLE>
+</CENTER></P>
+
+<P ALIGN="CENTER"></div></P>
+<PRE>basic_regex(const basic_regex&amp; e);</PRE>
+<B><P>Effects:</B> Constructs an object of class <CODE>basic_regex</CODE> as a copy of the object <I>e</I>. The postconditions of this function are indicated in Table RE7:</P>
+<I><H6 ALIGN="CENTER">Table RE7--</I>basic_regex(const basic_regex&amp; e)<I> effects</H6>
+<P><div align="center"></P></I>
+<P ALIGN="CENTER"><CENTER><TABLE BORDER CELLSPACING=1 CELLPADDING=7 >
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P><B>Element</B></TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<B><P>Value</B></TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>empty()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>e.empty()</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>size()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>e.size()</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>str()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>e.str()</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>getflags()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>e.getflags()</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>mark_count()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>e.mark_count()</TD>
+</TR>
+</TABLE>
+</CENTER></P>
+
+<P ALIGN="CENTER"></div></P>
+<PRE>template &lt;class ST, class SA&gt;
+basic_regex(const basic_string&lt;charT, ST, SA&gt;&amp; s,
+            flag_type f = re::normal, const Allocator&amp; a = Allocator());</PRE>
+<B><P>Throws: </B><CODE>bad_expression</CODE> if <I>s</I> is not a valid regular expression.</P>
+<B><P>Effects:</B> Constructs an object of class <CODE>basic_regex</CODE>; the object's internal finite state machine is constructed from the regular expression contained in the string <I>s</I>, and interpreted according to the flags specified in <I>f</I>. The postconditions of this function are indicated in Table RE8:</P>
+<I><H6 ALIGN="CENTER">Table RE8--</I>basic_regex(const basic_regex&amp; e) <I>effects</H6>
+<P><div align="center"></P></I>
+<P ALIGN="CENTER"><CENTER><TABLE BORDER CELLSPACING=1 CELLPADDING=7 >
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P><B>Element</B></TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<B><P>Value</B></TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>empty()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>false</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>size()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>s.size()</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>str()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>s</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>getflags()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>f</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>mark_count()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>The number of marked sub-expressions within the expression.</TD>
+</TR>
+</TABLE>
+</CENTER></P>
+
+<P ALIGN="CENTER"></div></P>
+<PRE>template &lt;class ForwardIterator&gt;
+basic_regex(ForwardIterator first, ForwardIterator last,
+            flag_type f = re::normal, const Allocator&amp; a = Allocator());</PRE>
+<B><P>Throws: </B><CODE>bad_expression</CODE> if the sequence <I>[first, last)</I> is not a valid regular expression.</P>
+<B><P>Effects:</B> Constructs an object of class <CODE>basic_regex</CODE>; the object's internal finite state machine is constructed from the regular expression contained in the sequence of characters [first, last), and interpreted according to the flags specified in <I>f</I>. The postconditions of this function are indicated in Table RE9:</P>
+<I><H6 ALIGN="CENTER">Table RE9--</I>basic_regex(ForwardIterator first, ForwardIterator last, flag_type f, const Allocator&amp;) <I>effects</H6>
+<P><div align="center"></P></I>
+<P ALIGN="CENTER"><CENTER><TABLE BORDER CELLSPACING=1 CELLPADDING=7 >
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P><B>Element</B></TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<B><P>Value</B></TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>empty()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>false</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>size()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>distance(first,last)</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>str()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>basic_string&lt;charT&gt;(first,last)</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>getflags()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>f</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>mark_count()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>The number of marked sub-expressions within the expression.</TD>
+</TR>
+</TABLE>
+</CENTER></P>
+
+<P ALIGN="CENTER"></div></P>
+<PRE>basic_regex&amp; operator=(const basic_regex&amp; e);</PRE>
+<B><P>Effects:</B> Returns the result of <CODE>assign(e.str(), e.getflags())</CODE>.</P>
+<PRE>basic_regex&amp; operator=(const charT* ptr);</PRE>
+<B><P>Requires:</B> <I>p</I> shall not be a null pointer.</P>
+<B><P>Effects:</B> Returns the result of <CODE>assign(ptr)</CODE>.</P>
+<PRE>template &lt;class ST, class SA&gt;
+basic_regex&amp; operator=(const basic_string&lt;charT, ST, SA&gt;&amp; p);</PRE>
+<B><P>Effects:</B> Returns the result of <CODE>assign(p)</CODE>.</P>
+<H4>RE.4.2 basic_regex iterators</H4>
+<PRE>const_iterator begin() const;</PRE>
+<B><P>Effects:</B> Returns a starting iterator to a sequence of characters representing the regular expression.</P>
+<PRE>const_iterator end() const;</PRE>
+<B><P>Effects:</B> Returns termination iterator to a sequence of characters representing the regular expression.</P>
+<H4>RE.4.3 basic_regex capacity</H4>
+<PRE>size_type size() const;</PRE>
+<B><P>Effects:</B> Returns the length of the sequence of characters representing the regular expression.</P>
+<PRE>size_type max_size() const;</PRE>
+<B><P>Effects:</B> Returns the maximum length of the sequence of characters representing the regular expression.</P>
+<PRE>bool empty() const;</PRE>
+<B><P>Effects:</B> Returns <B>true</B> if the object does not contain a valid regular expression, otherwise <B>false</B>.</P>
+<PRE>unsigned mark_count() const;</PRE>
+<B><P>Effects:</B> Returns the number of marked sub-expressions within the regular expresion.</P>
+<H4>RE.4.4 basic_regex assign</H4>
+<PRE>basic_regex&amp; assign(const basic_regex&amp; that);</PRE>
+<B><P>Effects:</B> Returns <CODE>assign(that.str(), that.getflags())</CODE>.</P>
+<PRE>basic_regex&amp; assign(const charT* ptr, flag_type f = re::normal);</PRE>
+<B><P>Effects:</B> Returns <CODE>assign(string_type(ptr), f)</CODE>.</P>
+<PRE>basic_regex&amp; assign(const charT* first, const charT* last,
+                    flag_type f = re::normal);</PRE>
+<B><P>Effects:</B> Returns <CODE>assign(string_type(first, last), f)</CODE>.</P>
+<PRE>template &lt;class string_traits, class A&gt;
+basic_regex&amp; assign(const basic_string&lt;charT, string_traits, A&gt;&amp; s,
+                    flag_type f = re::normal);</PRE>
+<B><P>Throws: </B><CODE>bad_expression</CODE> if <I>s</I> is not a valid regular expression.</P>
+<B><P>Returns:</B> <CODE>*this</CODE>.</P>
+<B><P>Effects:</B> Assigns the regular expression contained in the string <I>s</I>, interpreted according the flags specified in <I>f</I>. The postconditions of this function are indicated in Table RE10:</P>
+<I><H6 ALIGN="CENTER">Table RE10--</I> basic_regex&amp; assign(const basic_string&lt;charT, string_traits, A&gt;&amp; s, flag_type f) <I>effects</H6>
+<P><div align="center"></P></I>
+<P ALIGN="CENTER"><CENTER><TABLE BORDER CELLSPACING=1 CELLPADDING=7 >
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P><B>Element</B></TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<B><P>Value</B></TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>empty()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>false</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>size()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>s.size()</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>str()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>s</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>getflags()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>f</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>mark_count()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>The number of marked sub-expressions within the expression.</TD>
+</TR>
+</TABLE>
+</CENTER></P>
+
+<P ALIGN="CENTER"></div></P>
+<PRE>template &lt;class InputIterator&gt;
+basic_regex&amp; assign(InputIterator first, InputIterator last,
+                    flag_type f = re::normal);</PRE>
+<B><P>Requires:</B> The type InputIterator corresponds to the Input Iterator requirements (24.1.1).</P>
+<B><P>Effects:</B> Returns <CODE>assign(string_type(first, last), f)</CODE>.</P>
+<H4>RE.4.5 basic_regex constant operations</H4>
+<PRE>Allocator get_allocator() const;</PRE>
+<B><P>Effects:</B> Returns a copy of the Allocator that was passed to the object's constructor.</P>
+<PRE>flag_type getflags() const;</PRE>
+<B><P>Effects:</B> Returns a copy of the regular expression syntax flags that were passed to the object's constructor, or the last call to <CODE>assign.</P>
+</CODE><PRE>basic_string&lt;charT&gt; str() const;</PRE>
+<B><P>Effects:</B> Returns a copy of the character sequence passed to the object's constructor, or the last call to <CODE>assign.</P>
+</CODE><PRE>int compare(basic_regex&amp; e)const;</PRE>
+<B><P>Effects:</B> If <CODE>getflags() == e.getflags()</CODE> then returns <CODE>str().compare(e.str())</CODE>, otherwise returns <CODE>getflags() - e.getflags()</CODE>.</P>
+<H4>RE.4.6 basic_regex locale</H4>
+<PRE>locale_type imbue(locale_type l);</PRE>
+<B><P>Effects:</B> Returns the result of <CODE>traits_inst.imbue(l)</CODE> where <CODE>traits_inst </CODE>is a (default initialised) instance of the template parameter <CODE>traits</CODE> stored within the object.</P>
+<PRE>locale_type getloc() const;</PRE>
+<B><P>Effects:</B> Returns the result of <CODE>traits_inst.getloc()</CODE> where <CODE>traits_inst </CODE>is a (default initialised) instance of the template parameter <CODE>traits</CODE> stored within the object.</P>
+<H4>RE.4.7 basic_regex swap</H4>
+<PRE>void swap(basic_regex&amp; e) throw();</PRE>
+<B><P>Effects:</B> Swaps the contents of the two regular expressions. </P>
+<B><P>Postcondition:</B> <CODE>*this</CODE> contains the characters that were in <I>e</I>, <I>e </I>contains the regular expression that was in <CODE>*this</CODE>. </P>
+<B><P>Complexity:</B> constant time. </P>
+<H4>RE.4.8 basic_regex non-member functions</H4>
+<H5>RE.4.8.1 basic_regex non-member comparison operators&nbsp;</H5>
+<PRE>template &lt;class charT, class traits, class Allocator&gt;
+bool operator == (const basic_regex&lt;charT, traits, Allocator&gt;&amp; lhs,
+                  const basic_regex&lt;charT, traits, Allocator&gt;&amp; rhs);</PRE>
+<B><P>Effects:</B> Returns <CODE>lhs.compare(rhs) == 0</CODE>.</P>
+<PRE>template &lt;class charT, class traits, class Allocator&gt;
+bool operator != (const basic_regex&lt;charT, traits, Allocator&gt;&amp; lhs,
+                  const basic_regex&lt;charT, traits, Allocator&gt;&amp; rhs);</PRE>
+<B><P>Effects:</B> Returns <CODE>lhs.compare(rhs) != 0</CODE>.</P>
+<PRE>template &lt;class charT, class traits, class Allocator&gt;
+bool operator &lt; (const basic_regex&lt;charT, traits, Allocator&gt;&amp; lhs,
+                 const basic_regex&lt;charT, traits, Allocator&gt;&amp; rhs);</PRE>
+<B><P>Effects:</B> Returns <CODE>lhs.compare(rhs) &lt; 0</CODE>.</P>
+<PRE>template &lt;class charT, class traits, class Allocator&gt;
+bool operator &lt;= (const basic_regex&lt;charT, traits, Allocator&gt;&amp; lhs,
+                  const basic_regex&lt;charT, traits, Allocator&gt;&amp; rhs);</PRE>
+<B><P>Effects:</B> Returns <CODE>lhs.compare(rhs) &lt;= 0</CODE>.</P>
+<PRE>template &lt;class charT, class traits, class Allocator&gt;
+bool operator &gt;= (const basic_regex&lt;charT, traits, Allocator&gt;&amp; lhs,
+                  const basic_regex&lt;charT, traits, Allocator&gt;&amp; rhs);</PRE>
+<B><P>Effects:</B> Returns <CODE>lhs.compare(rhs) &gt;= 0</CODE>.</P>
+<PRE>template &lt;class charT, class traits, class Allocator&gt;
+bool operator &gt; (const basic_regex&lt;charT, traits, Allocator&gt;&amp; lhs,
+                 const basic_regex&lt;charT, traits, Allocator&gt;&amp; rhs);</PRE>
+<B><P>Effects:</B> Returns <CODE>lhs.compare(rhs) &gt; 0</CODE>.</P>
+<H5>RE.4.8.2 basic_regex inserter.</H5>
+<PRE>template &lt;class charT, class io_traits, class re_traits, class Allocator&gt;
+basic_ostream&lt;charT, io_traits&gt;&amp;
+   operator &lt;&lt; (basic_ostream&lt;charT, io_traits&gt;&amp; os
+                const basic_regex&lt;charT, re_traits, Allocator&gt;&amp; e);</PRE>
+<B><P>Effects:</B> Returns (os &lt;&lt; e.str()).</P>
+<H5>RE.4.8.3 basic_regex non-member swap</H5>
+<PRE>template &lt;class charT, class traits, class Allocator&gt;
+void swap(basic_regex&lt;charT, traits, Allocator&gt;&amp; lhs,
+          basic_regex&lt;charT, traits, Allocator&gt;&amp; rhs);</PRE>
+<B><P>Effects:</B> calls <CODE>lhs.swap(rhs)</CODE>.</P>
+<H3><A NAME="sub_match"></A>RE.5 Template class sub_match</H3>
+<P>Template class sub_match denotes the sequence of characters matched by a particular marked sub-expression.</P>
+<PRE>template &lt;class RandomAccessIterator&gt;
+class sub_match : public std::pair&lt;RandomAccessIterator, RandomAccessIterator&gt;
+{
+public:
+   typedef typename iterator_traits&lt;RandomAccessIterator&gt;::value_type       value_type;
+   typedef typename iterator_traits&lt;RandomAccessIterator&gt;::difference_type  difference_type;
+   typedef          RandomAccessIterator                                    iterator;
+
+   bool matched;
+
+   difference_type length()const;
+   operator basic_string&lt;value_type&gt;()const;
+};</PRE>
+<H4>RE.5.1 sub_match members</H4>
+<FONT COLOR="#ff0000"><P>TODO: add documentation here</P>
+</FONT><H4>RE.5.2 sub_match non-member operators</H4>
+<PRE>template &lt;class RandomAccessIterator&gt;
+bool operator == (const sub_match&lt;RandomAccessIterator&gt;&amp;,
+                  const sub_match&lt;RandomAccessIterator&gt;&amp;);
+template &lt;class RandomAccessIterator&gt;
+bool operator != (const sub_match&lt;RandomAccessIterator&gt;&amp;,
+                  const sub_match&lt;RandomAccessIterator&gt;&amp;);
+template &lt;class RandomAccessIterator&gt;
+bool operator &lt; (const sub_match&lt;RandomAccessIterator&gt;&amp;,
+                 const sub_match&lt;RandomAccessIterator&gt;&amp;);
+template &lt;class RandomAccessIterator&gt;
+bool operator &lt;= (const sub_match&lt;RandomAccessIterator&gt;&amp;,
+                  const sub_match&lt;RandomAccessIterator&gt;&amp;);
+template &lt;class RandomAccessIterator&gt;
+bool operator &gt;= (const sub_match&lt;RandomAccessIterator&gt;&amp;,
+                  const sub_match&lt;RandomAccessIterator&gt;&amp;);
+template &lt;class RandomAccessIterator&gt;
+bool operator &gt; (const sub_match&lt;RandomAccessIterator&gt;&amp;,
+                 const sub_match&lt;RandomAccessIterator&gt;&amp;);
+template &lt;class charT, class traits, class RandomAccessIterator&gt;
+basic_ostream&lt;charT, traits&gt;&amp;
+   operator &lt;&lt; (basic_ostream&lt;charT, traits&gt;&amp;
+                const sub_match&lt;RandomAccessIterator&gt;&amp;);</PRE>
+<P>&nbsp;</P>
+<H3><A NAME="match_results"></A>RE.6 Template class match_results</H3>
+<P>Template class match_results denotes a collection of character sequences representing the result of a regular expression match. Storage for the collection is allocated and freed as necessary by the member functions of class match_results. </P>
+<P>The template class match_results conforms to the requirements of a Sequence, as specified in (lib.sequence.reqmts), except that only operations defined for const-qualified Sequences are supported.</P>
+<PRE>template &lt;class RandomAccessIterator,
+          class Allocator = allocator&lt;sub_match&lt;RandomAccessIterator&gt; &gt;
+class match_results
+{ 
+public: 
+   typedef          sub_match&lt;RandomAccessIterator&gt;                         value_type;
+   typedef          const value_type&amp;                                       const_reference;
+   typedef          const_reference                                         reference;
+   typedef          implementation defined                                  const_iterator;
+   typedef          const_iterator                                          iterator;
+   typedef typename iterator_traits&lt;RandomAccessIterator&gt;::difference_type  difference_type;
+   typedef typename Allocator::size_type                                    size_type;
+   typedef          Allocator                                               allocator_type;
+   typedef typename iterator_traits&lt;RandomAccessIterator&gt;::value_type       char_type;
+   typedef          basic_string&lt;char_type&gt;                                 string_type;
+
+   // construct/copy/destroy:
+   explicit match_results(const Allocator&amp; a = Allocator());
+   match_results(const match_results&amp; m);
+   match_results&amp; operator=(const match_results&amp; m); 
+   ~match_results();
+
+   // size:
+   size_type size() const;
+   size_type max_size() const;
+   bool empty() const;
+   // element access:
+   difference_type length(int sub = 0) const;
+   difference_type position(unsigned int sub = 0) const;
+   string_type str(int sub = 0) const;
+   const_reference operator[](int n) const;
+
+   const_reference prefix() const;
+
+   const_reference suffix() const;
+   const_iterator begin() const;
+   const_iterator end() const;
+   // format:
+   template &lt;class OutputIterator&gt;
+   OutputIterator format(OutputIterator out,
+                         const string_type&amp; fmt,
+                         match_flag_type flags = format_default) const;
+   string_type format(const string_type&amp; fmt,
+                      match_flag_type flags = format_default) const;
+
+   allocator_type get_allocator() const;
+   void swap(match_results&amp; that);
+};</PRE>
+<H4>RE.6.1 match_results constructors</H4>
+<P>In all <CODE>match_results</CODE> constructors, a copy of the Allocator argument is used for any memory allocation performed by the constructor or member functions during the lifetime of the object. </P>
+<PRE>match_results(const Allocator&amp; a = Allocator());</PRE>
+<B><P>Effects:</B> Constructs an object of class match_results. The postconditions of this function are indicated in Table RE12:</P>
+<I><H6 ALIGN="CENTER">Table RE12--</I>match_results(const Allocator&amp;)<I> effects</H6>
+<P><div align="center"></P></I>
+<P ALIGN="CENTER"><CENTER><TABLE BORDER CELLSPACING=1 CELLPADDING=7 >
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P><B>Element</B></TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<B><P>Value</B></TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>empty()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>true</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>size()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>0</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>str()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>basic_string&lt;charT&gt;()</TD>
+</TR>
+</TABLE>
+</CENTER></P>
+
+<P ALIGN="CENTER"></div></P>
+<PRE>match_results(const match_results&amp; m);</PRE>
+<B><P>Effects:</B> Constructs an object of class match_results, as a copy of m.</P>
+<PRE>match_results&amp; operator=(const match_results&amp; m);</PRE>
+<B><P>Effects:</B> Assigns m to *this. The postconditions of this function are indicated in Table RE13:</P>
+<H6 ALIGN="CENTER">Table RE13--match_results(const Allocator&amp;) effects</H6>
+<P><div align="center"></P>
+<P ALIGN="CENTER"><CENTER><TABLE BORDER CELLSPACING=1 CELLPADDING=7 >
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P><B>Element</B></TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<B><P>Value</B></TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>empty()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>m.empty().</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>size()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>m.size().</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>str(n)</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>m.str(n) for all integers n &lt; m.size().</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>prefix()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>m.prefix().</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>suffix()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>m.suffix().</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>(*this)[n]</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>m[n] for all integers n &lt; m.size().</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>length(n)</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>m.length(n) for all integers n &lt; m.size().</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>position(n)</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>m.position(n) for all integers n &lt; m.size().</TD>
+</TR>
+</TABLE>
+</CENTER></P>
+
+<P ALIGN="CENTER"></div></P>
+<H4>RE.6.2 match_results size</H4>
+<PRE>size_type size()const;</PRE>
+<B><P>Effects:</B> Returns the number of sub_match elements stored in *this.</P>
+<PRE>size_type max_size()const;</PRE>
+<B><P>Effects:</B> Returns the maximum number of sub_match elements that can be stored in *this.</P>
+<PRE>bool empty()const;</PRE>
+<B><P>Effects:</B> Returns <CODE>size() == 0</CODE>.</P>
+<H4>RE.6.3 match_results element access</H4>
+<PRE>difference_type length(int sub = 0)const;</PRE>
+<B><P>Effects:</B> Returns <CODE>(*this)[sub].length()</CODE>.</P>
+<PRE>difference_type position(unsigned int sub = 0)const;</PRE>
+<B><P>Effects:</B> Returns <CODE>std::distance(prefix().first, (*this)[sub].first).</P>
+</CODE><PRE>string_type str(int sub = 0)const;</PRE>
+<B><P>Effects:</B> Returns <CODE>string_type((*this)[sub]).</P>
+</CODE><PRE>const_reference operator[](int n) const;</PRE>
+<B><P>Effects:</B> Returns a reference to the <CODE>sub_match </CODE>object representing the character sequence that matched marked sub-expression <I>n</I>. If <CODE>n == 0 </CODE>then returns a reference to a <CODE>sub_match</CODE> object representing the character sequence that matched the whole regular expression.</P>
+<PRE>const_reference prefix()const;</PRE>
+<B><P>Effects:</B> Returns a reference to the <CODE>sub_match </CODE>object representing the character sequence from the start of the string being matched/searched, to the start of the match found.</P>
+<PRE>const_reference suffix()const;</PRE>
+<B><P>Effects:</B> Returns a reference to the <CODE>sub_match </CODE>object representing the character sequence from the end of the match found to the end of the string being matched/searched.</P>
+<PRE>const_iterator begin()const;</PRE>
+<B><P>Effects:</B> Returns a starting iterator that enumerates over all the marked sub-expression matches stored in *this.</P>
+<PRE>const_iterator end()const;</PRE>
+<B><P>Effects:</B> Returns a terminating iterator that enumerates over all the marked sub-expression matches stored in *this.</P>
+<H4>RE.6.4 match_results reformatting</H4>
+<PRE>template &lt;class OutputIterator&gt;
+OutputIterator format(OutputIterator out,
+                      const string_type&amp; fmt,
+                      match_flag_type flags = format_default);</PRE>
+<B><P>Requires: </B>The type OutputIterator conforms to the Output Iterator requirements (24.1.2).</P>
+<B><P>Effects:</B> Copies the character sequence <I>[fmt.begin(), fmt.end())</I> to OutputIterator <I>out</I>. For each format specifier or escape sequence in <I>fmt</I>, replace that sequence with either the character(s) it represents, or the sequence of characters within *this to which it refers. The bitmasks specified in <I>flags</I> determines what format specifiers or escape sequences are recognised.</P>
+<B><P>Returns:</B> <I>out</I>.</P>
+<PRE>string_type format(const string_type&amp; fmt,
+                   match_flag_type flags = format_default);</PRE>
+<B><P>Effects:</B> Returns a copy of the string <I>fmt</I>. For each format specifier or escape sequence in <I>fmt</I>, replace that sequence with either the character(s) it represents, or the sequence of characters within *this to which it refers. The bitmasks specified in <I>flags</I> determines what format specifiers or escape sequences are recognised.</P>
+<PRE>allocator_type get_allocator()const;</PRE>
+<B><P>Effects:</B> Returns a copy of the Allocator that was passed to the object's constructor.</P>
+<PRE>void swap(match_results&amp; that);</PRE>
+<B><P>Effects:</B> Swaps the contents of the two sequences. </P>
+<B><P>Postcondition:</B> <CODE>*this</CODE> contains the sequence of matched sub-expressions that were in <CODE>that</CODE>, <CODE>that</CODE> contains the sequence of matched sub-expressions that were in <CODE>*this</CODE>. </P>
+<B><P>Complexity:</B> constant time. </P>
+<H3><A NAME="algorithms"></A>RE.7 Regular expression algorithms</H3>
+<H4>RE.7.1 regex_match</H4>
+<PRE>template &lt;class RandomAccessIterator, class Allocator, class charT,
+          class traits, class Allocator2&gt;
+bool regex_match(RandomAccessIterator first, RandomAccessIterator last,
+                 match_results&lt;RandomAccessIterator, Allocator&gt;&amp; m,
+                 const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e,
+                 match_flag_type flags = match_default);</PRE>
+<B><P>Requires:</B> Type RandomAccessIterator meets the requirements of a Random Access Iterator (24.1.5).</P>
+<B><P>Effects: </B>Determines whether there is an exact match between the regular expression <I>e</I>, and all of the character sequence [first, last), parameter <I>flags</I> is used to control how the expression is matched against the character sequence. Returns true if such a match exists, false otherwise.</P>
+<B><P>Postconditions: </B>If the function returns false, then the effect on parameter <I>m</I> is undefined, otherwise the effects on parameter <I>m</I> are given in table RE14:</P>
+<I><H6 ALIGN="CENTER">Table RE14--</I>regex_match(RandomAccessIterator first, RandomAccessIterator last, match_results&lt;RandomAccessIterator, Allocator&gt;&amp; m, const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e, match_flag_type flags) <I>effects</H6>
+<P><div align="center"></P></I>
+<P ALIGN="CENTER"><CENTER><TABLE BORDER CELLSPACING=1 CELLPADDING=7 >
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P><B>Element</B></TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<B><P>Value</B></TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m.size()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>e.mark_count()</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m.empty()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>false</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m.prefix().first</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>first</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m.prefix().last</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>first</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m.prefix().matched</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>false</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m.suffix().first</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>last</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m.suffix().last</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>last</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m.suffix().matched</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>false</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m[0].first</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>first</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m[0].second</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>last</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m[0].matched</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<CODE><P>true</CODE> if a full match was found, and <CODE>false</CODE> if it was a partial match (found as a result of the <CODE>match_partial</CODE> flag being set).</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m[n].first</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>For all integers n &lt; m.size(), the start of the sequence that matched sub-expression <I>n</I>. Alternatively, if sub-expression n did not participate in the match, then <I>last</I>.</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m[n].second</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>For all integers n &lt; m.size(), the end of the sequence that matched sub-expression <I>n</I>. Alternatively, if sub-expression n did not participate in the match, then <I>last</I>.</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m[n].matched</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>For all integers n &lt; m.size(), true if sub-expression <I>n</I> participated in the match, false otherwise.</TD>
+</TR>
+</TABLE>
+</CENTER></P>
+
+<P ALIGN="CENTER"></div></P>
+<B><P>Complexity: </B><FONT COLOR="#ff0000">depends upon the syntax chosen (TODO).</P>
+</FONT><PRE>template &lt;class RandomAccessIterator, class charT, class traits, class Allocator2&gt;
+bool regex_match(RandomAccessIterator first, RandomAccessIterator last,
+                 const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e,
+                 match_flag_type flags = match_default);</PRE>
+<B><P>Effects:</B> Behaves "as if" by constructing an instance of <CODE>match_results&lt;</CODE>RandomAccessIterator<CODE>&gt; what</CODE>, and then returning the result of <CODE>regex_match(first, last, what, e, flags)</CODE>.</P>
+<PRE>template &lt;class charT, class Allocator, class traits, class Allocator2&gt;
+bool regex_match(const charT* str, match_results&lt;const charT*, Allocator&gt;&amp; m,
+                 const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e,
+                 match_flag_type flags = match_default);</PRE>
+<B><P>Effects:</B> Returns the result of <CODE>regex_match(str, str + char_traits&lt;charT&gt;::length(str), m, e, flags)</CODE>.</P>
+<PRE>template &lt;class ST, class SA, class Allocator, class charT,
+          class traits, class Allocator2&gt;
+bool regex_match(const basic_string&lt;charT, ST, SA&gt;&amp; s,
+                 match_results&lt;typename basic_string&lt;charT, ST, SA&gt;::const_iterator, Allocator&gt;&amp; m, 
+                 const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e, 
+                 match_flag_type flags = match_default);</PRE>
+<B><P>Effects:</B> Returns the result of <CODE>regex_match(s.begin(), s.end(), m, e, flags)</CODE>.</P>
+<PRE>template &lt;class charT, class traits, class Allocator2&gt;
+bool regex_match(const charT* str,
+                 const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e,
+                 match_flag_type flags = match_default);</PRE>
+<B><P>Effects:</B> Returns the result of <CODE>regex_match(str, str + char_traits&lt;charT&gt;::length(str), e, flags)</CODE>.</P>
+<PRE>template &lt;class ST, class SA, class charT, class traits, class Allocator2&gt;
+bool regex_match(const basic_string&lt;charT, ST, SA&gt;&amp; s,
+                 const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e,
+                 match_flag_type flags = match_default);</PRE>
+<B><P>Effects:</B> Returns the result of <CODE>regex_match(s.begin(), s.end(), e, flags)</CODE>.</P>
+<H4>RE.7.2 regex_search</H4>
+<PRE>template &lt;class RandomAccessIterator, class Allocator, class charT,
+          class traits, class Allocator2&gt;
+bool regex_search(RandomAccessIterator first, RandomAccessIterator last,
+                  match_results&lt;RandomAccessIterator, Allocator&gt;&amp; m,
+                  const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e,
+                  match_flag_type flags = match_default);</PRE>
+<B><P>Requires:</B> Type RandomAccessIterator meets the requirements of a Random Access Iterator (24.1.5).</P>
+<B><P>Effects: </B>Determines whether there is some sub-sequence within [first,last) that matches the regular expression <I>e</I>, parameter <I>flags</I> is used to control how the expression is matched against the character sequence. Returns true if such a sequence exists, false otherwise.</P>
+<B><P>Postconditions: </B>If the function returns false, then the effect on parameter <I>m</I> is undefined, otherwise the effects on parameter <I>m</I> are given in table RE15:</P>
+<I><H6 ALIGN="CENTER">Table RE15--</I>regex_search(RandomAccessIterator first, RandomAccessIterator last, match_results&lt;RandomAccessIterator, Allocator&gt;&amp; m, const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e, match_flag_type flags) <I>effects</H6>
+<P><div align="center"></P></I>
+<P ALIGN="CENTER"><CENTER><TABLE BORDER CELLSPACING=1 CELLPADDING=7 >
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P><B>Element</B></TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<B><P>Value</B></TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m.size()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>e.mark_count()</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m.empty()</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>false</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m.prefix().first</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>first</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m.prefix().last</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>m[0].first</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m.prefix().matched</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>m.prefix().first != m.prefix().second</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m.suffix().first</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>m[0].second</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m.suffix().last</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>last</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m.suffix().matched</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>m.suffix().first != m.suffix().second</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m[0].first</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>The start of the sequence of characters that matched the regular expression</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m[0].second</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>The end of the sequence of characters that matched the regular expression</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m[0].matched</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<CODE><P>true</CODE> if a full match was found, and <CODE>false</CODE> if it was a partial match (found as a result of the <CODE>match_partial</CODE> flag being set).</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m[n].first</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>For all integers n &lt; m.size(), the start of the sequence that matched sub-expression <I>n</I>. Alternatively, if sub-expression n did not participate in the match, then <I>last</I>.</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m[n].second</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>For all integers n &lt; m.size(), the end of the sequence that matched sub-expression <I>n</I>. Alternatively, if sub-expression n did not participate in the match, then <I>last</I>.</TD>
+</TR>
+<TR><TD WIDTH="50%" VALIGN="TOP">
+<P>m[n].matched</TD>
+<TD WIDTH="50%" VALIGN="TOP">
+<P>For all integers n &lt; m.size(), true if sub-expression <I>n</I> participated in the match, false otherwise.</TD>
+</TR>
+</TABLE>
+</CENTER></P>
+
+<P ALIGN="CENTER"></div></P>
+<B><P>Complexity: </B><FONT COLOR="#ff0000">depends upon the syntax chosen (TODO).</P>
+</FONT><PRE>template &lt;class charT, class Allocator, class traits, class Allocator2&gt;
+bool regex_search(const charT* str, match_results&lt;const charT*, Allocator&gt;&amp; m,
+                  const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e,
+                  match_flag_type flags = match_default);</PRE>
+<B><P>Effects:</B> Returns the result of <CODE>regex_search(str, str + char_traits&lt;charT&gt;::length(str), m, e, flags)</CODE>.</P>
+<PRE>template &lt;class ST, class SA, class Allocator, class charT,
+          class traits, class Allocator2&gt;
+bool regex_search(const basic_string&lt;charT, ST, SA&gt;&amp; s,
+                  match_results&lt;typename basic_string&lt;charT, ST, SA&gt;::const_iterator, Allocator&gt;&amp; m,
+                  const reg_expression&lt;charT, traits, Allocator2&gt;&amp; e,
+                  match_flag_type flags = match_default);</PRE>
+<B><P>Effects:</B> Returns the result of <CODE>regex_search(s.begin(), s.end(), m, e, flags)</CODE>.</P>
+<PRE>template &lt;class iterator, class Allocator, class charT,
+          class traits&gt;
+bool regex_search(iterator first, iterator last,
+                  const reg_expression&lt;charT, traits, Allocator&gt;&amp; e,
+                  match_flag_type flags = match_default);</PRE>
+<B><P>Effects:</B> Behaves "as if" by constructing an instance of <CODE>match_results&lt;</CODE>RandomAccessIterator<CODE>&gt; what</CODE>, and then returning the result of <CODE>regex_search(first, last, what, e, flags)</CODE>.</P>
+<PRE>template &lt;class charT, class Allocator, class traits&gt;
+bool regex_search(const charT* str
+                  const reg_expression&lt;charT, traits, Allocator&gt;&amp; e,
+                  match_flag_type flags = match_default);</PRE>
+<B><P>Effects:</B> Returns the result of <CODE>regex_search(str, str + char_traits&lt;charT&gt;::length(str), e, flags)</CODE>.</P>
+<PRE>template &lt;class ST, class SA, class Allocator, class charT,
+          class traits&gt;
+bool regex_search(const basic_string&lt;charT, ST, SA&gt;&amp; s,
+                  const reg_expression&lt;charT, traits, Allocator&gt;&amp; e,
+                  match_flag_type flags = match_default);</PRE>
+<B><P>Effects:</B> Returns the result of <CODE>regex_search(s.begin(), s.end(), e, flags)</CODE>.</P>
+<H4>RE.7.3 regex_replace</H4>
+<PRE>template &lt;class OutputIterator, class RandomAccessIterator, class traits,
+          class Allocator, class charT&gt;
+OutputIterator regex_replace(OutputIterator out,
+                           RandomAccessIterator first,
+                           RandomAccessIterator last,
+                           const reg_expression&lt;charT, traits, Allocator&gt;&amp; e,
+                           const basic_string&lt;charT&gt;&amp; fmt,
+                           match_flag_type flags = match_default);</PRE>
+<B><P>Effects:</B> Finds all the non-overlapping matches <I>m</I> of type <CODE>match_results&lt;RandomAccessIterator&gt; </CODE>that occur within the sequence [first, last). If no such matches are found then calls <CODE>std::copy(first, last, out)</CODE>. Otherwise, for each match found, if <CODE>!(flags &amp; format_no_copy)</CODE> calls <CODE>std::copy(m.prefix().first, m.prefix().last, out)</CODE>, and then calls <CODE>m.format(out, fmt, flags)</CODE>. Finally if <CODE>!(flags &amp; format_no_copy)</CODE> calls <CODE>std::copy(m.suffix().first, m,suffix().last, out)</CODE>. If <CODE>flags &amp; format_first_only</CODE> is non-zero then only the first match found is replaced.</P>
+<B><P>Returns:</B> <CODE>out</CODE>. </P>
+<B><P>Complexity: </B><FONT COLOR="#ff0000">TODO, hard to figure out accurately.</P>
+</FONT><PRE>template &lt;class traits, class Allocator, class charT&gt;
+basic_string&lt;charT&gt; regex_replace(const basic_string&lt;charT&gt;&amp; s,
+                            const reg_expression&lt;charT, traits, Allocator&gt;&amp; e,
+                            const basic_string&lt;charT&gt;&amp; fmt,
+                            match_flag_type flags = match_default);</PRE>
+<B><P>Effects:</B> Constructs an object <CODE>basic_string&lt;charT&gt; result</CODE>, calls <CODE>regex_replace(back_inserter(result), s.begin(), s.end(), e, fmt, flags)</CODE>, and then returns <CODE>result</CODE>.</P>
+<H3><A NAME="iterators"></A>RE.8 Regular expression Iterators</H3>
+<H4>RE.8.1 Template class regex_iterator</H4>
+<P>The class template <CODE>regex_iterator</CODE> is an iterator adapter; that is to say it represents a new view of an existing iterator sequence, by enumerating all the occurrences of a regular expression within that sequence. <CODE>regex_iterator</CODE> finds (using <CODE>regex_search</CODE>) successive regular expression matches within the sequence from which it was constructed. After it is constructed, and every time ++ is used, the iterator finds and stores a value of <CODE>match_results&lt;RandomAccessIterator&gt;</CODE>. If the end of sequence is reached (<CODE>regex_search</CODE> returns false), the iterator becomes equal to the <I>end-of-sequence</I> iterator value. The constructor with no arguments <CODE>regex_iterator()</CODE> always constructs an end of sequence iterator object, which is the only legitimate iterator to be used for the end condition. The result of <CODE>operator*</CODE> on an end of sequence is not defined. For any other iterator value a <CODE>const match_results&lt;RandomAccessIterator&gt;&amp;</CODE> is returned. The result of <CODE>operator-&gt;</CODE> on an end of sequence is not defined. For any other iterator value a <CODE>const match_results&lt;RandomAccessIterator&gt;*</CODE> is returned. It is impossible to store things into <CODE>regex_iterator</CODE>'s. Two end-of-sequence iterators are always equal. An end-of-sequence iterator is not equal to a non-end-of-sequence iterator. Two non-end-of-sequence iterators are equal when they are constructed from the same arguments. </P>
+<PRE>
+namespace std{
+
+template &lt;class RandomAccessIterator, 
+          class charT = iterator_traits&lt;RandomAccessIterator&gt;::value_type,
+          class traits = regex_traits&lt;charT&gt;,
+          class Allocator = allocator&lt;charT&gt; &gt;
+class regex_iterator 
+{
+public:
+   typedef          basic_regex&lt;charT, traits, Allocator&gt;                  regex_type;
+   typedef          match_results&lt;RandomAccessIterator&gt;                    value_type;
+   typedef typename iterator_traits&lt;RandomAccessIterator&gt;::difference_type difference_type;
+   typedef typename iterator_traits&lt;RandomAccessIterator&gt;::pointer         pointer;
+   typedef typename iterator_traits&lt;RandomAccessIterator&gt;::reference       reference;
+   typedef          std::input_iterator_tag                                iterator_category;
+   
+   regex_iterator();
+   regex_iterator(RandomAccessIterator a, RandomAccessIterator b, 
+                  const regex_type&amp; re, 
+                  match_flag_type m = match_default);
+   regex_iterator(const regex_iterator&amp;);
+   regex_iterator&amp; operator=(const regex_iterator&amp;);
+   bool operator==(const regex_iterator&amp;);
+   bool operator!=(const regex_iterator&amp;);
+   const value_type&amp; operator*();
+   const value_type* operator-&gt;();
+   regex_iterator&amp; operator++();
+   regex_iterator operator++(int);
+private:
+   match_results&lt;RandomAccessIterator&gt; what;  // for exposition only
+   RandomAccessIterator*               end;   // for exposition only
+   const regex_type*                   pre;   // for exposition only
+   match_flag_type                     flags; // for exposition only
+};
+
+} // namespace std</PRE>
+<H5>RE.8.1.1 regex_iterator constructors</H5>
+<PRE>regex_iterator();</PRE>
+<FONT COLOR="#ff0000"><P>TODO</P>
+</FONT><PRE>regex_iterator(RandomAccessIterator a, RandomAccessIterator b, 
+               const regex_type&amp; re, 
+               match_flag_type m = match_default);</PRE>
+<FONT COLOR="#ff0000"><P>TODO</P>
+</FONT><PRE>regex_iterator(const regex_iterator&amp;);</PRE>
+<FONT COLOR="#ff0000"><P>TODO</P>
+</FONT><PRE>regex_iterator&amp; operator=(const regex_iterator&amp;);</PRE>
+<FONT COLOR="#ff0000"><P>TODO</P>
+</FONT><H5>RE.8.1.1 regex_iterator dereference</H5>
+<PRE>const value_type&amp; operator*();
+const value_type* operator-&gt;();
+regex_iterator&amp; operator++();
+regex_iterator&amp; operator++(int);</PRE>
+<FONT COLOR="#ff0000"><P>TODO</P>
+</FONT><H4>RE.8.1 Template class regex_token_iterator</H4>
+<P>The template class <CODE>regex_token_iterator</CODE> is an iterator adapter; that is to say it represents a new view of an existing iterator sequence, by enumerating all the occurrences of a regular expression within that sequence, and presenting one or more new strings for each match found. After it is constructed, the iterator finds and stores a value of <CODE>match_results&lt;RandomAccessIterator&gt; what</CODE> (by calling <CODE>regex_search</CODE>) and sets the internal count N to 1. Every time <CODE>operator++</CODE> is used the count N is incremented, if N exceeds or equals <CODE>this-&gt;subs.size()</CODE>, then the iterator finds and stores the next value of <CODE>match_results&lt;RandomAccessIterator&gt;</CODE> and sets count N to zero. If the end of sequence is reached (<CODE>regex_search</CODE> returns false), the iterator becomes equal to the <I>end-of-sequence</I> iterator value. The constructor with no arguments <CODE>regex_iterator()</CODE> always constructs an end of sequence iterator object, which is the only legitimate iterator to be used for the end condition. The result of <CODE>operator*</CODE> on an end of sequence is not defined. For any other iterator value a <CODE>const basic_string&lt;charT&gt;&amp;</CODE> is returned (obtained by calling <CODE>this-&gt;what[subs[N]]</CODE>). The result of <CODE>operator-&gt;</CODE> on an end of sequence is not defined. For any other iterator value a <CODE>const basic_string&lt;charT&gt;*</CODE> is returned. It is impossible to store things into <CODE>regex_iterator</CODE>'s. Two end-of-sequence iterators are always equal. An end-of-sequence iterator is not equal to a non-end-of-sequence iterator. Two non-end-of-sequence iterators are equal when they are constructed from the same arguments.</P>
+<PRE>namespace std{
+
+template &lt;class RandomAccessIterator, 
+          class charT = iterator_traits&lt;RandomAccessIterator&gt;::value_type,
+          class traits = regex_traits&lt;charT&gt;,
+          class Allocator = allocator&lt;charT&gt; &gt;
+class regex_token_iterator 
+{
+public:
+   typedef          basic_regex&lt;charT, traits, Allocator&gt;                  regex_type;
+   typedef          basic_string&lt;charT&gt;                                    value_type;
+   typedef typename iterator_traits&lt;RandomAccessIterator&gt;::difference_type difference_type;
+   typedef typename iterator_traits&lt;RandomAccessIterator&gt;::pointer         pointer;
+   typedef typename iterator_traits&lt;RandomAccessIterator&gt;::reference       reference;
+   typedef          std::input_iterator_tag                                iterator_category;
+   
+   regex_token_iterator();
+   regex_token_iterator(RandomAccessIterator a, RandomAccessIterator b, const regex_type&amp; re, 
+                        int submatch = 0, match_flag_type m = match_default);
+   regex_token_iterator(RandomAccessIterator a, RandomAccessIterator b, const regex_type&amp; re, 
+                        const std::vector&lt;int&gt;&amp; submatches, match_flag_type m = match_default);
+   template &lt;std::size_t N&gt;
+   regex_token_iterator(RandomAccessIterator a, RandomAccessIterator b, const regex_type&amp; re, 
+                        const int (&amp;submatches)[N], match_flag_type m = match_default);
+   regex_token_iterator(const regex_token_iterator&amp;);
+   regex_token_iterator&amp; operator=(const regex_token_iterator&amp;);
+   bool operator==(const regex_token_iterator&amp;);
+   bool operator!=(const regex_token_iterator&amp;);
+   const value_type&amp; operator*();
+   const value_type* operator-&gt;();
+   regex_token_iterator&amp; operator++();
+   regex_token_iterator operator++(int);
+private:
+   match_results&lt;RandomAccessIterator&gt; what;   // for exposition only
+   RandomAccessIterator*               end;    // for exposition only
+   const regex_type*                   pre;    // for exposition only
+   match_flag_type                     flags;  // for exposition only
+   basic_string&lt;charT&gt;            result; // for exposition only
+   std::size_t                         N;      // for exposition only
+   std::vector&lt;int&gt;                    subs;   // for exposition only
+};
+} // namespace std</PRE>
+<H5>RE.8.1.1 regex_iterator constructors</H5>
+<PRE>regex_token_iterator();</PRE>
+<FONT COLOR="#ff0000"><P>TODO</P>
+</FONT><PRE>regex_token_iterator(RandomAccessIterator a, RandomAccessIterator b, const regex_type&amp; re, 
+                     int submatch = 0, match_flag_type m = match_default);</PRE>
+<FONT COLOR="#ff0000"><P>TODO</P>
+</FONT><PRE>regex_token_iterator(RandomAccessIterator a, RandomAccessIterator b, const regex_type&amp; re, 
+                     const std::vector&lt;int&gt;&amp; submatches, match_flag_type m = match_default);</PRE>
+<FONT COLOR="#ff0000"><P>TODO</P>
+</FONT><PRE>template &lt;std::size_t N&gt;
+regex_token_iterator(RandomAccessIterator a, RandomAccessIterator b, const regex_type&amp; re, 
+                     const int (&amp;submatches)[N], match_flag_type m = match_default);</PRE>
+<FONT COLOR="#ff0000"><P>TODO</P>
+</FONT><PRE>regex_token_iterator(const regex_token_iterator&amp;);</PRE>
+<FONT COLOR="#ff0000"><P>TODO</P>
+</FONT><PRE>regex_token_iterator&amp; operator=(const regex_token_iterator&amp;);</PRE>
+<FONT COLOR="#ff0000"><P>TODO</P>
+</FONT><H5>RE.8.1.1 regex_token_iterator dereference</H5>
+<PRE>const value_type&amp; operator*();
+const value_type* operator-&gt;();
+regex_token_iterator&amp; operator++();
+regex_token_iterator&amp; operator++(int);</PRE>
+<P>&nbsp;</P>
+<P>&nbsp;</P>
+<P><HR></P>
+<H2>References</H2>
+<OL>
+
+<B><FONT SIZE=5><LI><A NAME="ref1"></A></B></FONT>IEEE Std 1003.1-2001, Portable Operating System Interface (POSIX). See also, The Single UNIX Specification, Version 3, <A HREF="http://www.unix-systems.org/version3/">http://www.unix-systems.org/version3/</A>.</LI>
+<LI>The Perl Programming Language, <A HREF="http://www.perl.org/">http://www.perl.org/</A>.</LI>
+<LI>Microsoft Corporation, Visual C#, <A HREF="http://msdn.microsoft.com/vcsharp/">http://msdn.microsoft.com/vcsharp/</A>.</LI>
+<LI>Standard ECMA-262 3<SUP>rd</SUP> Edition - December 1999, ECMAScript, <A HREF="http://www.ecma.ch/">http://www.ecma.ch/</A>.</LI>
+<LI>GNU, The GNU C Library, <A HREF="http://www.gnu.org/software/libc/">http://www.gnu.org/software/libc/</A>.</LI>
+<LI>Tom Lord, The Hackerlab C Library, <A HREF="http://regexps.com/">http://regexps.com/</A>.</LI>
+<LI>Henry Spencer, BSD regular expression library, <A HREF="ftp://ftp.zoo.toronto.edu/pub/">ftp://ftp.zoo.toronto.edu/pub/</A> and <A HREF="http://arglist.com/regex/">http://arglist.com/regex/</A>.</LI>
+<LI>Philip Hazel, Perl Compatible Regular Expressions, <A HREF="http://www.pcre.org/">http://www.pcre.org/</A>.</LI>
+<LI>Hugo Etchegoyen, A C++ wrapper around pcre-3.2, <A HREF="ftp://ftp.cus.cam.ac.uk/pub/software/programs/pcre/">ftp://ftp.cus.cam.ac.uk/pub/software/programs/pcre/</A>.</LI>
+<LI>Michael Tesch, A C++ Wrapper for the "Perl Compatible Regular Expressions" library, <A HREF="ftp://ftp.cus.cam.ac.uk/pub/software/programs/pcre/">ftp://ftp.cus.cam.ac.uk/pub/software/programs/pcre/</A>.</LI>
+<LI>John Maddock, Boost regular expression library, <A HREF="http://www.boost.org/">http://www.boost.org/</A>.</LI>
+<LI>Eric Niebler, The GRETA Regular Expression Template Archive, <A HREF="http://research.microsoft.com/projects/greta">http://research.microsoft.com/downloads/</A>.</LI>
+<LI>Mark Jason Dominus, Perl Regular Expression Matching is NP-Complete, <A HREF="http://perl.plover.com/NPC/">http://perl.plover.com/NPC/</A>.</LI>
+<LI>Charles L. A. Clarke, Gordon V. Cormack, On the use of Regular Expressions for Searching Text, ACM Trans. Programming Languages and Systems 19, (May 1997), University of Waterloo, Waterloo, Canada, Technical Report CS­95­07, <A HREF="http://plg.uwaterloo.ca/~gvcormac/PAPERS.html">http://plg.uwaterloo.ca/~gvcormac/PAPERS.html</A>.</LI>
+<LI>Larry Wall, Apocalypse 5, <A HREF="http://www.perl.com/pub/a/2002/06/04/apo5.html">http://www.perl.com/pub/a/2002/06/04/apo5.html</A>.</LI>
+<LI>Robert Sedgewick, Algorithms in C++, Addison Wesley.</LI>
+<LI>Thomas H. Cormen, Charles E. Leiserson, and Ronald L. Rivest, Introduction to Algorithms, MIT Press.</LI>
+<LI>Gonzalo Navarro and Mathieu Raffinot, Fast Regular Expression Search, In <I>Proceedings of WAE'99</I>, LNCS 1668. Pages 198-212, 1999, <A HREF="http://www.dcc.uchile.cl/~gnavarro/publ.html">http://www.dcc.uchile.cl/~gnavarro/publ.html</A>.</LI>
+<LI>Sun Wu and Udi Manber, Agrep - A Fast Approximate Pattern Matching Tool, <I>Usenix Winter 1992 Technical Conference,</I> San Francisco (January 1992), pp. 153-162, <A HREF="http://www.tgries.de/agrep/doc/agrep2ps.zip">http://www.tgries.de/agrep/doc/agrep2ps.zip</A>.</LI>
+<LI>Ricardo A. Baeza-Yates and Gaston H. Gonnet, A New Approach to Text Searching, <EM>Communications of the ACM</EM>, 35:74--82, Oct 1992, <A HREF="http://www.dcc.uchile.cl/~rbaeza/cv/journals.html">http://www.dcc.uchile.cl/~rbaeza/cv/journals.html</A>.</LI>
+<LI>An experimental Boost regex version uses the same stack recursive algorithm that GRETA does by default, and has proven to be just as fast in practice: <A HREF="http://ourworld.compuserve.com/homepages/proposals/exregex.htm">http://ourworld.compuserve.com/homepages/proposals/exregex.htm</A>. </LI>
+<LI>Gonzalo Navarro. "NR-grep: a Fast and Flexible Pattern Matching Tool"<B>.</B> <I>Software Practice and Experience (SPE)</I> 31:1265-1312, 2001. <A HREF="http://www.dcc.uchile.cl/~gnavarro/publ.html">http://www.dcc.uchile.cl/~gnavarro/publ.html</A>.</LI>
+<LI>Partial matches are described in more detail in the Boost documentation at: <A HREF="http://www.boost.org/libs/regex/template_class_ref.htm">http://www.boost.org/libs/regex/template_class_ref.htm#partial_matches</A>. </LI></OL>
+
+<H2>Acknowledgements</H2>
+<P>I am particularly grateful to GRETA's author Eric Niebler for many long and detailed discussions, to Edward Diener for much helpful feedback over many years, to Bjorn Karlsson, Jeremy Siek, Richard Peters, and Beman Dawes for many helpful comments on a draft of this proposal, and of course to all the Boost-list members and regex users for their continued help with this project.</P>
+<P>&nbsp;</P>
+<P>&nbsp;</P>
+<P>&nbsp;</P></BODY>
+</HTML>
+
+

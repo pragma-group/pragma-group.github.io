@@ -1,0 +1,831 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<html>
+  <head>
+    <title>N2276 &mdash; Thread Pools and Futures</title>
+  </head>
+
+  <body>
+    <p><em>Document Number: N2276=07-0136<br>
+        Anthony Williams &lt;<a href="mailto:anthony@justsoftwaresolutions.co.uk">anthony@justsoftwaresolutions.co.uk</a>&gt;<br>
+        Just Software Solutions Ltd<br>
+        2007-05-07</em></p>
+    <h1>N2276 &mdash; Thread Pools and Futures</h1>
+
+    <h2>1 Introduction</h2>
+
+    <p>At Oxford, the combined EWG and LWG voted to proceed with work on Thread Pools and Futures for C++0x, even though this work
+      had previously been destined for TR2. This paper is provided to further discussions in this area. It draws heavily on N2094
+      and N2185.</p>
+
+    <h2>2 Overview</h2>
+
+    <h3>2.1 Building Blocks</h3>
+
+    <p>The building blocks of the system are three class templates: <code>future</code>, <code>packaged_task</code>, and
+    <code>promise</code>.</p>
+
+    <h4>2.1.1 <code>future&lt;R&gt;</code></h4>
+    
+    <p>A <code>future&lt;R&gt;</code> encapsulates a potential value of type <code>R</code>, or an exception. When the
+    <code>future</code> is <em>ready</em>, you can retrieve the encapsulated value or exception either by using the explicit
+    <code>get()</code> member function, or by making use of the implicit conversion to <code>R</code>. If the <code>future</code> is
+    not <em>ready</em>, then the access functions will block until the <code>future</code> becomes <em>ready</em>. If a
+    <em>ready</em> <code>future</code> encapsulates a value, then the access functions will return that value. If a <em>ready</em>
+    <code>future</code> encapsulates an exception, then the access functions will throw a copy of the encapsulated
+    exception.</p>
+
+    <h4>2.1.2 <code>packaged_task&lt;R&gt;</code></h4>
+
+    <p>This is a wrapper for a callable object with a return type of <code>R</code>. A <code>packaged_task</code> is itself a
+    callable type &mdash; invoking it's function call operator will invoke the encapsulated callable object. This still doesn't get
+    you the value returned by the encapsulated object, though &mdash; to do that you need a
+    <strong><code>future&lt;R&gt;</code></strong> which you can obtain using the <code>get_future()</code> member function. Once the
+    function call operator has been invoked, all <code>future</code>s associated with a particular <code>packaged_task</code> will
+    become <em>ready</em>, and will store either the value returned by the invocation of the encapsulated object, or the exception
+    thrown by said invocation. <code>packaged_task</code> is intended to be used in cases where the user needs to build a thread
+    pool or similar structure because the standard facilities do not have the desired characteristics.</p>
+
+    <h4>2.1.3 <code>promise&lt;R&gt;</code></h4>
+
+    <p>This is an alternative means of creating <code>future</code>s without a callable object &mdash; the value of type
+    <code>R</code> to be returned by the associated <code>future</code>s is specified directly by invoking the
+    <code>set_value()</code> member function. Alternatively, the exception to be returned can be specified by invoking the
+    <code>set_exception()</code> member function. This allows the result to be set from a callback invoked from code that has no
+      knowledge of the <code>promise</code> or its associated <code>future</code>s.</p>
+
+    <h3>2.2 High Level Support</h3>
+
+    <p>As well as the low level building blocks, this proposal also includes high level support in the form of the
+    <code>thread_pool</code> class, and the <code>launch_in_thread</code> and <code>launch_in_pool</code> function templates.
+
+    <h4>2.2.1 <code>launch_in_pool</code></h4>
+
+    <p><code>launch_in_pool</code> submits a task to a system-supplied thread pool to be run. It takes a single parameter: the
+    function or callable object to run, and returns a <code>future</code> which encapsulate the result of the function call. The
+    intent is that the library implementor can provide a thread pool that provides what they believe to be optimal performance
+    characteristics for their customers, taking advantage of system-specific information. It is intended that the vast majority of
+    applications that need thread pool functionality will use this function to allow the system to define an appropriate thread
+    pool.</p>
+
+    <h4>2.2.2 <code>launch_in_thread</code></h4>
+
+    <p><code>launch_in_thread</code> is similar to <code>launch_in_pool</code>, but it creates a separate thread dedicated to the
+    task being run, which terminates when the task completes. It takes a single parameter: the function or callable object to run,
+    and returns a <code>future</code> which encapsulate the result of the function call. This is an enhancement over
+    <code>std::thread</code> for tasks that need a dedicated thread, but where the caller wishes to capture the returned value or
+    any unhandled exception.</p>
+
+    <h4>2.2.3 <code>thread_pool</code></h4>
+    
+    <p>A <code>thread_pool</code> is just that: a pool of threads. These threads will run for the lifetime of the
+    <code>thread_pool</code> object. The user can submit a task to the <code>thread_pool</code>, which will then be added to a queue
+    of tasks. When one of the threads in the pool becomes idle, it will take a task from the queue and execute it. Once the task is
+    complete, the thread will try and obtain a new task, and so on. A task can be submitted to the <code>thread_pool</code> by
+    passing a callable object to the <code>submit()</code> member function. In return, the caller is given a <code>future</code> to
+    encapsulate the result of the task.</p>
+
+
+
+    <h2>3 Proposed Wording</h2>
+
+    <h3>3.1 Header <code>&lt;threadpool&gt;</code> synopsis</h3>
+
+<pre>
+    namespace std
+    {
+        template &lt;typename R&gt; class future;
+        template &lt;typename R&gt; class future&lt;R&amp;&amp;&gt;;
+        template &lt;&gt; class future&lt;void&gt;;
+
+        template &lt;typename R&gt; class packaged_task;
+
+        template &lt;typename F&gt;
+        packaged_task&lt;typename result_of&lt;F()&gt;::type&gt; package_task(F const&amp; f);
+
+        template &lt;typename F&gt;
+        packaged_task&lt;typename result_of&lt;F()&gt;::type&gt; package_task(F&amp;&amp; f);
+
+        template &lt;typename R&gt; class promise;
+        template &lt;typename R&gt; class promise&lt;R&amp;&gt;;
+        template &lt;&gt; class promise&lt;void&gt;;
+
+        template &lt;typename F&gt;
+        future&lt;typename result_of&lt;F()&gt;::type&gt; launch_in_pool(F const&amp; f);
+
+        template &lt;typename F&gt;
+        future&lt;typename result_of&lt;F()&gt;::type&gt; launch_in_pool(F&amp;&amp; f);
+
+        template &lt;typename F&gt;
+        future&lt;typename result_of&lt;F()&gt;::type&gt; launch_in_thread(F const&amp; f);
+
+        template &lt;typename F&gt;
+        future&lt;typename result_of&lt;F()&gt;::type&gt; launch_in_thread(F&amp;&amp; f);
+
+        class thread_pool;
+
+        class future_canceled;
+
+        class future_result_moved;
+
+        class promise_result_already_set;
+    }
+</pre>    
+
+    <h3>3.2 Class template <code>future</code></h3>
+
+<pre>
+    namespace std
+    {
+        template&lt;typename R&gt;
+        class future
+        {
+        public:
+            // copying
+            future(const future&amp; other);
+            future&amp; operator=(future const&amp; other);
+
+            // functions to retrieve the stored value
+            operator R() const;
+            R get() const;
+            R move();
+            bool result_moved() const;
+
+            // functions to check ready state, and wait for ready
+            bool ready() const;
+            bool has_exception() const;
+            bool has_value() const;
+            void wait() const;
+            bool timed_wait(target_time const&amp; wait_until) const;
+
+            // cancel the task generating the result
+            void cancel();
+        };
+    }
+</pre>
+
+    <h4>3.2.1 Copying <code>future</code>s</h4>
+
+<pre>
+    future(const future&amp; other);
+</pre>
+
+    <p><strong>Effects:</strong> The only <code>public</code> constructor exposed by <code>future</code> is the copy
+    constructor. The copy constructor will yield a second <code>future</code> which is waiting for the same result as
+    <code>*this</code>. Both the <code>*this</code> and the copy will become <em>ready</em> when the result is available, and both
+    will return the same stored value, or throw the same exception when the result is accessed.</p>
+
+<pre>
+    future&amp; operator=(future const&amp; other);
+</pre>
+
+    <p><strong>Effects:</strong> Change <code>*this</code> to wait for the same result as <code>other</code>. <code>*this</code> and
+      <code>other</code> will both become <em>ready</em> when the result is available, and both
+    will return the same stored value, or throw the same exception when the result is accessed.</p>
+
+    <p><strong>Returns:</strong> <code>*this</code></p>
+
+    <h4>3.2.2 Functions to retrieve the stored result</h4>
+
+<pre>
+    operator R() const;
+</pre>
+
+    <p><strong>Returns:</strong> <code>get()</code></p>
+
+<pre>
+    R get() const;
+</pre>
+
+    <p><strong>Effects:</strong> Blocks until <code>*this</code> is <em>ready</em>, and retrieves the stored result. This function
+    is a cancellation point if <code>ready()</code> would return <code>false</code> on entry. If <code>result_moved</code> would
+    return <code>true</code> on entry, throws an exception of type <code>future_result_moved</code>.</p>
+
+    <p><strong>Returns:</strong> A copy of the stored value, if any.</p>
+
+    <p><strong>Throws:</strong> An exception of type <code>future_result_moved</code> as described above, or if there is no stored
+    value, throws a copy of the stored exception. If the copy constructor of the stored value throws an exception, this is
+    propagated to the caller.</p>
+
+<pre>
+    R move();
+</pre>
+
+    <p><strong>Effects:</strong> Blocks until <code>*this</code> is <em>ready</em>, and retrieves the stored result. This function
+    is a cancellation point if <code>ready()</code> would return <code>false</code> on entry. If <code>result_moved</code> would
+    return <code>true</code> on entry, throws an exception of type <code>future_result_moved</code>.</p>
+
+    <p><strong>Returns:</strong> A copy of the stored value <code>x</code>, if any, as-if by <code>return std::move(x)</code>.</p>
+
+    <p><strong>Throws:</strong> An exception of type <code>future_result_moved</code> as described above, or if there is no stored
+    value, throws a copy of the stored exception.</p>
+
+<pre>
+    bool result_moved() const;
+</pre>
+
+    <p><strong>Returns:</strong> <code>true</code> if <code>move</code> has already been called on any of the <code>future</code>s
+    associated with the same state as <code>*this</code>, <code>false</code> otherwise.</p>
+    
+
+    <h4>3.2.3 Functions to check ready state, and wait for ready</h4>
+
+<pre>
+    bool ready() const;
+</pre>
+
+    <p><strong>Returns:</strong> <code>true</code> if <code>*this</code> has a stored result (whether a value or an exception),
+    <code>false</code> otherwise.</p>
+
+<pre>
+    bool has_exception() const;
+</pre>
+
+    <p><strong>Returns:</strong> <code>true</code> if <code>*this</code> is <em>ready</em> with a stored exception,
+    <code>false</code> otherwise.</p>
+
+<pre>
+    bool has_value() const;
+</pre>
+
+    <p><strong>Returns:</strong> <code>true</code> if <code>*this</code> is <em>ready</em> with a stored value,
+    <code>false</code> otherwise.</p>
+    
+<pre>
+    void wait() const;
+</pre>
+
+    <p><strong>Effects:</strong> Blocks until <code>*this</code> is <em>ready</em>. This function is a cancellation point if
+    <code>ready()</code> would return <code>false</code> on entry.</p>
+
+<pre>
+    bool timed_wait(target_time const&amp; wait_until) const;
+</pre>
+
+    <p><strong>Effects:</strong> Blocks until <code>*this</code> is <em>ready</em> or the specified time is reached. This
+    function is a cancellation point if <code>ready()</code> would return <code>false</code> on entry.</p>
+
+    <p><strong>Returns:</strong> <code>true</code> if <code>*this</code> is <em>ready</em>, <code>false</code> if the operation
+      timed out.</p>
+
+    <h4>3.2.4 Cancelling the task generating the result</h4>
+<pre>
+    void cancel();
+</pre>
+    
+    <p><strong>Effects:</strong> None, if <code>*this</code> is <em>ready</em> on entry to this function. Otherwise attempts to
+    cancel the task generating the result asynchronously. If the cancellation attempt is successful, then <code>*this</code>
+    shall become <em>ready</em>, with a stored exception of type <code>future_canceled</code>. This function shall return
+      immediately, and not wait for <code>*this</code> to become <em>ready</em>.
+
+    <h4>3.2.5 The specialization <code>future&lt;void&gt;</code></h4>
+
+<pre>
+    namespace std
+    {
+        template&lt;&gt;
+        class future&lt;void&gt;
+        {
+        public:
+            // copying
+            future(const future&amp; other);
+            future&amp; operator=(future const&amp; other);
+
+            // functions to retrieve the stored value
+            void get() const;
+            bool result_moved() const;
+
+            // functions to check ready state, and wait for ready
+            bool ready() const;
+            bool has_exception() const;
+            bool has_value() const;
+            void wait() const;
+            bool timed_wait(target_time const&amp; wait_until) const;
+
+            // cancel the task generating the result
+            void cancel();
+        };
+    }
+</pre>
+
+    <p>This specialization is identical to the primary template, except that there is no implicit conversion operator or
+    <code>move</code> function, and <code>get</code>, <code>has_value</code> and <code>result_moved</code> behave as described
+    below.</p>
+
+<pre>
+    void get() const;
+</pre>
+
+    <p><strong>Effects:</strong> Blocks until <code>*this</code> is <em>ready</em>. This function is a cancellation point if
+    <code>ready()</code> would return <code>false</code> on entry.</p>
+
+    <p><strong>Returns:</strong> Nothing.</p>
+
+    <p><strong>Throws:</strong> A copy of the stored exception, if any.</p>
+
+<pre>
+    bool has_value() const;
+</pre>
+
+    <p><strong>Returns:</strong> <code>true</code> if <code>*this</code> is <em>ready</em> with no stored exception,
+    <code>false</code> otherwise.</p>
+
+    <h4>3.2.6 The specialization <code>future&lt;R&amp;&amp;&gt;</code></h4>
+
+<pre>
+    namespace std
+    {
+        template&lt;typename R&gt;
+        class future&lt;R&amp;&amp;&gt;
+        {
+        public:
+            // copying
+            future(const future&amp; other);
+            future&amp; operator=(future const&amp; other);
+
+            // functions to retrieve the stored value
+            operator R();
+            R get();
+            R move();
+            bool result_moved() const;
+
+            // functions to check ready state, and wait for ready
+            bool ready() const;
+            bool has_exception() const;
+            bool has_value() const;
+            void wait() const;
+            bool timed_wait(target_time const&amp; wait_until) const;
+
+            // cancel the task generating the result
+            void cancel();
+        };
+    }
+</pre>
+
+    <p>This specialization is identical to the primary template, except that <code>get</code> behaves as described below.</p>
+
+<pre>
+    operator R();
+    R get();
+</pre>
+
+    <p><strong>Returns:</strong> move().</p>
+
+    <h3>3.3 Class template <code>packaged_task</code></h3>
+
+<pre>
+    namespace std
+    {
+        template&lt;typename R&gt;
+        class packaged_task
+        {
+        private:
+            // packaged_task is not copyable
+            packaged_task(packaged_task&amp;); // for exposition only
+            packaged_task&amp; operator=(packaged_task&amp;); // for exposition only
+        public:
+            // construction and destruction
+            template&lt;typename F&gt;
+            explicit packaged_task(F const&amp; f);
+            template&lt;typename F&gt;
+            explicit packaged_task(F&amp;&amp; f);
+            packaged_task(packaged_task&amp;&amp; other);
+            ~packaged_task();
+
+            // assignment
+            packaged_task&amp; operator=(packaged_task&amp;&amp; other);
+            void swap(packaged_task&amp; other);
+
+            // result retrieval
+            future&lt;R&gt; get_future();
+
+            // execution
+            void operator()();
+
+            // cancellation
+            void cancel();
+        };
+    }
+</pre>
+
+
+    <h4>3.3.1 Construction and destruction of a <code>packaged_task</code></h4>
+<pre>
+    template&lt;typename F&gt;
+    packaged_task(F const&amp; f);
+
+    template&lt;typename F&gt;
+    packaged_task(F&amp;&amp; f);
+</pre>
+
+    <p><strong>Effects:</strong> Construct a new <code>packaged_task</code> that encapsulates a copy of the callable object <code>f</code>.</p>
+
+<pre>
+    packaged_task(packaged_task&amp;&amp; other);
+</pre>
+
+    <p><strong>Effects:</strong> Construct a new <code>packaged_task</code> that encapsulates the callable object previously
+      encapsulated in <code>other</code>. All <code>future</code>s associated with <code>other</code> become associated with the
+      newly constructed <code>packaged_task</code>. <code>other</code> no longer has an associated callable object or any associated
+      <code>future</code>s.</p>
+
+<pre>
+    ~packaged_task();
+</pre>
+
+    <p><strong>Effects:</strong> Destroy the <code>packaged_task</code> and its encapsulated callable object, if any. If the
+    encapsulated callable object has not yet been invoked, all <code>future</code>s associated with <code>*this</code> become
+    <em>ready</em>, with a stored exception of type <code>future_canceled</code>.</p>
+
+    <h4>3.3.2 Assignment</h4>
+<pre>
+    packaged_task&amp; operator=(packaged_task&amp;&amp; other);
+</pre>
+
+    <p><strong>Effects:</strong> As if:
+
+<pre>
+            packaged_task temp(other);
+            temp.swap(*this);
+</pre>        
+
+    <p><strong>Returns:</strong> <code>*this</code></p>
+
+<pre>
+    void swap(packaged_task&amp; other);
+</pre>
+
+    <p><strong>Effects:</strong> <code>*this</code> encapsulates the callable object previously encapsulated by <code>other</code>;
+    <code>other</code> encapsulates the callable object previously encapsulated by <code>*this</code>.  Any <code>future</code>s
+    previously associated with <code>other</code> become associated with <code>*this</code>; any <code>future</code>s previously
+    associated with <code>*this</code> become associated with <code>other</code>.</p>
+
+    <h4>3.3.3 Retrieving the result from a <code>packaged_task</code></h4>
+<pre>
+    future&lt;R&gt; get_future();
+</pre>
+
+    <p><strong>Returns:</strong> A new <code>future</code> associated with <code>*this</code>. If the encapsulated callable object
+      has already been invoked, then the <code>future</code> is <em>ready</em>, with the stored result the same as-if the
+      <code>future</code> had been constructed prior to the invocation.</p>
+
+    <h4>3.3.4 Executing the <code>packaged_task</code></h4>
+<pre>
+    void operator()();
+</pre>
+
+    <p><strong>Effects:</strong> Nothing, if <code>*this</code> has no encapsulated callable object, or the encapsulated callable
+    object has already been invoked. Otherwise, invokes the encapsulated callable object. If the invocation of the encapsulated
+    callable object returns normally, then all <code>future</code>s associated with <code>*this</code> become <em>ready</em> with a
+    stored value that is a copy of the value returned. If the invocation of the encapsulated callable object throws an exception,
+    then all <code>future</code>s associated with <code>*this</code> become <em>ready</em> with a stored exception that is a copy of
+    the exception thrown. If the invocation of the encapsulated callable object is cancelled, then the <code>future</code>s
+      associated with <code>*this</code> will become <em>ready</em>, with a stored exception of type <code>future_canceled</code>.</p>
+
+
+    <h4>3.3.5 Cancellation of a <code>packaged_task</code></h4>
+<pre>
+    void cancel();
+</pre>
+    
+    <p><strong>Effects:</strong> Nothing, if <code>*this</code> has no encapsulated callable object, or the invocation of the
+    encapsulated callable object has already completed. If the invocation of the encapsulated callable object has started on another
+    thread, but not completed, then the task is cancelled as-if by calling <code>cancel()</code> on the <code>std::thread</code>
+    object for the thread in which the invocation of the encapsulated callable object is running. Otherwise, destroys the
+    encapsulated callable object without invoking it. All <code>future</code>s associated with <code>*this</code> become
+    <em>ready</em>, with a stored exception of type <code>future_canceled</code>.</p>
+
+    <h3>3.4 Function template <code>package_task</code></h3>
+
+<pre>
+    template&lt;typename F&gt;
+    packaged_task&lt;typename result_of&lt;F()&gt;::type&gt; package_task(F const&amp; f);
+
+    template&lt;typename F&gt;
+    packaged_task&lt;typename result_of&lt;F()&gt;::type&gt; package_task(F&amp;&amp; f);
+</pre>
+
+    <p><strong>Effects:</strong> Constructs a new <code>packaged_task</code> encapsulating a copy of the supplied callable object
+    <code>f</code>. The template parameter <code>R</code> for the <code>packaged_task</code> is the return type of
+    <code>f()</code>.</p>
+
+    <p><strong>Returns:</strong> The newly constructed <code>packaged_task</code>.</p>
+
+    <h3>3.5 Class template <code>promise</code></h3>
+
+<pre>
+    namespace std
+    {
+        template&lt;typename R&gt;
+        class promise
+        {
+        private:
+            // promise is not copyable
+            promise(promise&amp;); // for exposition only
+            promise&amp; operator=(promise&amp;); // for exposition only
+
+        public:
+            // Construction and Destruction
+            promise();
+            promise(promise&amp;&amp; other);
+            ~promise();
+
+            // Assignment
+            promise&amp; operator=(promise&amp;&amp; other);
+            void swap(promise&amp; other);
+
+            // Result retrieval
+            future&lt;R&gt; get_future();
+
+            // Updating the state
+            void cancel();
+            void set_value(R const&amp; r);
+            void set_value(R&amp;&amp; r);
+            void set_exception(exception_ptr e);        
+        };
+    }
+</pre>
+
+    <h4>3.5.1 Construction and Destruction</h4>
+
+<pre>
+    promise();
+</pre>
+
+    <p><strong>Effects:</strong> Create a new <code>promise</code> with no stored value, no stored exception, and no associated
+      <code>future</code>s.</p>
+
+<pre>
+    promise(promise&amp;&amp; other);
+</pre>
+
+    <p><strong>Effects:</strong> Transfer the state currently associated with <code>other</code> to <code>*this</code>. All
+      <code>future</code>s previously associated with <code>other</code> become associated with <code>*this</code>.</p>
+
+<pre>
+    ~promise();
+</pre>
+
+    <p><strong>Effects:</strong> If <code>*this</code> currently has neither a stored value, nor a stored exception, all
+    <code>future</code>s associated with <code>*this</code> become <em>ready</em>, with a stored exception of type
+    <code>future_canceled</code>.</p>
+
+    <h4>3.5.2 Assignment</h4>
+
+<pre>
+    promise&amp; operator=(promise&amp;&amp; x);
+</pre>
+
+    <p><strong>Effects:</strong> As if:
+
+<pre>
+            promise temp(other);
+            temp.swap(*this);
+</pre>        
+
+    <p><strong>Returns:</strong> <code>*this</code></p>
+
+<pre>
+    void swap(promise&amp; other);
+</pre>
+
+    <p><strong>Effects:</strong> <code>*this</code> encapsulates the stored value or exception (if any) previously encapsulated by
+    <code>other</code>; <code>other</code> encapsulates the stored value or exception (if any) previously encapsulated by
+    <code>*this</code>. Any <code>future</code>s previously associated with <code>other</code> become associated with
+    <code>*this</code>; any <code>future</code>s previously associated with <code>*this</code> become associated with
+    <code>other</code>.</p>
+
+    <h4>3.5.3 Retrieving the result from a <code>promise</code></h4>
+
+<pre>
+    future&lt;R&gt; get_future();
+</pre>
+
+    <p><strong>Returns:</strong> A new <code>future</code> associated with <code>*this</code>. If <code>*this</code> already has a
+      stored value or exception, then the <code>future</code> is <em>ready</em>, with the stored value or exception,
+      respectively. Otherwise, the <code>future</code> is not <em>ready</em>.</p>
+
+    <h4>3.5.4 Updating the state of a <code>promise</code></h4>
+
+<pre>
+    void cancel();
+</pre>
+
+    <p><strong>Effects:</strong> Nothing, if <code>*this</code> already has a stored value or exception. Otherwise, all
+    <code>future</code>s associated with <code>*this</code> become <em>ready</em>, with a stored exception of type
+    <code>future_canceled</code>.</p>
+
+<pre>
+    void set_value(R const&amp; r);
+    void set_value(R&amp;&amp; r);
+</pre>
+
+    <p><strong>Effects:</strong> If <code>*this</code> already has a stored value or exception, throws an exception of type
+    <code>promise_result_already_set</code>. Otherwise, all <code>future</code>s associated with <code>*this</code> become
+    <em>ready</em>, with a stored value that is a copy of <code>r</code>. If the copy constructor of <code>r</code> throws an
+      exception, the associated <code>future</code>s become <em>ready</em> with a stored exception that is a copy of that exception,
+    as if set by <code>set_exception(current_exception())</code>.</p>
+
+<pre>
+    void set_exception(exception_ptr e);        
+</pre>
+
+    <p><strong>Effects:</strong> If <code>*this</code> already has a stored value or exception, throws an exception of type
+    <code>promise_result_already_set</code>. Otherwise, all <code>future</code>s associated with <code>*this</code> become
+    <em>ready</em>, with a stored exception that is a copy of the exception referred to by <code>e</code>.</p>
+
+    <h4>3.5.5 The specialization <code>promise&lt;void&gt;</code></h4>
+
+<pre>
+    namespace std
+    {
+        template&lt;&gt;
+        class promise&lt;void&gt;
+        {
+        private:
+            // promise is not copyable
+            promise(promise&amp;); // for exposition only
+            promise&amp; operator=(promise&amp;); // for exposition only
+
+        public:
+            // Construction and Destruction
+            promise();
+            promise(promise&amp;&amp; other);
+            ~promise();
+
+            // Assignment
+            promise&amp; operator=(promise&amp;&amp; other);
+            void swap(promise&amp; other);
+
+            // Result retrieval
+            future&lt;void&gt; get_future();
+
+            // Updating the state
+            void cancel();
+            void set_value();
+            void set_exception(exception_ptr e);        
+        };
+    }
+</pre>
+
+    <p>This specialization behaves identically to the primary template, except that <code>set_value</code> behaves as described
+      below.</p>
+
+<pre>
+    void set_value();
+</pre>
+
+    <p><strong>Effects:</strong> If <code>*this</code> already has a stored exception, or <code>set_value</code> has already been
+    called, throws an exception of type <code>promise_result_already_set</code>. Otherwise, all <code>future</code>s associated with
+    <code>*this</code> become <em>ready</em>, with no stored exception.</p>
+
+    <h4>3.5.6 The specialization <code>promise&lt;R&amp;&gt;</code></h4>
+
+<pre>
+    namespace std
+    {
+        template&lt;typename R&gt;
+        class promise&lt;R&amp;&gt;
+        {
+        private:
+            // promise is not copyable
+            promise(promise&amp;); // for exposition only
+            promise&amp; operator=(promise&amp;); // for exposition only
+
+        public:
+            // Construction and Destruction
+            promise();
+            promise(promise&amp;&amp; other);
+            ~promise();
+
+            // Assignment
+            promise&amp; operator=(promise&amp;&amp; other);
+            void swap(promise&amp; other);
+
+            // Result retrieval
+            future&lt;R&amp;&gt; get_future();
+
+            // Updating the state
+            void cancel();
+            void set_value(R&amp; r);
+            void set_exception(exception_ptr e);        
+        };
+    }
+</pre>
+
+    <p>This specialization behaves identically to the primary template, except that <code>set_value</code> behaves as described
+      below.</p>
+
+<pre>
+    void set_value();
+</pre>
+
+    <p><strong>Effects:</strong> If <code>*this</code> already has a stored value or exception, throws an exception of type
+    <code>promise_result_already_set</code>. Otherwise, all <code>future</code>s associated with <code>*this</code> become
+    <em>ready</em>, with a stored value that is a reference to <code>r</code>.</p>
+
+    <h3>3.6 Function template <code>launch_in_pool</code></h3>
+
+<pre>
+    template&lt;typename F&gt;
+    future&lt;typename result_of&lt;F()&gt;::type&gt; launch_in_pool(F const&amp; f);
+
+    template&lt;typename F&gt;
+    future&lt;typename result_of&lt;F()&gt;::type&gt; launch_in_pool(F&amp;&amp; f);
+</pre>
+
+    <p><strong>Effects:</strong> Submits a copy of <code>f</code> to the system-supplied thread pool for execution.  Constructs a
+    new <code>future</code> associated with the result of invoking the submitted copy of <code>f</code>. When the system thread pool
+    invokes the stored copy of <code>f</code>, the <code>future</code> will become <em>ready</em>, with a copy of the value returned
+    or the execution thrown by the invocation. The template parameter <code>R</code> for the <code>future</code> is the return type
+    of <code>f()</code>. A task running in the system-supplied thread pool can submit a task with <code>launch_in_pool</code> and
+    wait on the <code>future</code> returned without causing deadlock.</p>
+
+    <p><strong>Returns:</strong> The newly constructed <code>future</code>.</p>
+
+    <h3>3.7 Function template <code>launch_in_thread</code></h3>
+
+<pre>
+    template&lt;typename F&gt;
+    future&lt;typename result_of&lt;F()&gt;::type&gt; launch_in_thread(F const&amp; f);
+
+    template&lt;typename F&gt;
+    future&lt;typename result_of&lt;F()&gt;::type&gt; launch_in_thread(F&amp;&amp; f);
+</pre>
+
+    <p><strong>Effects:</strong> Start a new thread which will execute a copy of <code>f</code>.  Constructs a new
+    <code>future</code> associated with the result of invoking the copy of <code>f</code>. When the newly created thread has invoked
+    the stored copy of <code>f</code>, the <code>future</code> will become <em>ready</em>, with a copy of the value returned or the
+    execution thrown by the invocation. The template parameter <code>R</code> for the <code>future</code> is the return type of
+    <code>f()</code>.</p>
+
+    <p><strong>Returns:</strong> The newly constructed <code>future</code>.</p>
+
+    <h3>3.8 Class template <code>thread_pool</code></h3>
+
+<pre>
+    namespace std
+    {
+        class thread_pool
+        {
+        private:
+            // thread_pool is not copyable
+            thread_pool(thread_pool&amp;); // for exposition only
+            thread_pool&amp; operator=(thread_pool&amp;); // for exposition only
+
+        public:
+            // Construction and Destruction
+            explicit thread_pool(unsigned thread_count);
+            ~thread_pool();
+
+            // Submitting tasks for execution
+            template&lt;typename F&gt;
+            future&lt;typename result_of&lt;F()&gt;::type&gt; submit_task(F const&amp; f);
+
+            template&lt;typename F&gt;
+            future&lt;typename result_of&lt;F()&gt;::type&gt; submit_task(F&amp;&amp; f);
+        };
+    }
+</pre>
+
+    <h4>3.8.1 Construction and Destruction of a <code>thread_pool</code></h4>
+
+<pre>
+    thread_pool(unsigned thread_count);
+</pre>
+
+    <p><strong>Effects:</strong> Create a new <code>thread_pool</code> with <code>thread_count</code> threads, and an empty task
+      queue.</p>
+
+<pre>
+    ~thread_pool();
+</pre>
+
+    <p><strong>Effects:</strong> Cancel all threads in the thread pool. Any tasks on the queue that have not yet been scheduled for
+    execution on a thread in the pool are cancelled: all <code>future</code>s associated with such tasks become <em>ready</em>, with
+    a stored exception of type <code>future_canceled</code>. Blocks until all threads in the pool have finished execution.</p>
+
+    <h4>3.8.2 Submitting tasks to a <code>thread_pool</code> for execution</h4>
+
+<pre>
+    template&lt;typename F&gt;
+    future&lt;typename result_of&lt;F()&gt;::type&gt; submit_task(F const&amp; f);
+
+    template&lt;typename F&gt;
+    future&lt;typename result_of&lt;F()&gt;::type&gt; submit_task(F&amp;&amp; f);
+</pre>
+
+    <p><strong>Effects:</strong> Adds a copy of <code>f</code> to the task queue associated with <code>*this</code> for execution.
+    Constructs a new <code>future</code> associated with the result of invoking the submitted copy of <code>f</code>. When the
+    stored copy of <code>f</code> is invoked by one of the threads in the pool, the <code>future</code> will become <em>ready</em>,
+    with a copy of the value returned or the execution thrown by the invocation. The template parameter <code>R</code> for the
+    <code>future</code> is the return type of <code>f()</code>.</p>
+
+    <p><strong>Returns:</strong> The newly constructed <code>future</code>.</p>
+
+    <h2>Acknowledgements</h2>
+
+    <p>Thanks to Peter Dimov and Howard Hinnant for their earlier papers, and feedback given on the thoughts presented here.</p>    
+    <p>Thanks to Clark Nelson for allowing me to submit this revised draft after the deadline.</p>
+
+  </body>
+</html>

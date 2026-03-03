@@ -1,0 +1,242 @@
+<html>
+	<head>
+		<title>A Threading API for C++</title>
+		<meta content="http://schemas.microsoft.com/intellisense/ie5" name="vs_targetSchema">
+		<meta http-equiv="Content-Language" content="en-us">
+		<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+	</head>
+	<body bgColor="#ffffff">
+		<ADDRESS>Document number: N2090=06-0160</ADDRESS>
+		<ADDRESS>Programming Language C++, Evolution and Library Subgroups</ADDRESS>
+		<ADDRESS>&nbsp;</ADDRESS>
+		<ADDRESS>Peter Dimov, &lt;<A href="mailto:pdimov@pdimov.com">pdimov@pdimov.com</A>&gt;</ADDRESS>
+		<ADDRESS>&nbsp;</ADDRESS>
+		<ADDRESS>2006-09-07</ADDRESS>
+		<h1>A Threading API for C++</h1>
+		<h2>I. Overview</h2>
+		<p>This document proposes a minimal and complete C++ API for&nbsp;starting, 
+			stopping and querying the status of threads, with the following synopsis:</p>
+		<pre>    namespace thread {
+		
+    class resource_error: public std::exception;
+
+    class handle; // a handle to a thread
+
+    template&lt;class F&gt; handle create( F f ); // create a thread executing f()
+    template&lt;class Runnable&gt; handle create( shared_ptr&lt;Runnable&gt; p ); // create a thread executing p-&gt;run()
+
+    handle current(); // create a handle to the current thread
+    
+    void join( handle th ); // wait for the thread identified by th to end
+    bool try_join( handle th ); // query whether the thread identified by th has ended
+    bool timed_join( handle th, timespec const &amp; abstime ); // wait with timeout
+
+    void cancel( handle th ); // attempt to cancel the thread identified by th
+
+    enum cancel_state
+    {
+        cancel_state_disabled, // = PTHREAD_CANCEL_DISABLE
+        cancel_state_enabled   // = PTHREAD_CANCEL_ENABLE
+    };
+
+    cancel_state set_cancel_state( cancel_state cs ); // set the cancel state of the current thread
+    void test_cancel(); // explicit cancelation point
+
+    } // namespace thread
+</pre>
+		<P>The central component of the proposed design is the class <tt>thread::handle</tt>. 
+			It is DefaultConstructible (with a singular value that identifies no thread), 
+			CopyConstructible, Assignable, EqualityComparable, LessThanComparable, Hashable 
+			and OutputStreamable (for diagnostic purposes). A handle uniquely identifies 
+			its thread. All copies of a given handle are equivalent, and all handles to the 
+			same thread are equivalent. In particular, the handle returned by <tt>thread::create</tt>
+			and the handle returned by <tt>thread::current</tt> from within the newly 
+			created thread are equivalent and fully interchangeable. A handle provides 
+			basic thread safety.</P>
+		<P>A new thread is created by a call to <tt>thread::create</tt>. Its argument can 
+			be an arbitrary nullary function object <tt>f</tt> that is called in the new 
+			thread. If <tt>f()</tt> throws an exception other than the 
+			implementation-defined cancelation exception, this results in <tt>std::terminate</tt>
+			being called; in other words, <tt>thread::create</tt> does not place a catch 
+			clause around the call. The return value of <tt>f()</tt>, if any, is ignored.</P>
+		<P>A convenience shorthand is provided in the form of an overload of <tt>thread::create</tt>
+			that accepts a <tt>shared_ptr</tt> to an arbitrary class with a <tt>run()</tt> member 
+			function; the behavior of this overload is as if <tt>bind( &amp;Runnable::run, p )</tt>
+			has been passed to the first form of <tt>thread::create</tt>. The overload is 
+			provided based on experience with <tt>boost::thread</tt>; programmers, 
+			especially those with Java or other C++ threading library background, often 
+			want to create a thread from an object, and see no apparent way to accomplish 
+			the task. The <tt>shared_ptr</tt> argument ensures that the object will be kept 
+			alive for the duration of the thread, and offers the client a way to keep 
+			another <tt>shared_ptr</tt> to the object and communicate with it, if 
+			necessary.</P>
+		<P>A thread can obtain a handle to itself by calling <tt>thread::current</tt>. If 
+			the thread calling <tt>thread::current</tt> has not been created by <tt>thread::create</tt>, 
+			it is implementation defined whether the function will succeed; in practice, 
+			the majority of platforms will not fail the call.</P>
+		<P>It is possible to wait for a thread to end, given its handle, by calling <tt>thread::join</tt>.
+			<tt>thread::join</tt> is idempotent and sequentially consistent ("strong thread 
+			safety"); that is, it can be called multiple times from one or more threads, 
+			even in parallel. On every occasion, the behavior of <tt>thread::join</tt> is 
+			simply to block until the thread identified by its argument has ended. If the 
+			thread has already ended, the function returns immediately. <tt>thread::join</tt>
+			is a cancelation point.</P>
+		<P>A nonblocking variant of <tt>thread::join</tt> is provided, <tt>thread::try_join</tt>. 
+			It returns true when the thread has ended, false otherwise. It is not a 
+			cancelation point.</P>
+		<P><tt>thread::timed_join</tt> is a variant of <tt>thread::join</tt> that accepts a 
+			timeout. It waits for a bounded amount of time for the completion of the thread 
+			identified by <tt>th</tt>. Its return value is consistent with <tt>thread::try_join</tt>.
+			<tt>thread::timed_join</tt> is blocking and hence, a cancelation point.</P>
+		<P><tt>thread::cancel</tt> delivers a cancelation request to the thread identified 
+			by its argument. When a thread with a cancel state set to <tt>cancel_state_enabled</tt>
+			has a cancelation request pending and encounters a cancelation point, it throws 
+			an implementation-defined exception, called a cancelation exception. For 
+			cancelation to be useful, at minimum the blocking wait on a C++ condition 
+			variable must be a cancelation point.</P>
+		<P><EM>On POSIX platforms, the only practical way for C++ cancelation to be implemented 
+				is to use the underlying POSIX cancelation mechanism. For this to have a chance 
+				to work, POSIX cancelation needs to be implemented as (the equivalent of) 
+				throwing a C++ exception. On platforms where this is not the case, this 
+				author's opinion is that we (the C++ committee) can effectively do nothing to 
+				fix cancelation from the C++ side, and regrettably, programmers on these 
+				platforms will not be able to take advantage of the feature. Our best bet is 
+				simply to provide a mechanism to invoke <tt>pthread_cancel</tt> and leave it at 
+				that.</EM></P>
+		<P><EM>On Windows, the OS provides no built-in cancelation support, so cancelation will 
+				be implemented by the C++ API. The thread layer provides a Windows event handle 
+				that can be used by cancelation points in a WaitForMultipleObjects call to 
+				watch for cancelation requests.</EM></P>
+		<P>The thread API provides an explicit cancelation point <tt>thread::test_cancel</tt>. 
+			A thread that spins in a tight loop containing no blocking calls can 
+			periodically invoke <tt>thread::test_cancel</tt> if it wishes to handle 
+			cancelation requests.</P>
+		<P>Finally, <tt>thread::set_cancel_state</tt> provides a mechanism for a thread to 
+			ignore cancelation requests for a period of time, in order to provide the 
+			nothrow guarantee. <tt>thread::set_cancel_state</tt> returns the old value of 
+			the cancel state so that it can be restored at the end of the nothrow region. 
+			The initial cancel state of a thread is <tt>cancel_state_enabled</tt>.</P>
+		<h2>II. Design Decisions</h2>
+		<h3>A. Explicit versus Implicit Thread State Lifetime Management</h3>
+		<p>The proposed design differs from the widely known <tt>boost::thread</tt>, which 
+			will be used in this section as a reference point, by hiding the thread state 
+			from the user and making it the responsibility of the implementation to manage 
+			its lifetime and to be able to produce references (handles) to it on demand.</p>
+		<P>Experience with <tt>boost::thread</tt> has shown that users who need to refer to 
+			the thread state from two different points in the code are forced to use <tt>shared_ptr&lt;boost::thread&gt;</tt>
+			or <tt>boost::thread*</tt> to reimplement a handle-based layer on top of it. 
+			Unfortunately, this doesn't provide them with the convenience of being able to 
+			retrieve a reference to the thread state of the current thread without somehow 
+			receiving one as an argument. In addition, using a raw pointer is inherently 
+			prone to dangling pointer errors and memory leaks, and when the current thread 
+			is a "foreign" thread, it may have no thread state at all.</P>
+		<P>In this author's opinion, users should not be forced to reimplement a (more 
+			limited and less useful) handle-based API; we, the library implementers, need 
+			to provide one for them.</P>
+		<h3>B. Copyability and Equivalence</h3>
+		<p>The proposed handle class has full reference semantics and is usable in standard 
+			containers out of the box. It is copyable, with all copies being equivalent, 
+			interchangeable and identifying the same thread. <tt>thread::handle</tt> does 
+			not represent an unique access point to the thread state, as a noncopyable but 
+			movable class would. Since a thread can create a handle to itself at any time 
+			by calling <tt>thread::current</tt>, it naturally follows that uniqueness 
+			cannot be guaranteed.</p>
+		<h3>C. Return Values and Exceptions</h3>
+		<p>The thread layer does not transport return values or exceptions from one thread 
+			to another. It has been shown (by this author and others) that this 
+			functionality can be implemented in a separate, general purpose component that 
+			has no dependence on the specific API used for issuing an asynchronous function 
+			call, in a thread or otherwise (one alternative is a remote procedure call; 
+			another is just doing a synchronous execution in the same thread.)</p>
+		<P>A companion paper, <EM>Transporting Values and Exceptions between Threads</EM>,&nbsp;presents 
+			one possible design for such a component, called a <tt>future</tt>.</P>
+		<h3>D. Thread Safety Level</h3>
+		<p><tt>thread::handle</tt> itself provides basic thread safety and is not atomic; 
+			it is as thread safe as a raw pointer or a <tt>shared_ptr</tt>, the recommended 
+			default level of thread safety for all C++ components.</p>
+		<P>Operations on a thread identified by (copies of) the same handle, however, 
+			provide strong thread safety or sequential consistency. That is, multiple 
+			concurrent calls to the threading API are allowed and well defined, even when 
+			they refer to the same thread; their behavior is as if they have been issued 
+			sequentially in an unspecified order. This is the thread safety level that is 
+			intuitively expected by the majority of programmers from a threading API.</P>
+		<h3>E. No "Call Just Once" Requirement</h3>
+		<p><tt>boost::thread::join</tt> has semantics similar to <tt>pthread_join</tt>, in 
+			that it is allowed to be called at most once. This has been a source of 
+			complaints from the users, who perceive it as an arbitrary and unnecessary 
+			requirement. This author agrees with the users and as a consequence, <tt>thread::join</tt>
+			and its cousins can be called multiple times, even in parallel.</p>
+		<h3>F. Extensions</h3>
+		<p>A further refinement of this proposal can include extensions to <tt>thread::create</tt>
+			that supply attributes for the new thread, a non-portable accessor that 
+			retrieves the OS thread handle, and a mechanism to obtain a scalar and atomic 
+			thread identifier (useful for recording the current owner of a synchronization 
+			primitive, among other things). The extensions are omitted for brevity; it is 
+			more important to agree on the general direction first.</p>
+		<H2>III. Implementation</H2>
+		<p>Two prototype implementations of the proposed API are available, one 
+			Windows-based:</p>
+		<P><A href="http://www.pdimov.com/cpp/thread2_w32.cpp">http://www.pdimov.com/cpp/thread2_w32.cpp</A></P>
+		<P>and one POSIX-based:</P>
+		<P><A href="http://www.pdimov.com/cpp/thread2_pt.cpp">http://www.pdimov.com/cpp/thread2_pt.cpp</A></P>
+		<P>The prototypes use intrusive reference counting to manage the lifetime of the 
+			thread state, represented by the <tt>thread::state</tt> class. <tt>thread::handle</tt>
+			is defined as a typedef for <tt><A href="http://www.boost.org/libs/smart_ptr/intrusive_ptr.html">
+					boost::intrusive_ptr</A>&lt;thread::state&gt;</tt>. Both prototypes are 
+			able to "adopt" a foreign thread from within <tt>thread::current</tt> and 
+			produce a fully-featured handle for it (although the Windows implementation 
+			will not be able to do so on some versions on Windows CE due to lack of <tt>DuplicateHandle</tt>.)</P>
+		<P>The Windows implementation provides a non-portable accessor <tt>thread::get_cancel_event</tt>
+			that can be used from cancelation points such as <tt>condition::wait</tt> to 
+			retrieve the cancelation event handle for the current thread.</P>
+		<P>The POSIX implementation of <tt>thread::state</tt> contains the following 
+			members, given as a measure of the weight of the proposed API:</P>
+		<pre>    long refs_;
+    pthread_mutex_t mx_;
+    pthread_cond_t cn_;
+    bool ended_;
+    pthread_t handle_;
+</pre>
+		<P>On platforms where <tt>pthread_t</tt> has a singular value, the <tt>ended_</tt> boolean 
+			flag can be eliminated.</P>
+		<P>Since a thread is a relatively heavy object - a typical default stack size for a 
+			new thread is 1 MB - this author believes that the overhead imposed by the 
+			proposed API is justified by its functionality and usability.</P>
+		<P>The Windows implementation does not need to contain a mutex and a condition 
+			variable because the semantics of <tt>thread::join</tt> can be implemented 
+			directly on top of the native API:</P>
+		<pre>    long refs_;
+    long cancel_state_;
+    HANDLE cancel_event_;
+    HANDLE handle_;
+</pre>
+		<P>although, of course, it contains the cancelation support that is hidden behind 
+			the <tt>pthread_t</tt> in the POSIX case.</P>
+		<P>A final note on the Windows implementation: the prototype does not implement the 
+			infrastructure that is necessary for thread-specific data variables to have 
+			destructors (a functionality offered by <tt>pthread_key_create</tt>, but having 
+			no equivalent on Windows). The Boost implementation of <tt>boost::thread_specific_ptr</tt>
+			does contain such infrastructure with two alternate implementations, one based 
+			on DLL process/thread attach/detach notifications, the other based on the 
+			Portable Executable (PE) format ability to execute a function on thread 
+			termination. The relevant files can be viewed at:</P>
+		<P><A href="http://boost.cvs.sourceforge.net/*checkout*/boost/boost/libs/thread/src/tss_hooks.cpp">http://boost.cvs.sourceforge.net/*checkout*/boost/boost/libs/thread/src/tss_hooks.cpp</A></P>
+		<P><A href="http://boost.cvs.sourceforge.net/*checkout*/boost/boost/libs/thread/src/tss_pe.cpp">http://boost.cvs.sourceforge.net/*checkout*/boost/boost/libs/thread/src/tss_pe.cpp</A></P>
+		<P><A href="http://boost.cvs.sourceforge.net/*checkout*/boost/boost/libs/thread/src/tss_dll.cpp">http://boost.cvs.sourceforge.net/*checkout*/boost/boost/libs/thread/src/tss_dll.cpp</A></P>
+		<P>Such TSD destructor support has not been included in the Windows prototype in 
+			order to keep it manageable and understandable. A production-quality 
+			implementation, of course, will have to provide such support as it cannot 
+			afford to leak the thread states. The POSIX implementation takes advantage of 
+			the POSIX built-in TSD destructor support and contains no missing pieces.</P>
+		<P>It is my sincere hope that C++0x will provide a mechanism for us to just say</P>
+		<pre>    __thread X s_tx;</pre>
+		<P>and have the destructor of X automatically executed on thread termination (and 
+			the constructor of X executed on thread creation) so that we can dispense with 
+			the clumsy workarounds.</P>
+		<h2>IV. Proposed Text</h2>
+		<P>A future revision of this document will provide a proposed text for addition to 
+			the working paper or a technical report, if the proposal gathers sufficient 
+			interest from the working groups.</P>
+		<P><EM>--end</EM></P>
+	</body>
+</html>

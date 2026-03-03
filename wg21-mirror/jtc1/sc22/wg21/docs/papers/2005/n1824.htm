@@ -1,0 +1,232 @@
+<html>
+<head>
+<TITLE>
+ISO/IEC JTC1/SC22/WG21
+N1824
+</TITLE>
+</head>
+<body>
+<h1>
+<img align=top src="/pics/iso44.gif" alt="ISO/">
+<img align=top src="/pics/iec44.gif" alt="IEC">
+JTC1/SC22/WG21
+N1824
+</h1>
+<pre>
+n1824=05-0084 Extending Aggregate Initialization
+2005-06-27
+
+Alisdair Meredith [alisdair.meredith@uk.renaultf1.com]
+
+Motivation
+----------
+
+Aggregate initialization is a useful feature of C and C++.  However, it comes with some restrictions that quickly limit its usefulness for C++, confuse newcomers to the language and often leads to silent undefined behaviour when the rules are broken.(1)
+
+Some motivating examples will help the discussion
+
+// Declare some aggregate types
+struct Foo
+{
+  double a;
+  double b;
+};
+
+struct TwoFoo
+{
+  Foo x;
+  Foo y;
+};
+
+
+Foo f = { 1, 2 };
+TwoFoo f2 = { 1, 2, 3 };       // f2 == {1,2} {3,0}
+TwoFoo g2 = { { 1 } , 2, 3 };  // g2 == {1,0} {2,3}
+
+
+This is all familiar today.
+However, problems occur when you try to initialise aggregates in other contexts
+
+struct derived : Foo
+{
+  TwoFoo member;
+
+  derived();  // How can we initialize here?
+};
+
+TwoFoo test( Foo p1, Foo p2 ) // How can we call this?
+{
+  TwoFoo result;
+  result.x = p1;
+  result.y = p2;
+  return  result;  // Why could I not return temporary, enabling RVO?
+}
+
+
+std::auto_ptr&lt; Foo > pFoo( new Foo );  // How can I initialize this?
+
+
+Note that doubles make for particularly motivating examples, as un-initialized they can easily contained trapped values such as signalling NaNs.
+
+
+Possible Solutions
+------------------
+
+All these problems can be solved by defining a constructor for the aggregate classes.  However, this has several problems:
+
+i/  The class ceases to be an aggregate, so earlier initializations fail.
+
+And for these specific examples where all data members are also PODs
+
+ii/ The struct is no longer compatible with C, although this can be worked around with the preprocessor.
+iii/ class no longer qualifies as a POD
+iv/ class no longer qualifies to be used as a union member
+
+
+So we are left looking for an extension to the language that would solve these problems without breaking existing programs.  There are 3 obvious avenues to explore:
+
+i/ Throw away the concept of aggregates, PODs etc. and find a new way to describe that part of the type system and initialization.
+This is quite a radical solution, but not entirely without merit.  But there is no guarantee it will produce a better answer, and somewhat larger in scope than the problem this paper addresses.  We will put this idea on the side for now.
+
+ii/ Permit constructors (with some restrictions) in aggregates / PODs / union-members
+If a constructor has no side effect beyond directly initializing members, it should not cause problems for the issues that aggregates / PODs / union-membership address.  However, the constructors must be implemented inline and in the class definition, or else it would not be possible to diagnose if a class had aggregate-friendly constructors or not.  It does cause incompatibility with C.  It will also be very confusing for the non-expert why some classes with constructors can be used safely, and other can't.
+It is not clear that this direction will produce fewer problems than it solves.
+
+
+iii/ [The proposal] Forward 'constructor argument lists' as aggregate initializers 
+One of the less well understood features of aggregates is that while they have implicitly declared default constructors, it is impossible to call them.  Aggregates are either default initialized by default initializing each member, or value initialized by value initializing each member.  Any attempt to call the constructor will result in one of the two cases above.  [Checked: This included placement new calls]
+
+In particular, any place where the syntax appears to explicitly invoke the default constructor with an empty pair of parens, value initialization occurs which is equivalent to aggregate initialization with an empty pair of braces.  This proposal simply suggests extending the idea, so that when an aggregate is initialized with parens, the arguments are treated as if aggregate initialization had been legal and used here instead.
+
+To rework the original examples:
+
+Foo f( 1, 2 );
+
+TwoFoo f2( 1, 2, 3 );       // f2 == {1,2} {3,0}
+
+Note that although TwoFoo has two data members, aggregate initialization swallows the arguments initializing the sub-aggregates.   In particular, initializing TwoFoo with two integral arguments initializes only the first Foo member, not both
+
+TwoFoo f2a( 1, 2 );  // f2a = {1, 2} { 0, 0}
+
+The g2 example is interesting as it would seem to require braces within the constructor list, and that is clearly a much bigger change than we would like to make!  However, the same effect can be achieved by nesting explicit initialization requests:
+
+TwoFoo g2 = { Foo( 1 ) , 2, 3 };  // g2 == {1,0} {2,3}
+
+or even using the proposed new syntax entirely
+
+TwoFoo g2( Foo( 1 ) , 2, 3 );  // g2 == {1,0} {2,3}
+
+
+
+struct derived : Foo
+{
+  TwoFoo member;
+
+  derived();  // How can we initialize here?
+};
+
+Implementing the constructor is now easy:
+
+derived::derived()
+  : Foo( 1, 2 ) 
+  , member( Foo(), 4, 2 )
+{
+}
+
+Likewise, we can implement and call our test function:
+
+TwoFoo test( Foo p1, Foo p2 ) // How can we call this?
+{
+  return  TwoFoo( p1, p2 );
+}
+
+TwoFoo t = test( Foo( 1 ), Foo( 2 ) );
+
+
+And of course, we can now initialize dynamically allocated objects:
+
+std::auto_ptr&lt; Foo > pFoo( new Foo( 1, 2 ) );
+
+
+If we really want, we can even throw Foo exceptions:
+
+  throw Foo( 3.14, 2.78 );
+
+
+
+Further examples
+----------------
+
+Note that not all aggregates are classes, but this syntax extends to those cases as well.  For instance, there is the long standing problem of how to initialize array members of classes:
+
+class double_array
+{
+  double data[5];
+
+public:
+  explicit double_array( double d = 0.0 )
+    : data( d, d, d, d, d )
+  {
+  }
+};
+
+
+Related Proposals
+-----------------
+
+<a hRef="../2003/n1509.pdf">N1509</a> 03-0092 Generalized Initializer Lists	Bjarne Stroustrup
+<a hRef="../2004/n1701.pdf">N1701</a> 04-0141 Regularizing Initialization Syntax (revision 1)	Francis Glassborow
+
+
+
+Conclusion
+----------
+
+This paper proposes extending aggregate initialization syntax to cover initialization in all the contexts it is not possible today.  The advantages of this proposal are
+
+i/ it does not change the meaning of existing, valid programs.
+ii/ works 'out the box' with many Operating System and library structures declared in C.
+iii/ it is convenient and easy to teach, acting as if all the useful constructors for an aggregate had been declared.
+iv/ It removes some old embarrassments from the language, such as initializing member arrays.
+
+The disadvantage is that it still does not resolve the problem of initialized structures containing traps.  It does not solve the problem of providing non-zero defaults for members not explicitly initialized.  There are left for future extension papers, or a grand review of the type system and initialization.
+
+It is proposed to add precise wording in a revised paper for the next mailing.  Changes are expected to affect mainly 8.5 and 12.6.
+
+
+Open questions
+--------------
+
+Are there any issues with copy constructors?  There is certainly not a problem with fundamental types, as while int, double, etc. are PODs, they are not aggregates.
+
+However, what does the following mean?
+
+Foo { std::string s };
+Foo f( Foo( "hello" ) );
+
+Is f direct initialized from a copy constructor, or does this also head into aggregate initialization?
+Is there a difference?  I believe one way results in direct initialization, the other in copy initialization, but is that difference detectable?
+
+In any case, it should be clear from the proposed exactly what form of initialization is specified.
+
+
+Notes
+-----
+(1) an example of silent undefined behaviour is adding a ctor to initialize what the user believes is a POD, and then using memory-blitting functions on the members.  A classic example is:
+
+struct myPOD
+{
+// various data members
+
+  myPOD()
+  {
+    memset( this, 0, sizeof(*this) ); // undefined, but usually works
+  }
+};
+
+
+Acknowledgements:
+The following people were very helpful reviewing this paper and providing feedback:
+Chris Uzdavinis, Thomas Maeder, Lois </pre>
+</body>
+</html>

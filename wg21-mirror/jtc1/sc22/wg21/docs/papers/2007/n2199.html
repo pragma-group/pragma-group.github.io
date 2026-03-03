@@ -1,0 +1,550 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"
+        "http://www.w3.org/TR/html4/loose.dtd">
+<html lang="en">
+<head>
+	<meta http-equiv="content-type" content="text/html; charset=utf-8">
+	<title>Improved min/max</title>
+	<style>
+	p {text-align:justify}
+	li {text-align:justify}
+	blockquote.note
+	{
+		background-color:#E0E0E0;
+		padding-left: 15px;
+		padding-right: 15px;
+		padding-top: 1px;
+		padding-bottom: 1px;
+	}
+	ins {background-color:#FFFFA0}
+	del {background-color:#FFFFA0}
+	</style>
+</head>
+<body>
+
+<address align=right>
+Document number: N2199=07-0059<br>
+<br>
+<a href="mailto:howard.hinnant@gmail.com">Howard E. Hinnant</a><br>
+2007-03-09
+</address>
+<hr>
+<h1><center>Improved <tt>min</tt>/<tt>max</tt></center></h1>
+
+<h2>Introduction</h2>
+
+<p>
+The current standard <tt>min</tt> and <tt>max</tt> have some deficiencies, namely:
+</p>
+
+<ul>
+<li>
+<p>
+The function can not be used on the left hand side of an assignment:
+</p>
+<blockquote><pre>
+int x = 1;
+int y = 2;
+std::min(x, y) = 3;  // x == 3 desired, currently compile time error
+</pre></blockquote>
+</li>
+
+<li>
+<p>
+When rvalues are supplies as arguments to the function, there is a danger that if the
+client catches the return value by const reference, it will have a reference to a
+destructed object:
+</p>
+<blockquote><pre>
+class A
+{
+    int i_;
+public:
+    explicit A(int i) : i_(i) {assert(i_ > 0);}
+    ~A() {i_ = 0;}
+    friend bool operator<(const A& x, const A& y) {return x.i_ < y.i_;}
+    friend std::ostream& operator<<(std::ostream&& os, const A& a)
+    {
+        if (a.i_ > 0)
+            os << "A = " << a.i_;
+        else
+            os << "A is destructed";
+        return os;
+    }
+};
+
+int main()
+{
+    A a2(2);
+    const A& ar = std::min(A(1), a2);
+    std::cout << ar << '\n';
+}
+</pre>
+<p>Output:</p>
+<pre>
+A is destructed
+</pre></blockquote>
+</li>
+
+<li>
+<p>
+Different types which are comparable with each other do not work with the standard <tt>min</tt> / <tt>max</tt>.
+</p>
+<blockquote><pre>
+int a = 'q';
+a = std:min(a, 'b');  // a == 'b' desired, currently compile time error
+</pre></blockquote>
+</li>
+<li>
+<p>
+Additionally the current definition of <tt>min</tt> and <tt>max</tt> is not usable with move-only
+types.  We would like to be able to interoperate with either lvalue or rvalue move only types:
+</p>
+
+<blockquote><pre>
+MoveOnly m1(1);
+MoveOnly m2(2);
+MoveOnly m3 = std::move(std::min(m1, m2));     // error: access to private copy ctor of MoveOnly
+MoveOnly m4 = std::min(source1(), source2());  // error: access to private copy ctor of MoveOnly
+std::min(m1, m2) = source1();                  // error: can't assign to const MoveOnly
+</pre></blockquote>
+</li>
+</ul>
+
+<p>
+This paper proposes new definitions of <tt>min</tt> and <tt>max</tt>
+which eliminate all of the listed deficiencies.  <tt>min</tt> and <tt>max</tt> will be
+able to be assigned to if both arguments are non-const lvalues of the same type.  It will
+not be possible to form a reference to a destructed rvalue.  And the new <tt>min</tt> and <tt>max</tt>
+will interoperate with move-only types with the expected semantics.
+</p>
+
+<ul>
+<li>
+<blockquote><pre>
+int x = 1;
+int y = 2;
+std::min(x, y) = 3;  // ok, x == 3
+</pre></blockquote>
+</li>
+
+<li>
+<blockquote><pre>
+A a2(2);
+const A& ar = std::min(A(1), a2);
+std::cout << ar << '\n';
+</pre>
+<p>Output:</p>
+<pre>
+A == 1
+</pre></blockquote>
+</li>
+
+<li>
+<blockquote><pre>
+int a = 'q';
+a = std:min(a, 'b');  // ok, a == 'b'
+</pre></blockquote>
+</li>
+<li>
+<blockquote><pre>
+MoveOnly m1(1);
+MoveOnly m2(2);
+MoveOnly m3 = std::move(std::min(m1, m2));     // ok, m3 moves from m1
+MoveOnly m4 = std::min(source1(), source2());  // ok, m4 moves from source1()
+std::min(m1, m2) = source1();                  // ok, m1 moves from source1()
+</pre></blockquote>
+</li>
+</ul>
+
+<p>
+Additionally this definition of <tt>min</tt> and <tt>max</tt> restricts mixed mode integral comparisons
+to those that are intrinsically safe.  For example:
+</p>
+
+<ul>
+<li>
+<pre>
+int x = -1;
+short y = 2;
+int z = std::min(x, y);  // ok, z == -1
+</pre>
+</li>
+<li>
+<pre>
+signed char x = -1;
+unsigned short y = 2;
+int z = std::min(x, y);  // ok, z == -1, result type int able to represent full range
+                         //    of signed char and unsigned short.
+</pre>
+</li>
+<li>
+<pre>
+int x = -1;
+unsigned y = 2;
+unsigned z = std::min(x, y);  // does not compile.  Result type unsigned not able to represent full range
+                              //    of int.
+</pre>
+</li>
+<li>
+<pre>
+char x = -1;
+unsigned y = 2;
+unsigned z = std::min(x, y);  // does not compile if char is signed, z == 2 if char is unsigned (x == 255 typically)
+</pre>
+</li>
+<li>
+<pre>
+char x = -1;
+int y = 2;
+int z = std::min(x, y);  // if char is signed, z == -1
+                         // if char is unsigned, compiles only if the range of char is a subset of the range of int
+                         //    (and then z == 2)
+</pre>
+</li>
+<li>
+<pre>
+unsigned int x = 4;
+long long y = -1;
+long long z = std::min(x, y);  // ok, z == -1.  Result type long long able to represent full range
+                               //    of both arguments.
+</pre>
+</li>
+</ul>
+
+<h2>Proposed Wording</h2>
+
+<h3>25.3.7 Minimum and maximum [alg.min.max]</h3>
+
+<pre><ins>
+template &lt;class T, class U&gt;
+struct min_max_return {typedef <i>implementation</i> type;};
+</ins></pre>
+
+<p><ins>
+The <tt>struct min_max_return</tt> serves to define the return type of the <tt>min</tt>
+and <tt>max</tt> functions.  The typedef <tt>type</tt> shall indicate the return type,
+except in certain cases outlined below where it is specified that the typedef shall
+not be present.
+</ins></p>
+<ul>
+<li><ins>
+If <tt>T</tt> and <tt>U</tt> are not both reference types, then
+<tt>min_max_return</tt> shall contain no typedef <tt>type</tt>.
+</ins></li>
+<li><ins>
+If <tt>T</tt> and <tt>U</tt> are both references to integral types,</ins>
+<ul>
+<li><ins>
+then the usual arithmetic conversions are performed to bring them to a common type <tt>X</tt>.
+If the range of <tt>X</tt> is not a superset of the range of both <tt>T</tt> and <tt>U</tt> then
+<tt>min_max_return</tt> shall contain no typedef <tt>type</tt>.
+</ins></li>
+</ul>
+</li>
+<li><ins>
+If <tt>T</tt> has type <tt><i>cv1</i>-X&amp;</tt> and <tt>U</tt> has
+type <tt><i>cv2</i>-X&amp;</tt> (<tt>T</tt> and <tt>U</tt> are lvalue
+references to the same type <tt>X</tt> except for cv qualifications),
+then the typedef <tt>type</tt> shall be the same type as <tt>X&amp;</tt>
+qualified by the union of <tt><i>cv1</i></tt> and <tt><i>cv2</i></tt>.
+</ins></li>
+<li><ins>
+Else if <tt>T</tt> and <tt>U</tt> are lvalue or rvalue references to the same type
+<tt>X</tt> except for cv-qualifier differences, the typedef <tt>type</tt> shall
+be the same type as <tt>X</tt> with all cv-qualifiers removed.
+</ins></li>
+<li><ins>
+Else <tt>T</tt> and <tt>U</tt> are references to different types.  The
+typedef <tt>type</tt> shall be the same type as the expression <tt>b ? t
+: u</tt>, with cv-qualifiers removed from the result of the expression,
+for an invented variable <tt>b</tt> of type <tt>bool</tt>, an invented
+variable <tt>t</tt> of type <tt>T</tt> and an invented variable
+<tt>u</tt> of type <tt>U</tt>.
+</ins></li>
+</ul>
+
+<pre><del>
+template&lt;class T&gt; const T&amp; min(const T&amp; <i>a</i>, const T&amp; <i>b</i>);
+template&lt;class T, class Compare&gt;
+  const T&amp; min(const T&amp; <i>a</i>, const T&amp; <i>b</i>, Compare <i>comp</i>);
+</del></pre>
+
+<pre><ins>
+template&lt;class T, class U&gt;
+typename min_max_return&lt;T&amp;&amp;, U&amp;&amp;&gt;::type
+min(T&amp;&amp; <i>a</i>, U&amp;&amp; <i>b</i>);
+template&lt;class T, class U, class Compare&gt;
+  typename min_max_return&lt;T&amp;&amp;, U&amp;&amp;&gt;::type
+  min(T&amp;&amp; <i>a</i>, U&amp;&amp; <i>b</i>, Compare <i>comp</i>);
+</ins></pre>
+
+<p>
+-1- <i>Requires:</i> <ins>The first signature requires</ins> Type
+<del><tt>T</tt></del> <ins><tt>U</tt></ins> <del>is</del> <ins>to
+be</ins> <tt>LessThanComparable</tt> (20.1.2) <ins>with type
+<tt>T</tt></ins>.  <ins>If the return type is not a reference type (see
+<tt>min_max_return</tt>) and the argument is an rvalue, the type of
+that argument must be <tt>MoveConstructible</tt>.  Else if the return
+type is not a reference type and the argument is an lvalue, the
+type of that argument must be <tt>CopyConstructible</tt>.</ins>
+</p>
+
+<p>
+-2- <i>Returns:</i> <del>The smaller value.</del>
+<ins>If <tt><i>b</i> &lt; <i>a</i></tt> or <tt><i>comp</i>(<i>b</i>, <i>a</i>)</tt>
+is <tt>true</tt>, returns <tt><i>b</i></tt>, else returns <tt><i>a</i></tt>.</ins>
+</p>
+
+<p>
+-3- <i>Remarks:</i> Returns the first argument when the arguments are equivalent.
+</p>
+
+<pre><del>
+template&lt;class T&gt; const T&amp; max(const T&amp; <i>a</i>, const T&amp; <i>b</i>);
+template&lt;class T, class Compare&gt;
+  const T&amp; max(const T&amp; <i>a</i>, const T&amp; <i>b</i>, Compare <i>comp</i>);
+</del></pre>
+
+<pre><ins>
+template&lt;class T, class U&gt;
+typename min_max_return&lt;T&amp;&amp;, U&amp;&amp;&gt;::type
+max(T&amp;&amp; <i>a</i>, U&amp;&amp; <i>b</i>);
+template&lt;class T, class U, class Compare&gt;
+  typename min_max_return&lt;T&amp;&amp;, U&amp;&amp;&gt;::type
+  max(T&amp;&amp; <i>a</i>, U&amp;&amp; <i>b</i>, Compare <i>comp</i>);
+</ins></pre>
+
+<p>
+-4- <i>Requires:</i> <ins>The first signature requires</ins> Type <tt>T</tt> <del>is</del>
+<ins>to be</ins> <tt>LessThanComparable</tt> (20.1.2) <ins>with type <tt>U</tt></ins>.
+<ins>If the return type is not a reference type (see
+<tt>min_max_return</tt>) and the argument is an rvalue, the type of
+that argument must be <tt>MoveConstructible</tt>.  Else if the return
+type is not a reference type and the argument is an lvalue, the
+type of that argument must be <tt>CopyConstructible</tt>.</ins>
+</p>
+
+<p>
+-5- <i>Returns:</i> <del>The larger value.</del>
+<ins>If <tt><i>a</i> &lt; <i>b</i></tt> or <tt><i>comp</i>(<i>a</i>, <i>b</i>)</tt>
+is <tt>true</tt>, returns <tt><i>b</i></tt>, else returns <tt><i>a</i></tt>.</ins>
+</p>
+
+<p>
+-6- <i>Remarks:</i> Returns the first argument when the arguments are equivalent.
+</p>
+
+<h2>Reference Implementation</h2>
+
+<blockquote><pre>
+namespace detail
+{
+
+template &lt;class T, bool make_const, bool make_volatile&gt;
+struct union_cv_helper;
+
+template &lt;class T&gt;
+struct union_cv_helper&lt;T, false, false&gt;
+{
+    typedef T type;
+};
+
+template &lt;class T&gt;
+struct union_cv_helper&lt;T, false, true&gt;
+{
+    typedef volatile T type;
+};
+
+template &lt;class T&gt;
+struct union_cv_helper&lt;T, true, false&gt;
+{
+    typedef const T type;
+};
+
+template &lt;class T&gt;
+struct union_cv_helper&lt;T, true, true&gt;
+{
+    typedef const volatile T type;
+};
+
+}  // detail
+
+template &lt;class T, class U&gt;
+struct union_cv
+{
+    static const bool make_const = std::tr1::is_const&lt;T&gt;::value || std::tr1::is_const&lt;U&gt;::value;
+    static const bool make_volatile = std::tr1::is_volatile&lt;T&gt;::value || std::tr1::is_volatile&lt;U&gt;::value;
+    typedef typename std::tr1::remove_cv&lt;T&gt;::type Tr;
+    typedef typename std::tr1::remove_cv&lt;U&gt;::type Ur;
+    typedef typename detail::union_cv_helper&lt;Tr, make_const, make_volatile&gt;::type type;
+};
+
+template &lt;class T, class U&gt;
+struct promote
+{
+    static T t;
+    static U u;
+    static bool b;
+    typedef typename std::tr1::remove_cv&lt;decltype(b ? t : u)&gt;::type type;
+};
+
+namespace detail
+{
+
+template &lt;class T, class Tr, class U, class Ur&gt;
+struct min_max_return_helper
+{
+    typedef typename promote&lt;T&amp;, U&amp;&gt;::type type;
+};
+
+template &lt;class T, class Tr, class U&gt;
+struct min_max_return_helper&lt;T, Tr, U, Tr&gt;
+{
+    typedef typename union_cv&lt;T, U&gt;::type&amp; type;
+};
+
+template &lt;class T, T t, class U, U u&gt;
+struct safe_less_equal
+{
+    static const bool Tsigned = std::tr1::is_signed&lt;T&gt;::value;
+    static const bool Usigned = std::tr1::is_signed&lt;U&gt;::value;
+    static const bool Tneg = Tsigned &amp;&amp; t &lt; T(0);
+    static const bool Uneg = Usigned &amp;&amp; u &lt; U(0);
+    static const bool value = Tneg == Uneg ? t &lt;= u : Tneg;
+};
+
+template &lt;class T&gt;
+struct int_min
+{
+    static const T value = std::tr1::is_signed&lt;T&gt;::value ? T(T(1) &lt;&lt; std::numeric_limits&lt;T&gt;::digits) : T(0);
+};
+
+template &lt;class T&gt;
+struct int_max
+{
+    static const T value = T(~int_min&lt;T&gt;::value);
+};
+
+template &lt;class T, class U, bool = std::tr1::is_integral&lt;T&gt;::value &amp;&amp; std::tr1::is_integral&lt;U&gt;::value&gt;
+struct safe_compare_imp
+{
+    typedef typename promote&lt;T, U&gt;::type R;
+    static const R Rmin = int_min&lt;R&gt;::value;
+    static const R Rmax = int_max&lt;R&gt;::value;
+
+    static const T Tmin = int_min&lt;T&gt;::value;
+    static const T Tmax = int_max&lt;T&gt;::value;
+
+    static const U Umin = int_min&lt;U&gt;::value;
+    static const U Umax = int_max&lt;U&gt;::value;
+
+    static const bool value = safe_less_equal&lt;R, Rmin, T, Tmin&gt;::value &amp;&amp;
+                              safe_less_equal&lt;R, Rmin, U, Umin&gt;::value &amp;&amp;
+                              safe_less_equal&lt;T, Tmax, R, Rmax&gt;::value &amp;&amp;
+                              safe_less_equal&lt;U, Umax, R, Rmax&gt;::value;
+};
+
+template &lt;class T, class U&gt;
+struct safe_compare_imp&lt;T, U, false&gt;
+{
+    static const bool value = true;
+};
+
+template &lt;class T&gt;
+struct safe_compare_imp&lt;T, T, true&gt;
+{
+    static const bool value = true;
+};
+
+template &lt;class T&gt;
+struct safe_compare_imp&lt;T, T, false&gt;
+{
+    static const bool value = true;
+};
+
+template &lt;class T, class U&gt;
+struct safe_compare
+{
+private:
+    typedef typename std::tr1::remove_cv&lt;typename std::tr1::remove_reference&lt;T&gt;::type&gt;::type Tr;
+    typedef typename std::tr1::remove_cv&lt;typename std::tr1::remove_reference&lt;U&gt;::type&gt;::type Ur;
+public:
+    static const bool value = detail::safe_compare_imp&lt;Tr, Ur&gt;::value;
+};
+
+}  // detail
+
+template &lt;class T, class U, bool = detail::safe_compare&lt;T, U&gt;::value&gt;
+struct min_max_return {};
+
+template &lt;class T, class U&gt;
+struct min_max_return&lt;T&amp;&amp;, U&amp;&amp;, true&gt;
+{
+    typedef typename promote&lt;T&amp;&amp;, U&amp;&amp;&gt;::type type;
+};
+
+template &lt;class T, class U&gt;
+struct min_max_return&lt;T&amp;&amp;, U&amp;, true&gt;
+{
+    typedef typename promote&lt;T&amp;&amp;, U&amp;&gt;::type type;
+};
+
+template &lt;class T, class U&gt;
+struct min_max_return&lt;T&amp;, U&amp;&amp;, true&gt;
+{
+    typedef typename promote&lt;T&amp;, U&amp;&amp;&gt;::type type;
+};
+
+template &lt;class T, class U&gt;
+struct min_max_return&lt;T&amp;, U&amp;, true&gt;
+{
+private:
+    typedef typename std::tr1::remove_cv&lt;T&gt;::type Tr;
+    typedef typename std::tr1::remove_cv&lt;U&gt;::type Ur;
+public:
+    typedef typename detail::min_max_return_helper&lt;T, Tr, U, Ur&gt;::type type;
+};
+
+template &lt;class T, class U&gt;
+inline
+typename min_max_return&lt;T&amp;&amp;, U&amp;&amp;&gt;::type
+min(T&amp;&amp; a, U&amp;&amp; b)
+{
+    if (b &lt; a)
+        return std::forward&lt;U&gt;(b);
+    return std::forward&lt;T&gt;(a);
+}
+
+template &lt;class T, class U, class Compare&gt;
+inline
+typename min_max_return&lt;T&amp;&amp;, U&amp;&amp;&gt;::type
+min(T&amp;&amp; a, U&amp;&amp; b, Compare comp)
+{
+    if (comp(b, a))
+        return std::forward&lt;U&gt;(b);
+    return std::forward&lt;T&gt;(a);
+}
+
+template &lt;class T, class U&gt;
+inline
+typename min_max_return&lt;T&amp;&amp;, U&amp;&amp;&gt;::type
+max(T&amp;&amp; a, U&amp;&amp; b)
+{
+    if (a &lt; b)
+        return std::forward&lt;U&gt;(b);
+    return std::forward&lt;T&gt;(a);
+}
+
+template &lt;class T, class U, class Compare&gt;
+inline
+typename min_max_return&lt;T&amp;&amp;, U&amp;&amp;&gt;::type
+max(T&amp;&amp; a, U&amp;&amp; b, Compare comp)
+{
+    if (comp(a, b))
+        return std::forward&lt;U&gt;(b);
+    return std::forward&lt;T&gt;(a);
+}
+</pre></blockquote>
+
+</body>
+</html>

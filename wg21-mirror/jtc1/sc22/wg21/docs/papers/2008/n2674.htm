@@ -1,0 +1,547 @@
+﻿<html>
+<head>
+    <title>Shared_ptr atomic access, revision 1</title>
+    <meta content="http://schemas.microsoft.com/intellisense/ie5" name="vs_targetSchema" />
+    <meta http-equiv="Content-Language" content="en-us" />
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+</head>
+<body bgcolor="#ffffff">
+    <address>
+        Document number: N2674=08-0184</address>
+    <address>
+        Programming Language C++, Library Subgroup</address>
+    <address>
+        &nbsp;</address>
+    <address>
+        Peter Dimov, &lt;<a href="mailto:pdimov@pdimov.com">pdimov@pdimov.com</a>&gt;</address>
+    <address>
+        Beman Dawes, &lt;<a href="mailto:bdawes@acm.org">bdawes@acm.org</a>&gt;</address>
+    <address>
+        &nbsp;</address>
+    <address>
+        2008-06-12</address>
+    <h1>
+        Shared_ptr atomic access, revision 1</h1>
+    <ul>
+        <li><a href="#overview">Overview</a></li>
+        <li><a href="#rationale">Rationale</a></li>
+        <li><a href="#proposed">Proposed Text</a></li>
+        <li><a href="#implementability">Implementability</a></li>
+        <li><a href="#performance">Performance</a></li>
+    </ul>
+    <h2>
+        <a name="r1_changes">Changes in revision 1</a></h2>
+    <ul>
+        <li>Added rationale for pass by value.</li>
+        <li>Changed <code>atomic_swap</code> and <code>atomic_compare_swap</code> to <code>atomic_exchange</code>
+            and <code>atomic_compare_exchange</code>, respectively.</li>
+        <li>Added <code>atomic_is_lock_free</code>.</li>
+        <li>Replaced members with free functions for consistency with chapter 29 atomics, at
+            the committee's request.</li>
+        <li>Added a chapter 29 <code>swap</code> to <code>exchange</code> edit to the proposed
+            text, at the committee's request.</li>
+    </ul>
+    <h2>
+        <a name="overview">I. Overview</a></h2>
+    <p>
+        The level of thread safety offered by <code>shared_ptr</code> is the default for
+        the standard library: const operations on the same instance can be performed concurrently
+        by multiple threads, but updates require exclusive access. Some scenarios require
+        stronger guarantees; there is considerable demand (on the Boost mailing lists and
+        otherwise) for an <em>atomic</em> <code>shared_ptr</code>, one that can withstand
+        concurrent updates from two threads without synchronization. This is often motivated
+        by the desire to port an existing scalable pattern that relies on atomic operations
+        on raw pointers in combination with garbage collection.</p>
+    <p>
+        We propose the addition of the following functions to <code>&lt;memory&gt;</code>
+        to address this use case:</p>
+    <blockquote>
+        <pre>template&lt;class T&gt; bool atomic_is_lock_free( shared_ptr&lt;T&gt; const * p );
+
+template&lt;class T&gt; shared_ptr&lt;T&gt; atomic_load( shared_ptr&lt;T&gt; const * p );
+template&lt;class T&gt; shared_ptr&lt;T&gt; atomic_load_explicit( shared_ptr&lt;T&gt; const * p, memory_order mo );
+
+template&lt;class T&gt; void atomic_store( shared_ptr&lt;T&gt; * p, shared_ptr&lt;T&gt; r );
+template&lt;class T&gt; void atomic_store_explicit( shared_ptr&lt;T&gt; * p, shared_ptr&lt;T&gt; r, memory_order mo );
+
+template&lt;class T&gt; shared_ptr&lt;T&gt; atomic_exchange( shared_ptr&lt;T&gt; * p, shared_ptr&lt;T&gt; r );
+template&lt;class T&gt; shared_ptr&lt;T&gt; atomic_exchange_explicit( shared_ptr&lt;T&gt; * p, shared_ptr&lt;T&gt; r, memory_order mo );
+
+template&lt;class T&gt; bool atomic_compare_exchange( shared_ptr&lt;T&gt; * p, shared_ptr&lt;T&gt; * v, shared_ptr&lt;T&gt; w );
+template&lt;class T&gt; bool atomic_compare_exchange_explicit( shared_ptr&lt;T&gt; * p, shared_ptr&lt;T&gt; * v, shared_ptr&lt;T&gt; w, memory_order success, memory_order failure );</pre>
+    </blockquote>
+    <p>
+        A typical example scenario &mdash; a "lock-free" reader/writer pattern &mdash; that
+        takes advantage of this functionality is outlined below:</p>
+    <blockquote>
+        <pre>shared_ptr&lt;State&gt; ps;
+
+void reader()
+{
+    shared_ptr&lt;State const&gt; p = atomic_load( &amp;ps );
+    <em>use *p;</em>
+}
+
+// single writer case
+void writer()
+{
+    shared_ptr&lt;State&gt; p( new State( *ps ) );
+    <em>update *p reflecting new information;</em>
+    atomic_store( &amp;ps, move( p ) );
+}
+
+// or, multiple writers case
+void writer()
+{
+    shared_ptr&lt;State&gt; p = atomic_load( &amp;ps );
+
+    do
+    {
+        shared_ptr&lt;State&gt; q( new State( *p ) );
+        <em>update *q reflecting new information;</em>
+    }
+    while( !atomic_compare_exchange( &amp;ps, &amp;p, move( q ) ) );
+}</pre>
+    </blockquote>
+    <p>
+        This feature extends the interface of <code>shared_ptr</code> in a backward-compatible
+        way. We believe that it is a strong candidate for addition to the C++0x standard.
+        It introduces no source- or binary compatibility issues.</p>
+    <p>
+        The proposed additions have been implemented in Boost (with a slightly different
+        syntax) and will be part of Boost 1.36. Performance tests have identified reader/writer
+        scenarios where the above pattern achieves close to linear scalability, outperforming
+        a read/write lock.</p>
+    <h2>
+        <a name="rationale">II. Rationale</a></h2>
+    <h3>
+        Can the implementation be made lock-free? If not, is it still worth having?</h3>
+    <p>
+        There are several possible approaches that lead to a lock-free implementation: hazard
+        pointers, k-CAS, software transactional memory. The challenge is to consistently
+        outperform the spinlock baseline implementation, and this part is not easy; that
+        is why it makes sense to provide the functionality as part of the standard library.</p>
+    <p>
+        Yes, the spinlock implementation is still worth having. For certain tasks and workloads,
+        it still scales better than mutexes or read/write locks. See the <a href="#performance">
+            performance section</a>.</p>
+    <h3>
+        Can this be moved to TR2? Is it essential to have it in the standard?</h3>
+    <p>
+        A spinlock-based implementation can be done non-intrusively in a TR, but a lock-free
+        implementation cannot, as it inherently requires access to <code>shared_ptr</code>
+        internals. We don't want to disallow lock-free implementations because they would
+        scale better. The area is a subject of active research and having a stable interface
+        as a target will, hopefully, lead to the emergence of such implementations.</p>
+    <p>
+        We do not know whether a lock-free implementation will need to change <code>shared_ptr</code>'s
+        internal details, but the conservative assumption is that it might, which could
+        potentially require an ABI change unsuitable for a technical report.</p>
+    <h3>
+        Is the interface sufficient? Should <code>shared_ptr</code> maintain a version counter?</h3>
+    <p>
+        We believe that the interface is sufficient.</p>
+    <p>
+        The need for a version counter is motivated by the read-upgrade-write pattern:</p>
+    <blockquote>
+        <pre>void maybe_writer()
+{
+    <em>obtain a read lock;</em>
+    <em>use object;</em>
+
+    if( <em>object needs updating</em> )
+    {
+        <em>upgrade read lock to write lock;</em>
+        <em>update object;</em>
+    }
+}</pre>
+    </blockquote>
+    <p>
+        which in <code>shared_ptr</code> terms looks like:</p>
+    <blockquote>
+        <pre>void maybe_writer()
+{
+    shared_ptr&lt;State&gt; p = atomic_load( &amp;ps );
+
+    do
+    {
+        <em>use *p;</em>
+
+        if( <em>object doesn't need updating</em> ) break;
+
+        shared_ptr&lt;State&gt; q( new State( *p ) );
+        <em>update *q;</em>
+    }
+    while( !atomic_compare_exchange( &amp;ps, &amp;p, move( q ) ) );
+}</pre>
+    </blockquote>
+    <p>
+        The other possible use for a version counter is to avoid the <a href="http://en.wikipedia.org/wiki/ABA_problem">
+            ABA problem</a> that is common for CAS-based algorithms. ABA cannot occur in
+        our case because the storage for the object referenced by <code>p</code> cannot
+        be reused while <code>p</code> is still alive.</p>
+    <h3>
+        Should an atomic pointer be provided as a separate type? As an <code>std::atomic</code>
+        specialization?</h3>
+    <p>
+        An <code>std::atomic&lt; shared_ptr&lt;&gt; &gt;</code> specialization is not an
+        appropriate way to provide the functionality. The template parameter of <code>std::atomic&lt;T&gt;</code>
+        is required to have a trivial copy constructor and an assignment operator, for good
+        reasons; calling user code from within the atomic operations is a recipe for disaster.
+        Since the copy constructor and the assignment operator of <code>shared_ptr</code>
+        aren't trivial, it is not acceptable to instantiate <code>std::atomic</code> on
+        it.</p>
+    <p>
+        Providing a separate type <code>atomic_shared_ptr&lt;T&gt;</code> is a legitimate
+        alternative. We have instead chosen to propose additions to the existing <code>shared_ptr</code>
+        interface for the following reasons:</p>
+    <ul>
+        <li>We have implemented these additions and have experience with them.</li>
+        <li>By adding to the existing <code>shared_ptr</code> interface, we make it clear that
+            the support for atomic access and manipulation does not alter the type or the layout
+            of <code>shared_ptr</code>.</li>
+        <li>We can still manipulate <code>shared_ptr</code> instances atomically without sacrificing
+            the ability to keep them in containers. In particular, we could have an <code>std::map&lt;Key,
+                shared_ptr&lt;State&gt;&gt;</code> and use the reader-writer pattern on the
+            elements of this map.</li>
+        <li>We have no experience with a separate <code>atomic_shared_ptr</code> type and do
+            not feel confident that we can propose the right interface for it.</li>
+        <li>Given the proposed functions, it is possible to build an <code>atomic_shared_ptr</code>
+            on top of <code>shared_ptr</code>, but not vice versa.</li>
+    </ul>
+    <h3>
+        Why do the functions take some of their parameters by value, rather than by const
+        reference?</h3>
+    <p>
+        The implementation requires that the argument value is private to the function so
+        that it can fiddle with its internal state without some other thread getting inconsistent
+        results. A const reference implies that other threads are free to read the value.</p>
+    <p>
+        If the argument is passed by const reference, the functions will need to make their
+        own private copies anyway. This is inefficient when the argument is a temporary;
+        an extra copy is introduced, which isn't needed. Pass by value automatically elides
+        the copy when the argument is an rvalue.</p>
+    <h2>
+        <a name="proposed">III. Proposed Text</a></h2>
+    <h3>
+        Chapter 20 edits</h3>
+    <p>
+        Add to the synopsis of <code>&lt;memory&gt;</code> in <code>[memory]</code> the
+        following:</p>
+    <blockquote>
+        <pre>// <em>shared_ptr atomic access:</em>
+
+template&lt;class T&gt; bool atomic_is_lock_free( shared_ptr&lt;T&gt; const * p );
+
+template&lt;class T&gt; shared_ptr&lt;T&gt; atomic_load( shared_ptr&lt;T&gt; const * p );
+template&lt;class T&gt; shared_ptr&lt;T&gt; atomic_load_explicit( shared_ptr&lt;T&gt; const * p, memory_order mo );
+
+template&lt;class T&gt; void atomic_store( shared_ptr&lt;T&gt; * p, shared_ptr&lt;T&gt; r );
+template&lt;class T&gt; void atomic_store_explicit( shared_ptr&lt;T&gt; * p, shared_ptr&lt;T&gt; r, memory_order mo );
+
+template&lt;class T&gt; shared_ptr&lt;T&gt; atomic_exchange( shared_ptr&lt;T&gt; * p, shared_ptr&lt;T&gt; r );
+template&lt;class T&gt; shared_ptr&lt;T&gt; atomic_exchange_explicit( shared_ptr&lt;T&gt; * p, shared_ptr&lt;T&gt; r, memory_order mo );
+
+template&lt;class T&gt; bool atomic_compare_exchange( shared_ptr&lt;T&gt; * p, shared_ptr&lt;T&gt; * v, shared_ptr&lt;T&gt; w );
+template&lt;class T&gt; bool atomic_compare_exchange_explicit( shared_ptr&lt;T&gt; * p, shared_ptr&lt;T&gt; * v, shared_ptr&lt;T&gt; w, memory_order success, memory_order failure );
+</pre>
+    </blockquote>
+    <p>
+        Add a new section <code>[util.smartptr.shared.atomic]</code>:</p>
+    <blockquote>
+        <p>
+            Concurrent access to a <code>shared_ptr</code> instance from multiple threads does
+            not introduce a data race if the access is done exclusively via the functions in
+            this section and the instance is passed as their first argument.</p>
+        <p>
+            The meaning of the arguments of type <code>memory_order</code> is explained in 29.1/1
+            [atomics.order] and 29.1/2.</p>
+        <pre>template&lt;class T&gt; bool atomic_is_lock_free( shared_ptr&lt;T&gt; const * p );</pre>
+        <p>
+            <em>Returns:</em> <code>true</code> if atomic access to <code>*p</code> is lock-free,
+            <code>false</code> otherwise.</p>
+        <p>
+            <em>Throws:</em> nothing.</p>
+        <pre>template&lt;class T&gt; shared_ptr&lt;T&gt; atomic_load( shared_ptr&lt;T&gt; const * p );</pre>
+        <p>
+            <em>Returns:</em> <code>atomic_load_explicit( p, memory_order_seq_cst )</code>.</p>
+        <pre>template&lt;class T&gt; shared_ptr&lt;T&gt; atomic_load_explicit( shared_ptr&lt;T&gt; const * p, memory_order mo );</pre>
+        <p>
+            <em>Requires:</em> <code>mo</code> shall not be <code>memory_order_release</code>
+            or <code>memory_order_acq_rel</code>.</p>
+        <p>
+            <em>Returns:</em> <code>*p</code>.</p>
+        <p>
+            <em>Throws:</em> nothing.</p>
+        <pre>template&lt;class T&gt; void atomic_store( shared_ptr&lt;T&gt; * p, shared_ptr&lt;T&gt; r );</pre>
+        <p>
+            <em>Effects:</em> <code>atomic_store_explicit( p, r, memory_order_seq_cst )</code>.</p>
+        <pre>template&lt;class T&gt; void atomic_store_explicit( shared_ptr&lt;T&gt; * p, shared_ptr&lt;T&gt; r, memory_order mo );</pre>
+        <p>
+            <em>Requires:</em> <code>mo</code> shall not be <code>memory_order_acquire</code>
+            or <code>memory_order_acq_rel</code>.</p>
+        <p>
+            <em>Effects:</em> <code>p-&gt;swap( r )</code>.</p>
+        <p>
+            <em>Throws:</em> nothing.</p>
+        <pre>template&lt;class T&gt; shared_ptr&lt;T&gt; atomic_exchange( shared_ptr&lt;T&gt; * p, shared_ptr&lt;T&gt; r );</pre>
+        <p>
+            <em>Returns:</em> <code>atomic_exchange_explicit( p, r, memory_order_seq_cst )</code>.</p>
+        <pre>template&lt;class T&gt; shared_ptr&lt;T&gt; atomic_exchange_explicit( shared_ptr&lt;T&gt; * p, shared_ptr&lt;T&gt; r, memory_order mo );</pre>
+        <p>
+            <em>Effects:</em> <code>p-&gt;swap( r )</code>.</p>
+        <p>
+            <em>Returns:</em> the previous value of <code>*p</code>.</p>
+        <p>
+            <em>Throws:</em> nothing.</p>
+        <pre>template&lt;class T&gt; bool atomic_compare_exchange( shared_ptr&lt;T&gt; * p, shared_ptr&lt;T&gt; * v, shared_ptr&lt;T&gt; w );</pre>
+        <p>
+            <em>Returns:</em> <code>atomic_compare_exchange( p, v, w, memory_order_seq_cst, memory_order_seq_cst
+                )</code>.</p>
+        <pre>template&lt;class T&gt; bool atomic_compare_exchange_explicit( shared_ptr&lt;T&gt; * p, shared_ptr&lt;T&gt; * v, shared_ptr&lt;T&gt; w, memory_order success, memory_order failure );</pre>
+        <p>
+            <em>Requires:</em> <code>failure</code> shall not be <code>memory_order_release</code>,
+            <code>memory_order_acq_rel</code>, or stronger than <code>success</code>.</p>
+        <p>
+            <em>Effects:</em> If <code>*p</code> is equivalent to <code>*v</code>, assigns <code>
+                w</code> to <code>*p</code> and has synchronization semantics corresponding
+            to to the value of <code>success</code>, otherwise assigns <code>*p</code> to <code>
+                *v</code> and has synchronization semantics corresponding to to the value of
+            <code>failure</code>.</p>
+        <p>
+            <em>Returns:</em> <code>true</code> if <code>*p</code> was equivalent to <code>*v</code>,
+            <code>false</code> otherwise.</p>
+        <p>
+            <em>Throws:</em> nothing.</p>
+        <p>
+            <em>Remarks:</em> two <code>shared_ptr</code> instances are equivalent if they store
+            the same pointer value and <em>share ownership</em>.</p>
+    </blockquote>
+    <h3>
+        Chapter 29 edits</h3>
+    <p>
+        Rename the <code>swap</code> member function to <code>exchange</code> throughout
+        chapter 29.</p>
+    <p>
+        Rename the <code>compare_swap</code> member function to <code>compare_exchange</code>
+        throughout chapter 29.</p>
+    <p>
+        Rename the <code>atomic_swap</code> function to <code>atomic_exchange</code> throughout
+        chapter 29.</p>
+    <p>
+        Rename the <code>atomic_swap_explicit</code> function to <code>atomic_exchange_explicit</code>
+        throughout chapter 29.</p>
+    <p>
+        Rename the <code>atomic_compare_swap</code> function to <code>atomic_compare_exchange</code>
+        throughout chapter 29.</p>
+    <p>
+        Rename the <code>atomic_compare_swap_explicit</code> function to <code>atomic_compare_exchange_explicit</code>
+        throughout chapter 29.</p>
+    <h2>
+        <a name="implementability">IV. Implementability</a></h2>
+    <p>
+        A straightforward implementation would use a per-instance spinlock, obtained from
+        a spinlock pool keyed on a hash of the address of the instance. In pseudocode, the
+        functions will be implemented as follows:</p>
+    <blockquote>
+        <pre>
+template&lt;class T&gt; shared_ptr&lt;T&gt; atomic_load( shared_ptr&lt;T&gt; const * p )
+{
+    <em>lock the spinlock for *p</em>;
+    shared_ptr&lt;T&gt; r( *p );
+    <em>unlock the spinlock for *p</em>;
+    return r;
+}
+
+template&lt;class T&gt; void atomic_store( shared_ptr&lt;T&gt; * p, shared_ptr&lt;T&gt; r )
+{
+    <em>lock the spinlock for *p</em>;
+    p-&gt;swap( r );
+    <em>unlock the spinlock for *p</em>;
+}
+
+template&lt;class T&gt; shared_ptr&lt;T&gt; atomic_exchange( shared_ptr&lt;T&gt; * p, shared_ptr&lt;T&gt; r )
+{
+    <em>lock the spinlock for *p</em>;
+    p-&gt;swap( r );
+    <em>unlock the spinlock for *p</em>;
+    return r;
+}
+
+template&lt;class T&gt; bool atomic_compare_exchange( shared_ptr&lt;T&gt; * p, shared_ptr&lt;T&gt; * v, shared_ptr&lt;T&gt; w )
+{
+    <em>lock the spinlock for *p</em>;
+
+    if( <em>*p is equivalent to *v</em> )
+    {
+        p-&gt;swap( w );
+        <em>unlock the spinlock for *p</em>;
+        return true;
+    }
+    else
+    {
+        shared_ptr&lt;T&gt; tmp( *p );
+        <em>unlock the spinlock for *p</em>;
+        tmp.swap( *v );
+        return false;
+    }
+}</pre>
+    </blockquote>
+    <p>
+        Note that the code carefully avoids destroying a non-empty <code>shared_ptr</code>
+        instance while holding the spinlock, as this may lead to user code being called
+        and present an opportunity for a deadlock. It also attempts to limit the spinlock
+        scope to the minimum necessary to prevent contention.</p>
+    <p>
+        An implementation that closely follows this outline has already been committed to
+        the Boost SVN and will be part of Boost release 1.36. The relevant files can be
+        browsed online at:</p>
+    <ul>
+        <li><a href="http://svn.boost.org/trac/boost/browser/trunk/boost/shared_ptr.hpp">http://svn.boost.org/trac/boost/browser/trunk/boost/shared_ptr.hpp</a></li>
+        <li><a href="http://svn.boost.org/trac/boost/browser/trunk/boost/detail/spinlock_pool.hpp">
+            http://svn.boost.org/trac/boost/browser/trunk/boost/detail/spinlock_pool.hpp</a></li>
+        <li><a href="http://svn.boost.org/trac/boost/browser/trunk/boost/detail/spinlock.hpp">
+            http://svn.boost.org/trac/boost/browser/trunk/boost/detail/spinlock.hpp</a></li>
+        <li><a href="http://svn.boost.org/trac/boost/browser/trunk/boost/detail/spinlock_sync.hpp">
+            http://svn.boost.org/trac/boost/browser/trunk/boost/detail/spinlock_sync.hpp</a>
+        </li>
+        <li><a href="http://svn.boost.org/trac/boost/browser/trunk/boost/detail/spinlock_w32.hpp">
+            http://svn.boost.org/trac/boost/browser/trunk/boost/detail/spinlock_w32.hpp</a></li>
+        <li><a href="http://svn.boost.org/trac/boost/browser/trunk/boost/detail/yield_k.hpp">
+            http://svn.boost.org/trac/boost/browser/trunk/boost/detail/yield_k.hpp</a></li>
+        <li><a href="http://svn.boost.org/trac/boost/browser/trunk/libs/smart_ptr/test/sp_atomic_test.cpp">
+            http://svn.boost.org/trac/boost/browser/trunk/libs/smart_ptr/test/sp_atomic_test.cpp</a></li>
+        <li><a href="http://svn.boost.org/trac/boost/browser/trunk/libs/smart_ptr/test/sp_atomic_mt_test.cpp">
+            http://svn.boost.org/trac/boost/browser/trunk/libs/smart_ptr/test/sp_atomic_mt_test.cpp</a></li>
+        <li><a href="http://svn.boost.org/trac/boost/browser/trunk/libs/smart_ptr/test/sp_atomic_mt2_test.cpp">
+            http://svn.boost.org/trac/boost/browser/trunk/libs/smart_ptr/test/sp_atomic_mt2_test.cpp</a></li>
+    </ul>
+    <h2>
+        <a name="performance">V. Performance</a></h2>
+    <p>
+        We used <a href="http://svn.boost.org/trac/boost/browser/trunk/libs/smart_ptr/test/sp_atomic_mt2_test.cpp">
+            sp_atomic_mt2_test.cpp</a> to evaluate the performance of the reader-writer
+        pattern from the <a href="#overview">overview</a>. For comparison purposes we used
+        synchronization with a <code>boost::detail::lightweight_mutex</code>, equivalent
+        to <code>CRITICAL_SECTION</code> under Windows, and <code>boost::shared_mutex</code>,
+        a reader/writer lock that allows multiple concurrent read locks and a single exclusive
+        write lock.</p>
+    <p>
+        The test is intended to emulate a server process that fulfills client read or write
+        requests from a number of worker threads.</p>
+    <p>
+        We picked the following test parameters:</p>
+    <ul>
+        <li>vector size of 10000. The weight of the task performed by the readers and the writers
+            is proportional to the vector size.</li>
+        <li>iteration count of 1000000. Every worker thread performs 1M operations.</li>
+        <li>read to write ratio of 100. From the 1M operations, 10000 are writes, and the rest
+            are reads.</li>
+    </ul>
+    <p>
+    </p>
+    <p>
+        The results, obtained on a non-hyperthreaded dual core Pentium D (two hardware threads)
+        under Windows XP64, are shown in the following tables.</p>
+    <p>
+        Time in seconds:<em></em></p>
+    <table border="1" cellpadding="3" cellspacing="0">
+        <tr>
+            <td>
+                Primitive</td>
+            <td>
+                1 thread</td>
+            <td>
+                2 threads</td>
+            <td>
+                4 threads</td>
+        </tr>
+        <tr>
+            <td>
+                mutex</td>
+            <td>
+                8.312</td>
+            <td>
+                20.921</td>
+            <td>
+                42.812</td>
+        </tr>
+        <tr>
+            <td>
+                rwlock</td>
+            <td>
+                8.437</td>
+            <td>
+                23.390</td>
+            <td>
+                46.468</td>
+        </tr>
+        <tr>
+            <td>
+                atomic access</td>
+            <td>
+                8.515</td>
+            <td>
+                9.421</td>
+            <td>
+                18.781</td>
+        </tr>
+    </table>
+    <p>
+        Operations per millisecond:<em></em></p>
+    <table border="1" cellpadding="3" cellspacing="0">
+        <tr>
+            <td>
+                Primitive</td>
+            <td>
+                1 thread</td>
+            <td>
+                2 threads</td>
+            <td>
+                4 threads</td>
+        </tr>
+        <tr>
+            <td>
+                mutex</td>
+            <td>
+                120</td>
+            <td>
+                96</td>
+            <td>
+                93</td>
+        </tr>
+        <tr>
+            <td>
+                rwlock</td>
+            <td>
+                119</td>
+            <td>
+                86</td>
+            <td>
+                86</td>
+        </tr>
+        <tr>
+            <td>
+                atomic access</td>
+            <td>
+                117</td>
+            <td>
+                212</td>
+            <td>
+                213</td>
+        </tr>
+    </table>
+    <p>
+        It is clear that for this combination of parameters, the atomic access reader/writer
+        pattern offers the best scalability.</p>
+    <p>
+        Note that we make no claim that the atomic access approach unconditionally outperforms
+        the others, merely that it may be best for certain scenarios that can be encountered
+        in practice.</p>
+    <hr />
+    <p>
+        <em>Thanks to Hans Boehm and Lawrence Crowl for reviewing this paper.</em></p>
+    <p>
+        <em>--end</em></p>
+</body>
+</html>

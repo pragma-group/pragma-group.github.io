@@ -1,0 +1,590 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html lang="en-us">
+<HEAD>
+<meta http-equiv="Content-Type" content="text/html;charset=US-ASCII" >
+<TITLE>N2480: A Less Formal Explanation of the Proposed C++ Concurrency Memory Model</title>
+</head>
+<BODY>
+<table summary="Identifying information for this document.">
+	<tr>
+                <th>Doc. No.:</th>
+                <td>WG21/N2480<br>
+		J16/07-350</td>
+        </tr>
+        <tr>
+                <th>Date:</th>
+                <td>2007-12-09</td>
+        </tr>
+	<tr>
+		<th>Very minor revision of:</th>
+		<td>WG14/N1276</td>
+	</tr>
+	<tr>
+		<th>Revision of:</th>
+		<td>WG21/N2138<br>
+		J16/06-0208</td>
+	</tr>
+        <tr>
+                <th>Reply to:</th>
+                <td>Hans-J. Boehm</td>
+        </tr>
+        <tr>
+                <th>Phone:</th>
+                <td>+1-650-857-3406</td>
+        </tr>
+        <tr>
+                <th>Email:</th>
+                <td><a href="mailto:Hans.Boehm@hp.com">Hans.Boehm@hp.com</a></td>
+        </tr>
+</table>
+
+<H1>N2480: A Less Formal Explanation of the Proposed C++ Concurrency Memory Model</h1>
+
+<H2>Contents</h2>
+<UL>
+<LI><A HREF="#overview"> Overview</a>
+<LI><A HREF="#visibility">Visibility of assignments</a>
+<LI><A HREF="#unordered">The impact of unordered atomic operations</a>
+<LI><A HREF="#races">Data races</a>
+<LI><A HREF="#structure">A note on the structure of 1.10</a>
+<LI><A HREF="#simpler">Simpler rules for programmers</a>
+<LI><A HREF="#acknowledgements">Acknowledgements</a>
+</ul>
+
+This is an attempt to informally explain the C++ memory model, as
+it was proposed in a sequence of committee papers ending with
+<A HREF="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2429.htm">
+WG21/N2429=J16/07-0299</a>, which was accepted into the working paper
+at the October 2007 meeting in Kona.  This paper is purely informational.
+It was felt that it would be
+useful to have an update of WG21/N2138 that is consistent with the text
+actually accepted into the working paper.
+A very similar version of this paper was included in a prior C mailing as
+WG14/N1276.
+
+It is probably useful to refer to
+<A HREF="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2429.htm">
+N2429</a>
+or section 1.10 of 
+the post-Kona working paper
+(<A HREF="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2461.pdf">
+N2462</a>)
+while reading this document.
+
+<H2><A id="overview">Overview</a></h2>
+The meaning of a multi-threaded program is effectively given in
+two stages:
+<OL>
+
+<LI>We explain when a particular value computation (effectively load of an object) can
+yield or "see" the value stored by a particular assignment to the object.  This
+effectively defines what it means to run multiple threads concurrently, if we
+already understand the behavior of the individual threads.
+However, as discussed
+below, it also gives meaning to programs we would rather disallow.
+
+<LI>We define (in 1.10p11) when, based on the definition from the
+preceding step, a program
+contains a <I>data race</i> (on a particular input).  We then explicitly give
+such a program (on that input) undefined semantics.
+
+</ol>
+If we omitted the last step, we would, for example, guarantee that if
+we have
+
+<PRE>
+long long x = 0;
+</pre>
+
+then <A NAME="long_write_example">the following program</a>:
+
+<TABLE BORDER ALIGN=CENTER>
+	<TR>
+		<TD> Thread1 </td> <TD> Thread2 </td>
+
+	</tr>
+	<TR>
+		<TD ROWSPAN=1>
+			<TT>x = -1; </tt>
+		<TD ROWSPAN=1>
+			<TT>r1 = x; </tt>
+	</tr>
+</table>
+<P>
+could never result in the local variable <TT>r1</tt> being assigned a variable
+other than 0 or -1.  In fact, it is likely that on a 32-bit machine, the
+assignment of -1 would require two separate store instructions, and thread 2
+might see the intermediate value.  And it is often expensive to prevent such
+outcomes.
+<P>
+The preceding example is only one of many cases in which attempting to fully
+define the semantics of programs with data races would severely constrain the
+implementation.  By prohibiting conflicting concurrent accesses, we remain
+consistent with pthread practice.  We allow nearly all conventional compiler
+transformations on synchronization-free code, since we disallow any program
+that could detect invalid intermediate states introduced in the process.
+<P>
+Disallowing data races also has some more subtle
+and C++-specific consequences.  In particular,
+when constructing an object with a virtual function table, we do not
+need to generate code that guards against another thread "seeing" the
+object with an uninitialized pointer to the table.  Doing so would
+often require inserting expensive memory fence instructions.
+With our approach, no other thread can access the object and virtual
+function table pointer without either using sufficient synchronization
+to ensure that the correct function table pointer is visible, or
+introducing a data race. 
+<P>
+We will assume that each thread
+performs a sequence of evaluations in a known order, described
+by a <I>sequenced-before</i> relation, as described in
+<A HREF="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2239.htm">
+N2239</a>, which was previously accepted into the C++ working paper.
+If <I>a</i> and <I>b</i>
+are performed by the same thread, and <I>a</i> "comes first",
+we say that <I>a</i> is sequenced before <I>b</i>.
+<P>
+(C++ allows a number of different evaluation orders for each thread,
+notably as a result of varying argument evaluation order, and this
+choice may vary each time an expression is evaluated.  Here we assume
+that each thread has already chosen its argument evaluation orders in some
+way, and we simply define which multi-threaded executions are
+consistent with this choice.  Even then, there may be evaluations in
+the same thread, neither one of which is sequenced before the other.
+Thus sequenced-before is only a partial order, even when only the evaluations
+of a single thread are considered.
+But for the purposes of this discussion all of this can generally be ignored.)
+
+<H2><A id="visibility">Visibility of assignments</a></h2>
+Consider a simple sequence of assignments to scalar variables that is 
+sequentially executed, i.e. for every pair of distinct assignments, one is 
+sequenced before the other. A value computation <I>b</i> that
+references <TT>x</tt> "sees" a previous assignment <I>a</i> to <TT>x</tt>
+if <I>a</i> is the last prior assignment to <TT>x</tt>, i.e. if
+<UL>
+<LI> <I>a</i> is not sequenced after <I>b</i>, and if
+<LI> There is no intervening assignment <I>m</i> to <TT>x</tt> such that
+<I>a</i> is sequenced before <I>m</i> and  <I>m</i> is sequenced before
+<I>b</i>.
+</ul>
+We phrased this second, more precise, formulation to also make
+sense if not all of
+the assignments are ordered, as with multiple threads,
+though in that case <I>b</i> might be
+able to see the effect of more than one possible <I>a</i>.  If
+we very informally consider the (pseudo-code, not C++) program
+<PRE>
+x = 1;
+x = 2;
+in parallel do
+	<I>Thread 1:</i> x = 3;
+	<I>Thread 2:</i> r1 = x;
+</pre>
+The reference to <TT>x</tt> in thread 2
+may "see" either a value of 2 or 3, since in each case the
+corresponding assignment is not required to be executed after the
+assignment to <TT>r1</tt>, and there is no other intervening
+assignment to <TT>x</tt>.  Thread 2 may not see the value of 1,
+since the assignment
+<TT>x = 2;</tt> intervenes.
+<P>
+Thus our goal is essentially to define the multi-threaded version of the
+<I>sequenced-before</i> relation. We call this relation <I>happens-before</i>.  (This is based on
+the terminology introduced for distributed systems in Lamport, "Time, Clocks
+and the Ordering Events in a Distributed System", <I>CACM 21</i>, 7
+(July 1978).)  As with <I>sequenced-before</i>
+in the single-threaded case, if <I>a</i> happens before <I>b</i>,
+then <I>b</i> must see the effect of <I>a</i>, or the effects
+of a later action that hides the effects of <I>a</i>.  Similarly
+if <I>a</i> and <I>b</i> assign to the same object, later
+observers must consistently see an outcome reflecting the fact
+that <I>a</i> was performed first.
+<P>
+An evaluation <I>a</i> can happen before <I>b</i> either because
+they are executed in that order by a single thread, i.e  <I>a</i>
+is sequenced before <I>b</i>, or because there is
+an intervening communication between the two threads that enforces
+ordering.
+<P>
+A thread <I>T1</i> normally communicates with a thread <I>T2</i> by
+assigning to some shared variable <I>x</i> and then synchronizing
+with <I>T2</i>.  Most commonly, this synchronization would involve
+<I>T1</i> acquiring a lock while it updates <I>x</i>, and then
+<I>T2</i> acquiring the same lock while it reads <I>x</i>.
+Certainly any assignment performed prior to releasing a lock should be
+visible to another thread when acquiring the lock.
+<P>
+We describe this in several stages:
+<OL>
+<LI> Any side effect such as the assignment to <TT>x</tt>
+performed by a thread before it releases the lock,
+is sequenced before the lock release, and hence happens before it.
+<LI> The lock release operation <I>synchronizes with</i> the
+next acquisition of the same lock.  The <I>synchronizes with</i>
+relation expresses the actual ordering constraints imposed
+by synchronization operations.
+<LI> The lock acquire operation is again sequenced before value computations
+such as the one that reads <TT>x</tt>.
+</ol>
+In general, an evaluation <I>a</i> happens before an evaluation <I>b</i>
+if they are ordered by a chain of <I>synchronizes with</i> and
+<I>sequenced-before</i> relationships.  More formally
+<I>happens-before</i> is the transitive closure of the union of
+the <I>synchronizes-with</i> and <I>happens-before</i>
+relationships (1.10p8).
+<P>
+So far our discussion has been in terms of threads that communicate
+via lock-protected accesses to shared variables.  This should indeed
+be the common case.  But it is not the only case we wish to support.
+<P>
+Atomic variables are another, less common, way to communicate between
+threads.  Experience has shown that such variables are most
+useful if they have at least the same kind of acquire-release
+semantics as locks.  In particular a store to an atomic variable
+synchronizes with a load that sees the written value.
+(The atomics library also normally guarantees additional ordering
+properties, as specified in
+<A HREF="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2427.htm">
+N2427</a> and in chapter 29 the post-Kona C++ working paper.
+These are not addressed here, except that they are necessary
+to derive the <A HREF="#simpler">simpler rules for programmers</a>
+mentioned below.)
+<P>
+If atomic variables have acquire/release properties, then we can
+ensure that the following code does not result in an assertion
+failure.
+<PRE>
+int x = 0;
+atomic_int y = 0;
+in parallel do
+	<I>Thread 1:</i> x = 17; y.store(1);
+	<I>Thread 2:</i> while (!y.load()); assert(x == 17);
+</pre>
+<P>
+In this case, the assignment to <TT>y</tt> has release semantics, while the
+reference to <TT>y</tt> in the while condition has acquire semantics.  The pair
+behaves essentially like a lock release and acquisition with
+respect to the memory model.  The assignment <TT>x = 17</tt>
+is sequenced before the release operation <TT>y.store(1)</tt>.
+The release operation synchronizes with the last evaluation of the
+while condition, which is an acquire operation and loads the
+value stored by <TT>y.store(1)</tt>.
+Thus the assignment <TT>x = 17</tt> happens-before
+the evaluation of <TT>x</tt> in the assertion, and hence
+the assertion cannot fail, since the initialization of <TT>x</tt>
+to zero is no longer visible.
+<P>
+Once we have defined our <I>happens-before</i> ordering in this way,
+we largely define visibility as in the sequential case:
+<OL>
+<LI>Each read must see a write that does not happen after it, and
+<LI>there must be no intervening second write between the write
+and the read.
+</ol>
+This condition is expressed in 1.10p9 and 1.10p10, for ordinary
+memory operations, and for operations on atomics, respectively.
+<P>
+For ordinary memory operations, we strengthen the first
+condition to require that the write actually <I>happen
+before</i> the read, as opposed to insisting only that it
+not happen after it.  It is certainly possible that there is
+no happens-before ordering between the read and the write,
+in which case these statements are not the same.  However,
+in this case, we have a data race, and we leave the meaning
+of the program undefined in either case.  Thus the distinction
+does not matter; without data races, an ordinary read must always
+see a write that happens before it, and there must be a
+unique such write that also satisfies the second condition.
+1.10p9 refers to this unique write as <I>the visible side effect</i>.
+<P>
+For atomic operations, things are somewhat different.
+For example, if an atomic variable is initialized to zero,
+and then has the value 1 assigned to it by one thread while
+another thread reads it, the reader may see either the initializing
+write or the write of the value 1 by the other thread.  In general,
+it may see any write "between" the last one that happens before the
+read, and the first one that happens after the read (inclusively
+in the former case, and exclusively in the latter.)  This is
+defined by 1.10p10 as the <I>visible sequence</i>.
+<H2><A id = "unordered">The impact of unordered atomic operations</a></h2>
+Our memory model proposal differs from the Java one
+(see Manson, Pugh, Adve
+<A HREF="http://doi.acm.org/10.1145/1040305.1040336">
+The Java Memory Model</a> or
+<A HREF="http://www.cs.umd.edu/users/jmanson/java/journal.pdf">
+the authors' expanded version</a>)
+in that we completely disallow data races, as opposed to merely
+discouraging them.  However, there are some cases in which
+some performance can be gained by allowing concurrent unsynchronized
+access to shared variables, without enforcing loads to be
+acquire operations, and stores to be release operations.
+This is particularly true, since
+<UL>
+<LI>
+Enforcing the kind of visibility constraints implied by synchronizes-with
+relationships commonly requires the compiler to insert relatively
+expensive "memory fence" instructions. 
+<LI>
+Existing software often manually provides the necessary fence instructions
+in a platform-dependent way.  It is easier to convert such software
+if we provide atomic operations that do not provide potentially redundant
+ordering properties.
+</ul>
+The atomics library provides these unordered
+(called "relaxed") operations via functions
+on atomic objects with an explicit memory ordering argument.  If
+<TT>x</tt> has atomic type, it can be read or written respectively
+with
+<BLOCKQUOTE>
+<TT>x.load(memory_order_relaxed);<BR>
+x.store(</tt><I>something</i><TT>, memory_order_relaxed);</tt>
+</blockquote>
+<P>
+The atomics library also allows other kinds of finely distinguished
+explicit ordering constraints.  But they are not essential for the
+present discussion, and we only touch on them briefly below.
+<P>
+Note that it is quite difficult to use such operations correctly,
+and incorrect use is likely to result in very intermittent failures
+that are at best hard to test for, and at worst may only be visible
+on future implementations of a particular architecture.
+These operations are intended for particularly performance sensitive
+and carefully written code, and should otherwise be avoided.
+<P>
+In particular, if we rewrite the above example with <TT>relaxed</tt>
+atomics:
+<PRE>
+int x = 0;
+atomic_int y = 0;
+in parallel do
+	<I>Thread 1:</i> x = 17; y.store(1, memory_order_relaxed);
+	<I>Thread 2:</i> while (!y.load(memory_order_relaxed)); assert(x == 17);
+</pre>
+it now becomes entirely possible for the assertion to fail.  The
+fact that the atomic load "sees" the value written by the atomic
+store no longer provides a synchronizes-with or happens-before
+ordering; hence there is no longer a guarantee that the assignment
+of 17 to <TT>x</tt> becomes visible before the assertion.
+For example, it is now perfectly legitimate for a compiler to treat
+the stores to <TT>x</tt> and <TT>y</tt> as independent and reorder
+them, or for a hardware write buffer to do the same.
+<P>
+So far, we have sufficiently few constraints on the behavior
+of relaxed atomics to allow even more counterintuitive behavior.
+Consider <A NAME="single_variable_reordering">this example</a> involving only
+a single atomic variable:
+<P>
+<TABLE BORDER ALIGN=CENTER>
+	<TR>
+		<TD> Thread1 </td> <TD> Thread2 </td>
+
+	</tr>
+	<TR>
+		<TD ROWSPAN=2>
+			<TT>x.store(1, memory_order_relaxed); <BR>
+			x.store(2, memory_order_relaxed); </tt>
+		</td>
+		<TD ROWSPAN=2>
+			<TT> r1 = x.load(memory_order_relaxed); <BR>
+			r2 = x.load(memory_order_relaxed); </tt>
+		</td>
+	</tr>
+</table>
+<P>
+There is nothing in our current rules
+that prevents either store to be independently
+visible to either load.  In particular <TT>r1</tt> = 2 and <TT>r2</tt> = 1
+would be a perfectly acceptable outcome.  In fact if thread 2 were to
+read <TT>x</tt> in a loop, it could see an arbitrarily long
+sequence of alternating 1 and 2 values.
+<P>
+Most hardware does not even allow this behavior at the machine
+level.  Far more importantly, it was felt that, even in relation to
+the other surprising behaviors allowed by <TT>relaxed</tt> atomics,
+this is too unexpected to be directly usable by programmers.  For
+example, a shared counter that was only ever modified via atomic
+increments in one thread could appear to decrease in another thread.
+<P>
+Hence the memory model was designed to disallow visible reordering of
+operations on <EM>the same</em> atomic variable.  This is expressed
+via another set of ordering relations.  All changes to <EM>a single</em>
+atomic variable appear to occur in a single total
+<EM>modification order</em>, specific to that variable.
+This is introduced in 1.10p5, and the last non-note sentence
+of 1.10p10 states that loads of that variable
+must be consistent with this modification order.
+<P>
+Hence in the above example, one of the stores to <TT>x</tt> must
+come first in the modification order, and once the second store
+is seen by a load, the value stored by the first may not be seen
+again.  
+Hence <TT>r1</tt> = 2 and <TT>r2</tt> = 1 is no longer possible.
+<P>
+Once we have used this notion of a modification sequence, it
+can be used to address another issue.  Consider
+<A NAME="two-thread-init">the following example</a>
+(due to Peter Dimov, along with some of the other observations
+here).  This uses an explicit <TT>memory_order_release</tt>
+specification to indicate that a <TT>fetch_add</tt> operation has
+only release semantics associated with the store, but no acquire
+semantics associated with the load part.
+Like <TT>memory_order_relaxed</tt> this is often risky but may
+provide significantly improved performance.  (It also relaxes
+some other less relevant guarantees provided by the atomics library.)
+<P>
+Assume that <TT>v</tt> is atomic, and both <TT>x</tt> and <TT>v</tt>
+are initially zero.
+<P>
+<TABLE BORDER ALIGN=CENTER>
+	<TR>
+		<TD> Thread1 </td> <TD> Thread2 </td> <TD> Thread3 </td>
+
+	</tr>
+	<TR>
+		<TD ROWSPAN=2>
+			<TT>x = 1; <BR>
+			v.fetch_add(1, memory_order_relaxed); </tt>
+		</td>
+		<TD ROWSPAN=2>
+			<TT>y = 1; <BR>
+			v.fetch_add(1, memory_order_relaxed); </tt>
+		</td>
+		<TD ROWSPAN=2>
+			<TT> r1 = v.load(); <BR>
+			if (r1 == 2) assert(x == 1 &amp;&amp; y == 1); </tt>
+		</td>
+	</tr>
+</table>
+As we have described it so far, the memory model allows the assertion
+to fail.  The problem is that only one of the <TT>fetch_add()</tt>
+operations writes the value seen by the <TT>load()</tt>, and hence
+synchronizes with it.  Hence only one of the assignments to
+<TT>x</tt> and <TT>y</tt> is guaranteed to happen before the assertion.
+<P>
+Of course, this would not be an issue if the <TT>fetch_add()</tt>
+specified either <TT>memory_order_acq_rel</tt> or the default
+<TT>memory_order_seq_cst</tt>.  In both cases <TT>fetch_add()</tt>
+would have both acquire and release semantics, and the first
+(in modification order, would synchronize with the second, which
+would synchronize with the <TT>load()</tt>, ensuring that both
+assignments happen before the assertion.
+<P>
+However, even in the presence of <TT>memory_order_release</tt>,
+an assertion failure here both seems strange, and is in fact not
+allowed by natural implementations on common hardware.
+An alternative would be to say that a store with release semantics
+synchronizes with a load with acquire semantics, not only if
+the load "sees" the stored value, but also if it "sees" the value
+stored by a later modification.
+<P>
+It turns out that this adjustment is not compatible with some
+common hardware.  Hence we actually use a definition part-way
+between those two.  In 1.10p6, we define a <I>release sequence</i>
+to consist of only certain modifications following a release store,
+namely those that are atomic read-modify-write operations with stronger
+than relaxed ordering, or that are later updates (to the same
+atomic) performed by the
+same thread as the original update.
+<P>
+A load must see an update performed by one of the updates in the
+release sequence in order for the initial store to synchronize
+with the load.  This is a compromise that both allows efficient
+implementation on common hardware, and appears to guarantee the
+expected outcome for examples like the above.
+
+<H2><A id="races">Data races</a></h2>
+The above definitions tell us which assignments to scalar objects
+can be seen by particular value computations.  Hence they tell us how threads
+interact and, together with the single threaded semantics already
+in the standard, give us a basic multi-threaded semantics.  This
+semantics is used in the following two ways:
+<OL>
+<LI> It helps us to define when the execution of a program
+encounters a <I>data race</i>.
+<LI> It defines the semantics of data-race-free programs.
+</ol>
+For reasons illustrated <A HREF="#long_write_example">previously</a>,
+it does <I>not</i> define the semantics of programs with data races.
+<P>
+There are several possible definitions of a data race.  Probably the most
+intuitive definition is that it occurs when two ordinary accesses to
+a scalar, at least one of which is a write, are performed
+simultaneously by different threads.  Our definition is
+actually quite close to this, but varies in two ways:
+<OL>
+<LI> Instead of restricting simultaneous execution, we ask
+that conflicting accesses by different threads be ordered by
+happens-before.  This is equivalent in simpler cases, but
+the definition based on simultaneous execution would be inappropriate
+for weakly ordered atomics.
+See
+<A HREF="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2338.html">
+N2338</a> for details.
+(They are also not equivalent in the presence of
+<TT>pthread_mutex_trylock()</tt> as currently defined.  See
+<A HREF = "http://www.hpl.hp.com/techreports/2005/HPL-2005-217R1.html">
+Boehm, Reordering Constraints for Pthread-Style Locks</a>
+for details.  This is addressed in the C++ threads API by
+allowing the analogous call to fail "spuriously" even if the lock
+is available.  This is also addressed in N2338.)
+<LI> We have to accommodate the fact that updates to bit-fields
+are normally implemented by loading and storing back groups of
+adjacent bit-fields.  Thus a store to a bit-field may conflict
+with a concurrent store to an adjacent bit-field by another thread.
+If they overlap, one of the updates may be lost.  This is reflected
+in the definition by defining data races in terms of
+abstract <I>memory locations</i> which include entire sequences
+of adjacent bit-fields, instead of just scalar objects.  (1.7p3)
+</ol>
+<H2><A id="structure">A note on the structure of 1.10</a></h2>
+The astute reader will notice that the definitions of 1.10
+are circular.  We define visible sequences based on the happens-before
+relation, which is defined in terms of the synchronizes-with
+relation, which is determined by the values seen by atomic loads,
+the possibilities for which are given by the visible sequences.
+<P>
+If we were to state this more mathematically, as opposed to
+in "standardese", this would be expressed as an existential
+quantification over the values seen by atomic loads, and over
+modification orders.
+<P>
+A particular program behavior is allowed by the standard if
+there exists an association of a store to each load, reflecting
+the value observed by each load,
+and total orders of all the modifications to each
+atomic variable such that
+<UL>
+<LI>The association of stores to loads, and the corresponding values
+seen by the loads, gives rise to the observed behavior of the
+program, and
+<LI>The resulting happens-before relation and visible sequences
+allow this association of stores to loads, i.e. each of the stores
+in the resulting visible sequence of the corresponding load.
+</ul>
+
+<H2><A id="simpler">Simpler rules for programmers</a></h2>
+Based on this definition, as shown in
+<A HREF="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2338.html">
+N2338</a>,
+it becomes a theorem
+that programs using locks and atomic variables with default
+("sequentially consistent") ordering
+to protect other shared variables from simultaneous access
+(other than simultaneous
+read access) behave as though they were executed by simply interleaving the
+actions of each thread.  We
+expect that this is the rule that will be taught to most programmers.
+<H2><A id="acknowledgements">Acknowledgements</a></h2>
+As mentioned earlier, this description relies heavily on the
+prior work on the Java memory model.  Beyond the Java work, and
+later discussion with its authors,
+it has benefitted substantially from the various C++ threading
+discussions, particularly those with Herb Sutter, Doug Lea,
+Paul McKenney, and Sarita Adve.  Clark Nelson wrote most of the
+words in N2429 and its predecessors,
+helped to clean up the memory model description, and provided
+useful suggestions for improving this paper.
+Lawrence Crowl worked out most of the atomics library design
+details and wrote most of N2427 and its predecessors.
+</body>
+</html>

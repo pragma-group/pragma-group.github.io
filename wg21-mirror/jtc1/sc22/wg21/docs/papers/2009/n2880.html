@@ -1,0 +1,607 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+<html lang="en-us">
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=US-ASCII">
+<title>N2880: C++ object lifetime interactions with the threads API</title>
+</head>
+<body>
+
+<table summary="Identifying information for this document.">
+	<tr>
+                <th align=right>Doc. No.:</th>
+                <td>WG21/N2880=J16/09-0070</td>
+        </tr>
+        <tr>
+                <th align=right>Date:</th>
+                <td>2009-05-01</td>
+        </tr>
+        <tr>
+                <th align=right>Reply to:</th>
+                <td>Hans-J. Boehm, Lawrence Crowl</td>
+        </tr>
+        <tr>
+                <th align=right>Phone:</th>
+                <td>+1-650-857-3406, +1-650-253-3677</td>
+        </tr>
+        <tr>
+                <th align=right>Email:</th>
+                <td><a href="mailto:Hans.Boehm@hp.com">Hans.Boehm@hp.com</a>,
+                <a href="mailto:crowl@google.com">crowl@google.com</a></td>
+        </tr>
+</table>
+
+<h1>N2880: C++ object lifetime interactions with the threads API</h1>
+
+<p>
+This paper attempts to summarize parts of a discussion
+<a href="http://www.decadentplace.org.uk/pipermail/cpp-threads/2009-April/thread.html">thread</a>
+entitled "Asynchronous Execution Issues" on the
+<a href="http://www.decadentplace.org.uk/cgi-bin/mailman/listinfo/cpp-threads">cpp-threads mailing list</a>.
+</p>
+
+<p>
+This discussion was motivated by Lawrence Crowl's attempt to generate a proposal
+for a simple asynchronous execution facility to satisfy both UK 329 and
+prior committee concerns in this area.  In addition to some of the usual
+controversy surrounding this topic, the discussion raised concerns that
+constructs along these lines are not just absent from the standard, but
+in fact difficult or impossible to implement given the current committee
+draft.  Here we reflect these concerns about implementability, which are
+a prerequisite for addressing UK 329.  We do not discuss the specific
+library extensions that were originally proposed in UK 329.
+</p>
+
+<p>
+The concerns expressed here are related to those presented in
+<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2008/n2802.html">
+N2802</a> which were addressed by the Summit meeting.  Here we essentially
+observe that similar problems may arise from other combinations of
+existing features, including particularly destructors for <TT>thread_local</tt>
+objects (new in C++0x, and not widely implemented), <TT>thread::detach()</tt>
+(part of the C++0x threads API, though widely used in other threads APIs for
+non-garbage-collected languages), and to some extent the improved
+support for allocator instances in C++0x.
+</p>
+
+<p>
+Note that these concerns should be resolved <I>now</i>,
+even if the <TT>async</tt>
+facility suggested in UK329 is postponed until TR2, since they impact
+our ability to add such features later.
+</p>
+
+<p>
+We describe the issue as consisting of three separate problems:
+</p>
+
+<ul>
+<li>
+Our apparent inability
+to safely shut down detached threads without the use of <TT>quick_exit()</tt>,
+due to interactions between the destruction of <TT>thread_local</tt>s and
+destruction of objects with static duration.
+</li>
+
+<li>
+Our apparent inability to safely execute multiple independent tasks
+in a single thread,
+since it is hard to prevent "late" destruction of <TT>thread_local</tt>s.
+</li>
+
+<li>
+<TT>Thread_local</tt> variables combined with reuse of threads may result
+in unexpectedly large memory footprints.  This issue is less serious than the
+other two.  We mention it for completeness and because it interacts
+with the preceding one.
+</li>
+</ul>
+
+<p>
+We discuss these in turn.
+</p>
+
+<h2>Shutting down detached threads</h2>
+
+<p>
+The current draft contains the following wording in
+3.6.3 [basic.start.term] p4:
+</p>
+
+<blockquote>
+<p>
+If there is a use of a standard library object or function not permitted within
+signal handlers (18.9) that does not happen before (1.10) completion of
+destruction of objects with static storage duration and execution of
+<TT>std::atexit</tt> registered functions (18.4),
+the program has undefined behavior.
+[ <I>Note:</i>
+if there is a use of an object with static storage duration that does not
+happen before the object's destruction, the program has undefined behavior.
+Terminating every thread before a call to <TT>std::exit</TT>
+or the exit from main is sufficient, but not necessary,
+to satisfy these requirements. These
+requirements permit thread managers as static-storage-duration objects.
+<I>-- end note</i> ]
+</p>
+</blockquote>
+
+<p>
+The intent was clearly that this requirement be satisfied if a thread is
+joined before a call to <TT>exit()</TT>
+or within the destructor of a static-storage-duration object.
+The intent was also that it be possible
+to satisfy this constraint for a detached thread by having the thread
+signal that it was about to exit, e.g. by setting an atomic variable
+or notifying a condition variable, and then return, while the main thread
+waited to be signaled before exiting.
+</p>
+
+<p>
+The difficulty in the detached thread case is that between
+the time the detached thread signals completion
+and actually exits, it continues to execute, potentially concurrently
+with static destructors as the process shuts down.  This appeared to be
+safely implementable, so long as the detached thread makes no
+further library calls that might access static storage duration objects.
+</p>
+
+<p>
+Unfortunately, this analysis overlooks the impact of <TT>thread_local</tt>
+object destruction in the detached thread.  These destructors will also be
+invoked between the time the detached thread signals completion and actually
+terminates execution.  It is highly likely that they would call into the
+standard library, and possibly into other third-party libraries.  Since
+these calls inherently occur <EM>after</em> the main thread has been
+notified that it is OK to shut down, such calls can access e.g. the standard
+library <EM>after</em> destructors on its static duration objects have
+already been invoked, rendering those library calls invalid.
+</p>
+
+<p>
+Likewise, the destruction of a global object
+may interfere with the use of that object
+in the destructor for a thread-local variable.
+This scenario arises naturally
+with thread-local caches of a single global variable.
+For example, consider a multi-threaded program counting neutrinos.
+High neutrino counts will lead to excessive mutex contention
+without some caching of increments.
+The following code implements such caching,
+but the destructor of the cache must happen before
+the destructor for the main counter
+to prevent the use of the mutex after it has been destroyed.
+</p>
+
+<blockquote><pre><tt>
+class counter {
+    const char *what;
+    std::mutex protect;
+    int count;
+public:
+    counter( const char *w ) : what( w ), count( 0 ) { }
+    void inc( int a ) { std::lock_guard _( protect ); count += a; }
+    ~counter() { std::cout &lt;&lt; what &lt;&lt; count &lt;&lt; std::endl; };
+}; 
+class counter_cache {
+    counter&amp; aggregator;
+    int count;
+public:
+    void inc( int a ) { count += a; }
+    counter_cache( counter&amp; a ) : aggregator( a ), count( 0 ) { }
+    ~counter_cache() { aggregator.inc( count ); };
+}; 
+....
+counter neutrinos( "neutrinos detected " );
+thread_local counter_cache local_neutrinos( neutrinos );
+....
+{ .... local_neutrinos.inc( 1 ); .... }
+</tt></pre></blockquote>
+
+<p>
+Destructors of <TT>thread_local</tt> objects may need to be invoked in
+response to a <TT>thread_local</tt> variable use in a third party library
+invoked by the detached thread.  (Currently the draft also allows
+<TT>thread_local</tt> variables to be constructed, even if they
+are not used in that thread; thus it does not technically even have to
+be accessed by that thread.)  Thus it is unlikely that the author of the
+code creating the detached thread, and then waiting for it to terminate,
+would be able to predict calls performed during destruction of
+<TT>thread_local</tt> objects.
+</p>
+
+<p>
+As a result, it currently appears impossible to safely shut down a detached
+thread before invocation of static destructors.  Aside from special cases
+in which the entire program is known not to use <TT>thread_local</tt>s,
+the only way out appears to be the use of <TT>quick_exit</tt> to prevent
+the invocation of static destructors.  However we envision that the primary
+use of detached threads would be in library-like reusable components,
+which could not be aware of how the final program will be shut down.
+</p>
+
+<p>
+As a result, it appears hard to construct use cases in which it
+actually makes sense to detach threads.  It seems to make much more sense
+to always maintain a joinable thread object for every running thread,
+since that is the only reliable way to arrange for the thread to be shutdown.
+And we must have such a shutdown mechanism to avoid the otherwise inevitable
+race with destruction of statics.
+</p>
+
+<p>
+Closely related issues arise in other situations in which a thread needs to
+communicate that all of its actions, including destructor calls, have completed.
+Consider, for example, a slight modification of the above counter example,
+in which the counter itself is heap allocated and has limited lifetime.
+We need to ensure that it is not deleted until destructors for other threads'
+<TT>counter_cache</tt>s have completed.
+</p>
+
+<H2>Reusing threads</h2>
+
+<p>
+Consider using threads to implement a thread pool, or possibly some simpler
+facility that just reuses an existing thread along the lines of the
+UK329 suggestion to process a task without creating an entirely
+new thread.  Any such facility will run a sequence of independent
+tasks in a single thread.
+</p>
+
+<p>
+This implies that a <TT>thread_local</tt> variable used by one task
+will persist during the execution of all other tasks performed by that
+thread.  We're artificially and
+somewhat surprisingly extending the lifetime of some objects needed
+only during one of the tasks.
+</p>
+
+<p>
+In order to make this concrete, assume that we have a function
+<TT>caching_async(f)</tt> that runs its argument <TT>f</tt>
+in one of a pool of waiting threads, and immediately returns a
+<TT>future</tt> representing the result of <TT>f()</tt>.
+</p>
+
+<p>
+Consider calling
+a function <TT>par_func(</tt><i>y</i><TT>)</tt> that internally performs
+its job in parallel by (repeatedly) invoking
+<TT>caching_async()</tt>, which in turn
+runs a function that caches a copy <I>x</i> of some piece of the
+argument <I>y</i>
+in a <TT>thread_local</tt>.  If
+<I>y</i> and hence <I>x</i> happen to use, for example, an allocator
+whose lifetime is
+limited to that of a caller to <TT>par_func(</tt><I>y</i><TT>)</tt>,
+we will nonetheless invoke the destructor for <I>x</i> only at
+thread exit, which is likely to be much later.
+</p>
+
+<p>
+In the process of destroying <I>x</i>, we will access its associated
+allocator, whose memory has long since been recycled.  Depending on the
+allocator implementation, this may asynchronously overwrite memory in
+the calling thread's stack, creating an almost undiagnosable bug,
+and potential security hole.
+</p>
+
+<p>
+It can be argued that <TT>par_func</tt> must describe this
+lifetime-extending behavior in its interface.  However such a
+specification could be rather complex, since the actual use
+of <TT>thread_local</tt>s could be by member functions of some
+component of <I>y</i>.  And for such a specification to be useful,
+it would probably be necessary to pass the required thread pool as
+a parameter to <TT>par_func</tt>, removing any hope of making it
+as easy to use as a sequential version.  Even with a defaulted thread
+pool parameter, the client programmer would be forced to carefully
+analyze the lifetime implications.
+</p>
+
+<p>
+Although,there are approximate single-threaded analogs of this
+involving static instead of thread storage duration for the cached
+value <I>x</i>,
+this both seems considerably more surprising,
+and considerably harder to track down when it does happen.  The failure
+may also occur in the middle of execution rather than just during process
+shutdown, as static duration objects are destroyed.
+</p>
+
+<p>
+There are many ways to create objects with references to potentially
+shorter lifetime objects, but the increased support for allocator instances
+appears to aggravate the issue.  It is unsafe to arbitrarily
+extend the lifetime of any object with an allocator of limited duration,
+such as those that motivated the introduction of allocator instances.
+Storing such objects in <TT>thread_local</tt> objects is thus unsafe
+unless we can limit the life of the thread.
+</p>
+
+<p>
+Note that Java experience doesn't apply here.  Java has some issues with
+persistent thread-locals.  These can largely be addressed.
+But the presence of a garbage collector largely eliminates the kind
+of object lifetime issues causing difficulty here.
+</p>
+
+<p>
+Unfortunately, we are exploring new territory here, though that appears
+very difficult to avoid.
+</p>
+
+<p>
+Systems like Cilk and Intel Threading Building Blocks
+are also likely to run into this issue.
+However current implementations generally lack
+support for non-trivial destruction of <TT>__thread</tt> variables.
+We conjecture this is the reason
+they have not yet encountered these problems.
+</p>
+
+<h2>Space consumption</h2>
+
+<p>
+Pragmatically, 
+thread-local variables imply memory consumption.  In the worst case, the memory
+consumed is the product of threads, thread-local variables, and storage per
+variable.  That memory consumption can be unreasonably large.
+As a consequence,
+the design of the thread-local facility permits lazy allocation
+and initialization of such variables, which means that only memory in the
+intersection of thread control and thread-local variables need be allocated.
+When that intersection is small, memory consumption is small.
+</p>
+
+<p>
+The intersection of threads and thread-local variables
+can grow unexpectedly large
+when threads are reused for unrelated purposes.
+For example, consider a thread that
+is used for one task and then reused for another task.
+If the first task references thread-local variable A,
+that variable will be allocated and initialized.
+Now consider the next task, which references thread-local variable B.
+That variable too will be allocated and initialized.
+At this point, the thread is burdened by the space required by both A and B,
+even though neither task requires both simultaneously.
+Now consider the case of ten threads,
+each executing one each of ten different tasks,
+each referencing a different thread-local variable.
+Total consumption is one hundred instances of the thread-local variables.
+In contrast, consider those ten threads,
+but with each executing ten of a single kind of task.
+The total space consumption is ten instances of the thread-local variables,
+an order-of-magnitude lower.
+In general, a program-wide facility for reusing threads
+will tend towards using all variables in all threads,
+requiring memory consumption for the full product,
+which is precisely the problem we wished to avoid.
+</p>
+
+<p>
+Furthermore,
+the use of thread-local variables will often be for caches.
+In the above scenario,
+the effectiveness of those variables for caches
+is less effective in the low-locality case
+than in the high-locality case.
+</p>
+
+<p>
+There are two approaches to address these problems.
+</p>
+
+<dl>
+<dt>Limit the number of threads.</dt>
+<dd>
+<p>
+This approach works for tasks that are individually unsynchronized,
+but fails when tasks must synchronize between each other.
+</p>
+</dd>
+
+<dt>Increase locality of task types with threads.</dt>
+<dd>
+<p>
+This approach necessarily requires identifying the locality,
+at least by implication.
+Such identification of locality
+is an implication of programmer-managed thread pools.
+Destruction of the thread pool implies termination of the threads
+and destruction of their thread-local variables.
+Therefore, thread pools should be managed by the programmer
+as a proxy for managing the memory of the corresponding thread-local variables.
+</p>
+</dd>
+</dl>
+
+<p>
+While the latter approach is workable,
+the "Kona compromise" makes it beyond the scope of C++0x.
+</P>
+
+<h2>The solution space</h2>
+
+<p>
+We believe that a minimal solution would consist of pointing out the
+above hazards in non-normative text in the standard, and clarifying in
+30.2.1.5 [thread.thread.member] p6 that the execution of <TT>thread_local</tt>
+destructors happens before the return from <TT>join()</tt>.
+</p>
+
+<p>
+But this appears
+insufficient to us, since it leaves some major pitfalls in the language, and
+the bugs resulting from stumbling into those will be nearly undiagnosable.
+</p>
+
+<p>
+Other more drastic
+potential solutions include the following, arranged roughly in decreasing order of desirability based on the authors' opinions.  Most of these are only
+partial solutions:
+</p>
+
+<dl>
+<dt>Remove <TT>thread::detach()</tt> from the draft.</dt>
+<dd>
+<p>
+This is a clean solution to the problem of shutting
+down detached threads; they no longer exist.
+It does break with tradition in the area,
+and appears to be a "sledge hammer" solution.  However given the
+existing need to shut down threads before static destructors are
+invoked, it seems to affect only code that "knows" that a process will
+be terminated without invoking static destructors.  This is unlikely
+to be true for any code that claims to be reusable in some form, and it
+is unclear we should be encouraging other kinds of code.
+</p>
+
+<p>
+Detached threads were originally invented in order to be able to
+automatically release all resources associated with a thread once the
+thread terminated.  Given the role of destructors in C++, this is rarely
+possible in any case, since correct code must remember enough about the
+thread to ensure its termination before destructors are run.
+Removing <TT>detach()</tt> acknowledges this fact.
+</p>
+</dd>
+
+<dt>Provide a call-back after destroying thread-local variables.</dt>
+<dd>
+<p>
+Programmers can register functions,
+e.g. with
+</p>
+<blockquote>
+<p>
+<tt>at_thread_termination( void (*handler)( void* fml ), void* arg );</tt>
+</p>
+</blockquote>
+<p>
+to be called 
+</p>
+<blockquote>
+<p>
+<tt>handler( arg );</tt>
+</p>
+</blockquote>
+<p>
+after all thread-local variables have been destroyed.
+The handler cannot access thread-local variables.
+</p>
+
+<p>
+This solution allows
+safe shutdown of detached threads using obscure code.  It might be
+considered cleaner than the immediately following approach, in that it doesn't
+bypass the usual destructor timing.
+</p>
+</dd>
+
+<dt>Provide a function to destroy all thread-local variables.</dt>
+<dd>
+<p>
+An explicit call to the function would destroy all <TT>thread_local</tt>s
+associated with the calling thread.
+This solution appears to be the minimal solution to the problem of
+synchronizing thread-local destruction
+with the calling environment.
+In particular, it would allow a thread implementing an <tt>async</tt> function
+to destroy its thread-local variables
+before setting the <tt>promise</tt>.
+It would also allow detached threads to be safely shut down by
+explicitly destroying <TT>thread_local</tt>s before notifying the
+waiting thread.  But
+it would leave the most obvious and shortest code (which doesn't
+explicitly destroy <TT>thread_local</tt>s) very subtly broken.
+Unfortunately, the code that sets the promise
+is likely to be application-specific,
+and hence fail to notify any libraries with auxiliary threads
+that the client's thread-local variables have been destroyed.
+</p>
+</dd>
+
+<dt>Provide thread-destroying synchronization operations.</dt>
+<dd>
+<p>
+We could add alternatives to <TT>mutex::unlock</TT>
+and <TT>condition_variable::notify</TT>
+that first destroy thread-local variables
+and then perform the requested synchronization.
+This approach is less general than the prior approaches.
+Unfortunately, this solution currently requires that
+a thread be able to tell another thread how to join with it.
+No such facility is present now.
+</p>
+</dd>
+
+<dt>Provide a thread-carrying future.</dt>
+<dd>
+<p>
+This solution is a special case of the previous solution.
+The problem with the current future is that
+it does not provide a happens-before edge
+between thread-local destruction and the <tt>future::get</tt>.
+To get that edge, we need to <tt>thread::join</tt>,
+which is currently not possible
+without putting the <tt>std::thread</tt>
+within the data shared between the promise and the future.
+While feasible within the current draft,
+this approach is less general than the prior approaches.
+</p>
+</dd>
+
+<dt>Require lazy initialization of thread-local variables.</dt>
+<dd>
+<p>
+The current standard permits but does not require
+lazy initialization of thread-local variables.
+If thread-locals were initialized <em>only</em> if referenced,
+detached threads could be used
+when the code is known not to reference any.
+To make this approach effective,
+use of thread-local variables becomes a documentation requirement
+of the API.
+Unfortunately, documentation tends to lag implementation.
+</p>
+
+</dd>
+
+<dt>Remove allocator instance support.</dt>
+<dd>
+<p>
+Lack of such support would discourage the creation of objects
+whose "late" destruction creates dangling reference accesses.  Although
+some of us are increasingly nervous about the cost of this feature in
+added complexity, this step is probably too drastic, and too partial
+a solution, to be warranted by the problems under discussion.
+</p>
+</dd>
+
+<dt>Restricting <TT>thread_local</tt>s to have trivial destructors.</dt>
+<dd>
+<p>
+This solution would solve the immediate problems, and be consistent with
+existing implementations.  However, it appears to be very restrictive
+for non-garbage-collected applications.  For example, it appears quite
+useful to be able to retain an object as long as one of several threads
+is still running by keeping a <TT>shared_ptr</tt> to the object.
+<TT>shared_ptr</tt> of course has a non-trivial destructor, which
+will fail if delayed past the lifetime of the corresponding allocator.
+Furthermore, the earlier counter example would become unusable.
+So, such a restriction on thread-local variables seems too limiting.
+</p>
+</dd>
+</dl>
+
+<p>
+We recommend the first solution
+and at least one of the next four solutions.
+However, these solutions are not yet completely explored,
+so further work is needed before choosing solutions.
+</p>
+
+</body>
+</html>

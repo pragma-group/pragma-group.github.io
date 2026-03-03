@@ -1,0 +1,455 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+	<meta http-equiv="Content-Type" content="text/html; charset=us-ascii" />
+	<title>Dynamic memory allocation for over-aligned data</title>
+	<style type="text/css">
+		.right:
+		{
+			float: right;
+		}
+	</style>
+</head>
+<body>
+	<table class="right">
+		<tbody>
+			<tr>
+				<th>Doc. No.:</th>
+				<td>N3396= 12-0096</td>
+			</tr>
+			<tr>
+				<th>Date:</th>
+				<td>2012-08-30</td>
+			</tr>
+			<tr>
+				<th>Reply to:</th>
+				<td>Clark Nelson</td>
+			</tr>
+			<tr>
+				<th>Phone:</th>
+				<td>+1-503-712-8433</td>
+			</tr>
+			<tr>
+				<th>Email:</th>
+				<td><a href="mailto:clark.nelson@intel.com">clark.nelson@intel.com</a></td>
+			</tr>
+		</tbody>
+	</table>
+	<h1>Dynamic memory allocation for over-aligned data</h1>
+	<h2>Introduction</h2>
+	<p>To codify widespread existing practice, C++11 added the ability to specify increased
+		alignment (a.k.a. over-alignment) for class types. Unfortunately (but also consistently
+		with existing practice), C++11 did not specify any mechanism by which over-aligned
+		data can be dynamically allocated correctly (i.e. respecting the alignment of the
+		data). For example:</p>
+	<pre>class alignas(16) float4 {
+	float f[4];
+};
+float4 *p = new float4[1000];</pre>
+	<p>In this example, not only is an implementation of C++11 not required to allocate
+		properly-aligned memory for the array, for practical purposes it is very nearly
+		required to do the allocation incorrectly; in any event, it is certainly required
+		to perform the allocation by a process that does not take the specified alignment
+		value into account.</p>
+	<p>This represents a hole in the support for alignment in the language, which really
+		needs to be filled.</p>
+	<p>The purpose of this paper is to get feedback from WG21 as to the means by which over-alignment
+		should be accommodated by dynamic memory allocation. Once a preliminary consensus
+		has been reached, one or more implementations can provide support in the recommended
+		form, so the feature can be tested by experience before it is formally adopted,
+		hopefully for C++17.</p>
+	<h2>Backward compatibility</h2>
+	<p>One of the first questions that needs to be settled about the future direction is
+		the degree to which backward compatibility with C++11 needs to be maintained. On
+		the one hand, in an ideal world, for an example like the one above, it would be
+		obvious that the specified alignment should be honored.</p>
+	<p>On the other hand, there's no way to achieve that ideal without at least potentially
+		changing the behavior of some C++11 programs. For example, a program might asssume
+		control of dynamic allocation through the use of class-specific <code>operator new[]</code>
+		and <code>operator delete[]</code> functions, or by replacing the global functions.
+		These functions don't take any alignment argument. If a different function is used
+		instead, which is somehow passed an alignment value, some degree of backward compatibility
+		is lost.</p>
+	<p>When backward compatibility and the ideal future direction are in conflict, which
+		should take precedence, and to what degree?</p>
+	<p>If perfect backward compatibility with C++11 were required, one way to ensure that
+		might be to require that a new header &mdash; say <code>&lt;aligned_new&gt;</code>
+		&mdash; be included in order to get new dynamic allocation for over-aligned types.
+		But that would sacrifice convenience and/or correctness; using <code>alignas</code>
+		by itself would presumably never be enough to get correctly aligned dynamic allocation.</p>
+	<p>Another obvious position to take would be that backward compatibility with C++98,
+		which had no alignment specifier, needs to be complete. This might suggest that
+		dynamic allocation should differ between types involving alignment specifiers and
+		types that don't &mdash; which some might consider to be an unfortunate complication.</p>
+	<p>In C++11, when an over-aligned class type has its own dynamic memory allocation functions,
+		it would be reasonable to hope that those functions already do the right thing with
+		respect to alignment, and dangerous to make any change. However, the only way over-alignment
+		could be accommodated by global allocation and deallocation functions would be to
+		replace them with functions that always provide the strictest alignment used by
+		any type in the program. It may be reasonable to assume that very few programs go
+		to that length, instead of using class-specific allocation/deallocation.</p>
+	<p>Therefore, it may be acceptable to abandon backward compatibility with C++11 with
+		respect to calling a global allocation function for dynamic allocation of an over-aligned
+		type. But if so, that may well be the only acceptable case.</p>
+	<h2>Passing the alignment value</h2>
+	<p>
+		<!--Another important question that needs to be settled is the form in which the alignment
+		value is passed to the allocation function. The most obvious possibility would be
+		as a separate argument.-->
+		To minimize the possibility of conflict with existing placement allocation functions,
+		it might be advisable to invent a new standard enumeration type to use for alignment
+		parameters; for example:</p>
+	<pre>namespace std {
+	enum class align_val_t: size_t;
+};
+void *operator new(std::size_t, std::align_val_t);	// new overload</pre>
+	<p>It's not clear that this type would need any named constants of its own; it just
+		needs to be able to represent alignment values, which are associated with type <code>
+			size_t</code>. It should perhaps nevertheless be a scoped enumeration, to prevent
+		the possibility that a value of that type would inadvertently be converted to some
+		integer type, and match an existing placement allocation function.</p>
+	<p>If an allocation function that takes an alignment value is available, it should be
+		used, for the sake of generality; but if no such function is available, a function
+		that doesn't take one should be used, for backward compatibility. This suggests
+		a new rule for new-expressions: attempting to find an allocation function in two
+		phases, with two different sets of arguments.
+		<!--But Pablo Halpern suggested a different possibility, which wouldn't
+		require a special meta-overload-resolution rule:-->
+	</p>
+	<!--
+	<pre>namespace std {
+	class aligned_size {
+		size_t size, alignment;
+	public:
+		aligned_size(size_t size, size_t alignment);
+		operator size_t();	// returns the size
+	};
+};
+void *operator new(std::aligned_size);	// new overload</pre>
+	<p>If for <code>new T</code> the compiler synthesized a call to <code>operator new(aligned_size(sizeof(T),
+		alignof(T))</code>, the existing overload resolution rules would prefer a function
+		with an <code>aligned_size</code> parameter, but would accept a function with a
+		<code>size_t</code> parameter instead.</p>
+	<p>The advantage of this approach is that no new language rule related to overload resolution
+		would be needed. One disadvantage would be that it would be necessary to relax the
+		current restriction that the first parameter of an allocation have type <code>size_t</code>;
+		it's not clear exactly what (if anything) should then be disallowed. Another disadvantage
+		is that there would be a new language-support component of the library, on which
+		the compiler would depend for correctness. The standard might not need to say anything
+		about this, but for backward compatibility compilers might need to continue to use
+		the old method if <code>std::aligned_size</code> is not defined.</p>
+	<p>(It could be argued that the above <code>align_val_t</code> type would also imply
+		a dependency by the compiler on the library, but that would actually involve far
+		fewer necessary assumptions by the compiler.)</p>
+	-->
+	<h2>Class-specific allocation and deallocation</h2>
+	<p>It should be kept in mind that, under the current language rules, any class-specific
+		allocation functions effectively hide all global allocation functions, including
+		the ones in the standard library. For example, the following is invalid:</p>
+	<pre>#include &lt;new&gt;
+class X {
+	void *operator new(size_t);	// no operator new(size_t, std::nothrow_t)
+	void operator delete(void *);
+};
+X *p = new(nothrow) X;	// ::operator new(size_t, std::nothrow_t) is not considered</pre>
+	<p>It is possible to imagine adjusting the rules to enable finding an alignment-aware
+		allocation function more often, but that would also make it more likely that some
+		programmers would write programs believing &mdash; incorrectly &mdash; that they
+		have taken over complete control of the way that their class is dynamically allocated.</p>
+	<h2>Unified vs. distinct arenas</h2>
+	<p>What implementation techniques should the standard allow for allocation and deallocation
+		of aligned memory?</p>
+	<p>In POSIX, there is a function named <code>posix_memalign</code> that can allocate
+		over-aligned memory; <code>free</code> is used to free the blocks it allocates.</p>
+	<p>On Windows, on the other hand, of course <code>malloc</code>, <code>realloc</code>
+		and <code>free</code> are supported for default-aligned memory. In addition, for
+		over-aligned memory, there are functions named <code>_aligned_malloc</code>, <code>_aligned_realloc</code>,
+		and <code>_aligned_free</code>. Memory that's allocated by <code>_aligned_malloc</code>
+		must be freed by <code>_aligned_free</code>, and memory that's allocated by <code>malloc</code>
+		must be freed by <code>free</code>. So logically, there are two disjoint, non-interoperable
+		memory arenas; the program has to know to which arena a block belongs (i.e. how
+		it was allocated) in order to be able to free it.</p>
+	<p>This is almost certain to be true of any implementation where over-aligned memory
+		allocation is layered on top of &ldquo;plain old&rdquo; default-aligned memory allocation.
+		There are probably many such implementations, and they're not likely to go away
+		soon.</p>
+	<p>In an environment where information about the method used to allocate a block of
+		memory can be lost, having distinct arenas (i.e. distinct deallocation functions)
+		could be inconvenient. A program whose operation depends on the assumption that
+		<code>operator new</code> is equivalent to <code>malloc</code> is effectively an
+		environment where information about the method used to allocate a block of memory
+		is lost.</p>
+	<p>But in a well-written, portable C++ program, at the point where memory is deallocated,
+		the type of the object being deleted &mdash; and therefore whether it is over-aligned
+		&mdash; is known. This knowledge could, and probably should, be used to support
+		layered implementations of over-aligned memory allocation.</p>
+	<p>This implies that, just as a new-expression for an over-aligned type should look
+		for an alignment-aware allocation function, so should a delete-expression for a
+		pointer to an over-aligned type look for an alignment-aware deallocation function.
+		Presumably this would be done by selecting a deallocation function to which the
+		alignment value can be passed, even though probably very few implementations will
+		actually have any use for that value.</p>
+	<!--	<h2>Coming attractions: wording</h2>
+	<p>It's clear that new overloads of <code>operator new</code> and <code>operator new[]</code>
+		(and <code>operator delete</code> and <code>operator delete[]</code>) are needed.
+		But until the above questions are settled, basically nothing can be done in terms
+		of a specification for the solution of this problem.</p>
+	<p>The choice of the mechanism and type (i.e. something like <code>enum align_val_t</code>
+		versus something like <code>class aligned_size</code>) by which an alignment value
+		is passed to an allocation function will be determined by the relative desirability
+		of adding a new meta-overload-resolution rule to the way new-expressions are handled,
+		versus relaxing the language rules for allocation functions and adding new language
+		dependencies on library components.</p>-->
+	<h2>Outline of possible working paper changes</h2>
+	<p>The following changes are intended to be suggestive, not definitive. They are definitely
+		incomplete, but they give a sense of the flavor and some idea of the scope of the
+		form I believe the changes will eventually take. The particularly important changes
+		are presented first.</p>
+	<p>Mainly for simplicity, here I suggest that the new overloads should be added to <code>
+		&lt;new&gt;</code>, and for consistency with that, that they should also be predeclared.
+		But if 100% backward compatibility with C++11 is considered necessary, then the
+		new overloads probably need to be declared in a new library header (possibly <code>&lt;aligned_new&gt;</code>).
+		It's also possible to imagine requiring the declarations be in a new header, but
+		making it implementation-defined whether that header is included by <code>&lt;new&gt;</code>,
+		perhaps with the expectation that the actual choice will be left to users, under
+		the control of a command-line option or macro setting.</p>
+	<p>There is one change of terminology worth noting. Today, the phrase &ldquo;placement
+		new&rdquo; is ambiguous. In some contexts it means adding arguments to a call to
+		an allocation function, with any types and unspecified purpose. In other contexts,
+		it is used to refer specifically to cases where there is a single additional argument
+		of type <code>void *</code>, in which case the allocation function doesn't actually
+		allocate anything. I refer to the latter cases as &ldquo;non-allocating&rdquo;,
+		and refer to &#8220;allocating&#8221; cases to distinguish them when necessary.</p>
+	<p>Change 18.6, header <code>&lt;new&gt;</code> synopsis:</p>
+	<blockquote>
+		<pre>namespace std {
+	class bad_alloc;
+	class bad_array_new_length;
+	<ins>enum class align_val_t: size_t;</ins>
+	struct nothrow_t {};
+	extern const nothrow_t nothrow;
+	typedef void (*new_handler)();
+	new_handler get_new_handler() noexcept;
+	new_handler set_new_handler(new_handler new_p) noexcept;
+};
+void* operator new(std::size_t size);
+void* operator new(std::size_t size, const std::nothrow_t&amp;) noexcept;
+void operator delete(void* ptr) noexcept;
+void operator delete(void* ptr, const std::nothrow_t&amp;) noexcept;
+void* operator new[](std::size_t size);
+void* operator new[](std::size_t size, const std::nothrow_t&amp;) noexcept;
+void operator delete[](void* ptr) noexcept;
+void operator delete[](void* ptr, const std::nothrow_t&amp;) noexcept;
+</pre>
+		<ins>
+			<pre>void* operator new(std::size_t size, std::align_val_t alignment);
+void* operator new(std::size_t size, std::align_val_t alignment,
+			const std::nothrow_t&amp;) noexcept;
+void operator delete(void* ptr, std::align_val_t alignment) noexcept;
+void operator delete(void* ptr, std::align_val_t alignment,
+			const std::nothrow_t&amp;) noexcept;
+void* operator new[](std::size_t size, std::align_val_t alignment);
+void* operator new[](std::size_t size, std::align_val_t alignment,
+			const std::nothrow_t&amp;) noexcept;
+void operator delete[](void* ptr, std::align_val_t alignment) noexcept;
+void operator delete[](void* ptr, std::align_val_t alignment,
+			const std::nothrow_t&amp;) noexcept;</pre>
+		</ins>
+		<pre>void* operator new (std::size_t size, void* ptr) noexcept;
+void* operator new[](std::size_t size, void* ptr) noexcept;
+void operator delete (void* ptr, void*) noexcept;
+void operator delete[](void* ptr, void*) noexcept;</pre>
+	</blockquote>
+	<p>Change 5.3.4p11:</p>
+	<blockquote>
+		<p>The <var>new-placement</var> syntax <del>is</del> <ins>can be</ins> used to supply
+			additional arguments to an allocation function. <del>If used, overload</del> <ins>Overload</ins>
+			resolution is performed on a function call created by assembling an argument <del>list
+				consisting of</del> <ins>list. The first argument is</ins> the amount of space
+			requested <del>(the first argument)</del> <ins>, and has type <code>std::size_t</code>.
+				If the type of the allocated object is over-aligned, the next argument is the type's
+				alignment, and has type <code>std::align_val_t</code>.</ins> <del>and the</del>
+			<ins>If the <var>new-placement</var> syntax is used, its</ins> expressions <del>in the
+				<var>new-placement</var> part of the <var>new-expression</var> (</del> are the
+			<del>second and</del> succeeding arguments<del>)</del>. <del>The first of these arguments
+				has type <code>std::size_t</code> and the remaining arguments have the corresponding
+				types of the expressions in the <var>new-placement</var>.</del> <ins>If no matching
+					function is found and the allocated object type is over-aligned, the alignment argument
+					is deleted, and overload resolution is performed again.</ins></p>
+	</blockquote>
+	<p>Change 5.3.4p12:</p>
+	<blockquote>
+		<p>[ <em>Example:</em></p>
+		<ul>
+			<li><code>new T</code> results in a call of <ins>either <code>operator new(sizeof(T),
+				static_cast&lt;std::align_val_t&gt;(alignof(T)))</code> or</ins> <code>operator new(sizeof(T))</code>,</li>
+			<li><code>new(2,f) T</code> results in a call of <ins>either <code>operator new(sizeof(T),
+				static_cast&lt;std::align_val_t&gt;(alignof(T)),2,f)</code> or</ins> <code>operator
+					new(sizeof(T),2,f)</code>,</li>
+			<li><code>new T[5]</code> results in a call of <ins>either <code>operator new[](sizeof(T)*5+x,
+				static_cast&lt;std::align_val_t&gt;(alignof(T)))</code> or</ins> <code>operator new[](sizeof(T)*5+x)</code>,
+				and</li>
+			<li><code>new(2,f) T[5]</code> results in a call of <ins>either <code>operator new[](sizeof(T)*5+y,
+				static_cast&lt;std::align_val_t&gt;(alignof(T)),2,f)</code> or</ins> <code>operator
+					new[](sizeof(T)*5+y,2,f)</code>.</li>
+		</ul>
+		<p>...</p>
+	</blockquote>
+	<p>Most of the rest of these changes are just reflecting the implications of the above
+		changes through the rest of the document.</p>
+	<p>Change 3.7.4p2:</p>
+	<blockquote>
+		<p>The library provides default definitions for the global allocation and deallocation
+			functions. Some global allocation and deallocation functions are replaceable (18.6.1).
+			A C++ program shall provide at most one definition of a replaceable allocation or
+			deallocation function. Any such function definition replaces the default version
+			provided in the library (17.6.4.6). The following allocation and deallocation functions
+			(18.6) are implicitly declared in global scope in each translation unit of a program.</p>
+		<pre>void* operator new(std::size_t);
+void* operator new[](std::size_t);
+void operator delete(void*);
+void operator delete[](void*);</pre>
+		<ins>
+			<pre>void* operator new(std::size_t, std::align_val_t);
+void* operator new[](std::size_t, std::align_val_t);
+void operator delete(void*, std::align_val_t);
+void operator delete[](void*, std::align_val_t);</pre>
+		</ins>
+		<p>These implicit declarations introduce only the function names <code>operator new</code>,
+			<code>operator new[]</code>, <code>operator delete</code>, and <code>operator delete[]</code>.
+			[ <em>Note:</em> The implicit declarations do not introduce the names <code>std</code>,
+			<code>std::size_t</code>, <ins><code>std::align_val_t</code>,</ins> or any other
+			names that the library uses to declare these names. Thus, a <var>new-expression</var>,
+			<var>delete-expression</var> or function call that refers to one of these functions
+			without including the header <code>&lt;new&gt;</code> is well-formed. However, referring
+			to <code>std</code> or <code>std::size_t</code> <ins>or <code>std::align_val_t</code></ins>
+			is ill-formed unless the name has been declared by including the appropriate header.
+			&#8212;<em>end note</em>] Allocation and/or deallocation functions can also be declared
+			and defined for any class (12.5).</p>
+	</blockquote>
+	<p>Change 3.7.4.2p3:</p>
+	<blockquote>
+		<p>If a deallocation function terminates by throwing an exception, the behavior is undefined.
+			The value of the first argument supplied to a deallocation function may be a null
+			pointer value; if so, and if the deallocation function is one supplied in the standard
+			library, the call has no effect. Otherwise, the behavior is undefined if the value
+			supplied to <code>operator delete(void*)</code> in the standard library is not one
+			of the values returned by a previous invocation of <del>either <code>operator new(std::size_t)</code>
+				or <code>operator new(std::size_t, const std::nothrow_t&amp;)</code></del> <ins>an allocating
+					form of <code>operator new</code></ins> in the standard library, and the
+			behavior is undefined if the value supplied to <code>operator delete[](void*)</code>
+			in the standard library is not one of the values returned by a previous invocation
+			of <del>either <code>operator new[](std::size_t)</code> or <code>operator new[](std::size_t,
+				const std::nothrow_t&amp;)</code></del> <ins>an allocating form of <code>operator new[]</code></ins>
+			in the standard library.</p>
+	</blockquote>
+	<p>Change 3.7.4.3p2:</p>
+	<blockquote>
+		<p>A pointer value is a <dfn>safely-derived pointer</dfn> to a dynamic object only if
+			it has an object pointer type and it is one of the following:</p>
+		<ul>
+			<li>the value returned by a call to the C++ standard library implementation of <del>
+				<code>::operator new(std:: size_t)</code></del> <ins>any of the allocating forms of
+					<code>operator new</code> or <code>operator new[]</code></ins>;<sup>37</sup></li>
+			<li>...</li>
+		</ul>
+	</blockquote>
+	<!--
+	<p>5.3.4p8:</p>
+	<blockquote>
+		<p>A <var>new-expression</var> obtains storage for the object by calling an <var>allocation
+			function</var> (3.7.4.1). If the <var>new-expression</var> terminates by throwing
+			an exception, it may release storage by calling a deallocation function (3.7.4.2).
+			If the allocated type is a non-array type, the allocation function&#8217;s name is <code>operator
+				new</code> and the deallocation function&#8217;s name is <code>operator delete</code>.
+			If the allocated type is an array type, the allocation function&#8217;s name is <code>operator
+				new[]</code> and the deallocation function&#8217;s name is <code>operator delete[]</code>.
+			[ <em>Note: an implementation shall provide default definitions for the global allocation
+				functions (3.7.4, 18.6.1.1, 18.6.1.2). A C++ program can provide alternative definitions
+				of these functions (17.6.4.6) and/or class-specific versions (12.5). &#8212;end note</em>
+			]</p>
+	</blockquote>
+	<p>5.3.4p9:</p>
+	<blockquote>
+		<p>If the <var>new-expression</var> begins with a unary <code>::</code> operator, the
+			allocation function&#8217;s name is looked up in the global scope. Otherwise, if the allocated
+			type is a class type <code>T</code> or array thereof, the allocation function&#8217;s
+			name is looked up in the scope of <code>T</code>. If this lookup fails to find the
+			name, or if the allocated type is not a class type, the allocation function&#8217;s name
+			is looked up in the global scope.</p>
+	</blockquote>
+	<p>5.3.4p10:</p>
+	<blockquote>
+		<p>A <var>new-expression</var> passes the amount of space requested to the allocation
+			function as the first argument of type <code>std::size_t</code>. That argument shall
+			be no less than the size of the object being created; it may be greater than the
+			size of the object being created only if the object is an array. For arrays of <code>
+				char</code> and <code>unsigned char</code>, the difference between the result
+			of the <var>new-expression</var> and the address returned by the allocation function
+			shall be an integral multiple of the strictest fundamental alignment requirement
+			(3.11) of any object type whose size is no greater than the size of the array being
+			created. [ <em>Note: Because allocation functions are assumed to return pointers to
+				storage that is appropriately aligned for objects of any type with fundamental alignment,
+				this constraint on array allocation overhead permits the common idiom of allocating
+				character arrays into which objects of other types will later be placed. &#8212;end note</em>
+			]</p>
+	</blockquote>
+	-->
+	<p>Change 17.6.4.6p2:</p>
+	<blockquote>
+		<p>A C++ program may provide the definition for any of <del>eight</del> <ins>sixteen</ins>
+			dynamic memory allocation function signatures declared in header <code>&lt;new&gt;</code>
+			(3.7.4, 18.6):</p>
+		<ul>
+			<li><code>operator new(std::size_t)</code></li>
+			<li><code>operator new(std::size_t, const std::nothrow_t&amp;)</code></li>
+			<li><code>operator new[](std::size_t)</code></li>
+			<li><code>operator new[](std::size_t, const std::nothrow_t&amp;)</code></li>
+			<li><code>operator delete(void*)</code></li>
+			<li><code>operator delete(void*, const std::nothrow_t&amp;)</code></li>
+			<li><code>operator delete[](void*)</code></li>
+			<li><code>operator delete[](void*, const std::nothrow_t&amp;)</code></li>
+		</ul>
+		<ins>
+			<ul>
+				<li><code>operator new(std::size_t, std::align_val_t)</code></li>
+				<li><code>operator new(std::size_t, std::align_val_t, const std::nothrow_t&amp;)</code></li>
+				<li><code>operator new[](std::size_t, std::align_val_t)</code></li>
+				<li><code>operator new[](std::size_t, std::align_val_t, const std::nothrow_t&amp;)</code></li>
+				<li><code>operator delete(void*, std::align_val_t)</code></li>
+				<li><code>operator delete(void*, std::align_val_t, const std::nothrow_t&amp;)</code></li>
+				<li><code>operator delete[](void*, std::align_val_t)</code></li>
+				<li><code>operator delete[](void*, std::align_val_t, const std::nothrow_t&amp;)</code></li>
+			</ul>
+		</ins></blockquote>
+	<p>Add descriptions of the new functions to sections 18.6.1.1 and 18.6.1.2.</p>
+	<p>Change 18.6.1.1p12:</p>
+	<blockquote>
+		<p><em>Requires:</em> <var>ptr</var> shall be a null pointer or its value shall be a
+			value returned by an earlier call to <del>the</del> <ins>an allocating form of <code>
+				operator new</code></ins> (possibly replaced) <del><code>operator new(std::size_t)</code>
+					or <code>operator new(std::size_t,const std::nothrow_t&amp;)</code></del>
+			which has not been invalidated by an intervening call to <code>operator delete<del>(void*)</del></code>.</p>
+	</blockquote>
+	<p>Change 18.6.1.2p11:</p>
+	<blockquote>
+		<p><em>Requires:</em> <var>ptr</var> shall be a null pointer or its value shall be the
+			value returned by an earlier call to <ins>an allocating form of</ins> <code>operator
+				new[]</code><del><code>(std::size_t)</code> or <code>operator new[](std::size_t,const
+					std::nothrow_t&amp;)</code></del> which has not been invalidated by an intervening
+			call to <code>operator delete[]<del>(void*)</del></code>.</p>
+	</blockquote>
+	<p>Change the title of section 18.6.1.3:</p>
+	<blockquote>
+		<h4>18.6.1.3 <del>Placement</del> <ins>Non-allocating</ins> forms <span class="right">
+			[new.delete.placement]</span></h4>
+	</blockquote>
+	<p>Change 20.6.9.1p6:</p>
+	<blockquote>
+		<p><em>Remark:</em> the storage is obtained by calling <code>::operator new<del>(std::size_t)</del></code>
+			(18.6.1), but it is unspecified when or how often this function is called. The use
+			of <code>hint</code> is unspecified, but intended as an aid to locality if an implementation
+			so desires.</p>
+	</blockquote>
+</body>
+</html>

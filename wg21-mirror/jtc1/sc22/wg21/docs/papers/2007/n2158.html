@@ -1,0 +1,746 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+        "http://www.w3.org/TR/html4/strict.dtd">
+<html lang="en">
+<head>
+	<meta http-equiv="content-type" content="text/html; charset=utf-8">
+	<title>Issue 206</title>
+	<style>
+	p {text-align:justify}
+	li {text-align:justify}
+	blockquote.note
+	{
+		background-color:#E0E0E0;
+		padding-left: 15px;
+		padding-right: 15px;
+		padding-top: 1px;
+		padding-bottom: 1px;
+	}
+	ins {background-color:#FFFFA0}
+	del {background-color:#FFFFA0}
+	</style>
+</head>
+<body>
+
+<address align=right>
+Document number: N2158=07-0018<br>
+<br>
+<a href="mailto:hinnant@twcny.rr.com">Howard E. Hinnant</a><br>
+2006-11-13
+</address>
+<hr>
+<h1 align=center>LWG Issue 206: Linking new/delete operators</h1>
+
+<h2>Contents</h2>
+
+<ul>
+<li><a href="#Introduction">Introduction</a></li>
+<li><a href="#pass1">What's Reasonable, Pass 1</a></li>
+<li><a href="#pass2">What's Reasonable, Pass 2</a></li>
+<li><a href="#ablink">Linkage Between Groups A and B</a></li>
+<li><a href="#proposed">Proposed Wording</a></li>
+<li><a href="#Acknowledgments">Acknowledgments</a></li>
+</ul>
+
+<h2><a name="Introduction"></a>Introduction</h2>
+
+<p>
+This paper addresses the default implementation of the following 8 standard library functions:
+</p>
+
+<blockquote><pre>
+void* operator new     (std::size_t size)                        throw(std::bad_alloc);
+void  operator delete  (void* ptr)                               throw();
+
+void* operator new     (std::size_t size, const std::nothrow_t&amp;) throw();
+void  operator delete  (void* ptr,        const std::nothrow_t&amp;) throw();
+
+void* operator new   [](std::size_t size)                        throw(std::bad_alloc);
+void  operator delete[](void* ptr)                               throw();
+
+void* operator new   [](std::size_t size, const std::nothrow_t&amp;) throw();
+void  operator delete[](void* ptr,        const std::nothrow_t&amp;) throw();
+</pre></blockquote>
+
+<p>
+Note that all 8 of the above functions are replaceable.  And if all 8 are replaced, the requirements
+on those replacements are clear.  What is less clear is the requirements and behavior if only a subset
+of the above 8 functions are replaced.
+</p>
+
+<blockquote>
+<p>
+Why do we care if only a subset of the 8 functions are replaced?  Can't we just mandate that either
+none or all 8 of the above functions must be replaced?
+</p>
+</blockquote>
+
+<p>
+Yes, we could do that.  In fact that is effectively what we have done since 1998.  It isn't working.
+A common bug is:
+</p>
+
+<blockquote>
+<p>
+I've replaced <tt>sort</tt> with <tt>stable_sort</tt> as an internal
+implementation detail in my library.  Why are a few of my clients now
+complaining that my library is causing memory corruption in their applications?
+</p>
+</blockquote>
+
+<p>
+The answer to this seemingly bizarre bug report is that <tt>stable_sort</tt>
+typically indirectly calls <tt>new(nothrow)</tt> followed by <tt>delete</tt>,
+while <tt>sort</tt> typically doesn't.  When the client replaces <tt>operator
+new/delete</tt> but not the nothrow variants, <tt>stable_sort</tt> <b>crashes</b>
+whereas <tt>sort</tt> doesn't.
+</p>
+
+<p>
+<i>This is just evil.</i>
+</p>
+
+<p>
+This isn't a idle/rare occurrence.  I am writing this paper today in response
+to yet another customer of mine coming to me with a complaint of this nature. 
+My official answer is that there is a bug in the customer's code:  He must
+replace all eight of these signatures, even if he only wants to replace two. 
+However, my honest answer is that there is a bug in the standard.
+</p>
+
+<p>
+This all centers on what the default implementations of these functions are
+required to do. That default implementation is very visible to clients, and
+incorrectly specified in C++03, and the current
+(<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n2135.pdf">N2135</a>)
+working draft.
+</p>
+
+<h2><a name="pass1"></a>What's Reasonable, Pass 1</h2>
+
+<p>
+In the discussion that follows, when I refer to an operator being replaced, I
+implicitly assume that the operator no longer directly references whatever memory
+pool the default operator references (which is typically <tt>malloc</tt>/<tt>free</tt>).
+For simplicity of discussion, the default operators reference the default memory
+pool, and client-replaced operators reference a distinct client-defined memory pool.
+</p>
+
+<p>
+It appears to me that if you replace:
+</p>
+
+<blockquote><pre>
+void* operator new(std::size_t size) throw(std::bad_alloc);
+</pre></blockquote>
+
+<p>
+Then you must also replace:
+</p>
+
+<blockquote><pre>
+void  operator delete(void* ptr) throw();
+</pre></blockquote>
+
+<p>
+I think most people would immediately agree with this statement.  If one doesn't
+<i>link</i> these two operators to the same underlying memory pool, then the
+<tt>delete</tt> will not be able to handle pointers that come from <tt>new</tt>.
+Furthermore I believe the same statement goes for the other 6 operators.  Thus
+we can immediately separate these 8 functions into 4 cliques of 2 functions each:
+If you replace one function in a clique you must replace both:
+</p>
+
+<p><center>
+<table border="1">
+
+<tr><th>Clique</th><th>Operators</th></tr>
+
+<tr><td><center>1</center></td><td>
+<pre>void* operator new     (std::size_t size)                        throw(std::bad_alloc);
+void  operator delete  (void* ptr       )                        throw();</pre>
+</td></tr>
+
+<tr><td><center>2</center></td><td>
+<pre>void* operator new     (std::size_t size, const std::nothrow_t&amp;) throw();
+void  operator delete  (void* ptr,        const std::nothrow_t&amp;) throw();</pre>
+</td></tr>
+
+<tr><td><center>3</center></td><td>
+<pre>void* operator new   [](std::size_t size)                        throw(std::bad_alloc);
+void  operator delete[](void* ptr       )                        throw();</pre>
+</td></tr>
+
+<tr><td><center>4</center></td><td>
+<pre>void* operator new   [](std::size_t size, const std::nothrow_t&amp;) throw();
+void  operator delete[](void* ptr,        const std::nothrow_t&amp;) throw();</pre>
+</td></tr>
+
+</table>
+</center></p>
+
+<p>
+But now the next question is:
+</p>
+
+<blockquote><p>
+What happens if I replace clique 1 and not clique 2?  Or what happens if I replace clique 1 and not clique 3? etc.
+</p></blockquote>
+
+<h2><a name="pass2"></a>What's Reasonable, Pass 2</h2>
+
+<p>
+To answer the above question we need to look more closely at the requirements.  For example the requirements
+for both the nothrow and ordinary (but non-array) versions of <tt>operator delete</tt> are:
+</p>
+
+<blockquote>
+<i>Requires:</i> the value of <tt><i>ptr</i></tt> is null or the value returned
+by an earlier call to the default <tt>operator new(std:: size_t)</tt> or <tt>operator
+new(std::size_t,const std::nothrow_t&amp;)</tt>.
+</blockquote>
+
+<p>
+Ok, so we have a problem right here:  These words say that if you replace cliques
+1 and 2, then your <em>replaced</em> operator deletes must handle
+pointers allocated from the <em>default</em> operator new!
+</p>
+
+<p>
+That can't be right.  Surely we mean that if someone replaces cliques 1 and 2 that the delete operators
+in those cliques need only handle pointers from the <em>replaced</em>  new operators in those cliques.
+</p>
+
+<p>
+What did that <i>Requires:</i> clause intend to say?
+</p>
+
+<p>
+To find out, let's look at an example use case of <tt>operator new(nothrow)</tt>:
+</p>
+
+<blockquote><pre>
+A* ap = new(std::nothrow) A;
+...
+delete ap;
+</pre></blockquote>
+
+<p>
+Right!  Clients of <tt>new(std::nothrow)</tt> are expected to be able to delete those pointers
+with a simple (non-nothrow) <tt>delete</tt>.  And more generally, the delete operators in cliques 1
+and 2 are expected to be able to delete the pointers from the new allocators in cliques 1 and 2.  And
+similarly for cliques 3 and 4.
+</p>
+
+<p>
+This means that cliques 1 and 2 really form a single group of functions that all refer to the same
+underlying pool of memory.  Similarly for cliques 3 and 4.  We can call these two groups A and
+B.
+</p>
+
+<p><center>
+<table border="1">
+
+<tr><th>Group</th><th>Clique</th><th>Operators</th></tr>
+
+<tr><td rowspan=2><center>A</center></td><td><center>1</center></td><td>
+<pre>void* operator new     (std::size_t size)                        throw(std::bad_alloc);
+void  operator delete  (void* ptr       )                        throw();</pre>
+</td></tr>
+
+<tr><td><center>2</center></td><td>
+<pre>void* operator new     (std::size_t size, const std::nothrow_t&amp;) throw();
+void  operator delete  (void* ptr,        const std::nothrow_t&amp;) throw();</pre>
+</td></tr>
+
+<tr><td rowspan=2><center>B</center></td><td><center>3</center></td><td>
+<pre>void* operator new   [](std::size_t size)                        throw(std::bad_alloc);
+void  operator delete[](void* ptr       )                        throw();</pre>
+</td></tr>
+
+<tr><td><center>4</center></td><td>
+<pre>void* operator new   [](std::size_t size, const std::nothrow_t&amp;) throw();
+void  operator delete[](void* ptr,        const std::nothrow_t&amp;) throw();</pre>
+</td></tr>
+
+</table>
+</center></p>
+
+<p>
+However the above table does not imply that one must implement every signature
+in a group. It only implies that each signature in a group <b>must</b> refer to
+the same underlying memory pool.
+</p>
+
+<blockquote>
+<p>
+Is there anything the standard can do to make it easy for functions in the same
+group to refer to the same memory pool, and difficult for them not to?
+</p>
+</blockquote>
+
+<p>
+Yes!  Consider this proposed default implementation of the signatures in clique 2:
+</p>
+
+<blockquote><pre>
+void* operator new(std::size_t size, const std::nothrow_t&amp;) throw()  <i>// clique 2</i>
+{
+    try
+    {
+        return operator new(size);                        <i>// forward to clique 1</i>
+    }
+    catch (...)
+    {
+    }
+    return 0;
+}
+
+void  operator delete(void* ptr, const std::nothrow_t&amp;) throw()  <i>// clique 2</i>
+{
+    operator delete(ptr);                             <i>// forward to clique 1</i>
+}
+</pre></blockquote>
+
+<p>
+With the above default implementation, all the client has to do to replace group A is
+to just replace the two signatures in clique 1.  Since clique 2 forwards to clique 1 (replaced or not),
+then clique 2 is always <i>linked</i> to clique 1 as it should be.  The client can still replace
+clique 2 if desired.  However there is little point in doing so.  It must remain linked to clique 1,
+and not doing so will result in a run time error when <tt>delete</tt> is called with a pointer from
+<tt>new(nothrow)</tt>.
+</p>
+
+<p>
+There is no advantage in easily allowing clique 2 to become unlinked from clique
+1.  And there is every advantage in actively discouraging cliques 1 and 2 from
+becoming unlinked. They must be linked or a run time crash is inevitable.
+</p>
+
+<p>
+Everything I've said about the relationship between cliques 1 and 2 also applies to cliques 3 and 4.
+Cliques 3 and 4 must always be linked.  That implies that the proper default implementation of clique
+4 simply forwards to clique 3:
+</p>
+
+<blockquote><pre>
+void* operator new[](std::size_t size, const std::nothrow_t&amp;) throw()  <i>// clique 4</i>
+{
+    try
+    {
+        return operator new[](size);                        <i>// forward to clique 3</i>
+    }
+    catch (...)
+    {
+    }
+    return 0;
+}
+
+void  operator delete(void* ptr, const std::nothrow_t&amp;) throw()  <i>// clique 4</i>
+{
+    operator delete[](ptr);                           <i>// forward to clique 3</i>
+}
+</pre></blockquote>
+
+<p>
+The above is the bare minimum the standard must do in order to keep the standard library from
+being <em>extremely</em> fragile.
+</p>
+
+<h2><a name="ablink"></a>Linkage Between Groups A and B</h2>
+
+<p>
+We have now established firm reasoning for why clique 2 should forward to clique
+1, and clique 4 should forward to clique 3.  But should we (by default) link
+groups A and B by having clique 3 forward to clique 1?  I.e. implement the array
+operators in terms of the non-array operators.
+</p>
+
+<p>
+I believe that this is the question actually originally answered in
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/lwg-active.html#206">LWG 206</a>.
+Note that the actual question of 
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/lwg-active.html#206">LWG 206</a>
+was the issue of linking the nothrow and throwing versions of the operators as discussed
+in the previous sections.  <i>They</i> <b>must not</b> become unlinked.  However the
+same is not true of array vs non-array.
+</p>
+
+<p>
+The reason groups A and B do not have to be linked is because the
+<tt>delete</tt> operators in group A never have to deal with pointers from the
+<tt>new</tt> operators in group B. Similarly the <tt>delete</tt> operators in
+group B never have to deal with pointers from the <tt>new</tt> operators in
+group A.  Thus if the groups refer to different underlying memory pools (become
+unlinked), no harm (as in crashing) is done.
+</p>
+
+<h3>History of Linkage Between Groups A and B</h3>
+
+<p>
+The original 1998 and 2003 C++ standards partially link groups A and B.  The default <tt>operator new[]</tt>
+is specified to call <tt>operator new</tt>.  However the <tt>operator delete[]</tt> does not have
+the corresponding specification to call <tt>operator delete</tt>.
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/lwg-defects.html#298">LWG 298</a> corrects
+that inconsistency by specifying <tt>operator delete[]</tt> calls <tt>operator delete</tt>.
+Thus the current
+(<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n2135.pdf">N2135</a>)
+working draft links groups A and B.
+</p>
+
+<h3>Current Practice of Linkage Between Groups A and B</h3>
+
+<p>
+The following test was run on various compilers and platforms.  It detects whether groups A
+and B are linked or not by replacing the non-array operators, and then calling the array operators
+and observing if the replaced operators are called or not.
+</p>
+
+<blockquote><pre>
+#include &lt;cstdio&gt;
+#include &lt;cstdlib&gt;
+#include &lt;new&gt;
+
+void* operator new(std::size_t size) throw(std::bad_alloc)
+{
+    std::printf("custom allocation\n");
+    if (size == 0)
+        size = 1;
+    void*p = std::malloc(size);
+    if (p == 0)
+        throw std::bad_alloc();
+    return p;
+}
+
+void  operator delete(void* ptr) throw()
+{
+    std::printf("custom deallocation\n");
+    std::free(ptr);
+}
+
+int main()
+{
+    std::printf("begin main\n");
+    int* i = new int;
+    delete i;
+    std::printf("---\n");
+    int* a = new int[3];
+    delete [] a;
+    std::printf("end main\n");
+}
+</pre></blockquote>
+
+<p>
+The following tools indicated complete linkage between groups A and B:
+</p>
+
+<ul>
+<li>CodeWarrior, all recent versions</li>
+<li>gcc, all recent versions</li>
+<li>Microsoft (R) 32-bit C/C++ Optimizing Compiler Version 13.10.3077</li>
+<li>Sun C++ 5.8</li>
+</ul>
+
+<p>
+The following tools indicated no linkage between groups A and B:
+</p>
+
+<ul>
+<li>HP ANSI C++ (several versions)</li>
+<li>IBM VisualAge C++ 7.0 on AIX 5.3</li>
+</ul>
+
+<p>
+The following tool indicated inconsistent linkage between groups A and B:
+</p>
+
+<ul>
+<li>Digital Mars Compiler Version 8.38n</li>
+</ul>
+
+<h3>Recommendation for Linkage Between Groups A and B</h3>
+
+<p>
+Given that the current
+(<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n2135.pdf">N2135</a>)
+working draft and several (prominent) compilers currently link groups A and B,
+this paper recommends to not change the current
+(<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n2135.pdf">N2135</a>)
+working draft (with respect to A/B linkage) and thus continue linking groups A and B. The default
+implementation of the clique 3 operators should forward to clique 1:
+</p>
+
+<blockquote><pre>
+void* operator new[](std::size_t size) throw(std::bad_alloc)  <i>// clique 3</i>
+{
+    return operator new(size);                     <i>// forward to clique 1</i>
+}
+
+void  operator delete[](void* ptr) throw()  <i>// clique 3</i>
+{
+    operator delete(ptr);        <i>// forward to clique 1</i>
+}
+</pre></blockquote>
+
+<p>
+With the above recommendations, clients will be able to replace both groups A
+and B by simply replacing clique 1.  Indeed, this is the most common intention
+of replacing the <tt>new</tt> and <tt>delete</tt> operators.  If clients wish to
+treat array allocations differently from non-array allocations, the client can
+still safely and easily unlink groups A and B by replacing both cliques 1 and 3,
+and have them refer to different memory pools. There is little motivation for
+replacing cliques 2 or 4, but of course that is still allowed by this proposal
+as long as the replacements continue to link to cliques 1 and 3 respectively.
+</p>
+
+<h2><a name="proposed"></a>Proposed Wording</h2>
+
+<p>
+Proposed wording to accomplish the recommendations of this paper is provided below.  The
+differences are with respect to the current
+(<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n2135.pdf">N2135</a>)
+working draft.
+</p>
+
+<p>
+Change 18.5.1.1 [new.delete.single]:
+</p>
+
+<blockquote>
+<pre>
+void* operator new(std::size_t <i>size</i>, const std::nothrow_t&amp;) throw();
+</pre>
+<blockquote>
+<p>
+-5- <i>Effects:</i> Same as above, except that it is called by a placement
+version of a <i>new-expression</i> when a C++ program prefers a null pointer result as
+an error indication, instead of a <tt>bad_alloc</tt> exception.
+</p>
+
+<p>
+-6- <i>Replaceable:</i> a C++ program may define a function with this function
+signature that displaces the default version defined by the C++ Standard
+library.
+</p>
+
+<p>
+-7- <i>Required behavior:</i> Return a non-null pointer to suitably aligned
+storage (3.7.4), or else return a null pointer. This nothrow version of operator
+new returns a pointer obtained as if acquired from the <ins>(possibly
+replaced)</ins> ordinary version. This requirement is binding on a replacement
+version of this function.
+</p>
+
+<p>
+-8- <i>Default behavior:</i>
+</p>
+<ul>
+<li><ins>
+Calls <tt>operator new(<i>size</i>)</tt>.
+</ins></li>
+<li><ins>
+If the call to <tt>operator new(<i>size</i>)</tt> returns normally, returns
+the result of that call, else
+</ins></li>
+<li><ins>
+if the call to <tt>operator new(<i>size</i>)</tt> throws an exception, returns
+a null pointer.
+</ins></li>
+<li><del>
+Executes a loop: Within the loop, the function first attempts to allocate the
+requested storage. Whether the attempt involves a call to the Standard C library
+function <tt>malloc</tt> is unspecified.
+</del></li>
+<li><del>
+Returns a pointer to the allocated storage if the attempt is successful.
+Otherwise, if the last argument to <tt>set_new_handler()</tt> was a null
+pointer, return a null pointer.
+</del></li>
+<li><del>
+Otherwise, the function calls the current <i>new_handler</i> (18.5.2.2). If the
+called function returns, the loop repeats.
+</del></li>
+<li><del>
+The loop terminates when an attempt to allocate the requested storage is
+successful or when a called <i>new_handler</i> function does not return. If the
+called <i>new_handler</i> function terminates by throwing a <tt>bad_alloc
+exception</tt>, the function returns a null pointer.
+</del></li>
+</ul>
+<p>
+-9- [<i>Example:</i>
+</p>
+<blockquote><pre>
+T* p1 = new T;                 <i>// throws bad_alloc if it fails</i>
+T* p2 = new(nothrow) T;        <i>// returns 0 if it fails</i>
+</pre></blockquote>
+<p>
+--<i>end example</i>]
+</p>
+</blockquote>
+
+<pre>
+void operator delete(void* <i>ptr</i>) throw();
+<del>void operator delete(void* <i>ptr</i>, const std::nothrow_t&amp;) throw();</del>
+</pre>
+
+<blockquote>
+<p>
+-10- <i>Effects:</i> The <i>deallocation function</i> (3.7.4.2) called by a
+<i>delete-expression</i> to render the value of <tt><i>ptr</i></tt> invalid.
+</p>
+<p>
+-11- <i>Replaceable:</i> a C++ program may define a function with this function
+signature that displaces the default version defined by the C++ Standard
+library.
+</p>
+<p>
+-12- <i>Requires:</i> the value of <tt><i>ptr</i></tt> is null or the value
+returned by an earlier call to the <del>default</del> <ins>(possibly
+replaced)</ins> <tt>operator new(std::size_t)</tt> or <tt>operator
+new(std::size_t, const std::nothrow_t&amp;)</tt>.
+</p>
+<p>
+-13- <i>Default behavior:</i>
+</p>
+<ul>
+<li>
+For a null value of <tt><i>ptr</i></tt>, do nothing.
+</li>
+<li>
+Any other value of <tt><i>ptr</i></tt> shall be a value returned earlier by a
+call to the default <tt>operator new</tt>, which was not invalidated by an
+intervening call to <tt>operator delete(void*)</tt> (17.4.3.7). For such a
+non-null value of <tt><i>ptr</i></tt>, reclaims storage allocated by the earlier
+call to the default <tt>operator new</tt>.
+</li>
+</ul>
+<p>
+-14- <i>Remarks:</i>  It is unspecified under what conditions part or all of
+such reclaimed storage is allocated by a subsequent call to <tt>operator
+new</tt> or any of <tt>calloc</tt>, <tt>malloc</tt>, or <tt>realloc</tt>,
+declared in <tt>&lt;cstdlib&gt;</tt>.
+</p>
+</blockquote>
+
+<pre>
+<ins>void operator delete(void* <i>ptr</i>, const std::nothrow_t&amp;) throw();</ins>
+</pre>
+
+<blockquote>
+<p><ins>
+-15- <i>Effects:</i> Same as above, except that it is called by the
+implementation when an exception propagates from a nothrow placement version
+of the <i>new-expression</i> (i.e. when the constructor throws an exception).
+</ins></p>
+<p><ins>
+-16- <i>Replaceable:</i> a C++ program may define a function with this function
+signature that displaces the default version defined by the C++ Standard
+library.
+</ins></p>
+<p><ins>
+-17- <i>Requires:</i> the value of <tt><i>ptr</i></tt> is null or the
+value returned by an earlier call to the (possibly replaced) <tt>operator
+new(std::size_t)</tt> or <tt>operator new(std::size_t, const
+std::nothrow_t&amp;)</tt>. </ins></p>
+<p><ins>
+-18- <i>Default behavior:</i> Calls <tt>operator delete(<i>ptr</i>)</tt>.
+</ins></p>
+</blockquote>
+
+</blockquote>
+
+<p>
+Change 18.5.1.2 [new.delete.array]
+</p>
+
+<blockquote>
+<pre>
+void* operator new[](std::size_t <i>size</i>, const std::nothrow_t&amp;) throw();
+</pre>
+
+<blockquote>
+<p>
+-5- <i>Effects:</i> Same as above, except that it is called by a placement
+version of a <i>new-expression</i> when a C++ program prefers a null pointer result as
+an error indication, instead of a <tt>bad_alloc</tt> exception.
+</p>
+
+<p>
+-6- <i>Replaceable:</i>  a C++ program can define a function with this function
+signature that displaces the default version defined by the C++ Standard
+library.
+</p>
+
+<p>
+-7- <i>Required behavior:</i> <del>Same as for operator <tt>new(std::size_t,
+const std::nothrow_t&amp;)</tt>. This nothrow version of operator <tt>new[]</tt>
+returns a pointer obtained as if acquired from the ordinary version.</del>
+<ins>Return a non-null pointer to suitably aligned storage (3.7.4), or else
+return a null pointer. This nothrow version of operator new returns a pointer
+obtained as if acquired from the (possibly replaced) <tt>operator
+new[](std::size_t <i>size</i>)</tt>. This requirement is binding on a
+replacement version of this function.</ins>
+</p>
+
+<p>
+-8- <i>Default behavior:</i> <del>Returns <tt>operator new(<i>size</i>,
+nothrow)</tt>.</del>
+</p>
+
+<ul>
+<li><ins>
+Calls <tt>operator new[](<i>size</i>)</tt>.
+</ins></li>
+<li><ins>
+If the call to <tt>operator new[](<i>size</i>)</tt> returns normally, returns
+the result of that call, else
+</ins></li>
+<li><ins>
+if the call to <tt>operator new[](<i>size</i>)</tt> throws an exception, returns
+a null pointer.
+</ins></li>
+</ul>
+</blockquote>
+
+<pre>
+void operator delete[](void* <i>ptr</i>) throw(); 
+void operator delete[](void* <i>ptr</i>, const std::nothrow_t&amp;) throw();
+</pre>
+
+<blockquote>
+<p>
+-9- <i>Effects:</i> The <i>deallocation function</i> (3.7.4.2) called by the
+array form of a <i>delete-expression</i> to render the value of
+<tt><i>ptr</i></tt> invalid.
+</p>
+
+<p>
+-10- <i>Replaceable:</i> a C++ program can define a function with this function
+signature that displaces the default version defined by the C++ Standard
+library.
+</p>
+
+<p>
+-11- <i>Requires:</i> the value of
+<tt><i>ptr</i></tt> is null or the value returned by an earlier call to
+<tt>operator new[](std::size_t)</tt> or <tt>operator new[](std::size_t, const
+std::nothrow_t&amp;)</tt>.
+</p>
+
+<p>
+-12- <i>Default behavior:</i> Calls <tt>operator delete(<i>ptr</i>)</tt> or
+<tt>operator delete<ins>[]</ins>(<i>ptr</i><del>, std::nothrow</del>)</tt> respectively.
+</p>
+</blockquote>
+
+</blockquote>
+
+<h2><a name="Acknowledgments"></a>Acknowledgments</h2>
+
+<p>
+I would like to thank David Harmon, Rahtgaz, and Alexey Sarytchev for help in surveying
+existing practice.
+</p>
+
+</body>
+</html>

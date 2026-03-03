@@ -1,0 +1,282 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+"http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=us-ascii">
+<title>C++ Data-Dependency Ordering: Function Annotation</title>
+</head>
+<body>
+<h1>C++ Data-Dependency Ordering: Function Annotation</h1>
+
+<p>
+ISO/IEC JTC1 SC22 WG21 N2493 = 08-0003 - 2008-02-03
+</p>
+
+<p>
+Paul E. McKenney, paulmck@linux.vnet.ibm.com
+<br>
+Lawrence Crowl, crowl@google.com, Lawrence@Crowl.org
+</p>
+
+<h2>Introduction</h2>
+
+<p>
+Data dependency ordering can provide significant performance improvements
+to concurrent data structures that are read frequently and seldom modified.
+The rationale and primary design for data dependency ordering
+is in the primary proposal,
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2008/x2492.html">N2492</a>.
+An understanding of that proposal
+is necessary to understanding this proposal.
+</p>
+
+<p>
+Reasonable compilation strategies for data dependencies
+will truncate the dependencies
+at function boundaries
+when the implementations of those functions are unknown or unmodifiable.
+This document presents function annotations
+that assist compilers in following those data dependencies
+across function and translation-unit boundaries,
+avoiding prematurely truncating the data dependency tree,
+and thus improving program performance and scalability.
+</p>
+
+<p>
+This proposal does not affect existing standard library functions.
+Such changes (for example, annotating the Vector templates) were considered,
+but rejected because current uses of data dependency ordering
+are generally restricted to
+highly tuned concurrent data structures using only basic operations
+such as indirection, field selection, array access, and casting.
+Longer term experience might indicate
+that a future proposal affecting library classes is warranted,
+however, there is insufficient motivation for such a proposal at this time.
+</p>
+
+<p>
+This proposal is based on
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2153.pdf">N2153</a>
+by Silvera, Wong, McKenney, and Blainey, on
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2176.html">N2176</a>
+by Hans Boehm, on
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2195.html">N2195</a>
+by Peter Dimov, on
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2359.html">N2359</a>,
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2360.html">N2360</a>, and
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2361.html">N2361</a>
+by Paul E. McKenney, on
+discussions on the
+cpp-threads list, on discussions
+in the concurrency workgroup at the 2007 Oxford and Toronto meetings,
+and in particular discussions with Hans Boehm.
+</p>
+
+<h2>Proposal</h2>
+
+<p>
+We propose to annotate function declarations
+so that compilers may assume that
+compilation on the other side of the the function boundary
+will properly respect data dependency ordering.
+In analogy with the definition of data depencency ordering,
+we use the annotation <code>[[carries_dependency]]</code>
+to indicate that the compiler should not truncate the dependency tree.
+Such annotations attach to parameter declarations,
+and to the function declaration for its return value.
+</p>
+
+<p>
+If a given function is annotated,
+the compilation of the caller must preserve dependency ordering
+on the function return value.
+If a particular argument of a given function is annotated,
+the compilation of the callee must preserve dependency ordering
+on the function argument.
+
+<p>
+We believe the syntax of the attributes is consistent with
+<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2007/n2418.pdf">N2418
+Towards support for attributes in C++ (Revision 3)</a>.
+In any event, we will adapt this proposal to the final attribute proposal.
+</p>
+
+<p>
+For example, the following carries dependencies through argument
+<code>y</code> to the return value:
+</p>
+<pre>
+int *f(int *y [[carries_dependency]]) [[carries_dependency]]
+{
+        return y;
+}
+</pre>
+
+<p>
+The following example carries dependency trees in, but not out:
+</p>
+<pre>
+int f(int *y [[carries_dependency]])
+{
+        return *y;
+}
+</pre>
+
+<p>
+The following carries dependency trees out, but not in:
+<pre>
+struct foo *f(int i) [[carries_dependency]]
+{
+        return &amp;foo_head[i].load(memory_order_consume);
+}
+</pre>
+
+<p>
+In
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2176.html">N2176</a>,
+Hans Boehm lists a number of example optimizations that can break
+dependency trees.
+Most of these are addressed in
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2008/n2492.html">N2492</a>,
+the last is covered below.
+
+<p>
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2176.html">N2176</a>
+example code:
+</p>
+<pre>
+r1 = x.load(memory_order_consume);
+if (r1)
+	f(&amp;y);
+else
+	g(&amp;y);
+</pre>
+
+<p>
+In this case,
+there is no data dependency leading into <code>f()</code> and <code>g()</code>,
+so this code-dependency example is out of scope.
+Modifying the example by replacing <code>&amp;y</code> with <code>r1</code>
+to create a data dependency leading into the two functions:
+</p>
+<pre>
+r1 = x.load(memory_order_consume);
+if (r1)
+	f(r1);
+else
+	g(r1);
+</pre>
+
+<p>
+In this case,
+an implementation might emit a memory fence
+prior to calling <code>f()</code> and <code>g()</code>.
+(Of course,
+a more sophisticated implementation with visibility into these two functions
+might be able to optimize this memory fence away).
+In order to prevent the fence,
+the programmer would annotate <code>f()</code> and <code>g()</code>.
+</p>
+
+<p>Recoding this based on this proposal and on
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2008/n2492.html">N2492</a>:
+</p>
+<pre>
+void f(struct foo * p [[carries_dependency]]);
+void g(struct foo * p [[carries_dependency]]);
+
+r1 = x.load(memory_order_consume);
+if (r1)
+	f(r1);
+else
+	g(r1);
+</pre>
+
+<p>
+Assuming that <code>x</code> is an atomic,
+the <code>x.load(memory_order_consume)</code>
+will form the head of a dependency tree.
+The <code>[[carries_dependency]]</code> annotations
+will inform the compiler that it can assume
+data depencencies are properly respected
+within <code>f()</code> and <code>g()</code>,
+so that the compiler need not emit a memory fence
+prior to invoking these functions.
+</p>
+
+
+<h2>Alternatives Considered</h2>
+
+<p>
+<ul>
+<li>
+Require the compiler globally analyze the program
+to infer which dependency trees must be preserved.
+This conflicts with the common practice
+of compiling C++ programs on a module-by-module basis,
+so this alternative was rejected.
+</li>
+<li>
+Prohibit dependency trees from crossing function boundaries.
+There are a large number of examples of RCU dependency trees
+crossing function boundaries in the Linux kernel,
+so this alternative was rejected.
+</li>
+<li>
+Prohibit dependency trees from crossing compilation-unit boundaries.
+There are a large number of examples of RCU dependency trees
+crossing compilation-unit boundaries in the Linux kernel.
+In some cases,
+the overall overhead of the instructions making up the dependency tree
+overwhelms that of a memory fence,
+however, in a number of cases,
+the actual number of instructions is small,
+so that the overhead of a memory fence would still be prohibitive.
+Therefore, this alternative was rejected.
+</li>
+<li>
+Allow dependency trees to be truncated,
+but without requiring that the implementation emit appropriate memory fences,
+when the dependency tree would flow through
+an unannotated function return value
+or an unannotated argument of a called function.
+However,
+this would result in annotations changing the meaning of the program.
+Therefore, this alternative was rejected.
+</UL>
+
+<h2>Implementation</h2>
+
+<p>
+For trivial implementations of data dependency ordering,
+implementations of <code>[[carries_dependency]]</code>
+simply ignore this attribute.
+</p>
+
+<p>
+For non-trivial implementations of data dependency ordering,
+there are three implementation options
+for the <code>[[carries_dependency]]</code> attribute:
+</p>
+<ul>
+<li>
+Do full compilation analysis
+to preserve the dependencies carried by the attribute.
+</li>
+<li>
+Ignore the attribute.
+However, implementations do so at the risk of binary compatiblity
+with more sophisticated implementations,
+which leads to the third option.
+</li>
+<li>
+Emit a memory fences
+immediately after entry to a function with annotated arguments
+and immediately after calling an annotated function result.
+This implementation trivially meets the annotation contract,
+though without an additional performance,
+and enables future optimization.
+</li>
+</ul>
+
+</body></html>

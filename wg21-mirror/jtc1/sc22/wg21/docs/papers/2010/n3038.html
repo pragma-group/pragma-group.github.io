@@ -1,0 +1,627 @@
+<html>
+<head>
+<title>N3038 - Managing the lifetime of thread_local variables with
+  contexts (Revision 2)</title>
+<style type="text/css">
+ins, .inserted
+{
+    color: black;
+    background: #a0ffa0;
+    text-decoration: underline;
+}
+del
+{
+    color: black;
+    background: #ffa0a0;
+    text-decoration: line-through;
+}
+.standardtext
+{
+    margin-left: 2em;
+}
+</style>
+</head>
+<body>
+<table>
+<tr><td>Document Number:</td><td>N3038=10-0028</td></tr>
+<tr><td>Date:</td><td>2010-01-30</td></tr>
+<tr><td>Author:</td><td><a href="mailto:anthony@justsoftwaresolutions.co.uk">Anthony
+      Williams</a><br>Just Software Solutions Ltd</td></tr>
+</table>
+
+<h1>N3038 - Managing the lifetime of thread_local variables with
+  contexts (Revision 2)</h1>
+
+<p>This is a revision of my earlier paper N2959 based on feedback from
+  the LWG at the Santa Cruz WG21 meeting in October 2009. Following
+  this meeting I was asked to produce a revised paper allowing for
+  nested contexts.</p>
+
+<p>The basic idea of this proposal is that the lifetime
+  of <code>thread_local</code> variables is tied to the lifetime of an
+  instance of the new class <code>thread_local_context</code>. Each
+  thread has an implicit instance of such a class constructed prior to
+  the invocation of the thread function, and destroyed after
+  completion of the thread function, but additional instances can be
+  created in order to deliberately limit the lifetime
+  of <code>thread_local</code> variables: when
+  a <code>thread_local_context</code> object is destroyed, all
+  the <code>thread_local</code> variables tied to it are also
+  destroyed.</p>
+
+<h2>Addressing the concerns of N2880</h2>
+
+<p>This enables us to address several of the concerns of
+  N2880. Firstly, if we use a mechanism other than <code>thread::join</code>
+  to wait for a thread to complete its work &mdash; such as waiting for a
+  <code>unique_future</code> to be ready &mdash; then N2880 correctly
+  highlights that under the current working paper the destructors
+  of <code>thread_local</code> variables will still be running after
+  the waiting thread has resumed. By judicious use
+  of a <code>thread_local_context</code> instance and block scoping,
+  we can ensure that the <code>thread_local</code> variables are
+  destroyed before the future value is set. e.g.
+
+<pre>
+int find_the_answer();
+void thread_func(std::promise&lt;int&gt; * p)
+{
+    int local_result;
+    {
+        thread_local_context context; // create a new context for thread_locals
+        local_result=find_the_answer();
+    } // destroy thread_local variables along with the context object
+    p-&gt;set_value(local_result);
+}
+
+int main()
+{
+    std::promise&lt;int&gt; p;
+    std::thread t(thread_func,&amp;p);
+    t.detach(); // we're going to wait on the future
+    std::cout&lt;&lt;p.get_future().get()&lt;&lt;std::endl;
+}
+</pre>
+
+<p>When the call to <code>get()</code> returns, we know that not only
+  is the future value ready, but the <code>thread_local</code>
+  variables on the other thread have also been destroyed.</p>
+
+<h2>Reusing threads</h2>
+
+<p>A second concern of N2880 was the potential for accumulating vast
+  amounts of <code>thread_local</code> variables when reusing threads
+  for multiple independent tasks, such as when implementing a thread
+  pool. Under such circumstances, the thread pool implementation can
+  wrap each task inside a scope containing a
+  <code>thread_local_context</code> variable to ensure that when a
+  task is completed its <code>thread_local</code> variables are
+  destroyed in a timely fashion. e.g.</p>
+
+<pre>
+std::mutex task_mutex;
+std::queue&lt;std::function&lt;void()&gt;&gt; tasks;
+std::condition_variable task_cond;
+bool done=false;
+
+void worker_thread()
+{
+    std::unique_lock&lt;std::mutex&gt; lk(task_mutex);
+    while(!done)
+    {
+        task_cond.wait(lk,[]{return !tasks.empty();});
+        std::function&lt;void()&gt; task=tasks.front();
+        tasks.pop_front();
+        lk.unlock();
+        {
+            thread_local_context context;
+            task();
+        }
+        lk.lock();
+    }
+}
+</pre>
+
+<p>With this scheme, the <code>thread_local</code> variables are
+  destroyed between each task invocation when
+  the <code>thread_local_context</code> object is destroyed, so if the
+  sets of variables used by the tasks do not overlap then the problem
+  of increasing memory usage is avoided.</p>
+
+<h2>Consequences for implementations</h2>
+
+<p>Obviously, such a class would have to be tightly integrated with
+  the mechanism for <code>thread_local</code> variables used by a
+  compiler, so that they can be destroyed at the appropriate points,
+  and constructed again if necessary. This is a key point &mdash; for
+  the second scenario to work, then if
+  a <code>thread_local_context</code> is destroyed and a fresh one
+  constructed then any <code>thread_local</code> variables used during
+  the lifetime of a context object must be created afresh, even if
+  they were already created and destroyed during the lifetime of a
+  prior context object on the same thread.</p>
+
+<p>This does mean that implementations are pretty much restricted to
+  initializing <code>thread_local</code> variables on first use, with
+  a mechanism that allows the destructor
+  of <code>thread_local_context</code> objects to reset that "first
+  use" flag. If the <code>thread_local_context</code> is implemented
+  with compiler intrinsics then the compiler may still be able to
+  find optimization opportunities that allow batching of
+  initializations or less-frequent checking of the "first use"
+  flag.</p>
+
+<h3>C compatibility</h3>
+
+<p>For this mechanism to be compatible with the use of objects with
+  thread storage duration from C, the C compiler must register the
+  existence of such objects in a way that can be accessed
+  by <code>thread_local_context</code> objects in order that they can
+  be restored to their initial state.</p>
+
+<h2>Nesting of <code>thread_local_context</code> object lifetimes</h2>
+
+<p>As mentioned in the introduction, constructing
+  a <code>thread_local_context</code> object whilst one already exists
+  for a given thread is <strong>now permitted</strong>. This ensures
+  that it is always safe to create a
+  new <code>thread_local_context</code> object inside a library
+  function without having to place restrictions on the use
+  of <code>thread_local_context</code> objects by the calling
+  code.</p>
+
+<p>When a nested instance of <code>thread_local_context</code> is
+  created then the existing <code>thread_local</code> variables are
+  untouched. However, they are no longer accessible unless pointers or
+  references have been stored elsewhere &mdash; the names
+  of <code>thread_local</code> variables now refer to the objects
+  within the new context, which are thus freshly initialized on first
+  use within the lifetime of the nested context. Pointers or references
+  to the existing <code>thread_local</code> variables remain valid,
+  and continue to refer to the objects from the outer context.</p>
+
+<p>A nested context must be destroyed before its parent
+  context. Destroying a context whilst nested contexts are still alive
+  yields undefined behaviour.</p>
+
+<h2>Notifying other threads after <code>thread_local</code> have been
+  destroyed</h2>
+
+<p>One of the key issues raised by N2880 is how to ensure
+  that <code>thread_local</code> variables have been destroyed in a
+  timely fashion for detached threads. If the completion of the work
+  on a thread can be detected through another mechanism such as a
+  future or a flag and condition variable then it is common practise
+  to detach the thread and rely on the other synchronization mechanism
+  as the sole means of waiting for the thread to finish.</p>
+
+<p><code>thread_local</code> variables with destructors interact badly
+  with such practise, as they will thus run <strong>after</strong> the
+  synchronization mechanism has notified any waiting threads of the
+  completion of the task associated with the thread. Thus the thread
+  is continuing to execute code even though other threads are
+  proceeding as if it has completed. Where the task associated with a
+  thread can be wrapped in a <code>thread_local_context</code>, this
+  can be used as a mechanism to ensure that the synchronization is not
+  triggered until after the <code>thread_local</code> variables have
+  been destroyed. Unfortunately, this is not possible in all
+  circumstances.</p>
+
+<p>For example if we replace <code>int</code> with some more complex
+  type in the example at the beginning of this paper then
+  the <code>local_result</code> will be destroyed after the call
+  to <code>set_value()</code> has completed, and thus after any
+  waiting threads have been woken.</p>
+
+<pre>
+complex_type find_the_answer();
+void thread_func(std::promise&lt;int&gt; * p)
+{
+    complex_type local_result;
+    {
+        thread_local_context context; // create a new context for thread_locals
+        local_result=find_the_answer();
+    } // destroy thread_local variables along with the context object
+    p-&gt;set_value(local_result); // wake waiting threads
+} // destroy local_result
+</pre>
+
+<p>To this end I propose to add new overloads
+  of <code>promise::set_value()</code>
+  and <code>promise::set_exception()</code> which take
+  a <code>thread_local_context</code> object by reference. These
+  overloads can then be used to delay the waking of waiting thread
+  until the context is destroyed:</p>
+
+<pre>
+complex_type find_the_answer();
+void thread_func(std::promise&lt;int&gt; * p)
+{
+    thread_local_context context; // create a new context for thread_locals
+    p-&gt;set_value(context,find_the_answer()); // set value, but delay wake waiting threads
+} // destroy thread_local variables along with the context object
+// wake threads waiting on futures associated with p.
+</pre>
+
+<p>To the same end, I also propose adding a new member
+  function <code>execute()</code> to <code>std::packaged_task</code>
+  with the same properties: the task is executed and the value or
+  exception stored, but the associated future is not made ready until
+  the context is destroyed.</p>
+
+<pre>
+void task_executor(std::packaged_task&lt;void(int)&gt; task,int param)
+{
+    thread_local_context context;
+    task.execute(context,param); // execute stored task
+} // destroy context and wake threads waiting on futures from task
+</pre>
+
+<p>Finally, to allow this facility to be extended to other
+  synchronization mechanisms, I propose
+  that <code>thread_local_context</code> has a member
+  function <code>call_on_close</code> which registers a function to be
+  called when the <code>thread_local</code> variables associated with
+  that context have been destroyed. It is undefined behaviour for this
+  function to access <code>thread_local</code> variables.</p>
+
+<pre>
+std::condition_variable cv;
+std::mutex m;
+complex_type the_data;
+void thread_func()
+{
+    thread_local_context context;
+    std::lock_guard&lt;std::mutex&gt; lk(m);
+    the_data=find_the_answer();
+    context.call_on_close([]{cv.notify_all();});
+} // destroy context, notify cv
+</pre>
+
+<h2>Interaction with <code>std::async</code></h2>
+
+<p>If this proposal is adopted, then it could be used as part of an
+  implementation of <code>std::async</code> to ensure that the
+  associated future did not become ready before the thread-local
+  variables for the asynchronous task had been destroyed. This would
+  allow a single thread to be reused for multiple asynchronous
+  tasks.</p>
+
+<h2>Proposed Wording</h2>
+
+<h3>Modification to lifetime management clauses</h3>
+
+<p>Modify 3.6.3 [basis.start.term] paragraph 1 as follows:</p>
+
+<blockquote class="standardtext">Destructors (12.4) for initialized objects with static storage
+duration are called as a result of returning from main and as a result
+of calling std::exit (18.5). Destructors for initialized objects with
+thread storage duration within a given thread are called as a result
+of returning from the initial function of that thread, <ins>as part of
+the destruction of a <code>thread_local_context</code> object</ins>
+  and as a result of that thread calling std::exit. ..... <i>rest
+    unchanged</i></blockquote>
+
+<p>Modify 3.6.3 [basis.start.term] paragraph 2 as follows:</p>
+
+<blockquote class="standardtext">If a function contains a local object
+    of static or thread storage duration that has been destroyed and
+    the function is called during the destruction of an object with
+    static or thread storage duration, the program has undefined
+    behavior if the flow of control passes through the definition of
+    the previously destroyed local object. Likewise, the behavior is
+    undefined if the function-local object is used indirectly (i.e.,
+    through a pointer) after its destruction. <ins>[Note: If an object
+    with thread storage duration was destroyed as part of the
+    destructor of a <code>thread_local_context</code> object then its
+    state is restored to that prior to the construction of
+    the <code>thread_local_context</code>, and subsequent use does not
+    trigger undefined behaviour unless it would do so in the absence
+    of the <code>thread_local_context</code> object. -- end
+    note]</ins></blockquote>
+
+<p>Modify 3.7.2 [basic.stc.thread] paragraph 2 as follows:</p>
+
+<blockquote class="standardtext">An object or reference with thread
+  storage duration shall be initialized before its first use and, if
+  constructed, shall be destroyed on thread exit. <ins>The first use
+  of an object or reference of thread storage duration on a given
+  thread following the construction of
+  a <code>thread_local_context</code> object for that thread shall be
+  treated as the first use of that object on that thread, and that
+  object shall become associated with
+  the <code>thread_local_context</code> object, and destroyed as part
+  of its destruction (30.3.3.2). The state of an object of thread
+  storage duration on a given thread following destruction of that
+  object as part of the destruction of
+  a <code>thread_local_context</code> object shall be restored to the
+  state of that object that existed prior to the construction of
+  the <code>thread_local_context</code>.</ins></blockquote>
+
+<h3>Definition of <code>std::thread_local_context</code></h3>
+
+<p>Add the following declaration to the synopsis of chapter 30.3:</p>
+
+<pre class="standardtext"><ins>class thread_local_context;
+</ins></pre>
+
+<p>Add a new section to 30.3 as follows:</p>
+
+<div class="standardtext inserted">
+<h3>30.3.3 class <code>thread_local_context</code></h3>
+
+<pre>
+namespace std {
+class thread_local_context {
+public:
+    thread_local_context();
+    thread_local_context(thread_local_context const&amp;) = delete;
+    thread_local_context&amp; operator=(thread_local_context const&amp;) = delete;
+
+    template&lt;typename FunctionType&gt;
+    void call_on_close(FunctionType func);
+};
+}
+</pre>
+
+<p>The class <code>thread_local_context</code> provides a means of
+  managing the lifetime of objects with thread storage duration
+  (3.7.2). The construction of an instance
+  of <code>thread_local_context</code> on a given thread marks the
+  start of a new context for objects of thread storage duration. This
+  context persists until the thread exits or
+  the <code>thread_local_context</code> object is destroyed. When the
+  context is destroyed then all objects of thread storage duration
+  initialized on that thread during the life of the context are
+  destroyed in reverse order of their initialization (6.7).</p>
+
+<p>The existing state of all objects with thread storage duration for
+  a thread are set aside when a <code>thread_local_context</code>
+  object is constructed. The first use of an object with thread
+  storage duration after the construction of
+  a <code>thread_local_context</code> on the same thread is treated
+  as-if it were the first use of that object on that thread. Pointers
+  and references to such objects remain valid, and continue to point
+  at the existing objects.</p>
+
+<p>After the completion of the <code>thread_local_context</code>
+  destructor, the state of all objects of thread storage duration is
+  returned to that prior to the construction of
+  the <code>thread_local_context</code> object.</p>
+
+<p><i>[Example:
+
+<pre>
+int foo()
+{
+    static thread_local x=42;
+    return ++x;
+}
+
+void bar()
+{
+    thread_local_context ctx;
+    for(unsigned i=0;i&lt;3;++i)
+    {
+        std::cout&lt;&lt;foo()&lt;&lt;std::endl;
+    }
+}
+
+int main()
+{
+    bar(); // will output 43 44 45
+    bar(); // will also output 43 44 45
+}
+</pre>
+&mdash end example]</i></p>
+
+<p>Multiple <code>thread_local_context</code> objects may be
+  constructed on a single thread. The construction of each object
+  creates a new context. The lifetime of such instances must be
+  strictly nested: if two objects of
+  type <code>thread_local_context</code> <code>a</code>
+  and <code>b</code> are constructed on the same thread such
+  that <code>a</code> is constructed before <code>b</code>
+  then <code>b</code> must be destroyed before <code>a</code>,
+  otherwise the behavior of the program is undefined.</p>
+
+<p><i>[Example:
+
+<pre>
+#include &lt;iostream&gt;
+
+thread_local std::string s="hello";
+
+void inner(std::string* ps)
+{
+    thread_local_context ctx;
+    std::cout&lt;&lt;"inner s="&lt;&lt;s&lt;&lt;std::endl;
+    std::cout&lt;&lt;"*ps="&lt;&lt;*ps&lt;&lt;std::endl;
+    *ps="changed";
+    std::cout&lt;&lt;"inner s="&lt;&lt;s&lt;&lt;std::endl;
+}
+
+void outer()
+{
+    thread_local_context ctx;
+    s="outer";
+    std::cout&lt;&lt;"outer s="&lt;&lt;s&lt;&lt;std::endl;
+    inner(&amp;s);
+    std::cout&lt;&lt;"outer s="&lt;&lt;s&lt;&lt;std::endl;
+}
+
+int main()
+{
+    outer(); // OK
+}
+</pre>
+
+This program will output
+<pre>
+outer s=outer
+inner s=hello
+*ps=outer
+inner s=hello
+outer s=changed
+</pre>
+&mdash end example]</i></p>
+
+<h4>30.3.3.1 thread_local_context constructor</h4>
+
+<pre>
+thread_local_context();
+</pre>
+
+<dl>
+  <dt>Effects:</dt>
+  <dd>Create a new context for <code>thread_local</code>
+  variables.</dd>
+  <dt>Throws:</dt>
+  <dd><code>std::bad_alloc</code> if any required storage cannot be
+    allocated.</dd>
+</dl>
+
+<h4>30.3.3.2 thread_local_context destructor</h4>
+
+<pre>
+~thread_local_context();
+</pre>
+
+<dl>
+  <dt>Effects:</dt>
+  <dd>Destroys the context for <code>thread_local</code>
+    variables. All objects with thread storage duration (3.7.2)
+    constructed on this thread after the construction of
+    the <code>thread_local_context</code> object are destroyed in
+    reverse order of construction (see 3.6.3), and restored to their
+    initial state. Once all such objects have been destroyed, any
+    functions registered with the context by
+    calling <code>call_on_close()</code> are invoked in reverse
+    order. It is undefined behaviour to destroy an instance
+    of <code>thread_local_context</code> on a thread other than that
+    on which it was constructed. It is undefined behaviour to destroy
+    an instance of <code>thread_local_context</code> when instances
+    of <code>thread_local_context</code> created later on the same
+    thread have not yet been destroyed.</dd>
+  <dt>Throws:</dt>
+  <dd>Nothing.</dd>
+</dl>
+
+<h4>30.3.3.3 thread_local_context members</h4>
+
+<pre>
+template&lt;typename FunctionType&gt;
+void call_on_close(FunctionType func);
+</pre>
+
+<dl>
+  <dt>Effects:</dt>
+  <dd>Register a copy of <code>func</code> to be called
+    when <code>*this</code> is destroyed.</dd>
+  <dt>Throws:</dt>
+  <dd><code>std::bad_alloc</code> if any required storage cannot be
+    allocated. Any exceptions thrown by the copy constructor
+    of <code>func</code>.</dd>
+  <dt>Requirements:</dt>
+  <dd>Invocation of the stored copy of <code>func</code> shall not
+  exit via an exception, nor shall it access any objects of thread
+  storage duration.</dd>
+</dl>
+</div>
+
+<h3>Modifications to <code>std::promise</code> and <code>std::packaged_task</code></h3>
+
+<p>Add the following to the class definition
+  of <code>std::promise</code> in section 30.6.4
+  [futures.promise]:</p>
+
+<pre class="standardtext"><ins>void set_value(thread_local_context &amp; context,const R&amp; r);
+void set_value(thread_local_context &amp; context,see below);
+void set_exception(thread_local_context &amp; context,exception_ptr p);
+</ins></pre>
+
+<p>Add the following to the end of section 30.6.4
+  [futures.promise]:</p>
+
+<div class="standardtext inserted">
+<pre>
+void set_value(thread_local_context &amp; context,const R&amp; r);
+void promise::set_value(thread_local_context &amp; context,R&amp;&amp; r);
+void promise&lt;R&amp;&gt;::set_value(thread_local_context &amp; context,R&amp; r);
+void promise&lt;void&gt;::set_value(thread_local_context &amp; context);
+</pre>
+<dl>
+  <dt>Effects:</dt>
+  <dd>Stores r in the associated state. Updates <code>context</code>
+    to set that state to ready when <code>context</code> is destroyed,
+    as if by registering an appropriate function
+    with <code>context.call_on_close()</code>.</dd>
+
+  <dt>Throws:</dt>
+  <dd><code>future_error</code> if its associated state already has a
+  stored value or exception.</dd>
+
+  <dt>Error conditions:</dt>
+  <dd><code>promise_already_satisfied</code> if its associated state
+  already has a stored value or exception.</dd>
+</dl>
+
+<pre>
+void set_exception(thread_local_context &amp; context,exception_ptr p);
+</pre>
+<dl>
+  <dt>Effects:</dt>
+  <dd>Stores p in the associated state. Updates <code>context</code>
+    to set that state to ready when <code>context</code> is destroyed,
+    as if by registering an appropriate function
+    with <code>context.call_on_close()</code>.</dd>
+  
+  <dt>Throws:</dt>
+  <dd><code>future_error</code> if its associated state already has a
+  stored value or exception.</dd>
+
+  <dt>Error conditions:</dt>
+  <dd><code>promise_already_satisfied</code> if its associated state
+  already has a stored value or exception.</dd>
+</dl>
+</div>
+
+<p>Added the following member function to the class definition
+  for <code>std::packaged_task</code> in 30.6.7 [futures.task]:</p>
+
+<pre class="standardtext"><ins>void execute(thread_local_context const&amp; context,ArgTypes...);</ins></pre>
+
+<p>Add the following to 30.6.7 [futures.task] following paragraph
+  17:</p>
+
+<div class="standardtext inserted">
+<pre>
+void execute(thread_local_context const&amp;,ArgTypes... args);
+</pre>
+<dl>
+  <dt>Effects:</dt>
+  <dd><em>INVOKE (f, t1, t2, ..., tN, R)</em>, where <em>f</em> is the
+      associated task of <code>*this</code> and <em>t1, t2, ...,
+      tN</em> are the values in <code>args....</code> If the task
+      returns normally, the return value is stored as the asynchronous
+      result associated with *this, otherwise the exception thrown by
+      the task is stored. <code>context</code> is updated to ensure
+      that any threads blocked waiting for the asynchronous result
+    associated with the task are unblocked when <code>context</code>
+    is destroyed, as-if by passing an appropriate function
+      to <code>context.call_on_close()</code>.</dd>
+
+  <dt>Throws:</dt>
+  <dd>std::bad_function_call if the task has already been
+  invoked.</dd>
+</dl>
+</div>
+
+<h2>Acknowledgements</h2>
+
+<p>Thanks to Alberto Ganesh Barbati, Peter Dimov, Lawrence Crowl,
+  Beman Dawes, Herb Sutter and others who have commented on earlier
+  versions of this proposal on the mailing lists and via personal
+  email.</p>
+
+</body></html>

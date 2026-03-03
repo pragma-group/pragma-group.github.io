@@ -1,0 +1,719 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"
+    "http://www.w3.org/TR/html4/loose.dtd">
+<html>
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+  <meta content="text/html; charset=iso-8859-1">
+  <title>Adding Multimethods to C++</title>
+  <meta name="GENERATOR" content="amaya 5.1">
+</head>
+
+<body lang="en">
+<h1>Draft proposal for adding Multimethods to C++</h1>
+
+<p>Document number: 03-0046/N1463</p>
+
+<p>Author: Julian Smith (<a
+href="mailto:jules@op59.net">jules@op59.net</a>)</p>
+
+<p>Version: $Date: 2003/04/28 01:26:23 $ $Revision: 1.13 $</p>
+
+<h2>Contents</h2>
+<ul>
+  <li><a href="#Multimethods">Multimethods as a C++ extension</a></li>
+  <li><a href="#Impact">Impact on the standard</a></li>
+  <li><a href="#Unresolved">Unresolved issues</a></li>
+  <li><a href="#Ommitted">Ommitted features</a></li>
+  <li><a href="#Resources">Multimethods resources</a></li>
+  <li><a href="#Acknowledgements">Acknowledgements</a></li>
+  <li><a href="#Cmm">Cmm implementation issues</a></li>
+</ul>
+
+<h2><a name="Multimethods">Multimethods as a C++ extension</a></h2>
+
+<h3>Syntax</h3>
+
+<p>Stroustrup's <cite>Design and Evolution of C++</cite> suggests a syntax
+for multimethods in C++, which this proposal approximately follows.</p>
+
+<p>A function prototype is a multimethod function if one or more of its
+parameters are qualified with the keyword <code>virtual</code>.
+Implementations of a multimethod function have conventional parameters
+without the <code>virtual</code> qualifier.</p>
+
+<p>The parameters that correspond to the virtual parameters in the virtual
+function prototype must be derived from the original types, and have the same
+modifiers (such as <code>const</code>).</p>
+
+<p>Virtual function declarations must occur before multimethod implementation
+function definitions/declarations. Otherwise the multimethod implementation
+functions will be treated as conventional functions.</p>
+
+<p>Multimethod implementation functions have the same name as the multimethod
+function, but with an additional trailing underscore (but see <a
+href="#Unresolved">Unresolved issues</a>).</p>
+
+<p>Here is the classic multimethods example, an <code>Overlap()</code>
+function that takes references to a <code>Shape</code> base class. Detecting
+whether two shapes overlap requires different code for each combination of
+shapes:</p>
+<pre><code>struct  Shape            {...};
+struct  Square   : Shape {...};
+struct  Triangle : Shape {...};
+
+bool    Overlap( virtual Shape&amp; a, virtual Shape&amp; b);
+    
+bool    Overlap_( Square&amp; a, Triangle&amp; b) {...}
+bool    Overlap_( Triangle&amp; a, Square&amp; b) {...}
+bool    Overlap_( Shape&amp; a, Square&amp; b)    {...}
+bool    Overlap_( Square&amp; b, Shape&amp; a)    {...}</code></pre>
+
+<p>The <code>Overlap( virtual Shape&amp; a, virtual Shape&amp; b)</code>
+prototype is replaced by a dispatch function with prototype <code>Overlap(
+Shape&amp; a, Shape&amp; b)</code>. Internally, this dispatch function uses
+C++ RTTI to choose one of the available <code>Overlap_()</code> functions,
+based on the dynamic types of its parameters.</p>
+
+<h3>Dispatch algorithm</h3>
+
+<p>It is possible that there isn't any matching multimethod implementation
+function for a particular combination of dynamic types. In this case, the
+generated dispatch function will throw an exception.</p>
+
+<p>It will also throw an exception if there is no clear best multimethod
+implementation for a particular combination of dynamic types. A multimethod
+implementation is considered best only if both the following two conditions
+apply:</p>
+<ol>
+  <li>All of the best multimethod implementation's parameter types match the
+    dynamic types.</li>
+  <li>Each of the best multimethod implementation's parameter types is at
+    least as derived as the corresponding parameter type in any other
+    matching multimethod implementation.</li>
+</ol>
+
+<p>This is the same as the lookup rule used by C++ at compile time, apart
+from compile-time C++'s use of conversion operators and special-casing of
+built-in types.</p>
+
+<p>Note that we cannot have duplicate multimethod implementations, so the
+second condition implies that for each other matching multimethod
+implementation X, the best multimethod implementation must have at least one
+parameter type that is more derived than the corresponding parameter type in
+X.</p>
+
+<p>So:</p>
+<pre><code>Shape&amp;  s = *new Square;
+Shape&amp;  t = *new Triangle;
+Overlap( t, t); // Throws - no matching multimethod implementation
+Overlap( s, t); // Calls Overlap_( Square&amp;, Triangle&amp;)
+Overlap( t, s); // Calls Overlap_( Triangle&amp;, Square&amp;)
+Overlap( s, s); // Throws - these multimethod implementations
+                // both match, but neither is a
+                // better match than the other:
+                //   Overlap_( Shape&amp; a, Square&amp; b)
+                //   Overlap_( Square&amp; b, Shape&amp; a)</code></pre>
+
+<p>There is also the possibility of ambiguities caused by a dynamic type
+multiply-inheriting from the same class more than once (a similar error can
+already occur at compile time if a static type multiply-inherits from the
+same class more than once).</p>
+
+<h3>Miscellaneous issues</h3>
+
+<p>Classes that are used in multimethods shall be polymorphic - i.e. have at
+least one virtual function. This is necessary to allow the dispatcher to use
+RTTI on the classes.</p>
+
+<p>Each virtual parameter must be one of:</p>
+<ul>
+  <li>A reference to a class or a reference to a const-qualified class.</li>
+  <li>A pointer to a class or a pointer to a const-qualified class.</li>
+</ul>
+
+<p>If a virtual parameter is a pointer, passing a NULL pointer gives
+undefined behaviour.</p>
+
+<p>Multimethod implementations must match the use of reference/pointer
+parameters in the original multimethod:</p>
+<pre><code>bool Overlap( virtual Shape&amp;, virtual Shape*);
+...
+bool Overlap_( Square&amp; a, Triangle* b){...} // ok
+
+bool Overlap_( Circle&amp; a, Ellipse&amp; b) {...}
+  // not an implementation of the multimethod,
+  // because second parameter should be a pointer.</code></pre>
+
+<p>One can use non-virtual parameters in a multimethod in addition to the
+virtual parameters. So a multimethod could look like:</p>
+<pre><code>int foo(
+    std::string&amp;,
+    virtual Base&amp;,
+    int x,
+    virtual const Base&amp;);</code></pre>
+
+<h3>Suggested implementation requirements</h3>
+
+<h4>Dispatch speed</h4>
+
+<p>The dispatch should give at worst O(Log N) dispatch speed, where N is the
+number of different combinations of dynamic types that have been passed to
+the multimethod during the whole runtime of the programme.</p>
+
+<h4>Use of multimethods before <code>main()</code></h4>
+
+<p>Multimethods shall not be called before <code>main()</code> - i.e. static
+initialisation code shall not call multimethods.</p>
+
+<p>This allows implementations that initialise globals before
+<code>main()</code> is entered, to use their own global initialisation
+support to register multimethods at runtime, avoiding the need to do
+whole-programme analysis at build time.</p>
+
+<h2><a name="Impact">Impact on the standard</a></h2>
+
+<p>This proposal's syntax is a pure extension, which doesn't conflict with
+any existing C++ syntax.</p>
+
+<p>Implementations that do not initialise globals before <code>main()</code>
+is entered, will have to use a custom techique to ensure that multimethod
+implementations are registered correctly before <code>main()</code> is
+entered.</p>
+
+<h2><a name="Unresolved">Unresolved issues</a></h2>
+
+<h3>Syntax</h3>
+
+<p>The use of a trailing underscore for multimethod implementations is an
+ugly hack, but I haven't been able to come up with a good alternative yet. In
+particular, it allows direct calling of multimethod implementations, which
+will get conventional compile-time overloading all all visible multimethod
+implementations. For the Cmm implementation, it also allows one to define and
+call a multimethod implementation that takes the base parameters, which would
+otherwise clash with the generated dispatch function.</p>
+<pre><code>bool overlaps = Overlap( shape1, shape2);
+// conventional static dispatch.
+
+bool overlaps = Overlap( virtual shape1, virtual shape2);
+// call the multimethod.</code></pre>
+
+<p>Requiring the user to specify the dispatch in this way is contrary to the
+rest of C++ though.</p>
+
+<p>An possible alternative would be to put multimethod implementations inside
+a namespace:</p>
+<pre><code>bool Overlap( virtual Shape&amp;, virtual Shape&amp;);
+...
+namespace std_mm
+{
+  bool Overlap( Square&amp; a, Triangle&amp; b) {...}
+}</code></pre>
+
+<p>Should compile-time multimethod overloads be allowed? Maybe it could be
+used to restrict the number of possible multimethod implementations that are
+available for consideration at runtime. This would require that multimethod
+implementations are registered with more than one multimethod. I suspect that
+this would be a little-used feature, which would add unnecessary complexity
+to the proposal.</p>
+
+<h3>Volatile</h3>
+
+<p>Should virtual parameters be allowed to be qualified as
+<code>volatile</code>?</p>
+
+<h3>Covarient returns</h3>
+
+<p>By analogy with virtual functions, implementations of a multimethod that
+returns a reference or pointer to a type <code>T</code>, should probably be
+allowed to return a reference or pointer to anything derived from
+<code>T</code>.</p>
+
+<h3>Dispatch speed</h3>
+
+<p>The basic dispatch algorithm involves much use of RTTI, and is linear in
+the number of multimethod implementations available. Hence it is very
+slow.</p>
+
+<p>The specified O(LogN) dispatch speed can be easily obtained using a
+<code>std::map</code>-style dispatch cache, mapping from arrays of
+<code>type_info</code>'s to function pointers.</p>
+
+<p>It is possible to get constant-time dispatch if classes are assigned small
+unique integer identifiers, which could be stored in the vtable. This allows
+a dispatch array of pointers to functions to be created for each multimethod,
+using the small integer identifiers as indices.</p>
+
+<p>To avoid whole-programme analysis at build-time, it may be best to
+initialise these small integers to zero, and assign non-zero values at
+runtime whenever a class is first involved in a multimethod call; this would
+also avoid wasting integer space on classes that aren't involved in
+multimethod calls, which in turn would reduce the sizes of the dispatch
+arrays.</p>
+
+<p>A dispatch function for the Overlap example using these indices would look
+something like:</p>
+<pre><code>bool Overlap( Shape&amp; a, Shape&amp; b)
+{
+    typedef bool (*fnptr)( Shape&amp; a, Shape&amp; b);
+    
+    static void fnptr** cache = NULL;
+
+    int a_index = a._vtable-&gt;small_integer;
+    int b_index = b._vtable-&gt;small_integer;
+        
+    if (   a_index
+        &amp;&amp; b_index
+        &amp;&amp; cache
+        &amp;&amp; ((int) cache[0]) &gt; a_index
+        &amp;&amp; cache[ a_index]
+        &amp;&amp; ((int) cache[ a_index][0]) &gt; b_index
+        &amp;&amp; cache[ a_index][ b_index])
+    {
+        // fast dispatch:
+        return cache[ a_index][ b_index]( a, b);
+    }
+    else
+    {
+        /* Slow dispatch.
+        Ensure _vtable-&gt;small_integer's are assigned.
+        Ensure cache points to array of at least
+            a_index+1 items, (storing array size in
+            cache[0]).
+        Ensure cache[ a_index] points to array of at
+            least b_index+1 items, (storing array
+            size in cache[ a_index][0]).
+        Fill the cache using the slow algorithm
+        Make function call. */
+        ...
+    }
+}</code></pre>
+
+<p>The code leading to the `fast dispatch' could be implemented in a very few
+assembler instructions (e.g. around 10 instructions on an ARM).</p>
+
+<p>Cmm implements constant time dispatch using a similar scheme to this. It
+can't modify the vtable layout, so unique small integers are implemented by
+Cmm inserting extra inline virtual functions containing their own internal
+static ints.</p>
+
+<p>I'm not sure it would be a good thing to mandate constant time dispatch
+speed, because it requires changes to the vtable layout that might break
+backwards binary compatibility. And we have little experience of how
+important multimethod dispatch speed is in real applications. There may also
+be a possibility of large space overheads for the dispatch arrays in
+pathological cases.</p>
+
+<h3>Raw pointer to multimethod implementation function</h3>
+
+<p>For speed critical loops, it might be useful to provide a way for the user
+to get a pointer to the best multimethod implementation function for a
+particular set of dynamic types. This enables client code that calls a
+multimethod on the same parameters many times in a loop, to cache the
+function pointer and so avoid any dispatch overhead.</p>
+
+<p>Cmm implements this as an extra dispatch function with the same name as
+the multimethod, but with a suffix <code>_cmm_getimpl</code>. Using the
+<code>Overlap</code> example, if you have one collection of shapes that you
+know are all squares, and you want to search for an overlap with a particular
+shape, you would usually do:</p>
+<pre><code>void Fn( std::vector&lt; Square*&gt; squares, Shape&amp; s)
+{
+    std::vector&lt; Square*&gt;::iterator it;
+    for( it=squares.begin(); it!=squares.end() ++ it)
+    {
+        if ( Overlap( **it, s)) {...}
+    }
+}</code></pre>
+
+<p>With the generated <code>Overlap_cmm_get_impl</code> function, you can
+avoid the multimethod dispatch overhead in each iteration:</p>
+<pre><code>void Fn( std::vector&lt; Square*&gt; squares, Shape&amp; s)
+{
+    std::vector&lt; Square*&gt;::iterator it;
+    if ( squares.empty()) return;
+    
+    bool (*fn)( Shape&amp;, Shape&amp;) =
+        Overlap_cmm_get_impl( s, squares[0]);
+    
+    for( it=squares.begin(); it!=squares.end() ++ it)
+    {
+        if ( fn( **it, s)) {...}
+    }
+}</code></pre>
+
+<h3>Use with dynamic loading of code</h3>
+
+<p>The Cmm implementation automatically registers and unregisters multimethod
+implementations when code in shared libraries/DLLs is loaded/unloaded. If
+support for dynamic loading of code is added to the C++ standard in the
+future, I think it would be a good idea to require that multimethod
+implementations in shared libraries/DLLs are treated in this way.</p>
+
+<h2><a name="Ommitted">Ommitted features</a></h2>
+
+<p>Here are some features that have been suggested, with reasons why I am not
+currently including them in the proposal.</p>
+
+<h3>Multimethod member functions</h3>
+
+<p>It has been suggested that it should be possible to make member functions
+into multimethods. I don't like this idea because it adds complications for
+no real gain in functionality. In particular, mixing virtual member functions
+and multimethods would be plain confusing and not do anything that couldn't
+be done by a simple multimethod.</p>
+
+<h3>Multimethod templates</h3>
+
+<p>In principle, it may be possible to have multimethod templates, such
+as:</p>
+<pre><code>template&lt; class ShapeBase&gt;
+bool Overlap( virtual ShapeBase&amp;, virtual ShapeBase&amp;);
+// Dispatches to a Overlap_&lt; ShapeBase&gt;() function</code></pre>
+
+<p>However, I haven't figured out how this could work, or what it could be
+used for.</p>
+
+<h2><a name="Resources">Multimethods resources</a></h2>
+
+<p>Bjarne Stroustrup writes about multimethods in <cite>The Design and
+Evolution of C++</cite> (Section 13.8, pages 297-301).</p>
+
+<p>Multimethods are not a new idea; for example, the Dylan language (see <a
+href="http://www.functionalobjects.com/resources/index.phtml">http://www.functionalobjects.com/resources/index.phtml</a>)
+supports them natively, as does CLOS (Common Lisp).</p>
+
+<p>If one restricts oneself to Standard C++, it is possible to approximate
+multimethods at the expense of verbosity in source code. See Item 31 in Scott
+Meyers' <cite>More Effective C++</cite>, and chapter 11 of Andrei
+Alexandrescu's <cite>Modern C++ Design</cite>, where template techniques are
+used extensively. Bill Weston has a slightly different template technique
+that supports non-exact matches, see <a
+href="http://homepage.ntlworld.com/w.weston/">http://homepage.ntlworld.com/w.weston/</a>.</p>
+
+<p>Cmm, a C++ multimethods implementation in the form of a source-code
+translator, is available from <a
+href="http://www.op59.net/cmm/readme.html">http://www.op59.net/cmm/readme.html</a>.</p>
+
+<p>A paper about multimethods, C++ and Cmm is on the ACCU 2003 conference CD,
+also available online at <a
+href="http://www.op59.net/accu-2003-multimethods.html">http://www.op59.net/accu-2003-multimethods.html</a>.</p>
+
+<p>The Frost project (<a
+href="http://frost.flewid.de/">http://frost.flewid.de</a>) adds support for
+multimethods to the i386-version of the gcc compiler.</p>
+
+<h2><a name="Acknowledgements">Acknowledgements</a></h2>
+
+<p>Thanks to Bill Weston for many interesting and useful discussions about
+multimethods.</p>
+
+<p>Thanks to Loise Goldthwaite, Kevlin Henney and Anthony Williams for
+comments about this proposal on the cxxpanel@yahoogroups.co.uk list.</p>
+
+<h2><a name="Cmm">Cmm implementation issues</a></h2>
+
+<p>Cmm (See <a
+href="http://www.op59.net/cmm/readme.html">http://www.op59.net/cmm/readme.html</a>)
+is a source-code processor which implements a multimethods language extension
+for C++. The description of Cmm's implementation here corresponds to cmm-0.22
+(31 March 2003).</p>
+
+<p>Cmm takes individual compilation units containing multimethod code that
+have already been run through the C++ preprocessor (e.g.
+<code>#include</code>'s have been expanded), and generates legal C++
+compilation units, which can then be compiled and linked together
+conventionally.</p>
+
+<p>The generated C++ code calls some support functions that are provided as a
+single source file called <code>dispatch.cpp</code>. This contains functions
+that manage data structures that store all known multimethod functions and
+their implementations, the actual runtime dispatch functions, functions to
+support dispatch caching and also support for the exception types thrown for
+ambiguous/unmatched dispatches.</p>
+
+<p>Cmm has been designed to generate multimethod code that supports dynamic
+loading and unloading of code, which means that all information about
+multimethods and their implementations are stored in dynamic data strucures.
+This is probably not directly relevent to this proposal, because the C++
+standard doesn't concern itself with dynamic loading of code. However, it
+gives an example of the flexibility that the multimethods model can give.</p>
+
+<p>Such implementation issues are not directly part of this proposal, but Cmm
+demonstrates that multimethods need not break the simple C compiler/linker
+model.</p>
+
+<h3>Generated code for multimethod dispatch</h3>
+
+<p>In the simple <em>Overlap</em> multimethod example described earlier, The
+virtual function was:</p>
+<pre><code>bool Overlap( virtual Shape&amp;, virtual Shape&amp;);</code></pre>
+
+<p>Consider an implementation of <code>Overlap</code> that is specialised for
+a first parameter <code>Square</code> and second parameter
+<code>Triangle</code>. This will look like:</p>
+<pre><code>// user-written multimethod implementation function
+bool Overlap_( Square&amp; a, Triangle&amp; b) {...}</code></pre>
+
+<p>In order to perform multimethod dispatch, one has to first decide which
+multimethod implementations match the dynamic types, and then try to find one
+of the multimethod implementations which can be considered a better match
+then all of the others.</p>
+
+<p>The first step is done by calling auxiliary functions that Cmm creates for
+each multimethod implementation function, which take the base parameters and
+return <code>true</code> only if each of the parameters can be
+<code>dynamic_cast</code>-ed to the multimethod implementation's parameters.
+Because these functions takes the virtual function's base parameters, we
+cannot use conventional overloading to distinguish them, and so Cmm makes the
+function names unique using a mangling scheme which, for simplicity, will be
+denoted by <code>_XYZ</code> in the following:</p>
+<pre><code>// Cmm-generated match function for the function
+// bool Overlap( Square&amp; a, Triangle&amp; b);
+bool Overlap_cmm_match_XYZ( Shape&amp; a, Shape&amp; b)
+{
+    if ( !dynamic_cast&lt; Square*  &gt;( &amp;a)) return false;
+    if ( !dynamic_cast&lt; Triangle*&gt;( &amp;b)) return false;
+    return true;
+} </code></pre>
+
+<p>This separate function is generated in the same compilation unit as the
+multimethod implementation, which enables the <code>dynamic_cast</code> to
+work with derived types defined in anonymous namespaces. [Actually, the
+<code>Overlap_cmm_match_XYZ</code> function takes an array of two
+<code>void*</code>'s rather than a separate parameter for each virtual type,
+each of which is <code>static_cast</code>-ed to <code>Shape*</code> before
+the <code>dynamic_cast</code> is attempted. This is to enable generic
+dispatch code to be used for different virtual functions.]</p>
+
+<p>The second step requires that the inheritance tree for each dynamic type
+is known. The dispatch code can then compare the types taken by each matching
+multimethod implementation, and select the multimethod implementation for
+which each virtual parameter is no less derived than any other matching
+multimethod implementation's virtual parameter. As discussed earlier, this
+corresponds to the way conventional overloading works at compile time.</p>
+
+<p>The information about the inheritance trees is encoded in C-style strings
+using a mangling scheme similar to that used by C++ compilers when generating
+symbol names. This allows static initialisation to be used to register
+multimethod implementations at runtime.</p>
+
+<p>[Cmm can also register multimethod implementations at build time by
+requiring a separate link-style invocation, but this made builds very
+complicated and slow, and precludes use with dynamic loading of code. The
+only advantages of this scheme are that dispatch time may be slightly faster,
+and all multimethod implementations are usable by static initialisation
+code.]</p>
+
+<p>Finally, the generic dispatch code calls the actual multimethod
+implementation via a wrapper function that takes the base parameters, casts
+them directly to the derived types, and calls the multimethod implementation.
+Again, this function name is mangled:</p>
+<pre><code>// Cmm-generated call function for the function
+// bool Overlap( Square&amp; a, Triangle&amp; b);
+bool Overlap_cmm_call_XYZ( Shape&amp; a, Shape&amp; b)
+{
+    return Overlap(
+        *static_cast&lt; Square*  &gt;( &amp;a),
+        *static_cast&lt; Triangle*&gt;( &amp;b));
+}</code></pre>
+
+<p>This function's precondition is that the derived types are correct and so
+the <code>static_cast</code>'s are legal. Using this wrapper function enables
+the dispatch code to work in terms of generic function pointers even if
+multimethod implementations use derived classes in anonymous namespace.</p>
+
+<p>[The function should use <code>dynamic_cast</code> rather than
+<code>static_cast</code> when <code>Derived</code> inherits virtually from
+<code>Base</code>, but this hasn't been implemented yet.]</p>
+
+<h3>Registering multimethods using static initialisation</h3>
+
+<p>For each implementation, Cmm generates a global variable whose
+initialisation registers the implementation with the dispatch function:</p>
+<pre><code>static cmm_implementation_holder
+    Overlap_XYZ(
+        "7Overlap2_1_5Shape1_5Shape",
+           // the multimethod
+        "8Overlap_2_2_5Shape_6Square2_5Shape_8Triangle",
+           // the multimethod implementation
+        Overlap_cmm_implmatch_XYZ,
+        Overlap_cmm_implcall_XYZ);</code></pre>
+
+<p><code>cmm_implementation_holder</code> is a class defined in
+<code>dispatc.h</code>/<code>dispatch.cpp</code>, whose constructor
+de-mangles the first two textual parameters to extract complete information
+about the inheritance tree for each virtual parameter taken by the virtual
+function and the implementation function. Together with the
+<code>Overlap_cmm_match</code> functions, this is sufficient to enable
+multimethod dispatch to be performed.</p>
+
+<p>In this example, the first mangled string means: "A function called
+<em>Overlap</em> with 2 virtual parameters, the first a class containing one
+item in its inheritance tree, <em>Shape</em>, and the second also containing
+the same single class in its inheritance tree, <em>Shape</em>". The second
+mangled string means: "A function called <em>Overlap_</em> with 2 virtual
+parameters, the first one being a class with 2 items in its inheritance tree,
+<em>Shape</em> followed by <em>Square</em>, while the second parameter's type
+also contains 2 items in its inheritance tree, the first one being
+<em>Shape</em>, and the second <em>Triangle</em>".</p>
+
+<p>This use of static initialisers to register implementations allows
+dynamically loaded code to automatically register new implementations with
+the dispatch functions. Furthermore, the destructor of the
+<code>cmm_implementation_holder</code> class unregisters the implementations,
+so one can load/unload code at will.</p>
+
+<p>The handling of implementation functions in dynamically loaded code has
+been succesfully tested on OpenBSD 3.2, Slackware Linux 8.1 and
+Cygwin/Windows, using the <code>dlopen()</code> and <code>dlclose()</code>
+functions.</p>
+
+<h3>Dispatch caches</h3>
+
+<p>Figuring out which of a set of implementation functions to call for a
+particular set of dynamic types is very slow, so some sort of caching scheme
+is required. Caching is performed by the code in the
+<code>dispatch.cpp</code> library. Currently this uses a
+<code>std::map</code> to map from a <code>std::vector</code> of
+<code>std::type_info</code>'s to a function pointer. This gives a dispatch
+speed of O(Log N), where N is the number of different combinations of dynamic
+types that have been encountered (some of which may be mapped to the same
+function pointer). On OpenBSD 3.2 with gcc 2.95, the dispatch time for two
+virtual parameters is around 10-100 times slower than a conventional virtual
+function call.</p>
+
+<p>It would probably be better to have special cache support for multimethods
+with one or two virtual parameters, using a <code>std::map</code> with key
+types <code>std::type_info[1]</code> and <code>std::type_info[2]</code>. No
+doubt templates could be used to do this with maximum obfuscation.</p>
+
+<h3>Dispatch functions</h3>
+
+<p>The actual virtual dispatch function is very simple, because it uses code
+in <code>dispatch.cpp</code> to do all the real work. This means that it is
+practical to generate a separate copy in all compilation units as an inline
+function, looking like:</p>
+<pre><code>inline bool Overlap( Shape&amp; a, Shape&amp; b)
+{
+    static cmm_virtualfn&amp;   virtualfn =
+        cmm_get_virtualfn( "7Overlap2_1_5Shape1_5Shape");
+    typedef bool(*cmm_fntype)( Shape&amp;, Shape&amp;);
+    
+    const void*           params[] = { &amp;a, &amp;b};
+    const std::type_info* types[]  =
+        { &amp;typeid( a), &amp;typeid( b)};
+    
+    cmm_fntype cmm_fn = reinterpret_cast&lt; cmm_fntype&gt;(
+            cmm_lookup( virtualfn, params, types));
+    
+    return cmm_fn( cmm_0, cmm_1);
+}</code></pre>
+
+<p>The <code>cmm_lookup</code> function uses <code>types</code> as an index
+into the internal <code>std::map</code> dispatch cache. If this fails, the
+actual parameters <code>params</code> are used in the slow lookup algorithm
+described earlier. It returns a generic function pointer, which has to be
+cast into the correct type using <code>reinterpret_cast</code>.</p>
+
+<h3>Raw pointer to implementation function</h3>
+
+<p>Cmm provides an extra dispatch function that doesn't actually call the
+implementation. Instead, it returns a pointer to the best implementation
+function. This enables client code that calls a multimethod on the same
+parameters many times in a loop, to cache the function pointer and so avoid
+any dispatch overhead.</p>
+
+<p>This extra dispatch function has the same name as the virtual function,
+with a suffix <code>_cmm_getimpl</code>. Using the <code>Overlap</code>
+example, if you have one collection of shapes that you know are all squares,
+and you want to search for an overlap with a particular shape, you would
+usually do:</p>
+<pre><code>void Fn( std::vector&lt; Square*&gt; squares, Shape&amp; s)
+{
+    std::vector&lt; Square*&gt;::iterator it;
+    for( it=squares.begin(); it!=squares.end() ++ it)
+    {
+        if ( Overlap( **it, s)) {...}
+    }
+}</code></pre>
+
+<p>With the generated <code>Overlap_cmm_get_impl</code> function, you can
+avoid the multimethod dispatch overhead in each iteration:</p>
+<pre><code>void Fn( std::vector&lt; Square*&gt; squares, Shape&amp; s)
+{
+    std::vector&lt; Square*&gt;::iterator it;
+    if ( squares.empty()) return;
+    
+    bool (*fn)( Shape&amp;, Shape&amp;) =
+        Overlap_cmm_get_impl( s, squares[0]);
+    
+    for( it=squares.begin(); it!=squares.end() ++ it)
+    {
+        if ( fn( **it, s)) {...}
+    }
+}</code></pre>
+
+<h3>Constant-time dispatch speed</h3>
+
+<p>It's possible to get constant-time dispatch speed if all types are
+assigned a unique small integer, by looking in a multi-dimensional array
+using the small integers as indices. Cmm has a command-line switch that makes
+the generated code use this technique.</p>
+
+<p>This scheme is clearly potentially wasteful of memory. If a programme has
+a thousand classes, then each array will have up to one thousand elements.
+But only the arrary rows that are actually needed will be used.</p>
+
+<p>In pseudo code, the dispatch for a funtion with two virtual parameters
+looks like:</p>
+<pre><code>void foo( virtual Base&amp; a, virtual Base&amp; b
+    int a_smallint = a.get_small_integer();
+    int b_smallint = b.get_small_integer();
+    fn = cache[a_smallint][b_smallint];
+    return fn( a, b);</code></pre>
+
+<p>In this case, <code>cache</code> is essentially of type<code>
+fn_ptr**</code>.</p>
+
+<p>Cmm's <code>dispatch.cpp</code> contains an implementation of this
+dispatch method that allocates the array lazily so that memory is only
+allocated for those rows that are actually used.</p>
+
+<p>Getting a unique small integer for each dynamic type is slightly tricky.
+In an ideal world, the compiler and linker would conspire to make space
+available in the vtable, which would enable very fast lookup. Cmm can't do
+this though, so instead it inserts an inline virtual function body into all
+polymorphic classes, containing a static int to enable fast access to the
+unique integers:</p>
+<pre><code>class Base
+{
+    // Next function inserted by Cmm:
+    virtual int cmm_get_small_integer() const
+    {
+        static int id=0;
+        if ( !id) id =
+            cmm_create_small_integer( typeid( *this));
+        return id;
+    }
+};</code></pre>
+
+<p>The function <code>cmm_get_small_integer()</code> is in the Cmm library
+<code>dispatch.cpp</code> along with all of the other support function. It
+maintains an internal map of <code>std::type_info</code>'s to
+<code>int</code>s so that it returns the same integer if called more than
+once for the same type. This is required to make things work when the C++
+environment doesn't implement the static int <code>id</code> correctly; for
+example, under OpenBSD 3.2, each compilation unit that contains the inline
+function <code>cmm_get_small_integer()</code> will have its own copy.</p>
+
+<p>The constant time dispatch system is not robust. It adds a virtual
+function to all polymorphic classes, but this only works if all code is
+passed through Cmm. Other code, such as code in libraries that are linked
+into the final executable, may break at runtime because of assuming a
+different vtable layout.  To avoid breaking code in system libraries, Cmm
+doesn't insert the function into polymorphic classes defined in the
+<code>std</code> namespace, but of course this means that you cannot do
+constant-time multimethod dispatch on base classes that are defined in
+<code>std</code>, such as <code>std::exception</code>.</p>
+</body>
+</html>

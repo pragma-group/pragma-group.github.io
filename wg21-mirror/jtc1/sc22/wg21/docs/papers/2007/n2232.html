@@ -1,0 +1,611 @@
+﻿<html>
+<head>
+    <title>Improving shared_ptr for C++0x</title>
+    <meta content="http://schemas.microsoft.com/intellisense/ie5" name="vs_targetSchema" />
+    <meta http-equiv="Content-Language" content="en-us" />
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+</head>
+<body bgcolor="#ffffff">
+    <address>
+        Document number: N2232=07-0092</address>
+    <address>
+        Programming Language C++, Library Subgroup</address>
+    <address>
+        &nbsp;</address>
+    <address>
+        Peter Dimov, &lt;<a href="mailto:pdimov@pdimov.com">pdimov@pdimov.com</a>&gt;</address>
+    <address>
+        Beman Dawes, &lt;<a href="mailto:bdawes@acm.org">bdawes@acm.org</a>&gt;</address>
+    <address>
+        &nbsp;</address>
+    <address>
+        2007-04-17</address>
+    <h1>
+        Improving shared_ptr for C++0x</h1>
+    <ul>
+        <li><a href="#overview">Overview</a></li>
+        <li><a href="#allocator">Allocator Support</a></li>
+        <li><a href="#aliasing">Aliasing Support</a></li>
+        <li><a href="#creation">Object Creation</a></li>
+        <li><a href="#move">Move Support</a></li>
+        <li><a href="#atomic">Atomic Access</a></li>
+        <li><a href="#cycles">Cycle Collection</a></li>
+    </ul>
+    <h2>
+        <a name="overview">I. Overview</a></h2>
+    <p>
+        While <code>shared_ptr</code> has already proven its utility time and again, we
+        have observed frequent requests for enhancements in several legitimate and key areas:</p>
+    <ul>
+        <li>Ability to control its internal allocations;</li>
+        <li>Aliasing support;</li>
+        <li>A factory function that eliminates the need for an explicit <code>new</code> expression;</li>
+        <li>Reduced reference counting overhead when using <code>shared_ptr</code> in "mostly
+            unique" ownership situations such as containers;</li>
+        <li>A variant of <code>shared_ptr</code> that is <em>atomic</em>, that is, safe to be
+            manipulated from multiple threads without synchronization; </li>
+        <li>A way to reclaim cyclic <code>shared_ptr</code> structures; </li>
+        <li>A variant of <code>shared_ptr</code> that is confined to a single thread and uses
+            unsynchronized reference count updates. </li>
+    </ul>
+    <p>
+        This document proposes additions to the C++0x standard to address the first six.
+        Some of the proposed additions are essentially a subset of those presented in <a
+            href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2005/n1851.pdf">N1851</a>
+        by Kliatchko and Rocha. We refer the interested reader to that paper for a more
+        extensive rationale.</p>
+    <p>
+        This proposal makes use of variadic templates and rvalue references. These C++0x
+        features markedly improve the usability and effectiveness of several of the proposed
+        additions.</p>
+    <h2>
+        <a name="allocator">II. Allocator Support</a></h2>
+    <p>
+        The default behavior of <code>shared_ptr</code> is to allocate its control block
+        using <code>new</code>. This precludes its use in contexts where uncontrolled dynamic
+        allocations are not allowed, such as embedded environments or the implementation
+        of <code>::operator new</code>. The proposed addition allows the user to supply
+        an allocator that <code>shared_ptr</code> will use.</p>
+    <h3>
+        Impact:</h3>
+    <p>
+        This feature affects the interface of <code>shared_ptr</code>, allowing its broader
+        use, and is therefore strongly recommended to be added to the C++0x standard.</p>
+    <h3>
+        Proposed text:</h3>
+    <p>
+        Add to <code>shared_ptr</code> [util.smartptr.shared] the following constructor:</p>
+    <blockquote>
+        <pre>template&lt;class Y, class D, class A&gt; shared_ptr( Y * p, D d, A a );</pre>
+    </blockquote>
+    <p>
+        and the following member function:</p>
+    <blockquote>
+        <pre>template&lt;class Y, class D, class A&gt; void reset( Y * p, D d, A a );</pre>
+    </blockquote>
+    <p>
+        Change the section:</p>
+    <blockquote>
+        <pre>template&lt;class Y, class D&gt; shared_ptr( Y * p, D d );</pre>
+        <p>
+            <em>Requires:</em> <code>p</code> shall be convertible to <code>T*</code>. <code>D</code>
+            shall be <code>CopyConstructible</code>. The copy constructor and destructor of
+            <code>D</code> shall not throw exceptions. The expression <code>d(p)</code> shall
+            be well-formed, shall have well defined behavior, and shall not throw exceptions.</p>
+        <p>
+            <em>Effects:</em> Constructs a <code>shared_ptr</code> object that <em>owns</em>
+            the pointer <code>p</code> and the deleter <code>d</code>.</p>
+    </blockquote>
+    <p>
+        in [util.smartptr.shared.const] to:</p>
+    <blockquote>
+        <pre>template&lt;class Y, class D&gt; shared_ptr( Y * p, D d );
+template&lt;class Y, class D, class A&gt; shared_ptr( Y * p, D d, A a );</pre>
+        <p>
+            <em>Requires:</em> <code>p</code> shall be convertible to <code>T*</code>. <code>D</code>
+            shall be <code>CopyConstructible</code>. The copy constructor and destructor of
+            <code>D</code> shall not throw. The expression <code>d(p)</code> shall be well-formed,
+            shall have well defined behavior, and shall not throw. <code>A</code> shall be an
+            <em>allocator</em> [allocator.requirements]. The copy constructor and destructor
+            of <code>A</code> shall not throw.</p>
+        <p>
+            <em>Effects:</em> Constructs a <code>shared_ptr</code> object that <em>owns</em>
+            the pointer <code>p</code> and the deleter <code>d</code>. The second constructor
+            shall use a copy of <code>a</code> to allocate memory for internal use.</p>
+    </blockquote>
+    <p>
+        Add the following to [util.smartptr.shared.mod]:</p>
+    <blockquote>
+        <pre>template&lt;class Y, class D, class A&gt; void reset( Y * p, D d, A a );</pre>
+        <p>
+            <em>Effects:</em> Equivalent to <code>shared_ptr( p, d, a ).swap( *this )</code>.</p>
+    </blockquote>
+    <h3>
+        Implementability:</h3>
+    <p>
+        This feature has been added to <code>boost::shared_ptr</code> and will be part of
+        Boost 1.35. See:</p>
+    <p>
+        <a href="http://boost.cvs.sourceforge.net/*checkout*/boost/boost/boost/shared_ptr.hpp">
+            http://boost.cvs.sourceforge.net/*checkout*/boost/boost/boost/shared_ptr.hpp</a><br />
+        <a href="http://boost.cvs.sourceforge.net/*checkout*/boost/boost/libs/smart_ptr/test/shared_ptr_alloc2_test.cpp">
+            http://boost.cvs.sourceforge.net/*checkout*/boost/boost/libs/smart_ptr/test/shared_ptr_alloc2_test.cpp</a></p>
+    <p>
+        for reference.</p>
+    <h2>
+        <a name="aliasing">III. Aliasing Support</a></h2>
+    <p>
+        Advanced users often require the ability to create a <code>shared_ptr</code> instance
+        <code>p</code> that shares ownership with another (master) <code>shared_ptr</code>
+        <code>q</code> but points to an object that is not a base of <code>*q</code>. <code>
+            *p</code> may be a member or an element of <code>*q</code>, for example. This
+        section proposes an additional constructor that can be used for this purpose.</p>
+    <p>
+        An interesting side effect of this increase of expressive power is that now the
+        <code>*_pointer_cast</code> functions can be implemented in user code. The <code>make_shared</code>
+        factory function presented later in this document can also be implemented using
+        only the public interface of <code>shared_ptr</code> via the aliasing constructor.</p>
+    <h3>
+        Impact:</h3>
+    <p>
+        This feature affects the interface of <code>shared_ptr</code> in a way that increases
+        its expressive power and is therefore strongly recommended to be added to the C++0x
+        standard.</p>
+    <h3>
+        Proposed text:</h3>
+    <p>
+        Add to <code>shared_ptr</code> [util.smartptr.shared] the following constructor:</p>
+    <blockquote>
+        <pre>template&lt;class Y&gt; shared_ptr( shared_ptr&lt;Y&gt; const &amp; r, T * p );</pre>
+    </blockquote>
+    <p>
+        Add the following to [util.smartptr.shared.const]:</p>
+    <blockquote>
+        <pre>template&lt;class Y&gt; shared_ptr( shared_ptr&lt;Y&gt; const &amp; r, T * p );</pre>
+        <p>
+            <em>Effects:</em> Constructs a <code>shared_ptr</code> instance that stores <code>p</code>
+            and <em>shares ownership</em> with <code>r</code>.</p>
+        <p>
+            <em>Postconditions:</em> <code>get() == p &amp;&amp; use_count() == r.use_count()</code>.</p>
+        <p>
+            <em>Throws:</em> nothing.</p>
+        <p>
+            <em>[Note:</em> To avoid the possibility of a dangling pointer, the user of this
+            constructor must ensure that <code>p</code> remains valid at least until the ownership
+            group of <code>r</code> is destroyed. <em>--end note.]</em></p>
+        <p>
+            <em>[Note:</em> This constructor allows creation of an <em>empty</em> <code>shared_ptr</code>
+            instance with a non-NULL stored pointer. <em>--end note.]</em></p>
+    </blockquote>
+    <h3>
+        Implementability:</h3>
+    <p>
+        This feature has been added to <code>boost::shared_ptr</code> and will be part of
+        Boost 1.35. See:</p>
+    <p>
+        <a href="http://boost.cvs.sourceforge.net/*checkout*/boost/boost/boost/shared_ptr.hpp">
+            http://boost.cvs.sourceforge.net/*checkout*/boost/boost/boost/shared_ptr.hpp</a><br />
+        <a href="http://boost.cvs.sourceforge.net/*checkout*/boost/boost/libs/smart_ptr/test/shared_ptr_alias_test.cpp">
+            http://boost.cvs.sourceforge.net/*checkout*/boost/boost/libs/smart_ptr/test/shared_ptr_alias_test.cpp</a></p>
+    <p>
+        for reference.</p>
+    <h2>
+        <a name="creation">IV. Object Creation</a></h2>
+    <p>
+        Consistent use of <code>shared_ptr</code> can eliminate the need to use an explicit
+        <code>delete</code>, but it currently provides no support in avoiding explicit <code>
+            new</code>. There have been repeated requests from users for a factory function
+        that creates an object of a given type and returns a <code>shared_ptr</code> to
+        it. Besides convenience and style, such a function is also exception safe and considerably
+        faster because it can use a single allocation for the object and its corresponding
+        control block, eliminating a significant portion of <code>shared_ptr</code>'s construction
+        overhead. This function eliminates one of the major efficiency complaints about
+        <code>shared_ptr</code>.</p>
+    <p>
+        This section proposes a family of overloaded function templates, <code>make_shared&lt;T&gt;</code>
+        and <code>allocate_shared&lt;T&gt;</code>, to address this need. <code>make_shared</code>
+        uses the global <code>operator new</code> to allocate memory, whereas <code>allocate_shared</code>
+        uses an user-supplied allocator, allowing finer control consistent with <a href="#allocator">
+            section II</a> of this document.</p>
+    <h3>
+        Impact:</h3>
+    <p>
+        This feature does not affect the interface of <code>shared_ptr</code>. It is possible
+        to implement in a non-intrusive way using only the public interface, <strong>as long
+            as aliasing support is present</strong>. Access to implementation details can
+        eliminate between 5 and 8 bytes of storage overhead on a typical 32 bit platform.</p>
+    <p>
+        The addition is a strong candidate for the C++0x standard, but can be relegated
+        to a technical report.</p>
+    <h3>
+        Proposed text:</h3>
+    <p>
+        <em>In the following, the ... notation denotes a variable number of arguments. Once
+            variadic templates are voted into the WP, the intent is to replace this notation
+            with the appropriate variadic template syntax, for consistency with <a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2007/n2192.pdf">
+                N2192</a>.</em></p>
+    <h4>
+        Synopsis:</h4>
+    <blockquote>
+        <pre>namespace std {
+  template&lt;class T&gt; shared_ptr&lt;T&gt; make_shared();
+  template&lt;class T, class A&gt; shared_ptr&lt;T&gt; allocate_shared( A const &amp; a );
+
+  template&lt;class T, class A1, ..., class An&gt; shared_ptr&lt;T&gt; make_shared( A1 const &amp; a1, ..., An const &amp; an );
+  template&lt;class T, class A, class A1, ..., class An&gt; shared_ptr&lt;T&gt; allocate_shared( A const &amp; a, A1 const &amp; a1, ..., An const &amp; an );
+}
+</pre>
+    </blockquote>
+    <h4>
+        Description:</h4>
+    <blockquote>
+        <pre>template&lt;class T&gt; shared_ptr&lt;T&gt; make_shared();
+template&lt;class T, class A&gt; shared_ptr&lt;T&gt; allocate_shared( A const &amp; a );
+
+template&lt;class T, class A1, ..., class An&gt; shared_ptr&lt;T&gt; make_shared( A1 &amp;&amp; a1, ..., An &amp;&amp; an );
+template&lt;class T, class A, class A1, ..., class An&gt; shared_ptr&lt;T&gt; allocate_shared( A const &amp; a, A1 &amp;&amp; a1, ..., An &amp;&amp; an );
+</pre>
+        <p>
+            <em>Requires:</em> The expression <code>new( pv ) T()</code> or <code>new( pv ) T( std::forward&lt;A1&gt;(a1),
+                ..., std::forward&lt;An&gt;(an) )</code>, where <code>pv</code> is a <code>void*</code>
+            pointing to storage suitable to hold an object of type <code>T</code>, shall be
+            well-formed and shall have well defined behavior. <code>A</code> shall be an <em>allocator</em>
+            [allocator.requirements]. The copy constructor and destructor of <code>A</code>
+            shall not throw.</p>
+        <p>
+            <em>Effects:</em> Allocates memory suitable for an object of type <code>T</code>
+            and constructs an object in it via the placement new expression <code>new( pv ) T()</code>
+            or <code>new( pv ) T( std::forward&lt;A1&gt;(a1), ..., std::forward&lt;An&gt;(an) )</code>.
+            <code>allocate_shared</code> uses a copy of <code>a</code> to allocate memory.</p>
+        <p>
+            <em>Returns:</em> A <code>shared_ptr</code> instance that stores and owns the address
+            of the newly constructed object of type <code>T</code>.</p>
+        <p>
+            <em>Postconditions:</em> <code>get() != 0 &amp;&amp; use_count() == 1</code>.</p>
+        <p>
+            <em>Throws:</em> <code>bad_alloc</code>, or an implementation-defined exception
+            when a resource other than memory could not be obtained.</p>
+        <p>
+            <em>Exception safety:</em> If an exception is thrown, has no effect.</p>
+        <p>
+            <em>[Note:</em> These functions will typically allocate more memory than <code>sizeof(T)</code>
+            to allow for internal bookkeeping structures such as the reference counts. <em>--end
+                note]</em></p>
+    </blockquote>
+    <h3>
+        Implementability:</h3>
+    <p>
+        A proof of concept non-intrusive implementation is available at:</p>
+    <p>
+        <a href="http://www.pdimov.com/cpp/make_shared.cpp">http://www.pdimov.com/cpp/make_shared.cpp</a></p>
+    <p>
+        This implementation uses variadic templates and rvalue references. When these features
+        are not available, it falls back on a family of overloaded function templates taking
+        arguments by const reference.</p>
+    <h2>
+        <a name="move">V. Move Support</a></h2>
+    <p>
+        Users often express concerns over the cost of copying a <code>shared_ptr</code>
+        in situations where the source of the copy is no longer needed. To address this
+        use case, <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2005/n1851.pdf">
+            N1851</a> proposes a separate smart pointer, <code>managed_ptr</code>, that
+        is convertible from and to <code>shared_ptr</code> and enforces unique ownership.</p>
+    <p>
+        The current proposal does not take this approach. Instead, we propose that move
+        constructors and move assignment operators be added to <code>shared_ptr</code>.
+        This allows a <code>shared_ptr</code> to be as efficient as an <code>auto_ptr</code>
+        or the proposed <code>unique_ptr</code> when the source of the copy or assignment
+        is a temporary or no longer needed. Move-aware standard containers will automatically
+        take advantage of this optimization. As an example of the consequences, reallocating
+        a <code>vector&lt; shared_ptr&lt;T&gt; &gt;</code> will no longer entail any reference
+        count updates.</p>
+    <h3>
+        Impact:</h3>
+    <p>
+        This feature affects the interface of <code>shared_ptr</code> in a way that reduces
+        its copy overhead and is in line with the rvalue recommendations for the standard
+        library presented in <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2005/n1856.html">
+            N1859</a>-<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2005/n1862.html">N1862</a>.
+        We believe that it is a strong candidate for addition to the C++0x standard.</p>
+    <h3>
+        Proposed text:</h3>
+    <p>
+        Add to <code>shared_ptr</code> [util.smartptr.shared] the following:</p>
+    <blockquote>
+        <pre>shared_ptr( shared_ptr &amp;&amp; r );
+template&lt;class Y&gt; shared_ptr( shared_ptr&lt;Y&gt; &amp;&amp; r );
+
+shared_ptr&amp; operator=( shared_ptr &amp;&amp; r );
+template&lt;class Y&gt; shared_ptr&amp; operator=( shared_ptr&lt;Y&gt; &amp;&amp; r );
+</pre>
+    </blockquote>
+    <p>
+        Add the following to [util.smartptr.shared.const]:</p>
+    <blockquote>
+        <pre>shared_ptr( shared_ptr &amp;&amp; r );
+template&lt;class Y&gt; shared_ptr( shared_ptr&lt;Y&gt; &amp;&amp; r );</pre>
+        <p>
+            <em>Requires:</em> For the second constructor <code>Y*</code> shall be convertible
+            to <code>T*</code>.</p>
+        <p>
+            <em>Effects:</em> Move-constructs a <code>shared_ptr</code> instance from <code>r</code>.</p>
+        <p>
+            <em>Postconditions:</em> <code>*this</code> contains the old value of <code>r</code>.
+            <code>r</code> is <em>empty</em>.</p>
+        <p>
+            <em>Throws:</em> nothing.</p>
+    </blockquote>
+    <p>
+        Add the following to [util.smartptr.shared.assign]:</p>
+    <blockquote>
+        <pre>shared_ptr&amp; operator=( shared_ptr &amp;&amp; r );
+template&lt;class Y&gt; shared_ptr&amp; operator=( shared_ptr&lt;Y&gt; &amp;&amp; r );</pre>
+        <p>
+            <em>Effects:</em> Equivalent to <code>shared_ptr( move( r ) ).swap( *this )</code>.</p>
+        <p>
+            <em>Returns:</em> <code>*this</code>.</p>
+    </blockquote>
+    <h3>
+        Implementability:</h3>
+    <p>
+        This feature has been added to <code>boost::shared_ptr</code> and will be part of
+        Boost 1.35.</p>
+    <h2>
+        <a name="atomic">VI. Atomic Access</a></h2>
+    <p>
+        The level of thread safety offered by <code>shared_ptr</code> is the default for
+        the standard library: const operations on the same instance can be performed concurrently
+        by multiple threads, but updates require exclusive access. Some scenarios require
+        stronger guarantees; there is considerable demand (on the Boost mailing lists and
+        otherwise) for an <em>atomic</em> <code>shared_ptr</code>, one that can withstand
+        concurrent updates from two threads without synchronization.</p>
+    <p>
+        Instead of providing a separate atomic smart pointer, we propose additions to <code>
+            shared_ptr</code>'s interface to address this use case. A typical example scenario
+        &mdash; a "lock-free" reader/writer pattern &mdash; that takes advantage of this
+        functionality is outlined below:</p>
+    <pre>shared_ptr&lt;State&gt; ps;
+
+void reader()
+{
+    shared_ptr&lt;State&gt; p = ps.copy();
+    <em>use *p;</em>
+}
+
+// single writer case
+void writer()
+{
+    shared_ptr&lt;State&gt; p( new State( *ps ) );
+    <em>update *p reflecting new information;</em>
+    ps.replace( move( p ) );
+}
+
+// or, multiple writers case
+void writer()
+{
+    shared_ptr&lt;State&gt; p = ps.copy();
+    do
+    {
+        shared_ptr&lt;State&gt; q( new State( *p ) );
+        <em>update *q reflecting new information;</em>
+    }
+    while( !ps.compare_swap( p, move( q ) ) );
+}
+</pre>
+    <h3>
+        Impact:</h3>
+    <p>
+        This feature affects the interface of <code>shared_ptr</code>. We believe that it
+        is a strong candidate for addition to the C++0x standard.</p>
+    <h3>
+        Proposed text:</h3>
+    <p>
+        Add to <code>shared_ptr</code> [util.smartptr.shared] the following:</p>
+    <blockquote>
+        <pre>// <em>[util.smartptr.shared.atomic], atomic access:</em>
+
+shared_ptr copy() const;
+void replace( shared_ptr r );
+bool compare_swap( shared_ptr &amp; v, shared_ptr w );
+</pre>
+    </blockquote>
+    <p>
+        Add a new section [util.smartptr.shared.atomic]:</p>
+    <blockquote>
+        <p>
+            A program is allowed to access the same <code>shared_ptr</code> instance concurrently
+            from multiple threads if the access is done exclusively via the member functions
+            in this section.</p>
+        <pre>shared_ptr copy() const;</pre>
+        <p>
+            <em>Returns:</em> <code>*this</code>.</p>
+        <p>
+            <em>Throws:</em> nothing.</p>
+        <pre>void replace( shared_ptr r );</pre>
+        <p>
+            <em>Effects:</em> <code>swap( r )</code>.</p>
+        <p>
+            <em>Throws:</em> nothing.</p>
+        <pre>bool compare_swap( shared_ptr &amp; v, shared_ptr w );</pre>
+        <p>
+            <em>Effects:</em> If <code>*this</code> is equivalent to <code>v</code>, assigns
+            <code>w</code> to <code>*this</code>, otherwise assigns <code>*this</code> to <code>
+                v</code>.</p>
+        <p>
+            <em>Returns:</em> <code>true</code> if <code>*this</code> was equivalent to <code>v</code>,
+            <code>false</code> otherwise.</p>
+        <p>
+            <em>Throws:</em> nothing.</p>
+        <p>
+            <em>Remarks:</em> two <code>shared_ptr</code> instances are equivalent if they store
+            the same pointer value and <em>share ownership</em>.</p>
+    </blockquote>
+    <h3>
+        Implementability:</h3>
+    <p>
+        A typical implementation would use a spinlock pool as described in <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2145.html">
+            N2145</a>. In pseudocode, the functions will be implemented as follows:</p>
+    <blockquote>
+        <pre>shared_ptr copy() const
+{
+    <em>lock the spinlock for *this</em>;
+    shared_ptr r( *this );
+    <em>unlock the spinlock for *this</em>;
+    return r;
+}
+
+void replace( shared_ptr r )
+{
+    <em>lock the spinlock for *this</em>;
+    swap( r );
+    <em>unlock the spinlock for *this</em>;
+}
+
+bool compare_swap( shared_ptr &amp; v, shared_ptr w )
+{
+    <em>lock the spinlock for *this</em>;
+
+    if( <em>*this is equivalent to v</em> )
+    {
+        swap( w );
+        <em>unlock the spinlock for *this</em>;
+        return true;
+    }
+    else
+    {
+        shared_ptr tmp( *this );
+        <em>unlock the spinlock for *this</em>;
+        tmp.swap( v );
+        return false;
+    }
+}
+</pre>
+    </blockquote>
+    <p>
+        Note that the code carefully avoids destroying a non-empty <code>shared_ptr</code>
+        instance while holding the spinlock, as this may lead to user code being called
+        and present an opportunity for a deadlock. It also attempts to limit the spinlock
+        scope to the minimum necessary to prevent contention.</p>
+    <h2>
+        <a name="cycles">VII. Cycle Collection</a></h2>
+    <p>
+        The inability of <code>shared_ptr</code> to handle cyclic structures has long been
+        cited as one of its important downsides. The proposed addition offers a way for
+        users to opt to reclaim cyclic structures via implementing a support interface for
+        their nodes.
+        It imposes no overhead on existing non-cyclic uses that do not implement the interface.</p>
+    <h3>
+        Impact:</h3>
+    <p>
+        This feature does not affect the interface of <code>shared_ptr</code>, but requires
+        support from the implementation in a similar way to <code>enable_shared_from_this</code>.
+        We believe that it is therefore a candidate for addition to the C++0x standard.</p>
+    <h3>
+        Proposed text:</h3>
+    <p>
+        Add to the synopsis of <code>&lt;memory&gt;</code> the following:</p>
+    <blockquote>
+        <pre>class enable_sp_collect;
+void sp_collect();</pre>
+    </blockquote>
+    <p>
+        Add the following two sections after [util.smartptr.enab]:</p>
+    <blockquote>
+        <h4>
+            Class enable_sp_collect</h4>
+        <p>
+            A class that derives from <code>enable_sp_collect</code> via public and unambiguous
+            inheritance is called <em>collectible</em>. The implementation tracks all collectible
+            classes owned by <code>shared_ptr</code> instances and can reclaim cycles of unreachable
+            collectible objects.</p>
+        <pre>namespace std {
+
+  class enable_sp_collect
+  {
+  protected:
+    ~enable_sp_collect() {}
+  public:
+    virtual void sp_enumerate( vector&lt; shared_ptr&lt;enable_sp_collect&gt; &gt; &amp; v ) = 0;
+    virtual void sp_reset() = 0;
+  };
+
+} // namespace std
+</pre>
+        <pre>virtual void sp_enumerate( vector&lt; shared_ptr&lt;enable_sp_collect&gt; &gt; &amp; v ) = 0;</pre>
+        <p>
+            <em>Effects:</em> Appends all <code>shared_ptr</code> instances to <em>collectible</em>
+            objects that <code>*this</code> owns to <code>v</code>.</p>
+        <pre>virtual void sp_reset() = 0;</pre>
+        <p>
+            <em>Effects:</em> Resets or destroys all <code>shared_ptr</code> instances to <em>collectible</em>
+            objects that <code>*this</code> owns.</p>
+        <p>
+            <em>Throws:</em> nothing.</p>
+        <p>
+            <em>[Note:</em> This function may be called while the collector is holding a lock.
+            Performing anything else besides resetting the <code>shared_ptr</code> instances
+            is strongly discouraged as it may lead to deadlocks. <em>--end note]</em></p>
+        <p>
+            <em>[Example:</em></p>
+<pre>class Node: public enable_sp_collect
+{
+private:
+
+  shared_ptr&lt;Node&gt; link;
+  vector&lt; shared_ptr&lt;Node&gt; &gt; links;
+
+public:
+
+  void sp_enumerate( vector&lt; shared_ptr&lt;enable_sp_collect&gt; &gt; &amp; v )
+  {
+    v.push_back( link );
+    v.insert( v.end(), links.begin(), links.end() );
+  }
+
+  void sp_reset()
+  {
+    link.reset();
+    links.clear();
+  }
+};
+</pre>
+        <p>
+            <em>--end example]</em></p>
+        <h4>
+            sp_collect</h4>
+        <pre>namespace std {
+
+  void sp_collect();
+
+}</pre>
+        <p>
+            <em>Effects:</em> For every collectible object owned by a <code>shared_ptr</code>,
+            calls <code>sp_enumerate</code>. Performs reachability analysis on the returned
+            data and identifies the unreachable collectible objects. Retains temporary <code>shared_ptr</code>
+            references to all unreachable objects. For every unreachable object, calls <code>sp_reset</code>.
+            Drops the temporary references, causing the destruction of the unreachable objects.</p>
+        <p>
+            <em>[Note:</em> This function is allowed to be called in a separate thread. <em>--end
+                note]</em></p>
+        <p>
+            <em>[Note:</em> The reachability analysis may be performed using Christopher's algorithm.
+            Using the instance graph, compute the use counts the objects would have if there
+            were no external <code>shared_ptr</code> instances. Compare the computed use counts
+            with the actual use counts. For every mismatch, mark the object as reachable from
+            the outside. Propagate reachability throughout the graph. <em>--end note]</em></p>
+    </blockquote>
+    <h3>
+        Implementability:</h3>
+    <p>
+        A very preliminary proof of concept implementation is available at:</p>
+    <p>
+        <a href="http://www.pdimov.com/cpp/enable_sp_collect.cpp">http://www.pdimov.com/cpp/enable_sp_collect.cpp</a></p>
+    <p>
+        It is expected to be integrated with <code>boost::shared_ptr</code> in time for the mailing.</p>
+    <hr />
+    <p>
+        <em>Thanks to Joe Gottman for his comments on the move support.</em></p>
+    <p>
+        <em>--end</em></p>
+</body>
+</html>

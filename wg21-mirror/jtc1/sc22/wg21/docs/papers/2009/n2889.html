@@ -1,0 +1,1039 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=US-ASCII">
+<title>An Asynchronous Call for C++</title>
+</head>
+<body>
+<h1>An Asynchronous Call for C++</h1>
+
+<p>
+ISO/IEC JTC1 SC22 WG21 N2889 = 09-0079 - 2009-06-21
+</p>
+
+<p>
+Lawrence Crowl, crowl@google.com, Lawrence@Crowl.org
+</p>
+
+<p>
+<a href="#Problem">Problem Description</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Domain">Solution Domain</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Resources">Thread Resources</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Value">Solution Value</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Related">Related Work</a><br>
+<a href="#Solution">Proposed Solution</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Acknowledgements">Acknowledgements</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Function">The <code>async</code> Function</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Joining">Thread Joining</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Policies">Execution Policies</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Lazy">Eager and Lazy Evaluation</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Direct">Direct Execution</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Future">New Future Type</a><br>
+<a href="#Wording">Proposed Wording</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#futures.overview">30.6.1 Overview [futures.overview]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#futures.async">30.6.? Function template <code>async</code> [futures.async]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#futures.joining_future">30.6.? Class template <code>joining_future</code> [futures.joining_future]</a><br>
+</p>
+
+
+<h2><a name="Problem">Problem Description</a></h2>
+
+<p>
+One of the simplest methods for exploiting parallelism
+is to call one subroutine in parallel with another.
+However, with the current threading facilities,
+doing so is a difficult task.
+</p>
+
+<p>
+There have been repeated requests for a simpler mechanism,
+all of which were rejected by the committee
+as not being within the spirit of the Kona compromise.
+However, there are now national body comments
+requesting such a facility.
+</p>
+
+<blockquote>
+<p>
+UK-182 30.3.3.2.2
+</p>
+<p>
+Future, promise and packaged_task
+provide a framework for creating future values,
+but a simple function to tie all three components together is missing.
+Note that we only need a <strong>simple</strong> facility for C++0x.
+Advanced thread pools are to be left for TR2.
+</p>
+<p>
+<code>async( F&amp;&amp; f, Args &amp;&amp; ... );</code>
+Semantics are similar to creating a thread object
+with a packaged_task invoking <code>f</code>
+with <code>forward&lt;Args&gt;(args...)</code>
+but details are left unspecified
+to allow different scheduling and thread spawning implementations.
+It is unspecified whether a task submitted to <code>async</code>
+is run on its own thread or a thread previously used for another async task.
+If a call to async succeeds, it shall be safe to wait for it from any thread.
+The state of <code>thread_local</code> variables
+shall be preserved during async calls.
+No two incomplete async tasks
+shall see the same value of <code>this_thread::get_id()</code>.
+[Note: this effectively forces new tasks to be run on a new thread,
+or a fixed-size pool with no queue.
+If the library is unable to spawn a new thread
+or there are no free worker threads
+then the async call should fail.]
+</p>
+</blockquote>
+
+
+<h3><a name="Domain">Solution Domain</a></h3>
+
+<p>
+Concurrency and parallism represent broad domain of problems and solutions.
+Mechanisms are generally appropriate to a limited portion of that domain.
+So, mechanisms should explicitly state the domain
+in which they are intended to be useful.
+</p>
+
+<p>
+The anticipated domain for the following <code>async</code> solution
+is extracting a limited amount of concurrency
+from existing sequential programs.
+That is, some function calls
+will be made asynchrounous where appropriate
+to extract high-level concurrency from program structure,
+and not from its data structures.
+The facility is not intended to compete with OpenMP or automatic parallelizers
+that extract loop-level parallelism.
+To be concrete,
+the <code>async</code> facility would be appropriate
+to the recursive calls to quicksort,
+but not to the iteration in a partition.
+</p>
+
+<p>
+In this domain,
+the programming model is:
+</p>
+<ul>
+<li>At the highest levels of the program,
+add async where appropriate.</li>
+<li>If enough concurrency has not been achieved,
+move down a layer.</li>
+<li>Repeat until you achieve the desired core utilization.</li>
+</ul>
+
+<p>
+In this model,
+nested asynchronous calls are not only supported,
+but desired,
+as they provide the implementation the opportunity
+to reuse threads for many potentially, but not actually, asynchronous calls.
+</p>
+
+
+<h3><a name="Resources">Thread Resources</a></h3>
+
+<p>
+The central technical problem
+in providing an asynchronous execution facility
+is to provide it
+in a manner that does not require the use of thread pools,
+while at the same time avoiding problems synchronizing
+with the destructors for any thread-local variables
+used by any threads created to perform the asynchronous work.
+See
+<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2009/n2880.html">
+N2880: C++ object lifetime interactions with the threads API</a>,
+Hans-J. Boehm, Lawrence Crowl,
+ISO/IEC JTC1 WG21 N2880, 2009-05-01.
+</p>
+
+<p>
+While not explicit,
+the essential lesson of 
+<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2009/n2880.html">
+N2880</a>
+is as follows.
+</p>
+<blockquote>
+<p>
+Threads have variables
+in the form of thread-local variables, parameters, and automatic variables.
+To ensure that the resources held by those variables are released,
+one must join with the thread so that those variables are destroyed.
+To ensure that destructors of those variables are well-defined,
+one must join with the thread before its referenced environment is destroyed.
+</p>
+</blockquote>
+
+<p>
+Some consequences of this observation are:
+</p>
+<ul>
+<li>
+One should never detach non-trivial threads.
+(There is probably an opportunity for a formal definition in here.)
+</li>
+<li>
+All thread pools should be explicitly declared,
+i.e. implicit thread pools are bad.
+</li>
+<li>
+One should manage the thread pool
+as one would manage the resources it will accrete and reference.
+</li>
+</ul>
+
+
+<h3><a name="Value">Solution Value</a></h3>
+
+<p>
+In addition to the technical details,
+the committee must consider the value in any solution
+that meets the procedural bounds of the Kona compromise
+and the technical bounds embodied in 
+<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2009/n2880.html">N2880</a>.
+In particular,
+external facilities like
+<a href="http://supertech.csail.mit.edu/cilk/">Cilk</a>,
+the
+<a href="http://www.threadingbuildingblocks.org/">Threading Building Blocks</a>,
+and the
+<a href="http://msdn.microsoft.com/en-us/library/dd492418(VS.100).aspx">
+Parallel Patterns Library</a>
+are known to be better able to handle fined-grained parallelism.
+So, is the solution space of sufficient value,
+relative to these external facilities,
+for standardization in C++0x?
+</p>
+
+<p>
+The value in a solution is relative not only to external facilities,
+but also relative to facilities in the current standard.
+Our concurrency primitive, <code>std::thread</code>,
+does not return values,
+and getting a value out through <code>std::packaged_task</code>
+and <code>std::unique_future</code>
+may take more training than many programmers are willing to accept.
+So, is the solution space of sufficient value,
+relative to these internal facilities,
+for standardization in C++0x?
+</p>
+
+<p>
+In this paper, we presume that the value in the solution
+comes from its improvement over existing internal facilities.
+The wording of the UK national body comment implies the same conclusion.
+On that basis, we propose the following solution.
+</p>
+
+
+<h3><a name="Related">Related Work</a></h3>
+
+<p>
+Oliver Kowalke is implementing boost.task
+(formerly known as boost.threadpool).
+In this library, <code>launch_in_thread()</code> reuses existing threads.
+The function returns a returns handle object for both thread and return value.
+This library also allows task interruption.
+It is available at the Boost Vault
+(<a href="http://www.boostpro.com/vault/">http://www.boostpro.com/vault/</a>
+&mdash; section 'Concurrent Programming')
+or from the Boost sandbox
+(svn &mdash;
+<a href="https://svn.boost.org/svn/boost/sandbox/task/">
+https://svn.boost.org/svn/boost/sandbox/task/</a>).
+</p>
+
+<p>
+Herb Sutter has proposed an alternate solution in draft text,
+generally taking a different choice
+for those issues in which consensus has not formed.
+This paper should appear as
+<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2009/n2901.pdf">
+N2901</a>.
+</p>
+
+<h2><a name="Solution">Proposed Solution</a></h2>
+
+<p>
+The proposed solution consists of
+a set of <code>async</code> functions to launch asychronous work
+and a future to manage the function result.
+</p>
+
+
+<h3><a name="Acknowledgements">Acknowledgements</a></h3>
+
+<p>
+This solution derives from an extensive discussion
+on the <cite>C++ threads standardisation</cite>
+&lt;cpp-threads@decadentplace.org.uk&gt;
+mailing list.
+That discusson has not yet reached consensus.
+We highlight points of disagreement below.
+Note that
+the presentation in this paper is
+substantially expanded from earlier drafts,
+clarifying several issues,
+so the disagreements may be weaker than they were in discussion.
+</p>
+
+<p>
+Thanks to the following contributors to the discussion on this topic:
+Hans Boehm,
+Beman Dawes,
+Peter Dimov,
+Pablo Halpern,
+Howard Hinnant,
+Oliver Kowalke,
+Doug Lea,
+Arch Robison,
+Bjarne Stroustrup,
+Alexander Terekhov,
+and Anthony Williams.
+In particular, we are extremely grateful to Herb Sutter
+for forcing a thorough analysis into the issues.
+</p>
+
+
+<h3><a name="Function">The <code>async</code> Function</a></h3>
+
+<p>
+The <code>async</code> functions
+use the standard techniques for deferring function execution.
+The function and its arguments are listed separately
+as parameters to the <code>async</code> functions,
+which are later combined at the point of invocation
+to call the designated work.
+</p>
+
+<p>
+For example, consider computing the sum of a very large array.
+The first task is to not compute asynchronously
+when the overhead would be significant.
+The second task is to split the work into two pieces,
+one executed by the host thread and one executed asynchronously.
+</p>
+<blockquote><pre><code>
+int parallel_sum(int* data, int size)
+{
+  int sum = 0;
+  if ( size &lt; 1000 )
+    for ( int i = 0; i &lt; size; ++i )
+      sum += data[i];
+  else {
+    auto handle = std::async(parallel_sum, data+size/2, size-size/2);
+    sum += parallel_sum(data, size/2);
+    sum += handle.get();
+  }
+  return sum;
+}
+</code></pre></blockquote>
+
+
+<h3><a name="Joining">Thread Joining</a></h3>
+
+<p>
+Because Kona compromise prohibits thread pools
+and because we must join with any thread created,
+any asynchronous execution facility
+must ensure,
+at the very least,
+that any thread created is joined
+before the resulting handle is destroyed.
+(And, of course,
+the programmer must destroy the handle,
+not abandon it to free store.)
+</p>
+
+<p>
+A consequence of the joining
+is that threads cannot be reused.
+Otherwise, some section of the program
+would lose control of the resources accreted
+in the thread being reused.
+</p>
+
+<p>
+This issue has not yet reached consensus.
+</p>
+
+<p>
+Given that the thread must join,
+there are two implementation strategies,
+intrusively implement <code>async</code>
+or keep the <code>std::thread</code>
+within the future for later <code>join</code>ing.
+</p>
+
+<p>
+In the intrusive <code>async</code>,
+the implementation within the thread
+must
+</p>
+<ul>
+<li>capture any return value or exception;</li>
+<li>destroy all thread-local variables; and only then</li>
+<li>invoke the <code>set_value</code> or <code>set_exception</code>
+function of the <code>promise</code> corresponding to the future.</li>
+</ul>
+<p>
+That is, the promise
+effectively joins the thread
+before the future becomes ready.
+</p>
+
+<p>
+When storing the <code>std::thread</code> within the future,
+the implementation of <code>async</code>
+is a straightforward composition of
+<code>packaged_task</code>, <code>unique_future</code>,
+and <code>std::thread</code>.
+</p>
+
+<p>
+One consequence of 
+storing the <code>std::thread</code> within the future
+is that either <code>unique_future</code>
+must be substantially modified
+or that we introduce a new future type.
+</p>
+
+<p>
+Another consequence of
+storing the <code>std::thread</code> within the future
+is that the waiting function changes
+from a condition-variable <code>wait</code>
+to a thread join.
+The <code>std::thread</code> class
+does provides neither a <code>timed_join</code>
+nor a <code>try_join</code>,
+and so a joining future
+cannot implement the full interface of <code>unique_future</code>.
+</p>
+
+
+<h3><a name="Policies">Execution Policies</a></h3>
+
+<p>
+The <code>async</code> functions have a policy parameter.
+Three policies are defined in this paper.
+</p>
+<dl>
+
+<dt>Always invoke the function in a new thread.</dt>
+<dd>
+Note that we do not choose "another thread"
+as a consequence of the discussion above.
+</dd>
+
+<dt>Always invoke the function serially.</dt>
+<dd>
+The value in this policy
+is primarily in temporarily reducing local concurrency
+in experiments to achieve higher system performance.
+</dd>
+
+<dt>Invoke the function at the discretion of the implementation.</dt>
+<dd>
+The implementation may use either of the above policies on a per-call basis.
+The value in this policy is that
+it enables the implementation to better manage resources.
+It is the policy used when the programmer does not specify one.
+</dd>
+
+</dl>
+
+<p>
+The intent of this proposal is to closely follow
+the parameters and overloads of the <code>std::thread</code> constructors.
+We expect this consistency to provide the least surprise to users.
+Because <code>std::thread</code> has a variadic constructor,
+the <code>std::async</code> function has a variadic overload.
+A consequence is that the standard technique
+for implementing a default policy
+via a defaulted paramter
+does not work.
+Hence the proposal places the policy at the front of the parameter list
+and implements the default policy
+with a separate overload that does not have that parameter.
+This placement seems unnatural to many members of the committee,
+and they desire to place policy parameter at the end.
+</p>
+
+<p>
+The only way to provide the policy parameter at the end
+and to be consistent with <code>std::thread</code> constructors
+is to remove the variadic constructor from <code>std::thread</code>.
+Doing so would not lose a great deal of syntactic consiceness,
+because the lambda facility can encapsulate many parameters.
+The <code>async</code> form above can be written as follows.
+</p>
+<blockquote><pre><code>
+auto handle = std::async(
+    [=]{ return parallel_sum( data+size/2, size-size/2); },
+    fully_threaded );
+</code></pre></blockquote>
+
+<p>
+We have no objection to that approach.
+Indeed, it would make the referencing environment of
+the executed function quite explicit
+in the form of the <var>lambda-capture</var>.
+Should the variadic <code>std::thread</code> constructor be removed,
+we will modify the proposal to move the policy parameter
+to the end of the list and default it.
+</p>
+
+<p>
+Alternatively,
+one could have inconsistent parameters
+for <code>std::thread</code> constructors
+and <code>std::async</code> overloads.
+</p>
+
+<p>
+This choice has not reached consensus.
+</p>
+
+
+<h3><a name="Lazy">Eager and Lazy Evaluation</a></h3>
+
+<p>
+When the work is invoked serially,
+we propose to do so at the point of value request,
+rather than at the point of initiation.
+That is, work is invoked lazily rather than eagerly.
+This approach may seem surprising,
+but there are reasons to prefer invocation-on-request.
+</p>
+<ul>
+<li>
+Exceptions in the hosting code
+may cause the future to be prematurely destroyed.
+As the return value cannot be recovered,
+the only reason to do the work is for its side effects.
+</li>
+<li>
+Those side effects might not have occured
+in the original sequential formulation of the algorithm,
+so there would appear to be little lost in failing to
+execute those side effects if the value is not retrieved.
+</li>
+<li>
+Work stealing implementations will be ineffective
+if the <code>async</code> functions have already committed
+to an eager serial execution.
+</li>
+<li>
+Executing the work serially at the call to <code>async</code>
+might introduce deadlock.
+In contrast,
+executing the work serially at the call to <code>get</code>
+cannot introduce any deadlock that was not already present
+because the calling thread is necessarily blocked.
+</li>
+<li>
+Lazy evaluation permits speculative execution.
+Rather than wait to invoke the function when the result is known to be needed,
+one can invoke <code>async</code> earlier.
+When there are sufficient processor resources,
+the function executes concurrently and speculatively.
+When there are not sufficient resources,
+the function will execute only when truly needed.
+</li>
+</ul>
+
+<p>
+Eager semantics seem more natural
+when programmers think of "waiting to use the return value".
+On the other hand,
+lazy semantics seem more natural
+when programmers think of "moving the call earlier".
+Consider the following examples.
+</p>
+
+<blockquote><pre><code>
+int original( int a, b ) {
+    int c = work1( a );
+    int d = work2( b );
+}
+
+int eager( int a, b ) {
+    auto handle = async( work1, a );
+    int d = work2( b );
+    int c = handle.get();
+}
+
+int lazy( int a, b ) {
+    auto handle = async( work2, b );
+    int c = work1( a );
+    int d = handle.get();
+}
+</code></pre></blockquote>
+
+<p>
+Note also that in the proposed lazy semantics,
+any serial execution will be in the context
+of the thread that executes the <code>get()</code>.
+While we expect that this thread will nearly always
+be the same as the thread that executes <code>async()</code>
+it need not be because a future can be moved.
+</p>
+
+<p>
+There are consequences to lazy evaluation.
+In particular,
+the future returned from <code>async</code>
+must either be a modified version of the existing <code>unique_future</code>
+or the future must be of a new type.
+The reason is that lazy evaluation
+requires that the future carry an <code>std::function</code>
+to represent the computation needed.
+</p>
+
+
+<h3><a name="Direct">Direct Execution</a></h3>
+
+<p>
+A desirable implementation
+in the case of synchronous execution
+is <dfn>direct execution</dfn>,
+in which the call to the <code>std::function</code> representing the work
+returns its result or exception directly to the caller.
+</p>
+
+<p>
+In lazy evaluation,
+direct execution is straightforward;
+the implementation of a synchronous <code>get()</code>
+simply calls the <code>std::function</code> and returns its result.
+Any exeption is simply propogated as in a normal function call.
+</p>
+
+<p>
+In eager evaluation,
+one must necessarily save the result in a variable
+for later copy/move at from the <code>get()</code> call.
+However, propogating the exception at the <code>async()</code> call
+would introduce a second place in which the programmer
+must protect against an exception.
+That burden is undesirable,
+so the <code>async()</code> call should also save
+any exception for later propogation by the <code>get()</code> call.
+All of this means that eager evaluation cannot exploit direct execution.
+</p>
+
+<p>
+Direct execution has a consequence however.
+Since the value or exception status is unknown until the <code>get</code> call,
+the <code>has_value</code> and <code>has_exception</code> queries
+cannot provide meaningful results before then.
+That is, direct execution
+invalidates part of the interface to <code>unique_future</code>.
+</p>
+
+<p>
+Note, however,
+that the <code>has_value</code> and <code>has_exception</code> queries
+are meaningful with lazy evaluation
+so long as the first call to them
+invokes the <code>std::function</code>
+in an indirect manner.
+</p>
+
+
+<h3><a name="Future">New Future Type</a></h3>
+
+<p>
+As hinted several times earlier,
+we must make a choice in the future type returned by <code>async</code>:
+</p>
+<ul>
+<li>an unmodified <code>unique_future</code>,</li>
+<li>a modified <code>unique_future</code>, or</li>
+<li>a new future type.</li>
+</ul>
+
+<p>
+Based on the discussion above,
+</p>
+<ul>
+<li>
+A non-intrusive joining implementation
+implies a modified or new future type.
+</li>
+<li>
+The loss of interface functionality in a non-intrusive joining implementation
+suggests a new future type.
+</li>
+<li>
+Lazy evalutation
+implies a modified or new future type.
+</li>
+<li>
+Direct execution
+implies a modified or new future type.
+</li>
+<li>
+The loss of interface functionality in direct execution
+suggests a new future type.
+</li>
+</ul>
+
+<p>
+Furthermore,
+a modified <code>unique_future</code>
+would necessarily induce more overhead
+on the original intended uses of <code>unique_future</code>.
+The direct overhead might be as low as a few words
+and a couple of tests or virtual calls.
+Unfortunately, tests and virtual calls
+tend to introduce pipeline bubbles
+and virtual calls tend to be barriers to optimization.
+So, the indirect overhead might be substantially higher.
+However, we have no measurements
+comparing that overhead
+to the normal cost of <code>unique_future</code>.
+Even so,
+the original uses of <code>unique_future</code>,
+such as in coordinating thread pools invocations,
+are likely to be in more performance-sensitive
+code than are uses of <code>async</code>.
+Therefore, avoiding potential performance impact to thread pools
+implies a new future type.
+</p>
+
+<p>
+Modifying <code>unique_future</code>
+implies revisiting aspects of the working draft
+that we thought were stable.
+Introducing a new future type
+would avoid potentially destabilizing the draft.
+</p>
+
+<p>
+On balance,
+we believe that a new future type is the best overall
+solution to the conflicting desireable features in
+the return type of the <code>async</code> function.
+This choice has not reached consensus.
+</p>
+
+<p>
+Given that we have a new future,
+we remove <code>timed_wait</code>,
+<code>is_ready</code>,
+<code>has_value</code>, and
+<code>has_exception</code>,
+from the interface.
+That is, the new future interface,
+a <code>joining_future</code>,
+is modeled in part on <code>thread</code>,
+which has a unique owner and is therefore only movable.
+</p>
+
+
+<h2><a name="Wording">Proposed Wording</a></h2>
+
+<p>
+The proposed wording is as follows.
+It consists primarily of two new subsections.
+</p>
+
+
+<h3><a name="futures.overview">30.6.1 Overview [futures.overview]</a></h3>
+
+<p>
+Add to the synopsis the appropriate entries from the following sections.
+</p>
+
+
+<h3><a name="futures.async">30.6.? Function template <code>async</code> [futures.async]</a></h3>
+
+<p>
+Add the following section.
+</p>
+
+<blockquote>
+
+<pre><code>
+enum async_policy {
+    fully_threaded,
+    fully_synchronous,
+    impl_discretion
+}
+</code></pre>
+
+<dl>
+<dt><code>template&lt;class F&gt;<br>
+&nbsp;&nbsp;requires Callable&lt;F&gt;;<br>
+&nbsp;&nbsp;joining_future&lt;Callable::result_type&gt;<br>
+&nbsp;&nbsp;async(async_policy policy, F f);</code></dt>
+<dt><code>template&lt;typename F, typename ... Args&gt;<br>
+&nbsp;&nbsp;requires Callable&lt;F, Args...&gt;;<br>
+&nbsp;&nbsp;joining_future&lt;Callable::result_type&gt;<br>
+&nbsp;&nbsp;async(async_policy policy, F&amp;&amp; f, Args&amp;&amp;...);</code></dt>
+<dt><code>template&lt;class F&gt;<br>
+&nbsp;&nbsp;requires Callable&lt;F&gt;;<br>
+&nbsp;&nbsp;joining_future&lt;Callable::result_type&gt;<br>
+&nbsp;&nbsp;async(F f);</code></dt>
+<dt><code>template&lt;typename F, typename ... Args&gt;<br>
+&nbsp;&nbsp;requires Callable&lt;F, Args...&gt;;<br>
+&nbsp;&nbsp;joining_future&lt;Callable::result_type&gt;<br>
+&nbsp;&nbsp;async(F&amp;&amp; f, Args&amp;&amp;...);</code></dt>
+<dd>
+<p>
+<i>Requires:</i>
+<code>F</code> and each type <code>Ti</code> in <code>Args</code>
+shall be <code>CopyConstructible</code>
+if an lvalue and otherwise <code>MoveConstructible</code>.
+<code><var>INVOKE</var>(f, w1, w2, ..., wN)</code> (20.7.2)
+shall be a valid expression for some values <var>w1, w2, ..., wN</var>,
+where <code>N == sizeof...(Args)</code>.
+</p>
+<p>
+<i>Effects:</i>
+Constructs an object of type
+<code>joining_future&lt;Callable::result_type&gt;</code>
+([futures.joining_future]).
+If <code>policy</code> is <code>fully_threaded</code>,
+creates an object of type <code>thread</code>
+and executes <code><var>INVOKE</var>(f, t1, t2, ..., tN)</code>
+in a new thread of execution,
+where <var>t1, t2, ..., tN</var> are the values in <code>args...</code>.
+Any return value is captured by the <code>joining_future</code>.
+Any exception not caught by <code>f</code>
+is captured by the <code>joining_future</code>.
+If <code>policy</code> is <code>fully_synchronous</code>,
+the thread calling <code>joining_future::get()</code> ([future.joining_future])
+executes <code><var>INVOKE</var>(f, t1, t2, ..., tN)</code>
+in the caller's own thread of execution,
+where <var>t1, t2, ..., tN</var> are the values in <code>args...</code>.
+The invocation is said to be <dfn>deferred</dfn>.
+If <code>policy</code> is <code>impl_discretion</code>,
+the implementation may choose either policy above
+at any call to <code>async</code>.
+[<i>Note:</i>
+Implementations should defer invocations
+when no more concurrency can be effectively exploited.
+&mdash;<i>end note</i>]
+If there is no <code>policy</code> parameter,
+the behavior is as if
+there was a <code>impl_discretion</code> parameter was specified.
+</p>
+<p>
+<i>Synchronization:</i>
+The invocation of the <code>async</code>
+happens before (1.10 [intro.multithread]) the invocation of <code>f</code>.
+[<i>Note:</i>
+This statement applies even when
+the corresponding <code>joining_future</code> is moved to another thread.
+&mdash;<i>end note</i>]
+</p>
+<p>
+<i>Throws:</i>
+<code>std::system_error</code>
+if <code>policy</code> is <code>fully_threaded</code>
+and the implementation is unable to start a new thread.
+</p>
+<p>
+<i>Error conditions:</i>
+&mdash; <code>resource_unavailable_try_again</code> &mdash;
+if <code>policy</code> is <code>fully_threaded</code>
+and either the system lacked the necessary resources to create another thread,
+or the system-imposed limit on the number of threads in a process
+would be exceeded.
+</p>
+
+<p>
+[<i>Example:</i>
+Two items of work can be executed in parallel as below.
+</p>
+<pre><code>
+extern int work1(int value);
+extern int work2(int value);
+int work(int value) {
+  auto handle = std::async(std::impl_discretion, work2, value);
+  int tmp = work1(value);
+  return tmp + handle.get();
+}
+</code></pre>
+<p>
+&mdash;<i>end example:</i>]
+[<i>Note:</i>
+The statement
+</p>
+<pre><code>
+  return work1(value) + handle.get();
+</code></pre>
+<p>
+might not result in parallelism
+because <code>get()</code> may be evaluated before <code>work1()</code>,
+thus forcing <code>work2</code> to be evaluated before <code>work1()</code>.
+&mdash;<i>end note:</i>]
+</p>
+
+</dd>
+</dl>
+
+</blockquote>
+
+
+<h3><a name="futures.joining_future">30.6.? Class template <code>joining_future</code> [futures.joining_future]</a></h3>
+
+<p>
+Add the following section after the one above.
+</p>
+
+<blockquote>
+
+<pre><code>
+namespace std {
+  template&lt;class R&gt;
+  class joining_future {
+  public:
+    joining_future(joining_future &amp;&amp;);
+    joining_future(const joining_future&amp; rhs) = delete;
+    ~joining_future();
+    joining_future&amp; operator=(const joining_future&amp; rhs) = delete;
+    <i>// retrieving the value</i>
+    <em>see below</em> get();
+    // functions to check state and wait for ready
+  };
+}
+</code></pre>
+
+<p>
+The implementation shall provide the template <code>joining_future</code>
+and two specializations,
+<code>joining_future&lt;R&amp;&gt;</code> and
+<code>joining_future&lt;void&gt;</code>.
+These differ only in the return type
+and return value of the member function <code>get</code>,
+as set out in its description, below.
+</p>
+
+<dl>
+<dt><code>joining_future(joining_future&amp;&amp; rhs);</code></dt>
+<dd>
+<p>
+<i>Effects:</i>
+move constructs a <code>joining_future</code> object
+whose associated state is the same as the state of <code>rhs</code> before.
+The associated state derives from the <code>async</code> call
+that provided the original future.
+The state consists of one or more of
+any <code>thread</code> created by the call,
+the function object and its arguments,
+the return value of its invocation,
+or the exception of its invocation.
+</p>
+<p>
+<i>Postcondition:</i>
+<code>rhs</code> can be safely destroyed.
+</p>
+</dd>
+
+<dt><code>~joining_future();</code></dt>
+<dd>
+<p>
+<i>Effects:</i>
+destroys <code>*this</code> and its associated state
+if no other object refers to that.
+If the invocation has been deferred,
+but not yet executed via <code>get</code>,
+the invocation is not executed.
+</p>
+<p>
+<i>Synchronization:</i>
+If the invocation has been deferred,
+then the associated <code>async</code> call
+happens before (1.10 [intro.multithread]) the destructor return.
+Otherwise,
+as if <var>associated-thread</var><code>.join()</code>.
+</p>
+</dd>
+
+<dt><code>R&amp;&amp; joining_future::get();</code></dt>
+<dt><code>R&amp; joining_future&lt;R&amp;&gt;::get();</code></dt>
+<dt><code>void joining_future&lt;void&gt;::get();</code></dt>
+<dd>
+<p>
+<i>Note:</i>
+as described above,
+the template and its two required specializations
+differ only in the return type
+and return value of the member function <code>get</code>.
+</p>
+<p>
+<i>Effects:</i>
+If the invocation has been deferred,
+then executes <code><var>INVOKE</var>(f, t1, t2, ..., tN)</code>
+where <var>t1, t2, ..., tN</var> are the values in <code>args...</code>.
+</p>
+<p>
+<i>Returns:</i>
+If the invocation has been deferred, then
+</p>
+<ul>
+<li>
+<code>joining_future::get()</code> returns the rvalue-reference
+of the result of the invocation.
+</li>
+<li>
+<code>joining_future&lt;R&amp;&gt;::get()</code> returns the reference
+of the result of the invocation.
+</li>
+<li>
+<code>joining_future&lt;void&gt;::get()</code> returns nothing.
+</li>
+</ul>
+<p>
+Otherwise,
+</p>
+<ul>
+<li>
+<code>joining_future::get()</code> returns an rvalue-reference
+to the value stored in the asynchronous result.
+</li>
+<li>
+<code>joining_future&lt;R&amp;&gt;::get()</code> returns the stored reference.
+</li>
+<li>
+<code>joining_future&lt;void&gt;::get()</code> returns nothing.
+</li>
+</ul>
+<p>
+<i>Throws:</i>
+If the invocation has been deferred,
+then any exception from the invocation.
+Otherwise,
+the stored exception, if an exception was stored and not retrieved before.
+</p>
+<p>
+<i>Synchronization:</i>
+If the invocation has been deferred,
+and the return from the invocation
+happens before (1.10 [intro.multithread]) the <code>get</code> returns.
+Otherwise,
+as if <var>associated-thread</var><code>.join()</code>.
+</p>
+<p>
+<i>Remark:</i>
+the effect of calling <code>get()</code> a second time
+on the same <code>joining_future</code> object
+is unspecified.
+</p>
+</dd>
+
+</dl>
+
+</blockquote>
+
+</body>
+</html>

@@ -1,0 +1,439 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<html>
+
+<head>
+<title>N2744: Comments on Asynchronous Future Value Proposal</title>
+</head>
+
+<body>
+
+<pre>
+Doc. no:  N2744=08-0254
+Date:     2008-08-22
+Project:  Programming Language C++
+Reply to: Christopher Kohlhoff &lt;chris&#64;kohlhoff&#46;com&gt;
+</pre>
+
+<h1>N2744: Comments on Asynchronous Future Value Proposal</h1>
+
+<p>
+This paper contains some comments on the asynchronous future value library
+described in N2671 "An Asynchronous Future Value: Proposed Wording". Some of
+the comments below may have been rendered obsolete by a subsequent revision of
+that document.
+</p>
+
+<h2>Thread Safety and shared_future&lt;R&gt;::get()</h2>
+
+<h3>Problem</h3>
+
+<p>
+N2671 specifies that <code>shared_future&lt;R&gt;::get()</code> returns a
+<code>const</code> reference to the value stored in the asynchronous result.
+This may result in non-obvious sharing of objects between threads, and has the
+potential to cause race conditions in user code. 
+</p>
+
+<h3>Context</h3>
+
+<p>
+Given a class with a mutable data member:
+</p>
+
+<pre>
+  class widget
+  {
+  public:
+    ...
+    double get_value() const
+    {
+      if (value_is_cached_)
+        return value_;
+      else
+      {
+        value_ = /* expensive calculation */
+        value_is_cached_ = true;
+        return value_;
+      }
+    }
+    ...
+  private:
+    ...
+    mutable bool value_is_cached_;
+    mutable double value_;
+  };
+</pre>
+
+<p>
+Two or more threads may perform the following concurrently:
+</p>
+
+<pre>
+  std::shared_future&lt;widget&gt; w = ...;
+  double d = w.get().get_value();
+</pre>
+
+<p>
+If the variable <code>w</code> has the same associated state in all threads,
+then the program may encounter a race condition in
+<code>widget::get_value()</code>. Therefore the current specification of
+<code>shared_future&lt;R&gt;</code> in N2671 appears to require that
+<code>R</code> provide a thread safety guarantee on all const member
+functions.
+</p>
+
+<p>
+The programmer can, of course, prevent concurrent modification of the
+<code>mutable</code> data members by using a <code>mutex</code>. However, it is
+the author's belief that most programmers will assume a standardised mechanism
+to transfer values between threads means that they can safely transfer
+thread-unaware value types between threads.
+</p>
+
+<h3>Suggested Solution</h3>
+
+<p>
+Change the specification of <code>shared_future&lt;R&gt;::get()</code> to
+return by value. This would allow a type that provides no thread safety
+guarantees to be safely transported between threads (assuming no shared data
+between instances of the type).
+</p>
+
+<h2>Promise Non-Copyability</h2>
+
+<h3>Problem</h3>
+
+<p>
+The proposed wording in N2671 specifies that <code>promise</code> objects are
+movable but not copyable. However, difficulties arise whenever two or more
+control paths may need to set the <code>promise</code>. In particular, the need
+to deal with exceptions can be error prone.
+</p>
+
+<h3>Context</h3>
+
+<p>
+Consider a scenario where a programmer has been asked to implement the
+following function:
+</p>
+
+<pre>
+  void async_operation(std::promise&lt;int&gt; p);
+</pre>
+
+<p>
+to meet these requirements:
+</p>
+
+<ul>
+
+<li>
+The function initiates an asynchronous operation, i.e. the operation must be
+performed in a different thread of control to the point of initiation.
+</li>
+
+<li>
+The function accepts a <code>promise</code> that is to be set once the
+operation completes.
+</li>
+
+<li>
+The function is required to report any exception via the <code>promise</code>'s
+<code>set_exception()</code>, and must not allow it to propagate out.
+</li>
+
+</ul>
+
+<p>
+These are not artificial requirements -- the function may in fact be just one
+in a long chain of asynchronous operations. The responsibility for fulfilling
+the <code>promise</code> is transferred along the chain. Any given step in the
+chain would therefore be decoupled from the creation of the associated
+<code>unique_future</code> and executing in a thread of control quite distinct
+from the original point of initiation.
+</p>
+
+<p>
+Now, suppose the programmer's initial (and wrong) attempt looks like this:
+</p>
+
+<pre>
+  void perform_operation(std::promise&lt;int&gt; p) { ... }
+
+  void async_operation(std::promise&lt;int&gt; p)
+  {
+    try
+    {
+      std::thread(perform_operation, std::move(p)); // Can throw system_error.
+    }
+    catch (...)
+    {
+      p.set_exception(std::current_exception());
+    }
+  }
+</pre>
+
+<p>
+The <code>thread</code> constructor might throw an exception due to a system
+resource error. However, it isn't possible for the programmer to know whether
+the exception will be thrown before or after the value is moved out of the
+<code>promise</code> object <code>p</code>. (In the obvious implementation of
+<code>thread</code>, the exception is thrown <em>after</em> the
+<code>promise</code> has been moved.) The result is that the
+<code>set_exception</code> function may be called on an invalid
+<code>promise</code> object.
+</p>
+
+<p>
+To avoid making this sort of error, the programmer must assume that once the
+<code>thread</code> constructor begins, any object moved to the thread is no
+longer accessible. To be able to call <code>set_exception()</code> on the
+<code>promise</code> some type of shared ownership is required:
+</p>
+
+<pre>
+  void perform_operation(std::shared_ptr&lt;std::promise&lt;int&gt;&gt; p) { ... }
+
+  void async_operation(std::promise&lt;int&gt; p)
+  {
+    std::shared_ptr&lt;std::promise&lt;int&gt;&gt; new_p; // Throws nothing.
+
+    try
+    {
+      new_p.reset(new promise&lt;int&gt;); // Can throw bad_alloc.
+    }
+    catch (...)
+    {
+      p.set_exception(std::current_exception());
+      return;
+    }
+
+    *new_p = std::move(p); // Throws nothing.
+
+    try
+    {
+      std::thread(perform_operation, new_p); // Can throw system_error.
+    }
+    catch (...)
+    {
+      new_p-&gt;set_exception(std::current_exception());
+    }
+  }
+</pre>
+
+<p>
+This code illustrates that a lot of care must be taken to satisfy the
+requirement that all exceptions be captured and passed to the
+<code>promise</code>'s <code>set_exception()</code> function.
+</p>
+
+<p>
+On the other hand, it is likely that the need to use a <code>shared_ptr</code>
+would exist across the entire chain of asynchronous operations, and so the
+original function would instead be specified as:
+</p>
+
+<pre>
+  void async_operation(std::shared_ptr&lt;std::promise&lt;int&gt;&gt; p);
+</pre>
+
+<p>
+and the creation of the <code>shared_ptr</code> would only need to be performed
+at the beginning of the chain, simplifying the <code>async_operation()</code>
+implementation.
+</p>
+
+<h3>Suggested Solution</h3>
+
+<p>
+It is not clear why N2671 explicitly marks the <code>promise</code> copy
+constructor and copy assignment operator as deleted functions. Changing
+<code>promise</code> so that it is CopyConstructible and CopyAssignable (while
+keeping it MoveConstructible and MoveAssignable) would not appear to place any
+additional burden on implementors, as a <code>promise</code> must already share
+its associated state with a <code>unique_future</code> or one or more
+<code>shared_future</code>s. If <code>promise</code>s were CopyConstructible,
+the <code>async_operation</code> function may simply be written as follows:
+</p>
+
+<pre>
+  void perform_operation(std::promise&lt;int&gt; p) { ... }
+
+  void async_operation(std::promise&lt;int&gt; p)
+  {
+    try
+    {
+      std::thread(perform_operation, p);
+    }
+    catch (...)
+    {
+      p.set_exception(std::current_exception());
+    }
+  }
+</pre>
+
+<p>
+Note: the use of a <code>thread</code> object in this example is not intended
+to imply that this problem is specific to threads. The problem can arise in any
+asynchronous operation (such as socket I/O, a wait on a timer, etc.) where the
+ownership of the movable but noncopyable <code>promise</code> is transferred to
+an asynchronous execution context. Furthermore, more complex scenarios where
+parallel chains of asynchronous operations "compete" to fulfill a
+<code>promise</code> would have similar issues. These scenarios are also
+explored in the next item.
+</p>
+
+<h2>Error Handling and Exceptions</h2>
+
+<h3>Problem</h3>
+
+<p>
+N2671 considers all errors to be errors in program logic. However, in some
+scenarios, programs may legitimately need to cater for setting a
+<code>promise</code> (or at least attempting to) multiple times. In these
+cases, an already-satisfied <code>promise</code> is an expected error.
+</p>
+
+<h3>Context</h3>
+
+<p>
+First, let us return to the hypothetical problem above of implementing
+<code>async_operation()</code>, this time considering the
+<code>perform_operation()</code> function that performs the operation in the
+thread and sets the <code>promise</code> once the result is ready.
+</p>
+
+<p>
+A paranoid programmer will also be concerned about the possibility of an
+exception being thrown <em>after</em> the promise has been satisfied. Since
+calling <code>set_exception()</code> would throw in that case, the programmer
+must write something like:
+</p>
+
+<pre>
+  void perform_operation(std::promise&lt;int&gt; p)
+  {
+    try
+    {
+      ... calculate and satisfy promise ...
+    }
+    catch (...)
+    {
+      try
+      {
+        p.set_exception(std::current_exception());
+      }
+      catch (...)
+      {
+        // Swallow exception.
+      }
+    }
+  }
+</pre>
+
+<p>
+Second, consider use cases where two or more asynchronous operations are
+performed in parallel and "compete" to satisfy the promise. Some examples
+include:
+</p>
+
+<ul>
+
+<li>
+A sequence of network operations (e.g. request a web page) is performed in
+conjunction with a wait on a timer.
+</li>
+
+<li>
+A value may be retrieved from multiple servers. For redundancy, all servers are
+tried but only the first value obtained is needed.
+</li>
+
+</ul>
+
+<p>
+In both examples, the first asynchronous operation to complete is the one that
+satisfies the promise. Since either operation may complete second, the code for
+both must be written to expect that calls to <code>set_value()</code> may fail.
+The implementation options are:
+</p>
+
+<ul>
+
+<li>
+wrap all calls to <code>set_value()</code> in a
+<code>try</code>/<code>catch</code> block and swallow any exception; or
+</li>
+
+<li>
+maintain shared state alongside the <code>promise</code> to record whether it
+has been satisfied or not.
+</li>
+
+</ul>
+
+<p>
+The latter option requires that the state support thread-safe access, placing
+additional burden on the programmer. Clearly, the <code>promise</code> itself
+already maintains this knowledge in its associated state.
+</p>
+
+<h3>Suggested Solution</h3>
+
+<p>
+N2671 already specifies <code>error_code</code>s for the various error
+conditions. These may be used to add non-throwing overloads of the
+<code>promise</code> member functions <code>set_value()</code> and
+<code>set_exception()</code>:
+</p>
+
+<pre>
+  error_code set_value(R const &amp; r, error_code &amp; ec);
+  error_code set_value(R &amp;&amp; r, error_code &amp; ec);
+  error_code set_exception(exception_ptr p, error_code &amp; ec);
+</pre>
+
+<p>
+These behave identically to the existing member functions, except that rather
+than throwing an exception on failure, the <code>error_code</code> parameter
+<code>ec</code> is set to reflect the error condition. The value in
+<code>ec</code> is returned. A program may set the <code>promise</code>'s value
+without throwing an exception as follows:
+</p>
+
+<pre>
+  std::error_code ec;
+  if (p.set_value(123, ec))
+  {
+    // Error occurred, take action accordingly...
+  }
+</pre>
+
+<p>
+To ignore the error, the program may simply perform something like:
+</p>
+
+<pre>
+  void perform_operation(std::promise&lt;int&gt; p)
+  {
+    try
+    {
+      ...
+    }
+    catch (...)
+    {
+      std::error_code ignored_ec;
+      p.set_exception(std::current_exception(), ignored_ec);
+    }
+  }
+</pre>
+
+<p>
+For consistency across interfaces that produce <code>error_code</code>s, the
+exception type for the throwing overloads may also be changed to
+<code>system_error</code> or a class derived from <code>system_error</code>.
+</p>
+
+</body>
+
+</html>

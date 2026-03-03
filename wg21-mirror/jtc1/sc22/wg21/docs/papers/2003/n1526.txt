@@ -1,0 +1,415 @@
+Doc No: SC22/WG21/N1526 J16/03-0109
+Date: September 18, 2002 
+Project: JTC1.22.32 
+Reply to: Benjamin Kosnik, Red Hat, 3333 N. Lincoln Ave #2, Chicago, IL, 60657
+Email: bkoz@redhat.com
+
+Proposal to add namespace references to C++
+
+This paper discussed problems arising in library implementations that
+provide different versions (optimized, debug, normative) of underlying
+types to the same abstract library specification. It identifies
+inadequacies of current namespace semantics to properly help solve
+those issues. Furthermore, it suggests some extensions to namespace
+facilities to overcome those difficulties.  In summary, this proposal
+aims at supporting system programming and library implementations.
+
+1. The problem.
+
+The ability to switch between similar objects defined in different
+namespace entities at compile time, while preserving separate link
+semantics, is desired, but not currently possible. 
+
+More specifically, the fundamental issue may be described by the
+following sub-issues:
+
+     (1) At any time, in a given translation unit, one wants to pretend
+	 that a set of names that are defined in a namespace N, are
+	 also members of a namespace M, for all purpose but linkage
+         (i.e. name mangling).
+
+     (2) Assuming (1), one wants to pretend that any member added to
+	 namespace N, will automatically be viewed as member of
+	 namespace M. 
+
+     (3) Furthermore, one wants to retain usual lookup rules, in
+	 particular argument dependent lookup, member definition rules,
+	 etc.  
+
+     (4) Names added to namespace M should NOT be considered members of
+	 namespace N.
+
+Any of the above issues will be referred to as Issue(1), Issue(2),
+Issue(3) and Issue(4) respectively.  They will be illustrated in the
+remaining of this section.
+
+For instance:
+
+
+    namespace std
+    {
+      // In this translation unit, use some magic syntax
+      // to tie debug::vector to std::vector
+    }
+
+    std::vector<int> vi;     // OK, uses debug::vector<int>.
+
+    class udt { /* ... */ };
+
+    namespace std
+    {
+      // allow notation std::vector in explicit/partial specializations.
+      template<>
+	class vector<udt> 
+	 {
+	 public:
+	   void bar() { }
+	 };
+    }
+
+Allowing this kind of construct would let library implementors make
+their offerings more useful and robust, with optimization, debug, and
+normative namespaces and associated types.
+
+Attempts to create this kind of library within the existing boundaries
+of the C++ language have failed, as detailed below.
+
+
+1.1 Issues with using declarations.
+
+Perhaps the most obvious way of creating a C++ library with the
+desired behavior would be to use an existing namespace feature, using
+declarations. However, using-declarations do not work well as
+illustrated by the following example.
+
+   namespace std
+    {
+       using debug::vector;	// make std::vector an alias for debug::vector
+
+       template<class T>
+         void swap(T&, T&);
+    }
+  
+    // OK, uses debug::vector<int>.
+    std::vector<int> vi; 
+    std::vector<int> wi;
+    
+    swap(vi, wi);		// ERROR: does not find std::swap.
+    
+    namespace std
+    {
+      template<>
+        struct vector<udt> {	// ERROR: specialization not allowed
+                                //        using std::vector.
+          // ...
+        };
+    }
+
+This approach falls down with user specialization, which is not
+allowed in the current language.
+
+Therefore, while the using-declaration mechanism solves Issue (4) and
+seems to approximate a solution to Issue(1), it does not solve it
+completely; furthermore Issues(2) and Issues(3) are not addressed.
+
+
+1.2 Issues with using directives and namespace composition.
+
+The core issue presented in this paper seems to be closed to the scope
+of the programming technique named "namespace composition" as
+described in TC++PL3/§8.2.8.  That technique relies on using-directive
+semantics.
+
+In a similar vein, specialization of types is not possible if using
+directives are used to compose a std namespace from a debug namespace,
+like so:
+
+
+    namespace std
+    {
+      // pretend names from debug can prefixed with std::
+      using namespace std;
+
+       template<class T>
+         void swap(T&, T&);
+    }
+
+    std::vector<int> v;		// OK, resolves to debug::vector<int>
+    std::vector<int> w;
+    swap(v, w);			// ERROR: does not find std::swap
+
+    namespace std
+    {
+      template<>
+        struct vector<udt> {	// ERROR: specialization not allowed
+                                //        using std::vector.
+          // ...
+        };
+    }
+
+As a conclusion, namespace composition solves Issue(2), Issue(4), and
+approximate Issue(1) but does not solve it completely. Furthermore it
+does not address Issue(3).
+
+
+1.3 Issues with namespace aliases.
+
+Obviously, namespace-aliases solve Issue(1), Issue(2),
+Issue(3). However re-opening a namespace alias is not allowed.  See
+example below.
+
+     namespace debug
+     {
+       template<typename T>
+         class vector
+          {
+          public:
+            void foo() { }
+          };
+     }
+
+     namespace std = debug;
+
+     void foo()
+     {
+       using namespace std;
+
+       // OK, uses debug::vector<int>.
+       vector<int> vi; 
+     }
+
+     namespace std
+     {
+       // ERROR: cannot use a namespace-alias name in a namespace extension.
+       struct udt { };
+       template<>
+         class vector<udt>
+          {
+          public:
+            void bar() { }
+          };
+     }
+
+For this functionality to be used in C++ libraries, this would have to
+be allowed. Would the issue be completely resolved if
+namespace-aliases were allowed to be re-open?
+
+In addition, if namespace aliases were allowed to be re-opened, then
+another question must be asked, and that is: how would the
+specialization for std::vector<udt> be mangled, as above? For
+instantiations of templates, this issue is straightforward: it uses
+the namespace of the definition that is being instantiated.
+
+For specialization, Would it be mangled with a std:: namespace or a
+debug:: namespace? Both are problematic.
+
+If the specialization is mangled as std::vector<udt> then other
+translation units, perhaps compiled with other entities such as
+optimized::vector in use as std::vector, will all mangle down to the
+same symbol. In effect this would continue to allow only one
+specialization of a template for a given type, regardless of
+namespace. Is this desired?  Or will this have to change?
+
+Yes this is desired, because:
+    (1) In a given translation unit, the user is not always
+        aware that specializing in std:: will resolve to something
+	different.
+
+    (2) Any definition in std:: should be consistently identified
+        across translation units even if debug:: and optimized:: were
+        mixed in the whole program.
+    
+A straightforward way to resolve that is to mangle any definition with
+std:: part.
+
+On the other hand, if this specialization is mangled as
+debug::vector<udt>, other translation units, which may have used an
+alternate vector, say optimized::vector<udt> would also be able to
+explicitly specialize. Would this count as a separate specialization?
+In effect, the namespace would become another template parameter. We
+are assuming the answer is yes. In addition, it would no longer be
+possible to link declared but not defined specializations regardless
+of the underlying namespace for std::vector. (Such as non-inline
+member functions of a template class specialization.) This limits the
+usefulness of this extension for library implementors would would like
+to implement both debug and normative versions of standard library
+types, and have other users of this library be able to provide
+standard-compliant specializations that are able to link with both
+debug and normative modes without recompilation.
+
+ie:
+
+     // foo.h
+     namespace std 
+     {
+       struct udt { };
+       template<> swap(udt&, udt&);
+     }
+    
+     // foo.cc
+     #include "foo.h"
+
+     namespace std 
+     {
+        template<>
+          void swap(udt& a, udt& b) { /* ... */ }
+     }
+
+If a library uses foo.h, and the specialization of swap is allowed to
+mangle to things other than std, then the definition intended may not
+be found and used.
+
+Perhaps we are asking too much here...
+
+
+1.4 Issues with template aliases.
+
+After looking at the existing namespace functionalities, the template
+alias proposal (N1449) was also considered.  Its semantics does not
+cover the core issues presented in this paper.
+
+namespace optimize
+{
+  template<typename T>
+    class vector { };
+}
+
+namespace debug
+{
+  template<typename T>
+    class vector
+     {
+     public:
+       void foo() { }
+     };
+}
+
+     std::vector<int> v;	// OK, resolves to debug::vector<int>
+
+     namespace std
+     {
+        template<>
+          struct vector<udt> {	// ERROR: a template-alias may not be
+                                //     specialized. 
+            // ...
+          };
+     }
+
+Question: Will allowing a template-alias specialization would resolve
+the issue?  No, it would not because it does not solve Issue(2),
+Issue(3) and Issue(4).
+
+Errors with things like std::sort.
+
+
+2. Proposed solution.
+
+We suggest a language support for namespace accretion that displays
+the property listed in Issue(1), Issue(2), Issue(3) and
+Issue(4). Another name for this idea might be "namespace composition,"
+however this is already the name for a programming technique described
+in TC++PL3.
+
+7.3.4 Namespace accretion syntax
+
+-1- Add a notion of namespace-accretion that has the properties listed
+    in Issue(1), Issue(2), Issue(3) and Issue(4).
+
+    namespace-accretion
+        namespace namespace-name |= namespace-name;
+
+For instance:
+
+       namespace std { } // Etablish an initial unambiguous namespace.
+
+       namespace std |= debug;	     // Accrete std with debug.
+
+     (this might be easy to implement)
+
+or:
+
+        namespace std : debug { } // inheritances-style syntax
+
+For all purposes, except for linkage, a namespace composition
+establishes the properties listed in the beginning of sections 1.
+
+Example:
+
+     namespace std { }
+
+     namespace normative
+     {
+       template<typename T>
+         class vector { };
+     }
+
+     namespace optimize
+     {
+       template<typename T>
+         class vector { };
+     }
+
+     namespace debug
+     {
+       template<typename T>
+         class vector
+          {
+          public:
+            void foo() { }
+          };
+     }
+
+     namespace std |= debug;
+
+     std::vector<int> v; // Uses debug::vector.
+
+Where debug::vector<int>::foo mangled as _ZN5debug6vectorIiE3fooEv
+
+
+2.1 Specialization
+
+As above,
+
+     struct udt { };
+
+     namespace std
+     {
+       // 1 explicit specialization of class
+       template<>
+         class vector<udt>
+          {
+          public:
+            void foo() { }
+          };
+     }
+
+Where std::vector<udt>::foo mangled as
+_ZNSt6vectorI3udtE3fooEv
+
+And, assuming the immediate bit above is not seen:
+
+     struct udt { };
+
+     namespace std 
+     {
+       // 2 explicitly specialization of class member function	
+       template<>
+         void vector<udt>::resize(size_type sz)
+         { 
+           // do something special 
+         }
+     }
+
+Where std::vector<udt>::foo mangled as
+_ZN5debug6vectorI3udtSaIS0_EE6resizeIEv (?)  (Not sure about this one.
+Perhaps it should just mangle as if defined in std::, like above.)
+
+
+Acknowledgment: 
+
+J. Merrill, F. Glassborrow, A. Stokes, B. Stroustrup., G. Dos Reis.
+
+In addition, Doug Gregor implemented much of this functionality with a
+different approach. His comments can be found as part of:
+
+http://gcc.gnu.org/ml/libstdc++/2003-08/msg00177.html 

@@ -1,0 +1,280 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html lang="en-us">
+<HEAD>
+<meta http-equiv="Content-Type" content="text/html;charset=US-ASCII" >
+<TITLE>N2802: A plea to reconsider detach-on-destruction for thread objects
+</title>
+</head>
+<BODY>
+<table summary="Identifying information for this document.">
+	<tr>
+                <th>Doc. No.:</th>
+                <td>WG21/N2802=J16/08-0312</td>
+        </tr>
+        <tr>
+                <th>Date:</th>
+                <td>2008-12-04</td>
+        </tr>
+        <tr>
+                <th>Reply to:</th>
+                <td>Hans-J. Boehm</td>
+        </tr>
+        <tr>
+                <th>Phone:</th>
+                <td>+1-650-857-3406</td>
+        </tr>
+        <tr>
+                <th>Email:</th>
+                <td><a href="mailto:Hans.Boehm@hp.com">Hans.Boehm@hp.com</a></td>
+        </tr>
+</table>
+
+<H1>N2802: A plea to reconsider detach-on-destruction for thread objects
+</h1>
+The <A HREF="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2008/n2497.html#thread.threads.destr">destructor for std::thread</a> is currently
+described as having the following effect:
+<BLOCKQUOTE>
+If <TT>joinable()</tt> then <TT>detach()</tt>, otherwise no effects.
+[<I>Note:</i> Destroying a joinable thread can be unsafe if the thread
+accesses objects or the standard library unless the thread performs explicit
+synchronization to ensure that it does not access the objects or the
+standard library past their respective lifetimes. Terminating the process
+with <TT>_exit</tt> or <TT>quick_exit</tt> removes some of these obligations.
+- end note]
+</blockquote>
+This was discussed at the Kona meeting and quite controversial at the
+time.  The current solution was adopted in large part because it is
+consistent with Boost.
+<P>
+We would nonetheless like to reopen the discussion, because we feel
+this is possibly the most dangerous feature being added to C++0x.
+Unlike other "dangerous" features in the language, this appears to
+us to have near zero potential benefit, in terms of either
+performance or user convenience.  In retrospect, we also feel that
+even those of us who initially opposed this approach did not fully
+appreciate the problems it introduces.
+
+<H2>Why is detaching on destruction so dangerous?</h2>
+Consider the following simple example of a trivially parallelized
+naive Fibonacci function:
+<PRE>
+int fib(int n) {
+    if (n <= 1) return n;
+    int fib1, fib2;
+    
+    std::thread t([=, &amp;fib1]{fib1 = fib(n-1);});
+    fib2 = fib(n-2);
+    t.join();
+    return fib1 + fib2;
+}
+</pre>
+We first create a second thread to perform the first
+recursive subcomputation and then perform the second subcomputation ourselves.
+We then wait for the thread we created before computing the final result.
+<P>
+We claim the basic structure of this function is likely to be fairly typical
+for simple parallel algorithms.  Since <TT>thread::join()</tt>
+does not pass on a value, it seems to be natural to assign to
+a shared variable in the child thread.
+(One could easily add code to limit the number
+of threads, etc., but that's irrelevant to this discussion.)
+<P>
+So far, we believe this code is fine (modulo the stupid algorithm,
+possible overflows in the result, and
+possible syntax errors).  But now consider adding a simple
+error check, or adding a call to a function that might throw an exception,
+as in
+<PRE>
+// Don't write this code !!!
+int fib(int n) {
+    if (n <= 1) return n;
+    int fib1, fib2;
+    
+    std::thread t([=, &amp;fib1]{fib1 = fib(n-1);});
+    fib2 = fib(n-2);
+    if (fib2 &lt; 0) throw ...
+    t.join();
+    return fib1 + fib2;
+}
+</pre>
+This revised version of the function will probably still work most of
+the time, but it contains a horrible, and essentially
+impossible to debug, memory overwrite error.  Since the error
+occurs rarely, it is difficult to test for.
+If the resulting program is run in a trusted context, it also
+introduces a potential security hole.
+The presence of this error seems subtle enough that
+novice programmers are unlikely to avoid it.
+<P>
+This code may fail whenever the exception is actually thrown.  When
+that happens, the thread computing <TT>fib1</tt> for the invocation
+of <TT>fib()</tt> that threw the exception will be detached.  If we
+are in the process of computing <TT>fib2</tt> for our caller, the
+same will happen in our caller; the thread computing <TT>fib1</tt>
+on its behalf will also be detached, and so on.  After that,
+the stack is unwound, the exception is hopefully caught, and the
+main computation continues.
+<P>
+But all those threads computing <TT>fib1</tt> are still running!  And as 
+they finish, they will write to all those instances of <TT>fib1</tt>.
+Which are no longer there, since the stack has been unwound.  In its place
+will be the stack corresponding to the continuing computation that was
+initiated when the exception was caught.
+<P>
+Thus we now have a large number of threads writing to various locations
+on the user's stack.  By the time the user tries to debug the resulting mess,
+there is a good chance they will all be gone, leaving him/her with
+nothing but a stack with mysteriously smashed values.  Or those might
+no longer be visible either because a return address may have been
+overwritten, causing the main program to take a wild branch.  Or conceivably,
+a malicious and very clever user might have arranged to invoke the <TT>fib</tt>
+on an argument that intentionally causes a return address to be overwritten
+in just the right way ...
+<P>
+Templatizing the original <TT>fib()</tt> function
+with respect to the argument type will result in the
+same problem, even without the explicit <TT>throw</tt>, since operations
+on the argument type might themselves throw exceptions, e.g. because
+an unbounded integer arithmetic operation failed to allocate memory.
+<P>
+The fundamental issue is that direct use of <TT>std::thread</tt>
+is not exception safe,
+if the created thread accesses any object <I>b</i> with bounded lifetime.
+An exception thrown between the creation of the thread and joining it will
+leave a detached "escaped" thread that can access, and potentially write to
+<I>b</i> after the end of its lifetime.
+<P>
+The object <I>b</i> accessed by an escaped thread does not
+need to have automatic storage duration for this problem to arise.
+It can be deallocated on the heap and subsequently deallocated by
+its owner.  Or it can even be statically allocated and destroyed at
+program termination; there is often no way to ensure that such
+escaped threads finish before static destructors are called.
+<P>
+The use of futures to return values may help in some cases, but is
+a very incomplete solution.  To see this consider what would have
+happened if we had used the same approach as above to naively
+parallelize a simple quicksort by running the recursive invocations in parallel.
+In this case, the recursive invocations will write to the original
+array, which will typically be allocated in some stack frame.  The
+return value is not terribly interesting, but a detached thread would
+still overwrite the parent stack at unpredictable times.
+
+<H2>Possible workarounds</h2>
+We can think of the following plausible workarounds, given the current
+std::thread specification:
+<UL>
+<LI>Arrange that threads only access "permanent" objects.  This appears
+impractical, or at least very convoluted, for examples like the one in
+the preceding section.  For heap allocated objects, this generally
+requires that either garbage collection is in use, or the thread and
+its owner both have a <TT>shared_ptr</tt> to the object.  For statically
+allocated objects it usually requires use of <TT>_exit</tt> or
+<TT>quick_exit</tt> to avoid static destructor invocation.  It is
+clearly difficult to enforce when threads need to access objects
+that are parameters to the function creating the thread.  It also
+requires that threads created using this model somehow avoid calling
+into the standard library after <TT>main()</tt> exits
+(see [thread.threads.constr]), which again
+seems impractical in real cases.
+<LI>Arrange that threads are only created using a wrapper for std::thread that
+overrides the default destructor behavior, or are created just before
+a guard object that joins or otherwise ensures termination of the thread.
+Except in really simple cases, this appears to be the only practical solution.
+</ul>
+Thus it appears to us that the only way to live with the current default
+is to essentially always explicitly override it.  This seems like a poor
+justification for adding a very unsafe feature to the language.
+
+<H2>Boost Experience</h2>
+This problem appears to be subtle enough that many programmers do
+not recognize its existence.  Most of the examples in a
+<A HREF="http://www.ddj.com/cpp/184401518">2002
+Doctor Dobbs article on Boost Threads</a> are not completely correct
+with respect to the committee draft.  If <TT>join()</tt> throws (which it may),
+they can access the standard library after
+static destructors are called.
+<P>
+Toy examples, as in the above paper and in the
+<A HREF="http://en.wikipedia.org/wiki/Boost_C%2B%2B_Libraries#Multithreading_.E2.80.93_Boost.Thread">Wikipedia example</a>,
+are sometimes correct by virtue of not being able to throw exceptions
+between creation and join.  They also generally avoid the worst of
+the problems by not returning values from the child thread.
+<P>
+Real examples we found with Google code search (e.g. libopenvrml)
+generally did not address this issue, and appeared to be generally
+incorrect, though it was difficult to sufficiently understand the
+lifetime issues based on a quick code inspection.  It seems to be
+common to create a thread in a member function, and pass the <TT>this</tt>
+pointer to the thread, without worrying about unexpected thread destruction.
+This appears to be wrong unless the <TT>this</tt> object is never destroyed.
+The most transparent nontrivial case we found had essentially the
+structure of our (broken) example above.
+<P>
+We did not find any
+<TT>boost::thread</tt> uses that were both correct in this respect,
+and were robust with respect to both the addition of standard library calls
+in the thread, and exception producing calls between thread creation
+and join.  We expect that most code maintainers would expect to be able to
+add such calls.  In essence, it seems that the small amount of
+correct code was essentially correct by accident.
+
+<H2>Solutions</h2>
+Essentially any reasonable destructor behavior other than detaching the
+thread would be an acceptable solution and, in our opinion, a vast
+improvement.  Given the absence of a cancellation facility, acceptable
+options include:
+<OL>
+<LI> Joining the thread.  This has the unfortunate consequence that
+throwing an exception will wait for threads being destroyed.  But this is
+much more benign than stack overwrite errors by another thread.  And if it
+results in serious responsiveness issues, e.g. because it creates deadlocks,
+it is debuggable.  It does not risk security holes.
+<LI> Any specification that allows or requires the implementation to
+treat destruction of a joinable thread as an error.  Lawrence Crowl
+suggested simply replacing the <TT>detach()</tt> call in the current
+specification with a call to <TT>terminate()</tt> by analogy with
+unhandled exceptions.  This is another error condition that cannot
+be safely reported via an exception.
+</ol>
+I originally favored the first solution, but most of the feedback
+since then has favored the second, and I'm warming up to it.
+The first solution makes a large number of simple use cases
+implicitly safe, at the cost of introducing
+some potentially tricky performance debugging problems when it results
+in performance better than an outright deadlock, but worse than acceptable.
+<P>
+I don't recall the second alternative
+receiving serious consideration in the initial discussion, but
+certainly a case can be made for it.  Abandoning a thread by detaching it
+is not safe.  Joining it implicitly risks unexpected delays.  It seems
+that exception-safe code will usually need to address this issue explicitly.
+One way to encourage it to do so is to encourage the implementation to
+report when it doesn't.
+
+<H2>Proposed wording:</h2>
+There was a consensus in the mailing list discussion that the thread
+destructor and move assignment operators should perform the same
+action on the thread object being destroyed/overwritten.  This is
+reflected here:
+<H3>Alternative 1:</h3>
+Replace <TT>detach()</tt> in the paragraph 30.2.1.3p1 we quoted above
+[thread.threads.destr] with <TT>join()</tt>.  Remove the note attached to
+that paragraph.
+<P>
+In 30.2.1.4 [thread.thread.assign], replace <TT>detach()</tt>
+with <TT>join()</tt>.
+<H3>Alternative 2:</h3>
+Replace <TT>detach()</tt> in the paragraph 30.2.1.3 we quoted above
+[thread.threads.destr] with <TT>terminate()</tt>.  Replace the note
+attached to the paragraph with: [Note: Either implicitly detaching
+or joining a <TT>joinable()</tt> thread in its destructor could result
+in difficult to debug correctness (for detach) or performance (for join)
+bugs encountered only when an exception is raised.  Thus the programmer
+must ensure that the destructor is never executed while the thread
+is still joinable. --end note]
+<P>
+In 30.2.1.4 [thread.thread.assign], replace <TT>detach()</tt>
+with <TT>terminate()</tt>.
+</body>
+</html>

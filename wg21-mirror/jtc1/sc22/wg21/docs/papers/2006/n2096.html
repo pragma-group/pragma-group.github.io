@@ -1,0 +1,194 @@
+<html>
+	<head>
+		<title>Transporting Values and Exceptions between Threads</title>
+		<meta content="http://schemas.microsoft.com/intellisense/ie5" name="vs_targetSchema">
+		<meta http-equiv="Content-Language" content="en-us">
+		<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+	</head>
+	<body bgColor="#ffffff">
+		<ADDRESS>Document number: N2096=06-0166</ADDRESS>
+		<ADDRESS>Programming Language C++, Evolution and Library Subgroups</ADDRESS>
+		<ADDRESS>&nbsp;</ADDRESS>
+		<ADDRESS>Peter Dimov, &lt;<A href="mailto:pdimov@pdimov.com">pdimov@pdimov.com</A>&gt;</ADDRESS>
+		<ADDRESS>&nbsp;</ADDRESS>
+		<ADDRESS>2006-09-07</ADDRESS>
+		<h1>Transporting Values and Exceptions between Threads</h1>
+		<h2>I. Overview</h2>
+		<h3>A. Future</h3>
+		<p>Most existing proposals and implementations for returning a&nbsp;value from a 
+			function executed in a separate thread tie the transporting mechanism to the 
+			particular threading API. This document proposes a different approach. It 
+			describes a general purpose component, <tt>future&lt;R&gt;</tt>, with the 
+			following synopsis:</p>
+		<pre>    template&lt;class R&gt; class future
+    {
+    public:
+
+        future(); // creates an empty future
+
+        bool ready() const throw(); // queries whether the future contains a value or an exception
+
+        void wait(); // wait for ready()
+        bool timed_wait( timespec const &amp; abstime ); // as above, with timeout
+
+        R const &amp; operator()() const; // waits for a value, then returns it
+
+        void set_value( R const &amp; r ); // sets the value r and transitions to ready()
+
+        template&lt;class E&gt; void set_exception() throw(); // as if stores E() and transitions to ready()
+        template&lt;class E&gt; void set_exception( E const &amp; e ) throw(); // stores the exception e and transitions to ready()
+    };
+</pre>
+		<P>A <tt>future</tt> is DefaultConstructible, CopyConstructible and Assignable. It 
+			has reference semantics; all copies of the same <tt>future</tt> are equivalent 
+			and interchangeable. All operations on a <tt>future</tt> except assignment are 
+			strongly thread safe or sequentially consistent; that is, the behavior of 
+			concurrent calls is as if the calls have been issued sequentially in an 
+			unspecified order.</P>
+		<P>A <tt>future</tt> can be thought of as a container for a single element, the 
+			value that is being transported. In a typical scenario, a producer (a 
+			background thread, for example) and a consumer (the caller issuing the 
+			asyunchronous call) are given a copy of the same empty <tt>future</tt>. When 
+			the producer computes its return value, it places it into the <tt>future</tt> by 
+			using <tt>set_value</tt>. When the consumer needs the result of the 
+			asynchronous computation, it uses <tt>operator()</tt> to obtain it.</P>
+		<P>In case the producer has no value to return since the computation has failed 
+			with an error, it can place an exception into the <tt>future</tt>, which will 
+			then be thrown by <tt>operator()</tt> at the general direction of the consumer.</P>
+		<P>The accessor <tt>ready()</tt> can be used to query whether a value or an 
+			exception is available. When it returns true, <tt>operator()</tt> will return 
+			immediately, without blocking. <tt>ready()</tt> is non-blocking and hence, not 
+			a cancelation point.</P>
+		<P>Two calls, <tt>wait</tt> and <tt>timed_wait</tt>, are provided that allow the 
+			consumer to block until the <tt>future</tt> is in the ready state. They are 
+			both cancelation points.</P>
+		<P><tt>operator()</tt> will block until <tt>ready()</tt>, then it will return the 
+			stored value <tt>r</tt> after <tt>set_value( r )</tt> has been called, or throw 
+			the stored exception <tt>E()</tt> or <tt>e</tt> after <tt>set_exception&lt;E&gt;()</tt>
+			or <tt>set_exception( e )</tt> has been called. <tt>operator()</tt> is a 
+			cancelation point unless the <tt>future</tt> is <tt>ready()</tt>. If a 
+			cancelation exception has been stored by <tt>set_exception</tt>, this can lead 
+			to an ambiguity; in this case, the caller may wish to explicitly <tt>wait()</tt>
+			first.</P>
+		<P><tt>set_value( r )</tt> stores <tt>r</tt> into the <tt>future</tt>; a subsequent <tt>
+				operator()</tt> will return <tt>r</tt>.</P>
+		<P>After <tt>set_exception&lt;E&gt;()</tt>, a subsequent <tt>operator()</tt> will 
+			throw <tt>E()</tt>.</P>
+		<P>After <tt>set_exception( e )</tt>, a subsequent <tt>operator()</tt> will throw a 
+			copy of <tt>e</tt>, or <tt>bad_alloc</tt>, if the attempt to store <tt>e</tt> throws.</P>
+		<h3>B. Task</h3>
+		<P>In principle, a <tt>future</tt> is a sufficient answer to the problem of 
+			transporting values and exceptions across thread boundaries; however,&nbsp;one 
+			almost trivial&nbsp;supporting component greatly simplifies its usage:</P>
+		<pre>    template&lt; class F, class R = result_of&lt;F()&gt;::type &gt; class task
+    {
+    public:
+
+        task( F fn, future&lt;R&gt; ft ); // stores fn and ft
+        void operator()() throw(); // executes fn() and places the outcome into ft
+    };
+</pre>
+		<P><tt>task</tt> is a wrapper around the function object <tt>fn</tt>. Its <tt>operator()</tt>
+			calls <tt>fn()</tt> and, if the call returns a value <tt>r</tt>, calls <tt>ft.set_value( 
+				r )</tt>; otherwise, it catches the exception thrown by <tt>fn()</tt> and 
+			attempts to store an accurate representation of it into <tt>ft</tt> by using <tt>ft.set_exception</tt>. 
+			The actual mapping would be left up to the implementation; given a mechanism to 
+			clone and rethrow an arbitrary <tt>std::exception</tt>, the exception could be 
+			transported intact. Unknown exceptions are transported as <tt>std::bad_exception</tt>.</P>
+		<h3>C. Executor</h3>
+		<P>The components presented so far in this paper allow us to build models of the 
+			Executor concept:</P>
+		<pre>    class Executor
+    {
+    public:
+
+        template&lt;class Fn&gt; future&lt; typename result_of&lt; Fn() &gt;::type &gt; execute( Fn fn );
+    };
+</pre>
+		<P>An Executor accepts a function object and gives back a future return value. 
+			Various models of the same concept can offer different execution strategies. 
+			The trivial examples of a synchronous executor and a threaded executor are 
+			given below:</P>
+		<pre>    class synchronous_executor
+    {
+    public:
+
+        template&lt;class Fn&gt; future&lt; typename result_of&lt;Fn()&gt;::type &gt; execute( Fn fn )
+        {
+            typedef typename result_of&lt;Fn()&gt;::type R;
+
+            future&lt;R&gt; ft;
+            task&lt;Fn, R&gt; fw( fn, ft );
+
+            fw();
+
+            return ft;
+        }
+    };
+
+    class threaded_executor
+    {
+    public:
+
+        template&lt;class Fn&gt; future&lt; typename result_of&lt;Fn()&gt;::type &gt; execute( Fn fn )
+        {
+            typedef typename result_of&lt;Fn()&gt;::type R;
+
+            future&lt;R&gt; ft;
+            task&lt;Fn, R&gt; fw( fn, ft );
+
+            thread::create( fw );
+
+            return ft;
+        }
+    };
+</pre>
+		<P>The prototype implementation contains one additional Executor example that 
+			executes its tasks using a thread pool.
+		</P>
+		<h2>II. Future Directions <small>(no pun intended)</small></h2>
+		<p>Based on preliminary feedback from Howard Hinnant, Alexander Terekhov, Ion 
+			Gaztañaga and Beman Dawes, the design is very likely to be refined in the 
+			following directions:</p>
+		<UL>
+			<LI>
+				A <tt>future</tt> will likely offer <tt>has_value</tt> and <tt>has_exception</tt>
+				accessors in addition to <tt>ready</tt>;
+			<LI>
+				Movable, but noncopyable return values need better support; a destructive move 
+				version of <tt>operator()</tt> called <tt>move()</tt>
+			might offer an acceptable tradeoff;
+			<LI>
+				It is still up in the air whether multiple <tt>set_value</tt>/<tt>set_exception</tt>
+				calls should be allowed, and whether basic thread safety will be required from 
+				the copy constructor of <tt>R</tt>;
+			<LI>
+				An additional <tt>set_exception</tt> overload might need to be added to 
+				accommodate Beman Dawes's proposed clone/rethrow additions to <tt>std::exception</tt>;
+			<LI>
+				<tt>task::operator()</tt> might be required to translate a cancelation 
+				exception into a separate "remote cancelation exception" type, removing the 
+				ambiguity.</LI></UL>
+		<P>In addition, the following enhancements are also planned:</P>
+		<UL>
+			<LI>
+				Once a thread layer and a cancelation layer are settled upon, <tt>future</tt> would need 
+				to offer support for canceling the active asynchronous call when the 
+				caller is no longer interested in it;</LI>
+			<LI>
+				A multiple wait capability could be useful and needs further research;</LI>
+			<LI>
+				Given a multiple wait capability, it might be useful to support a syntax of the 
+				form <tt>f1 || f2</tt> for retrieving the first available result and canceling the 
+				second call. This syntax has been proposed by Herb Sutter and others.</LI></UL>
+		<H2>III. Implementation</H2>
+		<p>A preliminary implementation of a slightly outdated version of the design is 
+			available at:</p>
+		<P><A href="http://www.pdimov.com/cpp/future.cpp">http://www.pdimov.com/cpp/future.cpp</A></P>
+		<h2>IV. Proposed Text</h2>
+		<P>A subsequent revision of this document will provide a proposed text for addition 
+			to the working paper or a technical report, if the proposal gathers sufficient 
+			interest from the working groups.</P>
+		<P><EM>--end</EM></P>
+	</body>
+</html>

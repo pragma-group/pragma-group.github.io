@@ -1,0 +1,298 @@
+<html>
+<style>
+ins {background-color:#A0FFA0}
+del {background-color:#FFA0A0}
+</style>
+<title>noexcept(auto)</title>
+<body>
+Jason Merrill
+<br>2010-11-11
+<br>Revision 10
+<br>N3207=10-0197
+
+<h2>noexcept(auto)</h2>
+
+<h3>Introduction</h3>
+
+As discussed extensively in reflector traffic and 
+<a href="http://wiki.dinkumware.com/twiki/pub/Wg21batavia/EvolutionWorkingGroup/reconsider_noexcept.html">Thorsten</a> and
+<a href="http://wiki.dinkumware.com/twiki/pub/Wg21batavia/CoreWorkingGroup/noexcept.pdf">Bjarne's</a>
+<a href="http://wiki.dinkumware.com/twiki/pub/Wg21batavia/CoreWorkingGroup/deducing-noexcept.pdf">papers</a>, use of noexcept-specifications as specified in the FCD is
+extremely cumbersome, forcing users to write their functions over again in
+a mangled form in the noexcept-specification.  This is a gratuitous test
+for whether the user knows what transformation to apply and which pieces of
+the function matter; as Thorsten writes, "a user-maintained noexcept
+increases the likelihood that the specification is not correct. In turn,
+this implies (a) an increased chance that client code terminates
+unexpectedly, or (b) that optimization opportunities are lost. (Note that
+providing correct warnings is also undecidable."
+
+<p/>So, we would like the compiler to generate noexcept-specifications as
+much as possible.
+
+<p/>Thorsten and Bjarne's papers argue for implicit deduction of
+noexcept-specifications, which is certainly attractive; if the compiler can
+just do the right thing without any programmer intervention, so much the
+better.  Unfortunately, there are some significant problems with this
+approach.
+
+<h4>Problem 1</h4>
+
+Problem 1: If a function has multiple declarations, the order in which the
+declarations are seen can affect how deduction is done, and potentially
+lead to ODR violations.  Consider
+
+<pre>
+  int f();  // noexcept(false)
+  int f() { ... } // no deduction is done
+</pre>
+
+or
+
+<pre>
+  int f() { ... } // deduction is done
+  int f(); // use previously deduced specification?  ill-formed?
+</pre>
+
+Or as Daveed
+<a href="http://accu.org/cgi-bin/wg21/message?wg=core&msg=18079">wrote</a>,
+"What if you instantiate a template that references a function f in two
+translation units: In one f is defined and in the other not. You end up
+with a silent ODR violation, and quasi-random behavior."
+
+<h4>Problem 2</h4>
+
+Problem 2: Implicit noexcept deduction for function templates requires
+tentative instantiation of much of the function body which previously was
+not required.
+
+<p/>This is the issue Thorsten described as "almost every statement in
+function templates leak into the noexcept declaration", except now it
+would happen implicitly, without the user ever writing anything to request it.
+
+<pre>
+  template &lt;typename T> struct A { int ar[T()-1]; };
+
+  template &lt;typename T>
+  void f (T t, void *) { A&lt;T> a; }  // approximately, noexcept(noexcept(A&lt;T>()))
+  template &lt;typename T>
+  void f (T t, int) { } // noexcept(true)
+
+  void g()
+  {
+    f(1,2);
+  }
+</pre>
+
+Here, overload resolution considers <tt>f(T,void*)</tt>.  It deduces <tt>int</tt> for <tt>T</tt> and starts to produce a function declaration for <tt>f&lt;int>(int,void*)</tt>.  When it tries to instantiate the implicit noexcept-specification, it needs to instantiate <tt>A&lt;int></tt> to evaluate <tt>noexcept(A&lt;int>())</tt>, but <tt>A&lt;int></tt> is ill-formed, and that error is not in the immediate context of template argument deduction substitution, so the program is ill-formed.
+
+<p/>Without implicit noexcept deduction, overload resolution chooses the other function, so <tt>f&lt;int>(int,void*)</tt> is not instantiated, so <tt>A&lt;int></tt> is not instantiated, and the program is well-formed.
+
+<h4>Other problems?</h4>
+
+Since we have no implementation experience, it seems fair to assume that
+implicitly adding noexcept-specifications to almost all functions is likely
+to have other unexpected consequences that we haven't thought of yet.
+
+<h3>A compromise</h3>
+
+So, having to write everything out explicitly is horribly cumbersome, and
+having it all implicitly deduced has significant problems, what's left?
+
+<p/>This paper proposes a compromise: still require the user to explicitly
+ask for a noexcept-specification, but let them ask the compiler to
+determine exactly what that noexcept-specification should be.
+
+<pre>
+  int f() noexcept(auto) { return 42; } // noexcept(true)
+  template&lt;typename T>
+  void g(T t) noexcept(auto) { T t2 = t + t; } // approximately, noexcept(noexcept(T(t+t)))
+</pre>
+
+The deduction proposed for <tt>noexcept(auto)</tt> is the same as that
+proposed by Thorsten and Bjarne: "[a] function is (implicitly) noexcept
+unless it contains a throw or a call of a non-noexcept function."
+
+<h3>noexcept(auto) on declarations</h3>
+
+Clearly, we can only deduce a noexcept-specification from a definition.
+
+<p/>My previous thinking had been that it would only be allowed on a
+definition, not on a forward declaration.  If you want to
+use <tt>noexcept(auto)</tt> on a function that has a forward declaration,
+you would need to manually write a matching noexcept-specification for that
+forward declaration, which limits the usefulness of <tt>noexcept(auto)</tt>
+for such functions&mdash;but remember from above that under the implicit
+deduction proposal no deduction would be done for a function defined after
+an initial forward declaraton, so simply omitting <tt>noexcept(auto)</tt>
+in such a case would produce the same result.
+
+<p/>However, at the meeting today Pablo suggested an enhancement:
+allow <tt>noexcept(auto)</tt> on forward declarations, but make any mention
+of that function ill-formed until we have seen its definition.  That allows
+patterns like
+
+<pre>
+  template &lt;class T>
+  struct A { void f() noexcept(auto); };
+  template &lt;class T>
+  void A&lt;T>::f() noexcept(auto) { ... }
+</pre>
+
+So deduction can be done for functions defined outside the class body, just
+as long as the definition comes before any uses.  I can't think of any
+additional issues that might arise from this addition.
+
+<h3>Ordering dependencies</h3>
+
+Bjarne's <a href="http://wiki.dinkumware.com/twiki/pub/Wg21batavia/CoreWorkingGroup/deducing-noexcept.pdf">slide
+presentation</a> included a couple of interesting examples from Jens, which
+I will adapt here; I believe that this proposal resolves these questions in
+a straightforward way.
+
+<pre>
+  struct A {
+    void f(int i) noexcept(auto)
+      { if (i > 1) g(i-1); } 
+    void g(int i) noexcept(auto)
+      { if (i > 1) f(i-1); }
+  };
+</pre>
+
+This testcase would be ill-formed because when we parse f, we have not yet
+deduced the noexcept-specification for g, so the call to g is ill-formed.
+Note that this is the same rule as described above for definitions outside
+the class body.
+
+<pre>
+  template&lt;bool> struct M;
+  template&lt;> struct M&lt;true> { int large[100]; };
+  template&lt;> struct M&lt;false> { char small; };
+  struct B {
+    template&lt;bool> void maybe_throw();
+    template&lt;> void maybe_throw&lt;true>() noexcept(auto) { throw 0; } // deduced noexcept(false)
+    template&lt;> void maybe_throw&lt;false>() noexcept(auto) { } // deduced noexcept
+    void f() noexcept(auto) { maybe_throw&lt;(sizeof(B) > 10)>(); };
+    M&lt;noexcept(f())> data;
+  };
+</pre>
+
+Here, similarly, the call to <tt>f()</tt> in the declaration
+of <tt>B::data</tt> is ill-formed because we have not yet deduced the
+noexcept-specification for f.
+
+<p/>Recursion is an interesting case:
+
+<pre>
+  int f(int i) noexcept (auto) 
+  {
+    if (i == 0)
+      return i;
+    else
+      return f(i-1)+i;
+  }
+</pre>
+
+Deducing the noexcept-specification isn't a problem here (whether f throws
+does not affect whether f throws), but if we don't allow use of functions
+with pending noexcept deduction, that would seem to apply to the recursive
+call as well.
+
+<h3>Deduction specification</h3>
+
+The tricky part of the specification is describing exactly how the
+deduction is done for a template.  If we want to be able to write, say,
+
+<pre>
+  template&lt;class T> void f(T t) noexcept (noexcept (T(t+t)));
+  template&lt;class T> void f(T t) noexcept (auto) { T t = t + t; }
+</pre>
+
+Then we need to know exactly what the deduced noexcept-specification looks
+like so that the user can write an equivalent one on the forward
+declaration.  The above transformation probably isn't quite right, but
+describing a canonical form for users to imitate is a daunting task; it
+seems simpler just to say that <tt>noexcept(auto)</tt> on a template is not
+compatible with any other noexcept-specification and let implementers
+represent it however is most convenient.
+
+<h3>noexcept sfinae</h3>
+
+Discussion of this proposal led me to think that currently the
+exception-specification of a function is not exposed to SFINAE, and that
+this could lead to hard errors from substitution of noexcept-specifications
+in templates not chosen by overload resolution.  Further core discussion
+led to the conclusion that this substitution can be deferred until overload
+resolution is complete, so it would only produce a hard error when we
+actually try to use the function.
+
+<h2>Proposed Wording</h2>
+
+In 15.4p1:
+<blockquote><pre>
+    <i>noexcept-specification</i>:
+	noexcept ( <i>constant-expression</i> )
+        <ins>noexcept ( auto )</ins>
+	noexcept
+</blockquote>
+
+15.4p3:
+<blockquote>
+Two exception-specifications are compatible if:
+<ul>
+<li>both are non-throwing (see below), regardless of their form,</li>
+<li>both have the form noexcept(constant-expression) and the constant-expressions are equivalent,</li>
+<li><ins>both have the form <tt>noexcept(auto)</tt>,</ins></li>
+<li>one exception-specification is a noexcept-specification allowing all exceptions and the other is of the
+  form throw(type-id-list), or</li>
+<li>both are dynamic-exception-specifications that have the same set of adjusted types.</li>
+</ul>
+If any declaration of a function has an exception-specification that is not
+a noexcept-specification allowing all exceptions, all declarations,
+including the definition and any explicit specialization, of that function
+shall have a compatible exception-specification. If any declaration of a
+pointer to function, reference to function, or pointer to member function
+has an exception-specification, all occurrences of that declaration shall
+have a compatible exception-specification In an explicit instantiation an
+exception-specification may be specified, but is not required. If an
+exception-specification is specified in an explicit instantiation
+directive, it shall be compatible with the exception-specifications of
+other declarations of that function. A diagnostic is required only if the
+exception-specifications are not compatible within a single translation
+unit.
+
+<p/><ins>If a declaration of a function has an <i>exception-specification</i> of
+the form <tt>noexcept(auto)</tt>, then the exception specification for the
+function is deduced from the definition of the function. If no
+full-expression (1.9) in the function can throw an exception (in the sense
+of the <tt>noexcept</tt> operator, 5.3.7), then the exception specification is
+equivalent to <tt>noexcept(true)</tt>; otherwise, it is equivalent
+to <tt>noexcept(false)</tt>. [ Note: This analysis only considers
+expressions (including expressions implied by the use of various language
+ constructs), so functions that use a <tt>catch(...)</tt>  handler to
+prevent exceptions from escaping should not
+use <tt>noexcept(auto)</tt>. &mdash;end note ] Until the definition of the
+function is complete, referring to the function (even in an unevaluated
+context) is ill-formed.</ins>
+
+<p/><ins>[ Note: The exception specification for an implicitly-instantiated
+function is determined when the function is instantiated (14.7.1),
+which can be triggered by a reference in an unevaluated context.
+A <tt>noexcept(auto)</tt> specification can require an implementation to
+completely instantiate the specialization immediately when it is
+referenced, rather than defer the instantiation until a later point in
+compilation.  &mdash;end note ]</ins>
+</blockquote>
+
+Remove 14.8.2p5 (not a substantive change, just removing redundancy):
+
+<blockquote>
+<del>When all template arguments have been deduced or obtained from default
+template arguments, all uses of template parameters in the template
+parameter list of the template and the function type are replaced with the
+corresponding deduced or default argument values. If the substitution
+results in an invalid type, as described above, type deduction fails.</del>
+</blockquote>
+
+</body>
+</html>

@@ -1,0 +1,182 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN">
+<HTML><HEAD><TITLE>Exception Propagation across Threads</TITLE>
+<BODY>document number: n2107<BR>Jens Maurer
+&lt;Jens.Maurer@gmx.net&gt;<BR>Alisdair Meredith
+&lt;alisdair.meredith@uk.renaultf1.com&gt;<BR>2006-10-13
+<H1>Exception Propagation across Threads</H1>
+<H2>Problem Description</H2>During the Redmond Threads Meeting, the participants
+tentatively agreed upon having exceptions be rethrown when joining a thread that
+terminated with an uncaught exception. In N2061 "Library Exception Propagation
+Support", Beman Dawes presents a library-only solution involving a mixin-class.
+This solution is feasible, but has these disadvantages:
+<UL>
+  <LI>potentially requires changing all throw sites
+  <LI>imposes a class hierarchy upon user's exception classes
+  <LI>requires overriding clone_self and throw_self member functions in each
+  exception class </LI></UL>This paper outlines core language support for solving
+the problem. Further revision is needed if support for move constructors is
+desired.
+<P>The following description assumes that a non-detached (sub-)thread T1 throws
+an exception E that is not caught. Another thread T2, possibly the main thread,
+executes a join for T1. Subsequently, T1 is terminated and E is thrown from
+inside the join function in T2.
+<H2>Option 1: minimum "magic" cross-thread rethrow</H2>
+<H3>Outline</H3>In the library support code for thread T1, catch all exceptions,
+synchronize with another thread T2 that wants to join, give T2 the opportunity
+to "steal" the currently handled exception E (15.3p8), synchronize again to
+ensure the theft is complete, and then terminate T1.
+<P>T2 "steals" the exception from T1 by means of a special language-support
+library function (name subject to change) <PRE>  std::rethrow_from_foreign_thread(thread_id_type id)
+</PRE>That function copies the currently handled exception E from T1 to T2 and
+reactivates it (15.1p7).
+<P>Thus, the library support code for T1 might look like this: <PRE>  try {
+    // call user-supplied function that is executed as T1
+  } catch(...) {
+    // wait for condition "about to join me"
+    // acknowledge join, write "exception pending"
+    // exception is "stolen" by T2
+    // wait for condition "theft complete"
+    // do not use "throw;"
+    return;       // T1 terminates
+  }
+  // wait for condition "about to join"
+  // acknowledge join, write "no exception"
+  return;    // T1 terminates
+</PRE>The library support code for join (in T2) might look like this: <PRE>  void join(thread_id_type id)
+  {
+    // lock inter-thread synchronization mutex
+    // write "id" to global synchronization area
+    // signal condition variable "about to join"
+    // wait for join acknowledge
+    if (exception_pending(id)) {
+      try {
+        std::rethrow_from_foreign_thread(id);
+      } catch (...) {
+        // acknowledge "theft complete"
+        throw;
+      }
+    }
+    // no exception pending, done
+  }
+</PRE>This model yields global serialization for join operations, other
+solutions that use well-defined per-thread memory for synchronization are also
+feasible.
+<H3>Details</H3>A more formal specification of the "magic" function would look
+like this: <PRE>  std::rethrow_from_foreign_thread(thread_id_type id);
+</PRE><EM>Precondition:</EM> "id" refers to an existing, not-yet-joined thread.
+That thread has a currently handled exception (15.3p8) and is waiting on a
+condition variable.
+<P><EM>Effect:</EM> Reactivates the currently handled exception from that thread
+in the context of the caller (see 15.1p7).
+<P><EM>Note:</EM> It is unspecified whether this function invokes the copy
+constructor of the exception's class (15.1p5).
+<H3>Implementation</H3>For exposition purposes, the following presentation
+assumes that std::type_info objects are used to represent object types thrown as
+exceptions. In general, each catch handler would bear a reference to a
+std::type_info. When a handler is matched against an active exception, that
+exception carries a reference to its type's std::type_info that is matched
+against the handler's std::type_info. Matching base vs. derived classes requires
+additional checks that are passed over for this presentation. std::type_info
+objects are laid out for all types in the program, because C++ imposes few
+restrictions on which types can be thrown as exceptions.
+<P>The std::type_info information could be extended to contain a pointer to the
+copy constructor. (That pointer would not be exposed outside of the compiler's
+runtime support, keeping in mind that std::type_info is used in this
+presentation only for exposition purposes.) The copy constructor always exists
+and is accessible for types thrown as exceptions (15.1p5).
+<P>std::rethrow_from_foreign_thread then copies the exception from the (possibly
+thread-specific) memory location for "currently handled exceptions" to the local
+thread's space for the same and performs as if "throw;" would have been written.
+
+<P>If the overhead of extending std::type_info (or the compiler's equivalent)
+with a pointer to the copy constructor, if any, is deemed excessive, the
+compiler could hook on all "throw" expressions and emit copy constructor
+pointers for types that are actually thrown as exceptions. However, this would
+require additonal machinery to look up said pointer from
+std::rethrow_from_foreign_thread.
+<P>As a third option, the compiler could augment its exception infrastructure to
+not only transmit the exception object and its corresponding std::type_info, but
+a copy constructor pointer as well when an exception is actually thrown.
+<H2>Option 2: Type-Agnostic Cloning and Throwing</H2>
+<H3>Outline</H3>A general feature that allows cloning of the currently handled
+exception (using heap-allocated memory) and rethrowing it later is introduced,
+for example by introducing a special language-support library function
+std::currently_handled_exception and extending std::type_info with additional
+member functions <PRE>  void * currently_handled_exception();
+  class type_info {
+    // ...
+    void* clone_exception(const void *);
+    void destroy(void *);
+    void rethrow(const void *);
+  };
+</PRE>and introducing <CODE>typeid(...)</CODE> that would return a reference to
+the std::type_info of the currently handled exception inside a catch(...)
+handler.
+<P>If the type identified by a given std::type_info instance does not have a
+publicly accessible copy constructor, <CODE>clone_exception</CODE> returns a
+null pointer.
+<P>Thus, the library support code for T1 might look like this: <PRE>  try {
+    // call user-supplied function that is executed as T1
+  } catch(...) {
+    const std::type_info&amp; ti = typeid(...);
+    void * exc = ti.clone_exception(std::currently_handled_exception());
+    // move "&amp;ti" to joining thread T2
+    // move "exc" pointer to joining thread T2
+    return;       // T1 terminates
+  }
+  // indicate "no exception" to joining thread
+  return;    // T1 terminates
+</PRE>The library support code for join (in T2) might look like this: <PRE>  void join(thread_id_type id)
+  {
+    // get the "exc" and "type_info" pointers
+    const void * exc = ...; // get from T1
+    if (exc) {
+      const std::type_info * ti = ...; // get from T1
+      try {
+        ti-&gt;rethrow(exc);
+      } catch(...) {
+        ti-&gt;destroy(exc);
+        throw;
+      }
+    }
+    // no exception pending, done
+  }
+</PRE>(Similar inter-thread co-ordination as outlined for option 1 may be
+necessary.)
+<H3>Details</H3>In section 5.2.8, add after paragraph 4
+<BLOCKQUOTE><CODE>typeid(...)</CODE> shall appear lexically inside an
+  exception handler declared with <CODE>catch(...)</CODE> only. In such use, the
+  result refers to a std::type_info object representing the type of the
+  currently handled exception. </BLOCKQUOTE>Language support library (clause 18): <PRE>  void * currently_handled_exception();
+</PRE><EM>Effect:</EM> Returns a pointer to the currently handled exception
+(15.3p8), or a null pointer if there is none. <PRE>  class type_info {
+    // ...
+    void* clone_exception(const void *);
+    void destroy(void *);
+    void rethrow(const void *);
+  };
+</PRE><PRE>  void* clone_exception(const void * p);
+</PRE><EM>Precondition:</EM> The parameter p has a value that was previously
+returned by the function <CODE>currently_handled_exception</CODE>.
+<P><EM>Effect:</EM> Allocates memory and invokes the copy constructor on the
+object that <CODE>p</CODE> points to. It is unspecified whether the memory is on
+the heap or some other memory accessible to all threads.
+<P><EM>Returns:</EM> Returns a pointer to a copy of the object that
+<CODE>p</CODE> points to, or a null pointer if <CODE>p</CODE> is a null pointer.
+
+<P><EM>Throws:</EM> <CODE>bad_alloc</CODE> if memory could not be allocated, or
+<CODE>bad_clone</CODE> if the class of the object that <CODE>p</CODE> points to
+has no publicly accessible copy constructor. <PRE>  void destroy(void * p);
+</PRE><EM>Precondition:</EM> The parameter p has a value that was previously
+returned by the function clone_exception.
+<P><EM>Effect:</EM> Invokes the destructor of the object that <CODE>p</CODE>
+points to and frees the associated memory. Does nothing if <CODE>p</CODE> is a
+null pointer. <PRE>  void rethrow(const void *);
+</PRE><EM>Precondition:</EM> The parameter p has a value that was previously
+returned by the function clone_exception.
+<P><EM>Throws:</EM> The object that <CODE>p</CODE> points to, or nothing if
+<CODE>p</CODE> is a null pointer.
+<H3>Implementation</H3>Similar to option 1, the implementation has to keep track
+of publicly accessible copy constructors in std::type_info for use by
+clone_exception. Type-agnostic destructor calls are already required by the
+current language rules. </BODY></HTML>

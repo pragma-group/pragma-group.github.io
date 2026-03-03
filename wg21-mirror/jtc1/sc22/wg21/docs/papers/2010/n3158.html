@@ -1,0 +1,466 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html><head>
+
+<meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1">
+
+<title>N3158</title>
+
+<style type="text/css">
+  p {text-align:justify}
+  ins {background-color:#A0FFA0}
+  del {background-color:#FFA0A0}
+  blockquote.note
+  {
+   background-color:#E0E0E0;
+   padding-left: 15px;
+   padding-right: 15px;
+   padding-top: 1px;
+   padding-bottom: 1px;
+  }
+</style>
+</head><body>
+<address style="text-align: left;">
+Document number: N3158=10-0148<br>
+Date: 2010-10-13<br>
+Author: Daniel Kr&uuml;gler<br>
+Project: Programming Language C++, Library Working Group<br>
+Reply-to: <a href="mailto:daniel.kruegler@googlemail.com">Daniel Kr&uuml;gler</a><br>
+</address>
+<hr>
+<h1 style="text-align: center;">Missing preconditions for default-constructed <tt>match_result</tt> objects</h1>
+<p>
+<strong>Addresses</strong>: <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2010/n3118.html#GB126">GB 126</a>
+<p>
+<h2><a name="Discussion"></a>Discussion</h2>
+<p>
+NB comment GB 126 asserts: 
+<blockquote class="note"><p>
+&quot;It's unclear how <tt>match_result</tt>s should behave if it has been default-constructed. The <tt>sub_match</tt> objects 
+returned by <tt>operator[]</tt>, <tt>prefix</tt> and <tt>suffix</tt> cannot point to the end of the sequence that was 
+searched if no search was done. The iterators held by unmatched <tt>sub_match</tt> objects might be singular.&quot;
+</blockquote>
+<p>
+In contrast to the pre-evaluation during the Rapperswil meeting the author of this proposal believes that this comments
+describes a real issue. There are several problems involved with the current state of <tt>sub_match</tt> and <tt>match_results</tt>:
+<p> 
+One problem is that default-constructed <tt>sub_match</tt> objects have an uninitialized value for the <tt>matched</tt> member 
+as of the semantics of the compiler-generated default constructor. This restricts strongly the usability of such objects, 
+they can only be assigned to a new value, invoking any other member operations will be undefined behaviour, because 
+basically all of them query the <tt>matched</tt> member. 
+Furthermore, since these objects are elements of <tt>match_results</tt> objects, these restrictions propagate as 
+further implied restrictions to several member functions of the of <tt>match_results</tt> container in a subtle way.
+E.g. the function <tt>length()</tt> has the same effects as <tt>[sub].length()</tt>, but we may not satisfy the (implied)
+requirements to call this <tt>sub_match</tt> function.
+<p>
+Additional to that, <tt>match_results</tt> can have two different observable states, when being empty. They can be empty, 
+because they have not participated in any matching attempt yet, or they can be empty because of an unsuccessful 
+matching attempt. The reason for the difference is, that in the first case queried <tt>sub_match</tt>
+elements have a range defined by a pair of two value-initialized iterators, in the second case they
+have a range defined by the past-the-end values of the target sequence. Value-initialized iterator
+provide only little guaranteed usages. The only guarantee provided is that they can be used as a <strong>source</strong>
+of a copy or move operation. This means that we don't need to impose restrictions to move or copy operations of the
+<tt>matched_results</tt> object itself, but this still doesn't guarantee that such an iterator value can be used
+as an argument of <tt>operator==</tt>. According to 24.2.5/2:
+<blockquote class="note"><p>
+The domain of <tt>==</tt> for forward iterators is that of iterators over the same underlying sequence.	
+</blockquote><p>
+which was a response to the LWG issue <a href= "http://www.open-std.org/jtc1/sc22/wg21/docs/lwg-closed.html#446">446</a>.
+So, while this works for a pair of null pointers, it is not guaranteed to work for a pair of value-initialized
+user-defined iterators, because we have no well-defined underlying sequence. Without extra wording it is not valid
+to conclude that every empty range is equivalent to any other empty sequence, plus we don't know whether <tt>operator==</tt>
+is defined for this specific object state at all. For example, such iterator values could have a NaN-like state that 
+might raise an error when trying to compare them. The current iterator requirements allow this interpretation so unless 
+the library explicitly defines further operations of value-initialized (forward) iterators, we have to accept this state. 
+To enforce this effect, the library could <em>ad hoc</em> require that forward iterators are near to a <tt>NullablePointer</tt> 
+(except for conversions from <tt>std::nullptr_t</tt>), which seems to me somewhat too ambitious at this stage of the 
+standard because this might easily break valid code that relies on the current freedom for such restrictions. Another option 
+to solve this problem could be to add restrictions that only non-empty <tt>match_results</tt> can be used for such 
+functions, but that would have the effect that results from unsuccessful searches are much harder to handle than those 
+from successful, we would basically be required to forbid all operations - including <tt>match_results::operator==</tt> - 
+for empty <tt>match_results</tt> objects - this would indeed make unmatched results second class citizens!
+<p>
+The real problem seems to me, that user code has <strong>no portable</strong> means to verify in which empty state 
+such an object exists, especially <em>if</em> the corresponding iterator type does not support equality comparison 
+of value-initialized iterators (we cannot tell them to check whether these values are value-initialized). But without 
+a way to assert this state its hard to ensure that preconditions are satisfied for several functions. While such
+a situation is ok for a weak-referencing iterator-wrapper like <tt>reverse_iterator</tt> or <tt>move_iterator</tt>, it 
+seems inappropriate for a self-managing container like <tt>match_results</tt> that already must be aware of
+these different states.
+<p>
+During preparation of this proposal a new issue was found: Even if we ignore the problem of match results that have 
+not yet participated in a match, we have another one related to <tt>operator==</tt>. The current specification is as 
+follows:
+<blockquote><pre>
+template &lt;class BidirectionalIterator, class Allocator&gt;
+bool operator==(const match_results&lt;BidirectionalIterator, Allocator&gt;&amp; m1,
+                const match_results&lt;BidirectionalIterator, Allocator&gt;&amp; m2);
+</pre><blockquote><p>
+1 <em>Returns</em>: <tt>true</tt> only if the two objects refer to the same match.
+</blockquote></blockquote>
+<p>
+It is not really clear what this means: The current specification would allow for an
+implementation to return <tt>true</tt>, only if the address values of <tt>m1</tt> and
+<tt>m2</tt> are the same. While this approach is unproblematic in terms of used operations 
+this is also a bit unsatisfactory. With identity equality alone there seems to be no convincing
+reason to provide this operator at all. It could for example also refer to an comparison based
+on iterator values. In this case a user should better know that this will be done, because - 
+as quoted before - there is no guarantee at all that inter-container comparison of iterators 
+is a feasible operation. This was a clear outcome of the resolution provided in 
+<a href= "http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2010/n3066.html">N3066</a> 
+for LWG issue <a href= "http://www.open-std.org/jtc1/sc22/wg21/docs/lwg-closed.html#446">446</a>.
+It could also mean that a character-based comparison of the individual <tt>sub_match</tt>
+elements should be done - this would be equivalent to applying <tt>operator==</tt> to
+the subexpressions, prefix and suffix.
+<p>
+As a guidance to solve this issue I searched for comparable functionality in the Library. 
+The nearest one seemed to be the bucket API in unordered containers. The problem with this 
+type as a comparison is, that <tt>match_results</tt> are <strong>intended</strong> to return 
+<tt>sub_match</tt> elements, even, if the corresponding index value is out of range. 
+Another family of library components that could be used as models are <tt>future</tt> and friends,
+which provide a <tt>valid</tt> observer that can be inspected. Most member function require
+that this attribute is <tt>true</tt>. It was hard to fine a proper name for such a state: The 
+following names had been considered:
+<p>
+<ul>
+<li><tt>completed</tt></li>
+<li><tt>defined</tt></li>
+<li><tt>established</tt></li>
+<li><tt>has_results</tt></li>
+<li><tt>is_ready</tt></li>
+<li><tt>partial</tt></li>
+<li><tt>ready</tt></li>
+<li><tt>searched</tt></li>
+<li><tt>used</tt></li>
+<li><tt>valid</tt></li>
+</ul>
+<p>
+In the end the author decided for the name <tt>ready</tt> as a weak winner based on the criteria
+brevity and conciseness.
+<p>
+This paper suggest to perform the following changes to solve the problems raised by NB comment GB 126:
+<p>
+<ul>
+<li>Require that the default constructor of <tt>sub_match</tt> value-initializes all subobjects. I don't
+think that this decision would be too controversial, because the <tt>pair</tt> base does already value-initialize
+the two iterator members. This ensures that all member functions of <tt>sub_match</tt> can be called without adding
+further pre-conditions.</li>
+<li>Add an observer function <tt>ready()</tt> to <tt>match_results</tt> that returns whether this object has already 
+	participated at any match attempt. This solves the problem for user-code not being able to distinguish these two states.</li>
+<li>Clarify the semantics of <tt>operator==</tt> for <tt>match_results</tt>.</li>
+</ul>
+<p>	
+<p>
+<h2><a name="Proposed_resolution"></a>Proposed resolution</h2>
+<p>
+The following wording changes are against N3126.
+<p>
+<ol>
+<li>Change 28.9 [re.submatch]/1, class template sub_match synopsis, as indicated. The intent is to
+provide a user-defined default-constructor. We recommend to make it <tt>constexpr</tt> to support
+participation in static initialization (The base class <tt>pair</tt> has a constexpr default
+constructor, if the value-initialization of the iterator pair allows this):
+<blockquote><pre>
+namespace std {
+  template &lt;class BidirectionalIterator&gt;
+  class sub_match : public std::pair&lt;BidirectionalIterator, BidirectionalIterator&gt; {
+  public:
+    typedef typename iterator_traits&lt;BidirectionalIterator&gt;::
+      value_type                              value_type;
+    typedef typename iterator_traits&lt;BidirectionalIterator&gt;::
+      difference_type                         difference_type;
+    typedef BidirectionalIterator             iterator;
+    typedef basic_string&lt;value_type&gt;          string_type;
+
+    bool matched;
+
+    <ins>constexpr sub_match();</ins>
+
+    difference_type length() const;
+    operator string_type() const;
+    string_type str() const;
+
+    int compare(const sub_match&amp; s) const;
+    int compare(const string_type&amp; s) const;
+    int compare(const value_type* s) const;
+  };
+}
+</pre></blockquote>
+</li>
+<li>Insert a new member prototype description at the very beginning 28.9.1 sub_match members [re.submatch.members]:
+<p>
+<blockquote><pre>
+<ins>constexpr sub_match();</ins>
+</pre><blockquote><p>
+<ins><em>Effects</em>: Value-initializes the <tt>pair</tt> base class subobject and the member <tt>matched</tt>.</ins>
+</blockquote></blockquote><p>
+</li>
+<li>Insert a new (numbered) paragraph between and [re.results]/2 and [re.results]/3 as indicated. The intent is to clarify, when 
+	a <tt>match_results</tt> object is a fully valid result:
+<p>
+1 Class template <tt>match_results</tt> denotes a collection of character sequences representing the result of a regular
+expression match. Storage for the collection is allocated and freed as necessary by the member functions of
+class template <tt>match_results</tt>.
+<p>
+2 The class template <tt>match_results</tt> shall satisfy the requirements of an allocator-aware container and of a
+sequence container, as specified in 23.2.3, except that only operations defined for const-qualified sequence
+containers are supported.
+<p>
+<ins>? A default-constructed <tt>match_results</tt> object has no fully established result state. As a consequence of a 
+	completed regular expression match modifying such an object its result state becomes fully established, the match result 
+	is <em>ready</em>. For most member functions, the effects of calling them from a <tt>match_results</tt> object that 
+	is not ready	are undefined.</ins>
+<p>
+3 The <tt>sub_match object</tt> stored at index 0 represents sub-expression 0, i.e., the whole match. In this case the 
+<tt>sub_match</tt> member <tt>matched</tt> is always true. The <tt>sub_match</tt> object stored at index <tt>n</tt> 
+denotes what matched the marked sub-expression <tt>n</tt> within the matched expression. If the sub-expression <tt>n</tt> 
+participated in a regular expression match then the <tt>sub_match</tt> member <tt>matched</tt> evaluates to true, and 
+members <tt>first</tt> and <tt>second</tt> denote the range of characters <tt>[first,second)</tt> which formed that match. 
+Otherwise <tt>matched</tt> is false, and members <tt>first</tt> and <tt>second</tt> point to the end of the sequence that 
+was searched. [ <em>Note</em>: The <tt>sub_match</tt> objects representing different sub-expressions that did not 
+participate in a regular expression match need not be distinct. &mdash; <em>end note</em> ]
+</li>
+<li>Add a new observer function to the <tt>match_results</tt> class synopsis. The intent it to provide a test
+	function to verify whether such an object has been used in any match attempt:
+<blockquote><pre>
+namespace std {
+  template &lt;class BidirectionalIterator,
+            class Allocator = allocator&lt;sub_match&lt;BidirectionalIterator&gt; &gt;
+  class match_results {
+  public:
+    [..]
+
+    <ins>// <em>[re.results.state] state:</em></ins>
+    <ins>bool ready() const;</ins>
+
+    // <em>28.10.2 size:</em>
+    size_type size() const;
+    size_type max_size() const;
+    bool empty() const;
+    
+    [..]
+  };
+</pre></blockquote>
+</li>
+<li>Change [re.results.const]/3 as indicated. The post-conditions need to specify that the result is not yet ready. We also
+	remove the previous post-condition regarding <tt>str()</tt>, because we exclude this function from being in the 
+	domain of a not-ready match result:
+<p>
+<blockquote><pre>
+match_results(const Allocator&amp; a = Allocator());
+</pre><blockquote><p>
+2 <em>Effects</em>: Constructs an object of class <tt>match_results</tt>.
+<p>
+3 <em>Postconditions</em>: <ins><tt>ready()</tt> returns <tt>false</tt>.</ins> <tt>size()</tt> returns <tt>0</tt>. 
+<del><tt>str()</tt> returns <tt>basic_string&lt;char_type&gt;()</tt>.</del>
+</blockquote></blockquote><p>
+</li>
+<li>Change Table 138 as indicated, we need to say something about the ready state:
+<blockquote><p>
+<table border="1">
+<caption>Table 138 &mdash; <tt>match_results</tt> assignment operator effects</caption>
+
+<tbody>
+<tr>
+<th>Element</th>
+<th>Value</th>
+</tr>
+
+<tr>
+<td><ins><tt>ready()</tt></ins></td>
+<td><ins><tt>m.ready()</tt></ins></td>
+</tr>
+
+<tr>
+<td><tt>size()</tt></td>
+<td><tt>m.size()</tt></td>
+</tr>
+
+<tr>
+<td><tt>str(n)</tt></td>
+<td><tt>m.str(n)</tt> for all integers <tt>n < m.size()</tt></td>
+</tr>
+
+<tr>
+<td><tt>...</tt></td>
+<td><tt>...</tt></td>
+</tr>
+
+</tbody></table>
+<p></blockquote>
+
+</li>
+<li>Add a new sub-clause [re.results.state] just before sub-clause [re.results.size]:
+<p>
+<ins>28.10.? <tt>match_results</tt> state [re.results.state]</ins>
+<p>
+<blockquote><pre>
+<ins>bool ready() const;</ins>
+</pre><blockquote><p>
+<ins>? <em>Returns</em>: <tt>true</tt>, if <tt>*this</tt> corresponds to a match result with fully established result state, 
+	otherwise <tt>false</tt>.</ins>
+</blockquote></blockquote><p>
+</li>
+<li>Change the following paragraphs in 28.10.3 [re.results.acc] as indicated. The intent is add pre-conditions
+	as appropriate [Note: The <tt>(c)begin()</tt>/<tt>(c)end()</tt> functions are intentionally unconstrained]:
+<p>
+<blockquote><pre>
+difference_type length(size_type sub = 0) const;
+</pre><blockquote><p>
+<ins>? <em>Requires</em>: <tt>ready() == true</tt>.</ins>
+<p>
+1 <em>Returns</em>: <tt>(*this)[sub].length()</tt>.
+</blockquote></blockquote><p>
+<blockquote><pre>
+difference_type position(size_type sub = 0) const;
+</pre><blockquote><p>
+<ins>? <em>Requires</em>: <tt>ready() == true</tt>.</ins>
+<p>
+2 <em>Returns</em>: The distance from the start of the target sequence to <tt>(*this)[sub].first</tt>.
+</blockquote></blockquote><p>
+<blockquote><pre>
+string_type str(size_type sub = 0) const;
+</pre><blockquote><p>
+<ins>? <em>Requires</em>: <tt>ready() == true</tt>.</ins>
+<p>
+3 <em>Returns</em>: <tt>string_type((*this)[sub])</tt>.
+</blockquote></blockquote><p>
+
+<blockquote><pre>
+const_reference operator[](size_type n) const;
+</pre><blockquote><p>
+<ins>? <em>Requires</em>: <tt>ready() == true</tt>.</ins>
+<p>
+4 <em>Returns</em>: A reference to the <tt>sub_match</tt> object representing the character sequence 
+that matched marked sub-expression <tt>n</tt>. If <tt>n == 0</tt> then returns a reference to a <tt>sub_match</tt> 
+object representing the character sequence that matched the whole regular expression. If <tt>n >= size()</tt> then 
+returns a <tt>sub_match</tt> object representing an unmatched sub-expression.
+</blockquote></blockquote><p>
+	
+<blockquote><pre>
+const_reference prefix() const;
+</pre><blockquote><p>
+<ins>? <em>Requires</em>: <tt>ready() == true</tt>.</ins>
+<p>
+5 <em>Returns</em>: A reference to the <tt>sub_match</tt> object representing the character sequence from the start of
+the string being matched/searched to the start of the match found.
+</blockquote></blockquote><p>
+	
+<blockquote><pre>
+const_reference suffix() const;
+</pre><blockquote><p>
+<ins>? <em>Requires</em>: <tt>ready() == true</tt>.</ins>
+<p>
+6 <em>Returns</em>: A reference to the <tt>sub_match</tt> object representing the character sequence from the end of the
+match found to the end of the string being matched/searched.
+</blockquote></blockquote><p>
+	
+</li>
+<li>Change the following paragraphs in 28.10.4 [re.results.form] as indicated. The intent is add pre-conditions
+	as appropriate:
+
+<blockquote><pre>
+template &lt;class OutputIter&gt;
+  OutputIter format(OutputIter out,
+    const char_type* fmt_first, const char_type* fmt_last,
+      regex_constants::match_flag_type flags =
+        regex_constants::format_default) const;
+</pre><blockquote><p>
+1 <em>Requires</em>: <ins><tt>ready() == true</tt> and</ins> OutputIter shall satisfy the requirements for an Output Iterator (24.2.4).
+<p>
+	[...]
+</blockquote></blockquote><p>
+	
+<blockquote><pre>
+template &lt;class ST, class SA&gt;
+  basic_string&lt;char_type, ST, SA&gt;
+    format(const basic_string&lt;char_type, ST, SA&gt;&amp; fmt,
+      regex_constants::match_flag_type flags =
+        regex_constants::format_default) const;
+</pre><blockquote><p>
+<ins>? <em>Requires</em>: <tt>ready() == true</tt>.</ins>
+<p>
+5 <em>Effects</em>: Constructs an empty string <tt>result</tt> of type <tt>basic_string&lt;char_type, ST, SA&gt;</tt> and calls
+ <tt>format(back_inserter(result), fmt, flags)</tt>.
+<p>
+6 <em>Returns</em>: <tt>result</tt>.
+</blockquote></blockquote><p>
+	
+<blockquote><pre>
+string_type
+  format(const char_type* fmt,
+    regex_constants::match_flag_type flags =
+      regex_constants::format_default) const;
+</pre><blockquote><p>
+<ins>? <em>Requires</em>: <tt>ready() == true</tt>.</ins>
+<p>
+7 <em>Effects</em>: Constructs an empty string <tt>result</tt> of type <tt>string_type</tt> and calls
+<tt>format(back_inserter(result), fmt, fmt + char_traits&lt;char_type&gt;::length(fmt), flags)</tt>.
+<p>
+8 <em>Returns</em>: <tt>result</tt>.
+</blockquote></blockquote><p>
+</li>
+<li>Change 28.10.7 [re.results.nonmember]/1 as indicated. The intent is to specify the semantics of equality. This
+	takes into account a potential not-ready nature and clarifies that for complete match results the sequences of
+	<tt>sub_match</tt> objects (including prefix and suffix) will be compared &quot;by value&quot;. The wording is
+	carefully crafted to ensure that for empty results only the guaranteed attribute values are queried:
+<p>
+<blockquote><pre>
+template &lt;class BidirectionalIterator, class Allocator&gt;
+  bool operator==(const match_results&lt;BidirectionalIterator, Allocator&gt;&amp; m1,
+                  const match_results&lt;BidirectionalIterator, Allocator&gt;&amp; m2);
+</pre><blockquote><p>
+1 <em>Returns</em>: <del>true only if the two objects refer to the same match.</del><ins><tt>true</tt> if and only if 
+both match results are not ready, or both are ready and if</ins>
+	<ul>
+	<li><ins><tt>m1.empty() && m2.empty()</tt>, or</ins></li>
+	<li><ins><tt>!m1.empty() && !m2.empty()</tt>, and the following conditions are satisfied:</ins>
+  	<ul>
+	  <li><ins><tt>m1.prefix() == m2.prefix()</tt>,</ins></li>
+	  <li><ins><tt>m1.size() == m2.size() && equal(m1.begin(), m1.end(), m2.begin())</tt>, and</ins></li>
+	  <li><ins><tt>m1.suffix() == m2.suffix()</tt></ins></li>
+    </ul>
+	</li>
+  </ul>
+  <p>
+  <ins>[<em>Note</em>: the algorithm <tt>equal()</tt> is defined in Clause 25. &mdash; <em>end note</em>]</ins>
+  <p>
+</blockquote></blockquote><p>
+</li>
+<li>Change the [re.alg.match]/3 as indicated. The intend is to ensure that the match result is ready:
+<p>
+<blockquote><pre>
+template &lt;class BidirectionalIterator, class Allocator, class charT, class traits&gt;
+  bool regex_match(BidirectionalIterator first, BidirectionalIterator last,
+    match_results&lt;BidirectionalIterator, Allocator>&amp; m,
+      const basic_regex&lt;charT, traits>&amp; e,
+        regex_constants::match_flag_type flags =
+          regex_constants::match_default);
+</pre><blockquote><p>
+	[...]
+<p>
+3 <em>Postconditions</em>: <ins><tt>m.ready() == true</tt> in all cases.</ins> If the function returns <tt>false</tt>, 
+then the effect on parameter <tt>m</tt> is unspecified except that <tt>m.size()</tt> returns <tt>0</tt> and <tt>m.empty()</tt> 
+returns <tt>true</tt>. Otherwise the effects on parameter <tt>m</tt> are given in Table 139.
+</blockquote></blockquote><p>
+</li>
+<li>Change the [re.alg.search]/3 as indicated. The intend is to ensure that the match result is ready:
+<p>
+<blockquote><pre>
+template &lt;class BidirectionalIterator, class Allocator, class charT, class traits&gt;
+  bool regex_search(BidirectionalIterator first, BidirectionalIterator last,
+    match_results&lt;BidirectionalIterator, Allocator&gt;&amp; m,
+      const basic_regex&lt;charT, traits&gt;&amp; e,
+        regex_constants::match_flag_type flags =
+          regex_constants::match_default);
+</pre><blockquote><p>
+	[...]
+<p>
+3 <em>Postconditions</em>: <ins><tt>m.ready() == true</tt> in all cases.</ins> If the function returns <tt>false</tt>, 
+then the effect on parameter <tt>m</tt> is unspecified except that <tt>m.size()</tt> returns <tt>0</tt> and <tt>m.empty()</tt> 
+returns <tt>true</tt>. Otherwise the effects on parameter <tt>m</tt> are given in Table 140.
+</blockquote></blockquote><p>
+</li>
+</ol>
+<p>
+</p>
+</body></html>

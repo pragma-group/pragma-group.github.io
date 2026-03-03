@@ -1,0 +1,361 @@
+<html>
+<head>
+<title>Toward a More Perfect Union</title>
+</head>
+
+<body>
+<h1>Toward a More Perfect Union </h1>
+
+<p>ISO/IEC JTC1 SC22 WG21 <a hRef="../2007/n2248.html">N2248</a> = 07-0108
+<br>Author: Lois Goldthwaite
+<br>Date: 2007-05-07
+
+ 
+<p>Summary: Decisions already made, now in progress toward the Draft Working Paper, have broadened the number of classes which are eligible for membership in a union class type. See in particular <a hRef="../2007/n2210.html">N2210</a> (Default and Deleted Functions) and <a hRef="../2007/n2172.html">N2172</a> (POD's Revisited). Some further loosening of restrictions would give unions more utility for practical applications by increasing expressiveness and reducing hackery.
+
+<p>The <i>union</i> keyword is a <i>class-key</i> like <i>class</i> and <i>struct</i>. Unions are classes which are capable of containing objects of different types at different times (3.9.2). All of a union's members are allocated at the same address, and only one of the members can hold a value at any given time. 
+
+<p>What good are they? To put it bluntly, unions are a hack to subvert the C++ type system.  Sometimes they are used simply as a non-portable means of bit twiddling:
+
+<pre>
+// notecase-1.3.6/src/lib/blowfish.cpp:
+union aword {
+          DWORD dword;
+          BYTE byte [4];
+          struct {
+            unsigned int byte3:8;
+            unsigned int byte2:8;
+            unsigned int byte1:8;
+            unsigned int byte0:8;
+          } w;
+        };
+</pre>
+
+<p>but at other times they are used to create a kind of portmanteau "any" variable, a more readable alternative to void *, with the added benefit of value semantics:
+
+<pre>
+//libgcj-2.95.1/libjava/include/jni.h
+typedef union jvalue
+{
+  jboolean z;
+  jbyte    b;
+  jchar    c;
+  jshort  s;
+  jint    i;
+  jlong    j;
+  jfloat  f;
+  jdouble  d;
+  jobject l;
+} jvalue;
+</pre>
+
+<p>Unfortunately this brute-force approach cannot be extended to every user-defined type that a programmer might want to pass around transparently. As class types, unions are definitely second class: although a union may define a constructor and destructor for instances of its type, the standard does not allow it to contain any member whose default constructor, copy constructor, copy assignment operator, or destructor are non-trivial. The reason for these tight restrictions is obvious -- the compiler can hardly be expected to generate sensible default special member functions for an object whose type will only become known at run time, and therefore a "lowest-common-denominator" policy applies. With the rules in place, default initialization is effectively a no-op, likewise destruction, and copying is performed using a low-level memcpy. 
+
+<p>This rules out the inclusion of "interesting" types, or else requires the programmer to ignore good design practice in order to make them conform to the straightjacket of trivial types (see discussion in <a hRef="../2007/n2172.html">N2172</a>).
+
+<p>And yet the need for a "variant" data structure that can hold one object of a set of unrelated types is a problem that arises over and over[5][6][7][8].  Example use cases are interpreters, C++ wrappers for COM objects, GUI list controls, polymorphic collections of types not related by inheritance, or sometimes merely a desperate need to optimize data space. 
+
+<p>Code which ignores type safety is not pretty, although sometimes forced on us by circumstances, but the code to accomplish that is often downright ugly. In order to force-fit objects with non-trivial functions into a union, one technique is to create a type containing raw storage and construct objects in it using placement new:
+
+<pre>
+union YetAnotherVariantType
+{
+   char data_[large_enough_size];
+   MostRestrictiveAlignType align_;
+};
+
+YetAnotherVariantType v;
+T* t = new (v.data_) T(42, 3.14, 2.718, "Yoohoo");
+// ...
+reinterpret_cast &lt; T&amp; &gt; (v.data_).~T();   // cleanup
+</pre>
+
+<p>The need to use a union at all arises from considerations of alignment. Many platforms expect variables to begin at memory addresses which are multiples of 2 or larger numbers (3.9p5). Aligning a variable at the wrong address can severely hurt performance, or even end the program with a hardware fault. Including in the union the type with the most restrictive alignment requirement guarantees it will be correctly aligned for any variable type.
+
+<p>The naive code above puts the burden on the application programmer to manage the lifetime of the variable occupying the buffer space in the union, and to keep track of the type of variable in the buffer at the current time. Many cleverer implementations exist, some using template typelists and awe-inspiring metaprogramming techniques. Most implementations wrap the union in a struct together with an enum or more complicated mechanism for tracking and querying the active data type. (And somewhere most seem to include a comment along the lines of "C++'s union construct is nearly useless in an object-oriented environment.")
+
+<p>The adoption of <a hRef="../2007/n2210.html">N2210</a> and <a hRef="../2007/n2172.html">N2172</a> makes it appropriate to revisit the restrictions on unions (9.5) to see if they are all still necessary.
+
+<ul>
+<li>The members of a union are public by default. (9p4)</li>
+
+<li>The size of a union is sufficient to contain the largest of its data members.</li>
+
+<li>All data members begin at the same address.</li>
+
+<li>Only one data member can be active -- in other words, the value of at most one of the data members can be stored in a union at any time.</li>
+
+<li>A union shall not have base classes.</li>
+
+<li>A union shall not be used as a base class.</li>
+
+<li>If a union contains a static data member, or a member of reference type, the program is ill-formed.</li>
+
+<li>A union can not have virtual functions.</li>
+</ul>
+
+<p>Neither this paper nor those others suggests changing any of the above restrictions. However, this one is affected by <a hRef="../2007/n2210.html">N2210</a> and <a hRef="../2007/n2172.html">N2172</a>, even though neither of them makes any mention of unions:
+
+<ul>
+<li>An object of a class with a non-trivial default constructor (12.1), a non-trivial copy constructor (12.8), a non-trivial destructor (12.4), or a non-trivial copy assignment operator (13.5.3, 12.8) cannot be a member of a
+union, nor can an array of such objects.</li>
+</ul>
+
+<p>Under the current rules, this class:
+
+<pre>
+struct IntPair
+{
+  int i;
+  int j;
+  IntPair(int a, int b) : i(a), j(b) { }
+};
+</pre>
+
+<p>is not suitable for inclusion in a union, because it lacks a trivial default constructor, which has been suppressed by the declaration of another constructor. Even a user-defined copy constructor suppresses the implicit default constructor. Adding a do-nothing default constructor:
+
+<pre>
+  IntPair() { }
+</pre>
+
+<p>does not solve the problem, because at present a user-defined constructor is never trivial. But using the syntax in <a hRef="../2007/n2210.html">N2210</a>, adding:
+
+<pre>
+  IntPair() = default;
+</pre>
+
+<p>to the class declaration restores the trivial default constructor. My interpretation is that this syntax:
+
+<pre>
+union U
+{
+   IntPair ip;
+   double dw;
+};
+</pre>
+
+<p>would then be well-formed.
+
+Up to now this paper is just a statement of obvious consequences. Here is where it gets more interesting (and possibly even falls over the edge of plausibility).
+
+<p>Do we now have an opportunity to create a genuinely useful container for variable types? Since union types themselves can have constructors, we can easily control the type of variable which is stored in the union at its creation. Being able to list the actual types to be held by the union, regardless of their triviality, would get rid of the clever tricks to ensure appropriate alignment and to construct objects in the raw storage of the union buffer, leading to more readable code.
+
+<pre>
+
+template &lt; typename T1, typename T2 &gt;
+union Generic
+   {
+      T1 t1;
+      T2 t2;
+      // no default constructor
+      Generic(T1 t) : t1(t) {}
+      Generic(T2 t) : t2(t) {}
+
+      T1 &amp; getType1() { return t1; }
+      T2 &amp; getType2() { return t2; }
+};
+
+int main()
+{
+   Generic &lt; int,double &gt; g2(42);   
+   Generic &lt; int,double &gt; g3(3.14159);
+
+   std::cout &lt;&lt; g2.getType1() &lt;&lt; std::endl;
+   std::cout &lt;&lt; g3.getType2() &lt;&lt; std::endl;
+}
+
+</pre>  
+
+<p>The sample code compiles and runs with expected results now, when trivial types are used as template arguments. But
+
+<pre>
+   Generic &lt; IntPair, double &gt; g4(2.718);
+</pre>
+
+<p>evokes a compile-time error, at least until <a hRef="../2007/n2210.html">N2210</a> makes it into compilers.
+
+<p>But what about the other special member functions which compilers are expected to generate? Those are admittedly more problematic. But <a hRef="../2007/n2210.html">N2210</a> applies to unions as well as structs and classes. If copying semantics are not needed, they could be suppressed:
+
+<pre>
+   // ...
+   Generic(Generic const &amp;) = delete;
+   Generic &amp; operator = (Generic const &amp;) = delete;
+}
+</pre>
+
+<p>A programmer might choose to suppress these functions for a variety of reasons, but doing so frees the compiler from the duty of implicitly generating the functions. If any attempt to copy the union object is ill-formed, the copying semantics of its contained types become a moot point. An important use case is for objects which are constructed once and never copied or moved (see <a hRef="../2007/n2217.pdf">N2217</a>[9] for discussion of this use case).
+
+<p>Continuing the use case from <a hRef="../2007/n2217.pdf">N2217</a>, the Generic union could extend membership to objects without copy semantics by using the <code>emplace</code> technique which accepts a parameter pack and uses variadic template syntax to direct-initialize the data object in place, instead of copy-initializing it.
+
+<p>With the class as written above, the programmer still must keep track of the member type which is active at any given time, and this is sub-optimal. And there is also an obligation to perform any necessary cleanup by calling the contained object's destructor manually. An alternative is to package the union in a wrapper class with a discriminant, a hint about the union's data member:
+
+<pre>
+#include &lt; iostream &gt;
+#define MAXIMUM(a, b) ((a) > (b))? (a) : (b)
+
+template &lt; typename T1, typename T2 &gt;
+class GenericWrapper
+{
+   // nested types
+public:
+   enum typeOfU { NONE, TYPE1, TYPE2 } e;
+
+   union U
+   {
+      char data_[MAXIMUM(sizeof(T1), sizeof(T2))];
+      T1 t1;
+      T2 t2;
+      U() { }  // char [] active by default
+      U(T1 t) : t1(t) {}
+      U(T2 t) : t2(t) {}
+      ~U( ){}  // assume char [] is active
+   } u;
+
+   class bad_request : std::exception {};
+
+public:
+   GenericWrapper() : u() { e = NONE; }
+   GenericWrapper(T1 t) : u(t) { e = TYPE1; }
+   GenericWrapper(T2 t) : u(t) { e = TYPE2; }
+
+   ~GenericWrapper()
+   {
+      cleanup(); // leave u as raw storage
+   }
+
+   void cleanup()
+   {
+      switch(e)
+      {
+         case NONE:
+           break;
+
+         case TYPE1:
+           u.t1.~T1();
+           e = NONE;
+           break;
+
+         case TYPE2:
+           u.t2.~T2();
+           e = NONE;
+           break;
+      }
+   }
+
+   GenericWrapper(GenericWrapper const &amp; other) = delete;
+
+   GenericWrapper &amp; operator = (GenericWrapper const &amp; other) = delete;
+
+   typeOfU whatType() const
+   {
+      return e;
+   }
+
+   T1 &amp; getType1() 
+   { 
+      if (e != TYPE1)
+        throw bad_request();
+      return u.t1; 
+   }
+   T2 &amp; getType2() 
+   { 
+      if (e != TYPE2)
+        throw bad_request();
+      return u.t2; 
+   }
+
+
+   T1 const &amp; getType1() const
+   { 
+      if (e != TYPE1)
+        throw bad_request();
+      return u.t1; 
+   }
+   T2 const &amp; getType2() const
+   { 
+      if (e != TYPE2)
+        throw bad_request();
+      return u.t2; 
+   }
+};
+
+
+int main()
+{
+   GenericWrapper &lt; int,double &gt; g1;
+   GenericWrapper &lt; int,double &gt; g2(42);   
+   const GenericWrapper &lt; int,double &gt; g3(3.14159);
+
+   std::cout &lt;&lt; g2.getType1() &lt;&lt; std::endl;
+   std::cout &lt;&lt; g3.getType2() &lt;&lt; std::endl;
+
+   std::cout &lt;&lt; g2.whatType() &lt;&lt; std::endl;
+   std::cout &lt;&lt; g3.whatType() &lt;&lt; std::endl;
+
+   std::cout &lt;&lt; g2.getType2() &lt;&lt; std::endl; // throws
+}
+
+</pre>
+
+<p>Yes, macros are evil, but std::max is a function and so cannot be
+used in a constant expression like array size. The point of the
+char[] member of U is to allow the union to exist in an unitialized state
+containing simply raw storage. A more sophisticated library class might use <code>emplace</code> to implement copying semantics instead of disabling them. Meditation on the application of perfect forwarding and move semantics might yield additional synergies. The above is not offered as a serious addition to the standard library, but merely as a quick example of how programmers might exercise some of the new features of the language to achieve a clear expression of their intent.
+
+<p>The addition of garbage collection to standard C++ potentially could remove the worry about proper handling of many class types used as union members. Classes which manage no resources except allocated memory could simply be overwritten in the union's storage area, relying on the collector to clean up any memory leaks in a timely manner. 
+
+<p>Anonymous unions must be discussed briefly. This paper suggests no change in the restrictions on anonymous unions:
+
+<ul>
+<li>Anonymous unions may not have static data members.</li>
+<li>Anonymous unions may not have protected or private members.</li>
+<li>Anonymous unions may not have member functions.</li>
+</ul>
+
+<p>Since anonymous unions are not allowed to define member functions, the programmer cannot exercise the fine-grained control necessary to manage the lifetime of the individual data types. This is not anticipated to be a serious problem, since all that is necessary to remove the anonymity is to assign a variable name or pointer to the union.
+
+<p>Changes to the standard:
+
+<p>Remove this sentence from 9.5p1: 
+
+<blockquote>
+An object of a class with a non-trivial default constructor (12.1), a non-trivial copy constructor (12.8), a non-trivial destructor (12.4), or a non-trivial copy assignment operator (13.5.3, 12.8) cannot be a member of a
+union, nor can an array of such objects.
+</blockquote>
+
+<p>and replace it with this one:
+
+<blockquote>
+If a union contains any data member with non-trivial constructor, destructor, copy constructor, or assignment operator, and if any implicitly-defined functions for the union class would invoke one of those non-trivial funcions, the program is ill-formed.
+</blockquote>
+
+<p>Whether the loosening can extend to arrays as union members requires additional thought. The std::array class could serve as a substitute.
+
+<p>[Note: Since unions containing non-trivial types are not accepted by current compilers, I may be overly optimistic with some of the syntax proposed. An example is the "union Generic" code. Given the same constructors defined for a "normal" class, I would expect the compiler to invoke a default constructor for any data member not mentioned in the initializer list, before the body of the constructor is entered. The standard specifies how unions are default initialized; this is why the second example includes a "raw storage" element as the first member. If steroid-enhanced unions are considered worthy of further discussion, additional language might need to be drafted with guidance. Another alternative might be a library class packaging the functionality in a standard way.]
+
+<p>Conclusion: Decisions already made to incorporate various papers into the C++0x working paper make it feasible to relax the restrictions on types which can be used as members of a union class. This will conduce to more readable code, and programs which better express design decisions. It will also somewhat increase consistency among the three class types. New language features give the programmer more control and expressiveness; these benefits should not be diminished by carrying forward without review restrictions which may have outlived their justification.
+
+<p>References:
+
+<p>[1] <a hRef="../2007/n2210.html">N2210</a> Defaulted and Deleted Functions, Lawrence Crowl, www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2210.html
+
+<p>[2] POD's Revisited; Resolving Core Issue 568 (Revision 2), Beman Dawes, www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2172.html
+
+<p>[3] Core issue 568, Definition of POD is too strict, www.open-std.org/jtc1/sc22/wg21/docs/cwg_active.html#568, 
+
+<p>[4] Core issue 538, Definition and usage of structure, POD-struct, POD-union, and POD class, www.open-std.org/jtc1/sc22/wg21/docs/cwg_active.html#538
+
+<p>[5] An Implementation of Discriminated Unions in C++, Andrei Alexandrescu, 
+<a href="http://www.oonumerics.org/tmpw01/alexandrescu.pdf">http://www.oonumerics.org/tmpw01/alexandrescu.pdf</a>
+
+<p>[6] Union Lists: Single Value, Multiple Types, Christopher Diggins, <a href="http://www.codeproject.com/cpp/union_list.asp">http://www.codeproject.com/cpp/union_list.asp</a>
+
+<p>[7] boost::variant, <a href="http://www.boost.org/doc/html/variant.html">http://www.boost.org/doc/html/variant.html</a>
+
+<p>[8] Using Constructed Types in C++ Unions, Kevin T. Manley, C/C++ Users Journal, August 2002. This article has the subtitle "Toward a more perfect union," but I did come up with the title of this paper independently before discovering this.
+
+<p>[9] <a hRef="../2007/n2217.pdf">N2217</a> Placement Insert for Containers, Alan Talbot, www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2217.html
+
+</body>
+</html>
+

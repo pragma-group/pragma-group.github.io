@@ -1,0 +1,1281 @@
+<html>
+<head>
+<title>Dynamic Initialization and Destruction with Concurrency</title>
+</head>
+
+<body>
+<h1>Dynamic Initialization and Destruction with Concurrency</h1>
+
+<p> ISO/IEC JTC1 SC22 WG21 N2148 = 07-0008 - 2007-01-13
+
+<p> Lawrence Crowl, crowl@google.com, Lawrence@Crowl.org
+
+
+
+
+<h2>Introduction</h2>
+
+<p> Concurrency introduces potential deadlock or data races
+in the dynamic initialization and destruction of static-duration objects.
+Because the opportunity for programmers
+to manually synchronize such objects
+is limited by a lack of syntactic handles,
+the language must
+introduce new syntax, define synchronization, or limit programs.
+
+<p> This proposal breaks the problem into three reasonably separable parts:
+initialization of function-local static-duration objects,
+initialization of non-local static-duration objects, and
+destruction of all static-duration objects.
+Two of these problems have two proposed solutions.
+
+<p> This proposal exploits properties of a new algorithm
+for fast synchronized initialization
+by Mike Burrows of Google.
+(See the appendix for an implementation
+and an argument for its correctness.)
+The algorithm has three attributes signficant to its use here.
+<ul>
+<li>The "already initialized" check
+(e.g. for function-local static-duration objects already initialized)
+requires only one additional regular load over a non-concurrent check,
+presuming a fast implementation of
+<a href="n2147.html">N2147 Thread-Local Storage</a>.
+</li>
+<li>The initialization does not occur while holding
+any lock required by the synchronization mechanism.
+</li>
+<li>The algorithm is portable.
+</li>
+</ul>
+
+
+
+
+<h2>Function-Local Initialization</h2>
+
+<p> The core problem
+with function-local static-duration object initialization
+is that the containing function may be invoked concurrently,
+and thus the definition may execute concurrently.
+Failing to synchronize may introduce a race condition.
+The obvious solution is to synchronize.
+The problem is that such synchronization may introduce deadlock
+if the synchronization involves holding a lock while the initializer executes.
+We present two proposed solutions.
+The first solution assumes a synchronization mechanism
+that does not hold a lock during initialization.
+The second solution assumes that the mechanism may hold a lock,
+and thus requires new mechanisms to prevent deadlock.
+
+
+
+<h3>Option: No Introduced Locking</h3>
+
+<p> The proposal relies on Burrows' algorithm
+to avoid holding a lock while the initializer executes.
+Any deadlock that occurs as a result of initialization,
+must necessarily be a race condition in the absence of synchronization.
+
+
+<h4>6.7 Declaration statement [stmt.dcl]</h4>
+
+<p> In paragraph 4, edit
+
+<blockquote>
+Otherwise such an object is initialized
+the first time control passes through its declaration;
+such an object is considered initialized
+upon the completion of its initialization.
+If the initialization exits by throwing an exception,
+the initialization is not complete,
+so it will be tried again the next time control enters the declaration.
+<ins>If control enters the declaration concurrently
+while the object is being initialized,
+the concurrent execution waits for completion of the initialization.
+The implementation shall not introduce any locking
+around execution of the initializer.</ins>
+If control re-enters the declaration <del>(</del>recursively<del>)</del>
+while the object is being initialized,
+the behavior is undefined.
+</blockquote>
+
+
+
+<h3>Option: Possible Introduced Locking</h3>
+
+If the initialization synchronization mechanism holds a lock 
+and the thread doing the initialization holds a lock,
+and the initializer attempts to grab a lock,
+the initialization may deadlock.
+To resolve this problem,
+we enable programmers to chose to synchronize or not.
+
+<p> The definition of a function-local static-duration variable
+may indicate the synchronization of its initialization
+with a <var>synchronizer</var>.
+
+<ul>
+
+<li> If the <var>synchronizer</var> is <code>protected</code>,
+the initialization of the variable is locked.
+Each variable has its own lock.
+In the event that the initializer recursively invokes itself,
+the behavior is undefined.
+(Deadlock is probably preferable to any other action.)
+</li>
+
+<li> If the <var>synchronizer</var> is <code>private</code>,
+the initialization of the variable
+is not protected implicitly,
+and the program is undefined
+if it executes the definition of the variable
+concurrently or recursively.
+</li>
+
+<li> If the <var>synchronizer</var> is not specified,
+the initialization is implicitly <code>protected</code>.
+[Note: We expect compilers to provide options
+that change this behavior to permit migrating code
+from its current default.]
+</li>
+</ul>
+
+<p> For example:
+<blockquote><pre><code>int f() {
+    static int u protected = g(); // synchronized
+    static int v = h(); // synchronized
+    static int w private = i(); // unsynchronized
+    static nonPOD x private (3); // unsynchronized
+    return u + v + w + x.to_int();
+}
+</code></pre></blockquote>
+
+<p> A function-local static-duration object
+that is not also a variable
+has no syntactic handle for a synchronizer.
+In this case, the default synchronizer applies.
+
+
+<h4>Implementation</h4>
+
+<p> There is existing experience implementing the semantics for
+function-local static-duration object initialization.
+The current GNU compiler implements <code>protected</code> semantics.
+The current Sun compiler implements <code>private</code> semantics.
+Thus, there is implementation experience for both approaches individually.
+There is currently no implementation of the proposed synchronizer syntax.
+
+
+<h4>6.7 Declaration statement [stmt.dcl]</h4>
+
+<p> In paragraph 4, edit
+
+<blockquote>
+Otherwise such an object is initialized
+the first time control passes through its declaration;
+such an object is considered initialized
+upon the completion of its initialization.
+If the initialization exits by throwing an exception,
+the initialization is not complete,
+so it will be tried again the next time control enters the declaration.
+<ins>If control enters the declaration concurrently
+while the object is being initialized,
+the concurrent execution waits for completion of the initialization.</ins>
+If control re-enters the declaration <del>(</del>recursively<del>)</del>
+while the object is being initialized,
+the behavior is undefined.
+</blockquote>
+
+
+<h4>8.5 Initializers [dcl.init]</h4>
+
+<p> In paragraph 1, edit
+
+<blockquote>
+A declarator can specify an initial value for the identifier being declared.
+The identifier designates an object or reference being initialized.
+The process of initialization described in the remainder of 8.5
+applies also to initializations specified by other syntactic contexts,
+such as
+the initialization of function parameters with argument expressions (5.2.2)
+or the initialization of return values (6.6.3).
+<ins>For function-scoped static-duration objects,
+the initalizer may specify a synchronizer.</ins>
+<dl>
+<dt><var>initializer:</var></dt>
+<dd><ins><var>initalizer-synchronizer</var>
+<var>initializer-specification</var></ins></dd>
+<dd><ins><var>initalizer-synchronizer</var></ins></dd>
+<dd><ins><var>initializer-specification</var></ins></dd>
+
+<dt><ins><var>initalizer-synchronizer:</var></ins></dt>
+<dd><ins><code>private</code></ins></dd>
+<dd><ins><code>protected</code></ins></dd>
+
+<dt><ins><var>initializer-specification:</var></ins></dt>
+<dd><code>=</code> <var>initializer-clause</var></dd>
+<dd><code>(</code> <var>expression-list <code>)</code></dd>
+
+<dt><var>initializer-clause:</var></dt>
+<dd><var>assignment-expression</var></dd>
+<dd><code>{</code> <var>initializer-list</var>
+<code>,</code><sub><var>opt</var></sub> <code>}</code></dd>
+<dd><code>{ }</code></dd>
+
+<dt><var>initializer-list:</var></dt>
+<dd><var>initializer-clause</var></dd>
+<dd><var>initializer-list</var> <code>, <var>initializer-clause</var></dd>
+</dl>
+</blockquote>
+
+<p> At the end of section 8.5, add a new paragraph 6
+
+<blockquote>
+<ins>The definition of a function-scoped static-duration variable
+may indicate the synchronization of its initialization
+with an <var>initializer-synchronizer</var>.
+<ul>
+<li>If the <var>synchronizer</var> is <code>protected</code>,
+the initialization of the variable
+is protected by implicit double-checked locking.
+Each variable has its own lock.
+In the event that the initializer recursively invokes itself,
+the behavior is undefined.
+</li>
+
+<li>If the <var>synchronizer</var> is <code>private</code>,
+the initialization of the variable
+is not protected implicitly,
+and the program is undefined
+if it executes the definition of the variable
+concurrently or recursively.
+</li>
+
+<li>If the <var>synchronizer</var> is not specified,
+the initialization is implicitly <code>protected</code>.
+</li>
+</ul></ins>
+</blockquote>
+
+<p> At the end of section 8.5, add a new paragraph 7
+
+<blockquote>
+<ins>A function-local static-duration object
+that is not also a variable,
+is synchronized as if it were a variable
+with an unspecified synchronizer.</ins>
+</blockquote>
+
+
+<h4>12.6 Initialization [class.init]</h4>
+
+<p> In paragraph 1, edit
+
+<blockquote>
+When no <del>initializer</del> <ins><var>initializer-specifier</var></ins>
+is specified for an object of (possibly cv-qualified) class type
+(or array thereof),
+or the <del>initializer</del> <ins><var>initializer-specifier</var></ins>
+has the form <code>()</code>,
+the object is initialized as specified in 8.5.
+</blockquote>
+
+
+
+
+<h2>Non-Local Initialization</h2>
+
+<p> There are two problems
+with non-local static-duration object initialization.
+The first problem is that such initialization may occur concurrently.
+There are two sources to the concurrency,
+dynamic opening of a shared library
+in a multi-threaded context
+and creating of multiple threads in initializers,
+and hence the potentially implied concurrent execution of other initializers.
+The second problem is that static-duration object initialization
+may constitute a large fraction of process time,
+particularly when users are waiting for program start,
+and hence may benefit from parallel execution.
+
+<p> The standard currently admits unordered initialization.
+When initializing one object,
+reference to a relatively unordered object
+may result in access before dynamic initialization
+but after zero initialization.
+Since the concept of zero initialization
+has limited utility for many objects,
+particularly those that require dynamic construction,
+we consider this feature of the current C++ standard to be of limited utility.
+Therefore, we propose to make such references undefined.
+
+<p> Making such references undefined
+would normally imply that
+<code>std::cout</code> and <code>std::operator new</code>
+could not be used by any dynamic initializer.
+To resolve this problem,
+the standard should provide additional guarantees,
+and it currently appears to do so.
+
+<p> In the sequential 2003 standard,
+unspecified order of initialization
+essentially required some serial order of initialization.
+In the parallel proposed standard,
+the unspecified order of initialization
+admits concurrent initialization.
+The necessary additional restriction
+is that a single object may be initialized at most once.
+This restriction may require locking.
+With concurrent initialization,
+any write (or read in the presence of writes) to statically-initialized objects
+must be properly locked.
+An alternate approach,
+not proposed here,
+is to require a single global order for all initialization.
+
+<p> The implementation must initialize
+static-duration objects before any of their use
+within <code>main</code> or the functions it calls.
+
+
+<h4>Implementation</h4>
+
+<p> To the best of our knowledge,
+no compiler synchronizes
+the initialization of non-local static-duration objects.
+However, the technical issues
+are similar to existing function-local initializations,
+and so present no new challenges.
+
+
+<h4>3.6.2 Initialization of non-local objects [basic.start.init]</h4>
+
+<p> In paragraph 1, edit
+
+<blockquote>
+Dynamic initialization of an object
+<ins>defined in namespace scope</ins>
+is either ordered or unordered.
+Definitions of explicitly specialized class template static data members
+have ordered initialization.
+Other class template static data members
+(i.e., implicitly or explicitly instantiated specializations)
+have unordered initialization.
+Other objects defined in namespace scope have ordered initialization.
+<ins>Such o</ins><del>O</del>bjects within a single translation unit
+and with ordered initialization
+<ins>are <dfn>relatively ordered</dfn>,
+otherwise they are <dfn>relatively unordered</dfn>.
+Relatively ordered objects</ins>
+shall be initialized in the order of their definitions
+within the translation unit.
+The order of initialization
+is unspecified for <ins>relatively unordered</ins> objects<del>
+with unordered initialization
+and for objects defined in different translation units</del>.
+<ins>If the initialization of an object
+uses a relatively unordered object,
+the behavior is undefined;
+no diagnostic is required.
+[Note: This definition permits concurrent initialization.]</ins>
+</blockquote>
+
+
+
+
+<h2>Destruction</h2>
+
+<p> The primary problem with destruction of static-duration objects
+is preventing execution of the destructors before threads finish.
+In many applications, finishing a thread requires terminating the threads.
+For various reasons, this shutdown needs to be cooperative.
+This need in turn implies that all code be able to handle shutdown.
+This requirement is new; nearly all existing code is not properly written.
+In addition, the difficulty of the code is equivalent to exception safety,
+which is known to be a hard task.
+The concern is that
+few programs will every be able to successfully finish in this environment.
+Therefore, it would be better to never execute static destructors.
+
+<p> Recognizing the potential controversy in not executing static destructors,
+we propose two options, one without destruction, and one with.
+
+
+
+<h3>Option: No Destructor Execution</h3>
+
+<p> The imposed burden on most programs
+in not executing static-duration object destructors
+is in fact fairly small.
+Few of the destructors have external effect.
+Those that do can use the <code>std::atexit</code> mechanism
+to clean up their state.
+
+
+<h4>3.6.3 Termination [basic.start.term]</h4>
+
+<p> In paragraph 1, edit
+
+<blockquote>
+Destructors (12.4) for initialized objects of static storage duration
+<del>(declared at block scope or at namespace scope)</del>
+are <ins><em>not</em></ins> called
+as a result of returning from <code>main</code>
+<del>and</del> <ins>or</ins> as a result of calling
+<code>std::exit</code> (18.4).
+<del>These objects
+are destroyed in the reverse order
+of the completion of their constructor or
+of the completion of their dynamic initialization.
+If an object is initialized statically,
+the object is destroyed in the same order
+as if the object was dynamically initialized.
+For an object of array or class type,
+all subobjects of that object are destroyed
+before any local object with static storage duration
+initialized during the construction of the subobjects
+is destroyed.</del>
+</blockquote>
+
+<p> Delete paragraph 2.
+
+<blockquote>
+<del>If a function contains a local object of static storage duration
+that has been destroyed
+and the function is called
+during the destruction of an object with static storage duration,
+the program has undefined behavior
+if the flow of control
+passes through the definition of the previously destroyed local object.</del>
+</blockquote>
+
+<p> Delete paragraph 3.
+
+<blockquote>
+<del>If a function is registered with <code>std::atexit</code>
+(see <code>&lt;cstdlib&gt;</code>, 18.4)
+then following the call to <code>std::exit</code>,
+any objects with static storage duration
+initialized prior to the registration of that function
+shall not be destroyed
+until the registered function is called from the termination process
+and has completed.
+For an object
+with static storage duration
+constructed after a function is registered with <code>std::atexit</code>,
+then following the call to <code>std::exit</code>,
+the registered function is not called
+until the execution of the object's destructor has completed.
+If <code>std::atexit</code> is called during the construction of an object,
+the complete object to which it belongs shall be destroyed
+before the registered function is called.</del>
+</blockquote>
+
+
+<h4>18.4 Start and termination [lib.support.start.term]</h4>
+
+<p> In paragraph 8, bullet 1, edit
+
+<blockquote>
+First, <del>objects with static storage duration are destroyed and</del>
+functions registered by calling <code>atexit</code> are called.
+<del>Non-local objects with static storage duration
+are destroyed in the reverse order of the completion of their constructor.</del>
+(<del>Automatic o</del><ins>O</ins>bjects are not destroyed
+as a result of calling <code>exit()</code>.)218)
+Functions registered with <code>atexit</code>
+are called in the reverse order of their registration,
+except that a function is called after any previously registered functions
+that had already been called at the time it was registered.219)
+<del>A function registered with <code>atexit</code>
+before a non-local object <code>obj1</code> of static storage duration
+is initialized
+will not be called until <code>obj1</code>'s destruction has completed.
+A function registered with <code>atexit</code>
+after a non-local object <code>obj2</code> of static storage duration
+is initialized
+will be called before <code>obj2</code>'s destruction starts.
+A local static object <code>obj3</code>
+is destroyed at the same time it would be
+if a function calling the <code>obj3</code> destructor
+were registered with <code>atexit</code>
+at the completion of the <code>obj3</code> constructor.</del>
+</blockquote>
+
+
+
+<h3>Option: Destructor Execution</h3>
+
+<p> As stated before, the primary problem with destruction
+is threads accessing objects during or after their destruction.
+To prevent this problem,
+we require that all user threads terminate
+before destruction begins.
+The mechanism to terminate threads is under discussion
+and as yet has no firm proposal.
+
+<p> Destruction also introduces the potential
+to consume a large fraction of process time.
+Therefore, similar to initialization,
+we enable concurrent destruction.
+
+<p> Objects defined at namespace scope with relatively ordered initializations
+must be destructed in reverse order of their initialization.
+
+<p> The complication to this approach
+is destruction of function-local static-duration objects
+and calls to functions registered with <code>std::atexit</code>.
+Since the order
+of initialization of function-local static-duration objects
+and of calls to <code>std::atexit</code>
+is defined by execution,
+rather than by declaration,
+we call these execution-ordered objects.
+(For expository purposes, calls to <code>std::atexit</code>
+correspond to initialization of a virtual object.)
+Non-local static-duration objects are called declaration-ordered objects.
+For execution-ordered objects
+initialized from within the dynamic context
+of a declaration-ordered initialization,
+their destruction
+shall occur in reverse order of completion of their initialization
+immediately before the destruction of the context object.
+
+<p> To make this approach viable,
+initialization and destruction of execution-ordered objects
+must obey the same restrictions as those on declaration-ordered objects.
+Specifically, the initialization and destruction of an execution-ordered object
+must not use an object that is relatively unordered
+with respect to the context object
+and must synchronize use of objects with trivial destructors.
+
+<p> Finally, execution-ordered objects may be initialized
+outside the context of initialization of a declaration-ordered object,
+that is, they may be initialized from ordinary code.
+These objects are destructed
+in reverse order of the completion of their initialization
+before destruction of any declaration-ordered object.
+
+
+<h4>Implementation</h4>
+
+<p> One potential concern
+is the run-time cost of managing destruction order.
+To address this issue, we provide an implementation outline below.
+
+<ul>
+
+<li> Define a static-duration object
+that lists pending destructions for groups of declaration-ordered objects.
+Call this list the declaration-destructor list.
+</li>
+
+<li> Define a static-duration object
+that lists pending destructions for execution-ordered objects
+not initialized in the context of a declaration-ordered initialization.
+Call this list the execution-destructor list.
+</li>
+
+<li> Define a thread-duration object that lists pending destructions.
+Call this list the threaded-destructor list.
+</li>
+
+<li> When starting initialization of a group of relatively-ordered objects,
+create an empty threaded-destructor list.
+</li>
+
+<li> For each dynamic initialization within an initialization region,
+non-atomically insert the destruction
+at the head of the threaded-destructor list.
+This list will capture the function-local objects
+initialized as a consequence of the initialization of non-local objects.
+The code can be as simple as an insertion onto a singly-linked list
+with nodes statically allocated.
+</li>
+
+<li> When finishing an initialization region,
+atomically move the threaded-destructor list
+to the declaration-destructor list
+as a group.
+The code can be as simple as
+an atomic insertion onto a singly-linked list
+with nodes statically allocated.
+The atomic insertion can be done with a compare-and-swap-with-release loop,
+which will terminate rapidly.
+A read-acquire on the head of the loop will be necessary
+before traversing the list.
+</li>
+
+<li> For each dynamic initialization not within an initialization region,
+atomically insert the destruction at the head of the execution-destructor list.
+The code can be as simple as an atomic insertion onto a singly-linked list
+with nodes statically allocated.
+The insertion has the same basic algorithm as above.
+</li>
+
+<li> Upon program exit,
+iterate over the execution-destructor list
+and call the corresponding destructors.
+After those complete,
+iterate over the declaration-destructor list
+and start the corresponding group destruction concurrently.
+Within each group, iterate sequentially over the destructor list.
+</li>
+
+</ul>
+
+
+<h4>3.6.3 Termination [basic.start.term]</h4>
+
+<p> In paragraph 1, edit
+
+<blockquote>
+Destructors (12.4) for initialized objects of static storage duration
+<del>(declared at block scope or at namespace scope)</del>
+are called as a result of returning from <code>main</code>
+and as a result of calling <code>std::exit</code> (18.4).
+<del>These objects
+are destroyed in the reverse order
+of the completion of their constructor or
+of the completion of their dynamic initialization.</del>
+<ins>Dynamic initializations of local static objects
+executing inside the dynamic scope
+of the initialization a non-local static object
+are relatively ordered to the non-local static object.
+Dynamic initializations of local static objects
+executing outside the dynamic scope
+of the initialization a non-local static object
+are relatively ordered to <code>main</code>.
+Objects with relatively ordered initialization
+shall be destroyed in reverse order of completion of their initialization.
+Objects with relatively unordered initialization
+may be destroyed concurrently,
+except that all objects relatively ordered to <code>main</code>
+shall be destroyed before any non-local static-duration objects.</ins>
+If an object is initialized statically,
+the object is destroyed in the same order
+as if the object was dynamically initialized.
+For an object of array or class type,
+all subobjects of that object are destroyed
+before any local object with static storage duration
+initialized during the construction of the subobjects
+is destroyed.
+</blockquote>
+
+<p> In paragraph 2, edit
+
+<blockquote>
+If a function contains a local object of static storage duration
+that has been destroyed
+and the function is called
+during the destruction of an object with static storage duration,
+the program has undefined behavior
+if the flow of control
+passes through the definition of the previously destroyed local object.
+<ins>Likewise, the behavior is undefined
+if the function-local object is used indirectly
+(i.e. through a pointer).</ins>
+</blockquote>
+
+<p> In paragraph 3, edit
+
+<blockquote>
+<ins>A call to <code>std::atexit</code>
+from inside the dynamic scope of
+the initialization of a non-local static object
+is relatively ordered to the non-local static object.
+A call to <code>std::atexit</code>
+from outside the dynamic scope of
+the initialization of a non-local static object
+is relatively ordered to <code>main</code>.</ins>
+If a function is registered with <code>std::atexit</code>
+(see <code>&lt;cstdlib&gt;</code>, 18.4)
+then following the call to <code>std::exit</code>,
+any <ins>relatively ordered</ins> objects with static storage duration
+initialized prior to the registration of that function
+shall not be destroyed
+until the registered function is called from the termination process
+and has completed.
+For <del>an</del> <ins>a relatively ordered</ins> object
+with static storage duration
+constructed after a function is registered with <code>std::atexit</code>,
+then following the call to <code>std::exit</code>,
+the registered function is not called
+until the execution of the object's destructor has completed.
+If <code>std::atexit</code> is called during the construction of an object,
+the complete object to which it belongs shall be destroyed
+before the registered function is called.
+</blockquote>
+
+
+<h4>18.4 Start and termination [lib.support.start.term]</h4>
+
+<p> In paragraph 8, add a new bullet 0
+
+<blockquote>
+<ins>First, terminate all threads.</ins>
+</blockquote>
+
+<p> In paragraph 8, existing bullet 1, edit
+
+<blockquote>
+<del>First,</del> <ins>Next,</ins>
+objects with static storage duration are destroyed and
+functions registered by calling <code>atexit</code> are called.<ins>219)</ins>
+<ins>See 3.6.3 for the order of destructions and calls.</ins>
+<del>
+Non-local objects with static storage duration
+are destroyed in the reverse order of the completion of their constructor.</del>
+(Automatic objects are not destroyed
+as a result of calling <code>exit()</code>.)218)
+<del>Functions registered with <code>atexit</code>
+are called in the reverse order of their registration,
+except that a function is called after any previously registered functions
+that had already been called at the time it was registered.219)
+A function registered with <code>atexit</code>
+before a non-local object <code>obj1</code> of static storage duration
+is initialized
+will not be called until <code>obj1</code>'s destruction has completed.
+A function registered with <code>atexit</code>
+after a non-local object <code>obj2</code> of static storage duration
+is initialized
+will be called before <code>obj2</code>'s destruction starts.
+A local static object <code>obj3</code>
+is destroyed at the same time it would be
+if a function calling the <code>obj3</code> destructor
+were registered with <code>atexit</code>
+at the completion of the <code>obj3</code> constructor.</del>
+</blockquote>
+
+
+
+
+<h2>Appendix: A Fast Implementation of Synchronized Initialization</h2>
+
+<p>Mike Burrows, m3b at Google.
+
+
+
+<h3>Overview</h3>
+
+<p>I show a fast form of concurrent synchronized initialization
+in the form of an alternate implementation of <samp>pthread_once</samp>.
+
+
+
+<h3>Licensing</h3>
+
+<p>It is our intent to make the following technique freely available.
+To that end, some licensing appears to be required.
+
+<p>Copyright (c) 2007, Google Inc.
+<br>All rights reserved.
+
+<p>Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+<ul>
+<li>Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.</li>
+<li>Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.</li>
+<li>Neither the name of Google Inc. nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.</li>
+</ul>
+
+<p>THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,           
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY           
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+
+<h3>Header fast_pthread_once.h</h3>
+
+<p>The header defines the synchronization type,
+defines a synchronization sentinal values,
+declares the synchronization function,
+and defines an inline fast synchronization function.
+
+<pre><code>
+#ifndef FAST_PTHREAD_ONCE_H
+#define FAST_PTHREAD_ONCE_H
+
+#include &lt;signal.h&gt;
+#include &lt;stdint.h&gt;
+
+typedef sig_atomic_t fast_pthread_once_t;
+#define FAST_PTHREAD_ONCE_INIT SIG_ATOMIC_MAX
+extern __thread fast_pthread_once_t _fast_pthread_once_per_thread_epoch;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+extern void fast_pthread_once( pthread_once_t *once, void (*func)(void) );
+
+inline static void fast_pthread_once_inline(
+    fast_pthread_once_t *once, void (*func)(void) )
+{
+    fast_pthread_once_t x = *once;        /* unprotected access */
+    if ( x &gt; _fast_pthread_once_per_thread_epoch ) {
+        fast_pthread_once( once, func );
+    }
+}
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif FAST_PTHREAD_ONCE_H
+</code></pre>
+
+
+
+<h3>Source fast_pthread_once.c</h3>
+
+<p>The source is written in C.
+The lines of the primary function
+are numbered for reference in the subsequent correctness argument.
+
+<pre><code>
+#include "fast_pthread_once.h"
+
+#include &lt;pthread.h&gt;
+
+static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+  /* protects global_epoch and all fast_pthread_once_t writes */
+
+static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
+  /* signalled whenever a fast_pthread_once_t is finalized */
+
+#define BEING_INITIALIZED (FAST_PTHREAD_ONCE_INIT - 1)
+
+static fast_pthread_once_t global_epoch = 0; /* under mu */
+
+__thread fast_pthread_once_t _fast_pthread_once_per_thread_epoch;
+
+static void check( int x )
+{
+    if ( x == 0 )
+        abort();
+}
+
+void fast_pthread_once( fast_pthread_once_t *once, void (*func)(void) )
+{
+/*01*/    fast_pthread_once_t x = *once;        /* unprotected access */
+/*02*/    if ( x &gt; _fast_pthread_once_per_thread_epoch ) {
+/*03*/        check( pthread_mutex_lock(&amp;mu) == 0 );
+/*04*/        if ( *once == FAST_PTHREAD_ONCE_INIT ) {
+/*05*/            *once = BEING_INITIALIZED;
+/*06*/            check( pthread_mutex_unlock(&amp;mu) == 0 );
+/*07*/            (*func)();
+/*08*/            check( pthread_mutex_lock(&amp;mu) == 0 );
+/*09*/            global_epoch++;
+/*10*/            *once = global_epoch;
+/*11*/            check( pthread_cond_broadcast(&amp;cv) == 0 );
+/*12*/        } else {
+/*13*/            while ( *once == BEING_INITIALIZED ) {
+/*14*/                check( pthread_cond_wait(&amp;cv, &amp;mu) == 0 );
+/*15*/            }
+/*16*/        }
+/*17*/        _fast_pthread_once_per_thread_epoch = global_epoch;
+/*18*/        check (pthread_mutex_unlock(&amp;mu) == 0);
+          }
+}
+</code></pre>
+
+
+
+<h3>Correctness Argument</h3>
+
+<p>The above code implements <samp>pthread_once()</samp>
+in a way that is both fast (a few simple instructions, no memory barriers)
+and portable.
+Careful use of memory atomicity and monotonicity
+are used in place of a memory barrier.
+
+<p>The fast-path for the inline function in the header
+has the following code as generated by gcc 3.2.2 on an x86:
+
+<blockquote>
+<table border=0>
+<tr><td>mov</td><td>%gs:(%esi),%eax</td>
+<td># access to thread-local storage</td></tr>
+<tr><td>cmp</td><td>%eax, pthread_once_t_location</td>
+<td># accesses the pthread_once_t variable</td></tr>
+<tr><td>jg</td><td>slow_path</td>
+<td># decides whether to call the function</td></tr>
+</table>
+</blockquote>
+
+<p>This code is one more instruction than a test that is not thread safe. 
+This code touches two cache lines,
+while an unsafe version would touch only one.
+However, the additional cache line is thread-specific,
+and not especially likely to cause misses.
+As one might expect,
+repeated calls to the inline version
+achieve around 1 billion fast-path calls per second
+on a 2.8GHz processor with a hot cache.
+
+<p>In the sketch proof that follows,
+assumptions and deductions are given names in square brackets.
+This sketch will no doubt appear to be overly pedantic to some
+and sloppy to others.
+It probably contains errors and misuse of terminology;
+I hope these faults are not fatal.
+Its purpose is to convince the reader
+that with sufficient effort a full proof could be constructed,
+and perhaps to form the basis for such a proof
+for anyone eager for such mental exercise.
+
+<p>The portability assumptions beyond those in a straightforward implementation
+are as follows:
+
+<dl>
+<dt>[thread_local]</dt>
+<dd>There is a way to access thread-specific data or thread-local storage.
+The technique is useful only if such an access is faster than a memory barrier.
+For the disassembly above,
+the compiler used its ability to access thread-local storage
+using variables declared with <samp>__thread</samp>,
+so the thread-local access is a normal "<samp>mov</samp>" instruction
+with a different segment register.
+</dd>
+
+<dt>[atomicity]</dt>
+<dd>There exists an integral type T (such as <samp>sig_atomic_t</samp>)
+such that loads and stores of a variable of type T are atomic.
+It is not possible to read from such a variable any value
+that was not written to the variable,
+even if multiple reads and writes occur on many processors.
+Another way to say this is that variables of type T
+do not exhibit word tearing when accessed with full-width accesses.
+
+<dt>[*once_bound]</dt>
+<dd>The number of <samp>pthread_once_t</samp> variables in a programme
+is bounded and can be counted in an instance of type T without overflow.
+If T is 32-bits,
+this implementation requires that
+the number of <samp>pthread_once_t</samp> variables in a programme
+not exceed 2**31-3.
+(Recall that <samp>pthread_once_t</samp> variables
+are intended to have static storage class,
+so it would be remarkable for such a huge number to exist.)
+</dd>
+
+<dt>[monotonicity]</dt>
+<dd>Accesses to a single variable V of type T by a single thread X
+appear to occur in programme order.
+For example, if V is initially 0, then X writes 1, and then 2 to V,
+no thread (including but not limited to X)
+can read a value from V and then subsequently read a lower value from V.
+(Notice that this does not prevent arbitrary load and store reordering;
+it constrains ordering only between actions on a single memory location.
+This assumption is reasonable on all architectures that I currently know about.
+I suspect that the Java and CLR memory models require this assumption also.)
+</dd>
+</dl>
+
+<p>Let us say that
+every <samp>fast_pthread_once</samp> variable <samp>*once</samp>
+is "finalized"
+when the associated initialization function "<samp>func</samp>"
+returns (line 7 in the code above).
+We want to argue [correctness] (the combination of [safety] and [liveness])
+of the code above, using the assumptions above, plus a few others given below.
+For [safety], we require [safety_1] that
+each variable <samp>*once</samp> is finalized at most once.
+We also require [safety_2] that
+any thread that calls <samp>fast_pthread_once</samp> on <samp>*once</samp>
+does not return until <samp>*once</samp> has been finalized at least once,
+and all the modifications made by <samp>func</samp>
+are visible to that thread.
+For [liveness], we require that the code does not deadlock or loop forever.
+
+<p>For the code, all variable accesses are consistent,
+except the load of <samp>*once</samp> on line 1 because:
+<ul>
+<li>All modifications to <samp>*once</samp> and all loads but line 1
+occur under mu,
+so all accesses to <samp>*once</samp> except the load on line 1 are consistent.
+</li>
+<li>All accesses to <samp>global_epoch</samp> occur under mu,
+so all accesses to <samp>global_epoch</samp> are consistent.
+</li>
+<li>The variable <samp>_fast_pthread_once_per_thread_epoch</samp>
+is a per-thread variable accessed only by its owning thread,
+so all accesses to <samp>_fast_pthread_once_per_thread_epoch</samp>
+are consistent (requires [thread_local]).
+The consistency of variable accesses will not be mentioned further,
+except for <samp>*once</samp> on line 1.
+</li>
+</ul>
+
+<p>[release_consistency]
+We assume that we have mutexes that provide at least release consistency.
+We use <samp>pthread_mutex_t</samp> in the example.
+
+<p>[fairness]
+We assume that runnable threads eventually run.
+
+<p>[atomicity2]
+We assume that <samp>fast_pthread_once</samp> variables are of the type T,
+from [atomicity].
+
+<p>[initialization]
+We assume that <samp>fast_pthread_once_t</samp> variables
+are originally set to <samp>FAST_PTHREAD_ONCE_INIT</samp>.
+
+<p>[global_epoch_value_range]
+<samp>global_epoch</samp> counts the number of <samp>*once</samp> variables
+that have been finalized;
+it is incremented (line 9) each time <samp>func</samp> is called (line 7)
+and never modified otherwise.
+From [*once_bound],
+we know the value of <samp>global_epoch</samp>
+is in {<samp>0</samp>, ..., <samp>FAST_PTHREAD_ONCE_INIT-2<samp>},
+because <samp>global_epoch</samp> is initially <samp>0</samp>,
+and <samp>FAST_PTHREAD_ONCE_INIT<samp>
+is the maximum value for the type of <samp>*once</samp>.
+
+<p>[*once_value_sequence]
+Every <samp>*once</samp> variable is initialized to
+<samp>FAST_PTHREAD_ONCE_INIT<samp> [initialization].
+There are only two places where <samp>*once</samp>
+is changed:
+<dl>
+<dt>Line 5:</dt>
+<dd><samp>*once</samp> is set to <samp>BEING_INITIALIZED</samp>
+(<samp>==FAST_PTHREAD_ONCE_INIT-1</samp>)
+</dd>
+<dt>Line 10:</dt>
+<dd><samp>*once</samp> is set to the value of <samp>global_epoch</samp>,
+which is in {<samp>0</scamp>, ..., <samp>FAST_PTHREAD_ONCE_INIT-2</samp>}
+(from global_epoch_value_range)
+</dd>
+</dl>
+<p>The sets {<samp>FAST_PTHREAD_ONCE_INIT</samp>},
+{<samp>BEING_INITIALIZED</samp>}, and
+{<samp>0</samp>, ..., <samp>FAST_PTHREAD_ONCE_INIT-2</samp>}
+have no intersection because
+<samp>BEING_INITIALIZED==FAST_PTHREAD_ONCE_INIT-1</samp>,
+and <samp>FAST_PTHREAD_ONCE_INIT</samp>
+is the maximum value for the type of <samp>*once</samp>.
+The first assignment (line 5) to <samp>BEING_INITIALIZED</samp>
+is predicated on <samp>*once</samp> being <samp>FAST_PTHREAD_ONCE_INIT</samp>,
+and the update is atomic due to the use of a mutex.
+Therefore, a <samp>*once</samp>
+may make the transition from <samp>FAST_PTHREAD_ONCE_INIT</samp>
+to <samp>BEING_INITIALIZED</samp> at most once.
+The second assignment (line 10) occurs
+only if the executing thread performed the first assignment;
+therefore the second assignment occurs at most once.
+So any given <samp>*once</samp> location takes on a sequence of values
+that is a prefix of the sequence:
+<blockquote>
+<samp>FAST_PTHREAD_ONCE_INIT</samp>, <samp>BEING_INITIALIZED</samp>, E
+</blockquote>
+where E &lt; <samp>FAST_PTHREAD_ONCE_INIT</samp>,
+E &lt; <samp>BEING_INITIALIZED</samp>,
+and E is in {<samp>0</samp>, ..., <samp>FAST_PTHREAD_ONCE_INIT-2</samp>}.
+
+<p>[safety_1]
+The function <samp>func</samp>
+is called at most once for each <samp>*once</samp> variable,
+because it is called only if the executing thread
+performed the assignment at line 5,
+which is performed at most once,
+from [*once_value_sequence].
+This shows [safety_1].
+
+<p>[slow_path_safety_2]
+Any thread W that reaches line 10 has called <samp>func</samp>;
+therefore <samp>*once</samp> is finalized
+and the modifications from <samp>func</samp> are visible to W.
+If W reaches line 18,
+W either passed through line 10,
+or passed through line 13 and found <samp>*once != BEING_INITIALIZED</samp>.
+We know from [monotonicity] and [*once_value_sequence] that
+<samp>*once</samp> cannot be <samp>FAST_PTHREAD_ONCE_INIT</samp> (line 4)
+or <samp>BEING_INITIALIZED</samp> (line 13),
+so it must be some value E,
+a value in {<samp>0</samp>, ..., <samp>FAST_PTHREAD_ONCE_INIT-2</samp>}.
+The location <samp>*once</samp>
+takes on such a value only after being finalized.
+Moreover, accesses by a thread after line 13 seeing E
+are ordered after the assignment of E to <samp>*once</samp>
+and the modifications made by the call to func.
+This is from [release_consistency]
+and the facts that accesses at line 13 occur with the mutex held
+that the thread that finalized <samp>*once</samp>
+released the same mutex after doing so.
+Thus, if W reaches line 18,
+it does so after <samp>*once</samp> has been finalized,
+and with all modifications made by <samp>func</samp> visible to it.
+This shows [safety_2] for the slow path, which we call [slow_path_safety_2].
+
+<p>[fast_path_safety_2]
+We now need to show that any thread X that
+takes the fast path (just lines 1 and 2, with a false predicate at line 2),
+does so only if <samp>*once</samp> is finalized
+and <samp>func</samp>'s modifications are visible to X.
+The value read from <samp>*once</samp> at line 1 is not read under mu,
+so the value read may be inconsistent.
+However, it is known to be one of the values
+<blockquote>
+<samp>FAST_PTHREAD_ONCE_INIT</samp>, <samp>BEING_INITIALIZED<samp>, E
+</blockquote>
+<p>(where E is in {<samp>0</samp>, ..., <samp>FAST_PTHREAD_ONCE_INIT-2</samp>}
+and E &lt; <samp>FAST_PTHREAD_ONCE_INIT</samp>
+and E &lt; <samp>BEING_INITIALIZED</samp>)
+because of [*once_bound], [atomicity2], and [*once_value_sequence].
+Further, we know that X's <samp>_fast_pthread_once_per_thread_epoch</samp>
+is in {<samp>0</samp>, ..., <samp>FAST_PTHREAD_ONCE_INIT-2</samp>}
+because it is assigned only from <samp>global_epoch</samp> (line 17)
+and we have [global_epoch_value_range].
+Therefore, X sees the line 2 predicate as false only if both:
+<ul>
+<li>X read some value E from <samp>*once</samp>
+(rather than reading <samp>FAST_PTHREAD_ONCE_INIT</samp>
+or <samp>BEING_INITIALIZED</samp>),
+and
+</li>
+<li>X's <samp>_fast_pthread_once_per_thread_epoch</samp> exceeds the value E;
+both values were ultimately derived from <samp>global_epoch</samp>,
+which is consistently accessed under mu.
+</ul>
+<p>From the first of these
+plus assumptions [*once_bound], [monotonicity], and [*once_value_sequence],
+we know that for X to take the fast path,
+some thread Y executed line 10, and therefore Y finalized <samp>*once</samp>.
+From the second of these,
+we know that X must have acquired mu (mu is held at line 17)
+after Y finalized <samp>*once</samp> and subsequently released mu.
+So from [release_consistency],
+all the values modified by <samp>func</samp> are visible to X.
+This gives us [fast_path_safety_2].
+
+<p>[safety]
+Combining [safety_1], [slow_path_safety_2], and [fast_path_safety_2],
+we have [safety].
+
+<p>[mu_deadlock_freedom]
+From the code, while mu is held,
+no other mutexes are acquired nor any other blocking call made,
+so mu cannot participate in a deadlock.
+
+<p>[liveness]
+Liveness comes from these observations
+<ul>
+<li>the scheduler does not delay arbitrarily [fairness],
+</li>
+<li>the mutex cannot cause deadlock [mu_deadlock_freedom],
+</li>
+<li>all changes that might cause line 13 to see a false predicate
+must be made by line 10,
+and the same thread must then signal the condition variable (line 11)
+thus waking any waiter (line 14), and</li>
+<li>there is only one loop, at line 13.
+This loop will is entered only if
+some thread Y
+has set <samp>*once != FAST_PTHREAD_ONCE_INIT</samp> (from line 4).
+The loop will terminate if Y ever reaches lines 10, 11 and 18 (in sequence),
+which is shown by the foregoing observations.
+</li>
+</ul>
+
+<p>[correctness]
+We have [safety] and [liveness].
+
+
+
+<h3>Test fast_pthread_once_test.c</h3>
+
+<pre><code>
+#include &lt;stdio.h&gt;
+#include &lt;assert.h&gt;
+#include "fast_pthread_once.h"
+
+fast_pthread_once_t once = FAST_PTHREAD_ONCE_INIT;
+
+void run_once(void)
+{
+    static int run_count = 0;
+    assert( run_count == 0 );
+    run_count++;
+}
+
+int main( int argc, char *argv[] )
+{
+    int use_inline = 0;
+    int n = 1000 * 1000 * 1000;
+    int i;
+    for ( i = 1; i &lt; argc; i++ ) {
+        const char *arg = argv[i];
+        if ( strcmp(arg, "-i") == 0 ) {
+            use_inline = 1;
+        } else if ( strspn(arg, "0123456789") == strlen(arg) ) {
+            n = atoi(arg);
+        } else {
+            fprintf( stderr, "usage: %s [-i] [number]\n", argv[0] );
+            return 2;
+        }
+    }
+    if ( use_inline ) {
+        for ( i = 0; i != n; i++ ) {
+            fast_pthread_once_inline(&amp;once, run_once);
+        }
+    } else {
+        for ( i = 0; i != n; i++ ) {
+            fast_pthread_once(&amp;once, run_once);
+        }
+    }
+    return 0;
+}
+</code></pre>
+
+
+
+<h3>Improvements</h3>
+
+<p>There are two primary sources of inefficiency in code.
+First, there is a single mutex for maintaining the global epoch.
+Second, all waiting threads are woken for each completed initialization.
+We do not believe these inefficiencies will matter in practice,
+because they become significant only for
+many threads over many long-running initializations.
+(Recall that the mutex is not held during the actual initialization.)
+However, for pathological programs
+the following improvements should suffice.
+
+<ul>
+<li>Use atomic operations (without memory barriers)
+to turn the <code>*once</code> location into a mutex
+and update <code>global_epoch</code> atomically.
+</li>
+<li>Use many condition variables
+(but still only one mutex), hashed by <code>pthread_once_t</code> address.
+Unlike having multiple mutexes, this would <em>not</em> affect the fast path,
+and could reduce the effect of premature waking by an arbitrary factor.
+</li>
+</ul>
+
+
+
+
+</body>
+</html>

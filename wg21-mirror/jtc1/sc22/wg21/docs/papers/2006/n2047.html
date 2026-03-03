@@ -1,0 +1,575 @@
+<HTML>
+<HEAD>
+<TITLE>An atomic operations library for C++</title>
+</head>
+<BODY>
+<table summary="This table provides identifying information for this document.">
+	<tr>
+		<th>Doc. No.:</th>
+
+		<td>WG21/N2047<br />
+		J16/06-0117</td>
+	</tr>
+	<tr>
+		<th>Date:</th>
+		<td>2006-06-24</td>
+	</tr>
+
+	<tr>
+		<th>Reply to:</th>
+		<td>Hans-J. Boehm</td>
+	</tr>
+	<tr>
+		<th>Phone:</th>
+		<td>+1-650-857-3406</td>
+
+	</tr>
+	<tr>
+		<th>Email:</th>
+		<td><a href="mailto:Hans.Boehm@hp.com">Hans.Boehm@hp.com</a></td>
+	</tr>
+</table>
+<H1>An Atomic Operations Library for C++</h1>
+We present a brief design rationale and a proposed interface for a C++
+atomic operations library.  This design has benefited from discussions
+at the Berlin meeting.
+<P>
+Unlike N1875, and for reasons discussed below, we propose to add atomic
+operations purely as a library API.  In practice, this API would have
+to be implemented largely with either compiler intrinsics or assembly code.
+We believe that in most cases intrinsics or assembler support sufficient
+for a prototype implementation already exists.
+<P>
+The memory model proposal (N1942) assumes the existence of something along
+these lines.
+<H2>A Rationale</h2>
+Here are some of the arguments for different aspects of the current
+atomics package design.
+<H3>Provide atomics purely as a library API</h3>
+Function call syntax appears to provide a strong and useful hint to the
+programmer as to which operations are executed atomically.
+Only the function invocation itself is atomic; argument evaluation
+is not part of the atomic action.  It seems to be harder, not easier,
+to make this clear with some kind of atomic block syntax.
+<P>
+An atomic block syntax seems far more appropriate to express general
+atomic memory transactions.  It is premature to standardize those
+at this point.
+<P>
+This part of our approach is consistent with exiting practice, which
+often provides for somewhat platform-dependent compiler intrinsics
+or inline assembly functions to express atomic operations. 
+<H3>Allow relaxed ordering specifications</h3>
+We choose to complicate the interface by adding explicit ordering
+specifications to various operations.  Many comparable packages don't,
+and instead provide only a single version of operations like
+compare-and-swap, which implicitly include a full memory fence.
+<P>
+Unfortunately, the extra ordering constraint introduced by the single version
+is almost never completely necessary.  For example, an atomic increment
+operation may be used simply to count the number of times a function is called,
+as in a profiler.  This requires atomicity, but no ordering constraints.  And
+on many architectures (PowerPC, Itanium, Alpha, though not X86), the extra
+ordering constraints are at least moderately expensive.
+<P>
+It is also unclear how a convention requiring full memory fences would
+properly interact with an interface that supported simple atomic loads
+and stores.  Here a full memory fence would generally multiply the
+cost by a large factor.  (The current gcc interface does not seem to
+support simple atomic loads and stores explicitly, which makes it unclear
+how to support e.g. lock-based emulation, or architectures on which
+the relevant loads and stores are not implicitly atomic.)
+<H3>Include ordering constraints with operations</h3>
+There are two possible approaches to specifying ordering constraints:
+<UL>
+<LI> Have the programmer provide explicit memory fences/barriers, perhaps
+most usefully in a way that's analogous to the SPARC membar instructions.
+<LI> Associate the ordering semantics with operations.  The closest
+hardware analog for this is probably Itanium, though we carry this
+through more consistently.
+</ul>
+Both approaches appear to have their merits.  We chose the latter for
+several reasons:
+<UL>
+<LI> On architectures such as X86 and Itanium, it can lead to substantially
+faster code, at least in the absence of complex compiler analysis.
+For example, on X86, a lock is often released with a simple store
+instruction, which is widely believed to effectively have implicit "release"
+semantics.  If this appears in the source as <TT>store&lt;release&gt;</tt>
+it is easy to simply map that to a store instruction.  If it is
+expressed as a fence followed by a store, the compiler would have to
+deduce that the fence is redundant.  It is unclear that that can be done
+under realistic conditions, since the fence prevents operations
+from moving into the critical region, while a simple store does not
+do so for loads.  On Itanium a similar situation arises with
+the compare-and-swap operation.
+<LI> It seems to be marginally more convenient.  For example, double-checked
+locking can be easily written with load_acquire and store_release, with
+no explicit barriers.  (The semantics of the fence version are also
+unnecessarily stronger, causing unnecessary overhead on Itanium.  We
+are not aware of common examples where the reverse is true for other
+architectures.)
+<LI> It gives us an easy way to express that atomic loads and stores
+"normally" have acquire and release semantics, but that weaker
+options may exist.  It is important to encourage the acquire/release
+versions, since they behave with respect to dependencies in the way
+that essentially all programmers expect, while remaining easily definable.
+The unordered variants can be very counterintuitive.
+<LI> It makes it harder to ignore ordering issues.  Ignoring them is
+almost always a mistake at this level.
+</ul>
+<H3> Provide both direct and possibly emulated versions</h3>
+In some cases, both the decision to use a lock-free algorithm,
+and sometimes the choice of lock-free algorithm, depends on the
+availability of underlying hardware primitives.  For these cases, we provide
+both feature-tests and direct access to the underlying hardware primitives
+as part of the <TT>native_atomic</tt> template.
+<P>
+In other cases, e.g. when dealing with asynchronous signals, it
+may be important to know that operations like compare-and-swap are really
+lock-free, because a lock-based emulation might result in deadlock.
+Again direct access to the hardware primitives is called for.
+<P>
+In other cases, implementors know that sufficient hardware primitives are
+available on the architectures important to them, but would like the
+code to be minimally portable to other architectures without further
+work.  We provide <TT>atomic</tt> to handle this case.
+<H3>Provide a minimal set of ordering constraints</h3>
+Clearly there is a reason to keep the interface to the atomics
+library as simple as possible.  However, there have been repeated calls
+for adding additional ordering constraints.  There are probably cases
+in which these would result in some limited performance benefit.
+We have so far not included these for the following reasons:
+<P>
+Some architectures provide fences that are limited to loads or stores.
+We have, so far, not included them, since it seems to be hard to find cases
+in which both:
+<UL>
+<LI> Such limited ordering constraints are useful and not excessively
+brittle.
+<LI> Actually result in a performance benefit over the more general constraint.
+</ul>
+<P>
+Most architectures provide additional ordering guarantees if one memory
+operation is dependent on another.  In fact, these are critical for
+efficient implementation of languages like Java.  They are not
+reflected in our proposal (except for the "depends-on" implications
+from the memory model).
+<P>
+In this case, there is near-universal agreement that it would be nice
+to have some such guarantees.  The difficulty is that we have not been
+able to formulate such a guarantee that both makes sense at the C++
+source level, and does not interfere with optimization of code in
+compilation units that do not mention atomics.  The fundamental issues are:
+<UL>
+<LI> Compilers may remove or change data and/or control dependencies.
+<LI> Detailed guarantees vary across architectures.
+</ul>
+<H3>Pass ordering constrains as template arguments</h3>
+This seems to be the best compromise between insisting on ordering constraints
+to be static and avoiding repeated reimplementation of higher level functions
+that differ only in ordering constraints.
+<H3>Provide two separate <TT>atomic_int</tt> and <TT>atomic_ptr</tt> variants.</h3>
+An earlier version of our proposal passed the underlying atomic operations
+class as a template parameter to <TT>atomic_int</tt>, avoiding the
+introduction of <TT>native_atomic_int</tt>.  This is purely a taste
+issue, but that level of template
+parametrization was generally viewed as excessive by the C++
+committee subgroup that considered it.
+<H3>Provide primarily "dynamic" feature tests</h3>
+Our feature tests generally do not guarantee that they can be evaluated at
+compile time.  This allows the resulting code to directly handle the
+common situation in which a single executable is generated for several
+architectural variants which differ in the atomic operations they
+directly support.
+<P>
+The low level interface does make one exception here, in that it makes
+it possible to test statically that no variants of a platform provide
+certain operations.  That makes it possible to use a different data
+structure in cases in which no dynamic test is ever necessary.
+<H2>The API</h2>
+We present the proposed API for C++ atomics in header file format,
+for now:
+<PRE>
+// The expectation is that this will usually be implemented in terms of
+// low_level_atomics.h by checking whether the template argument has
+// sufficient size and alignment constraints that it can be safely
+// cast to a primitive integer type, and one of the low level primitives
+// can be applied.
+
+enum ordering_constraint {raw, acquire, release, ordered};
+	// Informally:
+	// raw ==&gt; This operation is unordered, and may become
+	//          visible to other threads in an order that is
+	//          constrained only by ordering constraints on other
+	//          operations.
+	// release ==&gt; All prior memory operations (including ordinary
+	//          assignments) become visible to a an acquire
+	//          operation on the same object that sees the resulting
+	//          value.
+	// acquire ==&gt; See above.
+	// ordered ==&gt; Both acquire and release ordering properties.
+
+// This version gives direct access to the hardware primitives, and fails
+// if they don't exist.  As a result, it should be OK for inter-process
+// and signal-handler communication, though that's beyond the standard.
+template &lt;class T&gt;
+class native_atomic {
+    public:
+	static bool basics_supported();
+		// Are load/store primitives supported?
+	native_atomic(T);
+		// No ordering semantics, constructor itself not atomic.
+	
+	// The following may fail if basics_supported() returns false.
+	// A store_release, or an atomic update with a release
+	// argument, "synchronizes with" a load_acquire or an atomic
+	// update with an acquire argument.  There are no other
+	// such relationships.
+	template &lt;ordering_constraint c&gt;
+	    void store(const T&);
+	    // Compile-time error if c is acquire.
+	template &lt;ordering_constraint c&gt;
+	    T load();
+	    // Compile-time error if c is neither none nor acquire.
+	
+	static bool cas_supported();
+		// Is compare_and_swap supported?
+		// If so, the various fetch_and_... primitives
+		// are also presumed to be supported for numeric
+		// types T, since they
+		// can be emulated with a CAS loop.
+		// Cas is not guaranteed to be
+		// wait-free, though it should be if the hardware
+		// provides them.
+	// There was a suggestion that the above be static, for this
+	// version only.  I'm not sure that's right, given that portable
+	// code should probably be prepared to adjust dynamically.
+
+	// Compare-and-swap.  Does not fail spuriously.  Not wait-free
+	// on ll-sc machines.
+	template &lt;ordering_constraint c&gt;
+	    bool cas(const T& old, const T& new_val);
+	static bool cas_is_wait_free();
+
+	// Compare-and-swap.  May fail spuriously.  Wait-free
+	// on ll-sc machines.
+	template &lt;ordering_constraint c&gt;
+	    bool weak_cas(const T& old, const T& new_val);
+	static bool weak_cas_is_wait_free();
+
+	// I'm inclined to restrict double-width operations to
+	// the low level interface, if we provide them at all.
+	// They're very difficult to use,
+	// due to architectural variation, and would mess up this
+	// interface.
+	
+	T operator T() { return load&lt;acquire&gt;(); }
+	void operator=(const T& x) { return store&lt;release&gt;(x); }
+};
+
+// The following provides the same interface, but the primitives
+// always have functional implementations, possibly because they are
+// emulated with locks.
+// The implementation should avoid emulation whenever the hardware
+// provides suitable primitives.
+// We expect that the canonical implementation will provide a static
+// hash table of locks, and map each address to a location in the hash
+// table.
+// Since the implementation may be lock-based, this version is NOT useful
+// for either signal-handler or inter-process communication.  (Again,
+// this is beyond the scope of the standard, but non-normative text
+// should make that clear to avoid accidents.)  It is only useful
+// for inter-thread communication, which would like to avoid the overhead of
+// a full lock in most cases, but needs to run everywhere to some
+// extent.  Based on limited experience, we nonetheless believe
+// that this is a common case.
+
+template &lt;class T&gt;
+class atomic {
+    public:
+	static bool basics_supported();
+		// Always yields true.
+	atomic(T);
+		// No ordering semantics, constructor not atomic.
+	template &lt;ordering_constraint c&gt;
+	    void store(const T&);
+	    // Compile-time error if c is neither none nor release.
+	template &lt;ordering_constraint c&gt;
+	    T load();
+	    // Compile-time error if c is neither none nor acquire.
+	
+	static bool cas_supported();
+		// Always yields true.
+		// Lock free if native_atomic::cas_supported()
+		// yields true.
+
+	// Compare-and-swap.  Does not fail spuriously.  Not wait-free
+	// on ll-sc machines.
+	template &lt;ordering_constraint c&gt;
+	    bool cas(const T& old, const T& new_val);
+	static bool cas_is_wait_free();
+
+	// Compare-and-swap.  May fail spuriously.  Wait-free
+	// on ll-sc machines.
+	template &lt;ordering_constraint c&gt;
+	    bool weak_cas(const T& old, const T& new_val);
+	static bool weak_cas_is_wait_free();
+
+	T operator T() { return load&lt;acquire&gt;(); }
+	void operator=(const T& x) { return store&lt;release&gt;(x); }
+
+
+// Atomic integral data type with fetch_and_... operations.
+// Meaningful unly if the argument T is an integral type.  
+template &lt;class T=int&gt;
+class native_atomic_int : public native_atomic&lt;T&gt; {
+    public:
+	native_atomic_int(T);
+		// No ordering semantics, not atomic.
+	// The fetch_op functions may fail if cas_supported() yields false.
+	// These are also not guaranteed to be wait-free, and hence
+	// can be trivially emulated with cas.  We provide them
+	// directly for convenience, and since they may have slightly
+	// faster implementations.
+	// They return the original value of the atomic.
+	template &lt;ordering_constraint c&gt;
+	    T fetch_add(T);
+	static bool fetch_add_is_wait_free();
+		// Is the operation wait-free?
+	template &lt;ordering_constraint c&gt;
+	    T fetch_and(T);
+	static bool fetch_and_is_wait_free();
+	template &lt;ordering_constraint c&gt;
+	    T fetch_or(T);
+	static bool fetch_or_is_wait_free();
+};
+
+template &lt;class T=int&gt;
+class atomic_int : public atomic&lt;T&gt; {
+    public:
+	atomic_int(T);
+		// No ordering semantics, not atomic.
+	// The fetch_op functions always succeed, but are guaranteed
+	// to be lock-free only id native_atomic::cas_supported yields
+	// true.
+	template &lt;ordering_constraint c&gt;
+	    T fetch_add(T);
+	static bool fetch_add_is_wait_free();
+		// Is the operation wait-free?
+	template &lt;ordering_constraint c&gt;
+	    T fetch_and(T);
+	static bool fetch_and_is_wait_free();
+	template &lt;ordering_constraint c&gt;
+	    T fetch_or(T);
+	static bool fetch_or_is_wait_free();
+};
+
+// Adds fetch_and_... operations to a pointer type.
+// Meaningful unly if T is a pointer type.
+template &lt;class T&gt;
+class native_atomic_ptr : public native_atomic&lt;T&gt; {
+    public:
+	native_atomic_ptr(T);
+		// No ordering semantics, not atomic.
+	// The following may fail if native_atomic&lt;T&gt;::cas_supported()
+	// yields false.
+	// This atomic pointer addition or
+	// subtraction, i.e. a multiple of the object size is added
+	// to the address.
+	// Also by analogy to basic pointer types, we do not directly
+	// provide for tags.
+	template &lt;ordering_constraint c&gt; T fetch_and_add(ptr_diff_t);
+	static bool fetch_add_is_wait_free();
+};
+
+// Adds fetch_and_... operations to a pointer type.
+// Meaningful unly if T is a pointer type.
+template &lt;class T&gt;
+class atomic_ptr : public atomic&lt;T&gt; {
+    public:
+	atomic_ptr(T);
+		// No ordering semantics, not atomic.
+	// Always succeeds, since it may be emulated with locks.
+	template &lt;ordering_constraint c&gt; T fetch_and_add(ptr_diff_t);
+	static bool fetch_add_is_wait_free();
+};
+</pre>
+<H2>The low level API</h2>
+There appears to be agreement that we also need a lower level C-compatible
+API for expressing atomic operations.  The details are less clear.  In
+particular, based on earlier discussions, there is a choice to be made
+as to whether C-level atomic operations should operate only on specially
+declared "atomic data", or should be usable on arbitrary scalars.
+<P>
+The former design potentially provides better compatibility with the
+higher level C++ API discussed above.  But it makes it significantly
+harder to convert existing code to the new API, since existing interfaces,
+such as the Intel/gcc <TT>__sync_</tt>... intrinsics, often operate on
+scalar data that has not been specially declared, and may thus be used
+to operate on fields of previously declared structures. 
+<P>
+(Although the Intel/gcc primitives are somewhat established, and are in many
+ways similar to what is proposed here, I do not advocate standardizing them as
+is.  They provide far less control over memory ordering than we advocated
+above.  For example, they provide no way to atomically increment a counter
+without imposing unnecessary ordering constraints.  The lack of appropriate
+ordering control appears to already have resulted in implementation shortcuts,
+e.g. gcc does not implement <TT>__sync_synchronize()</tt> as a full memory
+barrier on X86, in spite of the documentation.  I believe a number of issues
+were not fully understood when that design needs as developed, and it could
+could greatly benefit from another iteration at this stage.)
+<P>
+Here we propose an interface similar to what was tentatively
+discussed at the Berlin meeting.  In order to facilitate conversion
+of existing code, we dropped the previously required <TT>volatile</tt>
+qualifiers on arguments.
+<P>
+Again, this is presented in header file format for now.
+<PRE>
+// This is an attempt at providing low-level C style
+// atomics.  This does not follow existing precedent, in that we are
+// very explicit about ordering constraints.
+
+// All primitives have corresponding feature tests.
+// Each feature test macro is either:
+//   - undefined if no instance of the platform defines the feature, or
+//   - defined to a possibly non-constant (in the C/C++ sense) expression
+//     which evaluates to a nonzero value if the feature is present on the
+//     current machine.
+// For example, ATOMIC_HAVE_INT_CAS would be undefined on an architecture
+// such as PA-RISC, which does not provide a hardware compare-and-swap
+// operation, but it would be defined to a runtime expression, which tests
+// that the processor is at least a 486 when compiling generic (386 or better)
+// X86 code.  On an architecture like Itanium, where all instances provide
+// the operation, it would be defined to a nonzero constant such as 1.
+//
+// Thus most uses of these macros would be of the form
+//      # ifndef ATOMIC_HAVE_...
+//	#   define ATOMIC_HAVE_... 0
+//	# endif
+//
+// 	if (ATOMIC_HAVE_...)
+//	  &lt; code that uses atomic operations &gt;
+//      else
+//	  &lt; lock-based code &gt;
+//
+// #ifndef ATOMIC_HAVE_...
+// can be used to substitute alternate code on platforms that never provide
+// the feature.
+//
+// This arrangement does not allow a preprocessor test for whether the
+// feature is defined on all instances of the processor.  Our guess is that
+// this is not particularly useful.  Typically if any instances provide it,
+// nearly all future instances will, and thus code should include the
+// dynamic tests.
+//
+// We could provide both static and dynamic feature tests directly, but
+// that significantly increases the size of the interface.  Or we could
+// eliminate the static test, but that would make it harder to deal with
+// cases (such as a linked stack) that are likely to use different 
+// data structured depending the availability of primitives.  Thus this
+// compromise.
+
+// Some feature test macros
+#define ATOMIC_HAVE_CHAR_BASICS &lt;impl. defined&gt;
+	// nonzero if ordered & unordered load/store primitives on
+	// char and unsigned char are supported.
+#define ATOMIC_HAVE_SHORT_BASICS &lt;impl. defined&gt;
+#define ATOMIC_HAVE_INT_BASICS &lt;impl. defined&gt;
+#define ATOMIC_HAVE_LONG_BASICS &lt;impl. defined&gt;
+#define ATOMIC_HAVE_PTR_BASICS &lt;impl. defined&gt;
+	// 1 if ordered & unordered load/store primitives on
+	// void * are supported.
+void atomic_memory_fence(void);     // Guarantees explicit memory ordering
+				     // for otherwise unordered atomics,
+				     // and for other memory references wrt
+				     // atomics.  Not useful for ordering
+				     // ordinary memory references, since
+				     // those may not race and, if they don't
+				     // race, always appear to be ordered.
+void atomic_compiler_fence(void);   // Ensures that prior memory operations
+				     // appear in the instruction stream
+				     // before subsequent ones, i.e. the
+				     // compiler is not allowed to reorder
+				     // around this.  This really has only
+				     // implementation-defined semantics,
+				     // but it seems to be useful in
+				     // ensuring ordering with respect to
+				     // signal handlers and the like.
+				     
+// I will assume that the following are overloaded for T in (void *)
+// and unsigned {char, short, int, long}.
+// A signed version can be derived from the unsigned.
+// (In a strictly conforming program, I think this requires adding an
+// explicit bias.  In practice, it's a non-issue.)
+// They may not be applied to user-defined types.
+// The semantics of primitives whose corresponding feature test macro is
+// not defined are left undefined.  Implementations that fail conspicuously
+// are preferred over implementations that occasionally produce unexpected
+// outcomes, w.g. by relaxing the atomicity constraint.
+void atomic_store(T*, T);  // No ordering guarantees.
+void atomic_store_release(T*, T);
+
+T atomic_load(T*);	// No ordering guarantees.
+T atomic_load_acquire(T*);
+
+#define ATOMIC_HAVE_T_CAS  &lt;impl. defined&gt;
+	// Abbreviates 5 different feature tests for different
+	// replacements of T.
+
+#define ATOMIC_HAVE_WAIT_FREE_T_CAS  &lt;impl. defined&gt;
+	// Abbreviates 5 different feature tests for different
+	// replacements of T.  Indicates whether the below
+	// operation is wait-free.  Undefined if it is never wait-free.
+
+T atomic_cas[_order](T* addr, T old_val, T new_val);
+	// Order can be any of raw, acquire, release, or ordered.
+	// "Raw" implies the operation is unordered.
+	// Most architectures provide a way to return the old
+	// value.  On those that do not, it can be emulated with
+	// an additional load, at the expense of wait-freedom
+	// or spurious failure.
+
+#define ATOMIC_HAVE_WEAK_T_CAS  &lt;impl. defined&gt;
+T atomic_weak_cas[_order](T* addr, T old_val, T new_val);
+	// Similar to the above, but may fail spuriously, and
+	// must be wait-free, if provided.
+
+// It is unclear how various flavors of double-wide or two operand
+// CAS should be handled.  We omit them here.  That may in fact
+// be a reasonable alternative.
+
+#define ATOMIC_HAVE_T_FETCH_ADD &lt;impl. defined&gt;
+	// Abbreviates 5 different feature tests for different
+	// replacements of T.
+
+T atomic_fetch_add[_order](T* addr, T incr);
+	// Order can be any of acquire, release, or ordered.
+	// If it is omitted, the operation is unordered.
+
+#define ATOMIC_HAVE_T_FETCH_OR &lt;impl. defined&gt;
+
+T atomic_fetch_or[_order](T* addr, T mask);
+
+#define ATOMIC_HAVE_T_FETCH_AND &lt;impl. defined&gt;
+
+T atomic_fetch_and[_order](T* addr, T mask);
+
+// A simple test-and-set primitive.  We probably don't need a
+// feature test macro, since this pretty much has to be supported.
+typedef enum {atomic_ts_clear, atomic_ts_set} atomic_ts_val;
+
+typedef &lt;implementation defined&gt; atomic_ts_loc;
+	// Needs strange alignments, etc on some architectures.
+
+atomic_ts_val atomic_ts(atomic_ts_loc *addr);
+
+void atomic_ts_clear(atomic_ts_loc *addr);
+void atomic_ts_clear_release(atomic_ts_loc *addr);
+
+#define ATOMIC_TS_LOC_INITIALIZER &lt;implementation defined&gt;
+	// Initialization expression for cleared atomic_ts_loc.
+</pre>
+</body>
+</html>

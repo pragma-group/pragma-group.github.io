@@ -1,0 +1,347 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+    "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+  <head>
+    <title>N2559 Nesting Exception Objects (Revision 1)</title>
+    <base href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/" />
+    <meta http-equiv="content-type" content="text/html; charset=utf-8" />
+    <style type="text/css">
+      /* <![CDATA[*/
+        address {text-align: right}
+        p {text-align:justify}
+        li {text-align:justify}
+        ins {background-color:#FFFF99}
+        del {background-color:#FF9999}
+     /* ]]> */
+    </style>
+  </head>
+  <body>
+    <address>
+      Document number: N2559=08-0069<br />
+      <br />
+      <a href="mailto:alisdair.meredith@codegear.com">Alisdair Meredith</a><br />
+      2008-02-29
+    </address>
+    
+    <hr />
+    
+    <h1>Nesting Exception Objects (Revision 1)</h1>
+    <p>
+    A popular feature of exception frameworks in other successful languages,
+    notably Java and the .NET framework, is the ability to nest a caught
+    exception as part of the context within a new exception when performing
+    exception translation. Typically this is supported by requiring all
+    exceptions to derive from a common base class, which can store a
+    reference to a nested exception of the same type.
+    </p>
+    <p>
+    While C++ does not enforce a common base class for all exceptions, the
+    standard library provides an exception framework for its own use that
+    <strong>is</strong> rooted on the class <code>std::exception</code>.
+    This class is also a popular base for many user-supplied exception
+    hierarchies, so one aproach would be to extend this base exception
+    class to support nesting.
+    </p>
+    <p>
+    A more flexible approach would be to provide a mixin class, that captures
+    and stores a copy of the currently handled exception. This is available
+    through the <code>current_exception</code> API adopted at the Oxford 2007
+    meeting, see <a href=".../2007/n2079.html">n2079</a> for details. If this
+    mixin class has a virtual destructor then it can be detected through a
+    dynamic_cast, allowing users an effective query method for all exception
+    types.
+    </p>
+    <p>
+    To simplify use, the library could provide a factory function template to
+    throw an exception derived from the user requested type, and the new
+    nested exception holder type.  This function template must take special
+    case to handle non-class types, unions and [[final]] classes that cannot
+    be derived from, and classes already derived from the nested exception
+    wrapper as we rely on this base being non-ambiguous.  Rather than ban
+    these types with a requires clause, it is preferred to simply throw the
+    exception as provided in these cases, so support use generic code.
+    </p>
+    <p>
+    As the factory function template throws a class publicly derived from both
+    the original type and the new nested wrapper (or just the original type)
+    it is always safe to migrate to the new idiom as all the existing
+    exception handlers will be activated under the same conditions.
+    </p>
+    <h2>Example</h2>
+    <p>
+    The first example shows exception translation, where a function guarantees
+    all exceptions it throws are of a certain type.  To avoid losing the
+    whole context, the original exception is now nested inside the new type.
+<blockquote><pre>
+  void some_function() {
+    try {
+    // Do some work
+    }
+    catch( ... ) {
+      // translate all exceptions into my_failure exceptions
+      // nest the original exception inside for future recovery
+      throw_with_nested( my_failure() );
+    }
+  }
+</pre></blockquote>
+    </p>
+    
+    <p>
+    To recover context, use <code>dynamic_cast</code> to test for the presence
+    of a nested exception.
+<blockquote><pre>
+  void test() {
+    try {
+      some_function();
+    }
+    catch( my_failure const & e ) {
+      // Any recover code here
+      if( std::nested_exception const * n = dynamic_cast&lt; std::nested_exception const * >( &e ) ) {
+        try {
+          n->rethrow_nested();
+        }
+        catch ( another_failure const & ){
+          // handle additional cleanup for known nested type
+          // otherwise allow nested exception to propogate
+        }
+      }
+    }
+  }
+</pre></blockquote>
+    </p>
+    
+    
+    <h2>Further Applications</h2>
+
+    <h3>Automate nested rethrows</h3>
+    <p>
+    The awkward <code>dynamic_cast</code> from the example could be shielded
+    from users with a simple class template:
+<blockquote><pre>
+  template&lt; typename E >
+  void rethrow_if_nested( E const & e ) {
+      if( std::nested_exception const * ex = dynamic_cast&lt; std::nested_exception const * >( &e ) ) {
+          ex->rethrow_nested();
+      }
+  }
+</pre></blockquote>
+    </p>
+
+    <h2>Rejected Extensions</h2>
+
+    <h3>Extending <code>bad_cast</code></h3>
+    <p>
+    While rejecting the idea of extending the <code>std::exception</code> base
+    class, it is noted that the whole purpose of <code>std::bad_exception
+    </code> is to report a problem with the currently active exception.  It is
+    therefore proposed that <code>std::bad_exception</code> be required to
+    derive publicly from both <code>std::exception</code> and <code>
+    std::nested_exception</code>.
+    </p>
+    <p>
+    The problem is that while this is essentially API-compatible with C++03,
+    it will break the ABI of many implementions.
+    </p>
+
+    <h2>Alternative Scheme</h2>
+    <p>
+    The proposed API offers a function that will throw an exception nesting
+    the currently handled exception inside.  An alternative would be to
+    supply a factory function that returned an appropriate-but-unspecified
+    type to be thrown.  This could be captured with a new <code>auto</code>
+    declaration, or invoked directly from a throw expression.  The same
+    <code>nested_exception</code> specification would follow.
+    </p>
+
+
+    <h2>Sample Implementation</h2>
+    <p>
+<blockquote><pre>
+namespace std {
+  class nested_exception {
+  public:
+    nested_exception() : ex( current_exception() ) {}
+    nested_exception( const nested_exception & ) = default;
+    nested_exception& operator=( const nested_exception & ) = default;
+    virtual ~nested_exception() = default;
+
+    <em>// access functions</em>
+    void rethrow_nested() const [[noreturn]] {
+      rethrow_exception( ex );
+    }
+    exception_ptr nested_ptr() const { return ex; }
+    
+  private:
+    exception_ptr ex;
+  };
+
+  template&lt; typename T > struct nested__wrapper : T, nested_exception {
+    nested__wrapper( T && ) : T( t ), nested_exception() {}
+  };
+
+  template&lt; typename T > void throw_with_nested( T&& t ) [[noreturn]] {
+    if( !is_class&lt; T, nested_exception>::value ) {
+      throw t; <em>// cannot derive from unions or fundamental types</em>
+    }
+    else if( is_base_of&lt; T, nested_exception>::value ) {
+      throw t; <em>// avoid ambiguous base, context already captured</em>
+    }
+    else {
+      throw nested__wrapper&lt;T>( T );
+    }
+  }
+}
+</pre></blockquote>
+    </p>
+    
+    
+    <h2>Revision history</h2>
+    Changes to original paper <a href=".../2008/n2509.html">n2509</a>
+    <ul>
+    <li>Remove changes to <code>bad_exception</code></li>
+    <li>Attributes downgraded to comments, pending adoption of attribute
+    language feauture.</li>
+    </ul>
+
+    <h2>Acknowledgements</h2>
+    <p>
+    The inception of this paper was a proposal by Bronek Koziki to
+    the BSI panel modifying <code>std::exception</code> to achieve the same
+    result.  After the author suggested these alterations there was much
+    discussion from the whole panel that helped distil the interface presented
+    here.
+    </p>
+
+    <h2>Proposed Wording</h2>
+    <p>
+    Add the following to <strong>18.7p1 [support.exception]</strong>
+<blockquote><pre>
+namespace std {
+  class exception;
+  class bad_exception;
+  <ins>class nested_exception;</ins>
+  
+  typedef void (*unexpected_handler)();
+  unexpected_handler set_unexpected(unexpected_handler f) throw();
+  void unexpected();
+  
+  typedef void (*terminate_handler)();
+  terminate_handler set_terminate(terminate_handler f) throw();
+  void terminate();
+  
+  bool uncaught_exception() throw();
+  
+  typedef <em>unspec</em> exception_ptr;
+  
+  exception_ptr current_exception();
+  void rethrow_exception(exception_ptr p);
+  template&lt;class E> exception_ptr copy_exception(E e);
+
+  <ins>template&lt; typename T > void throw_with_nested( T&& t ); <em>// [[noreturn]]</em></ins>
+  <ins>template&lt; typename E > void rethrow_if_nested( const E & e );</ins>
+}
+</pre></blockquote>
+    </p>
+    
+    <p>
+    Add the following as <br />
+    <strong>18.7.6 [except.nested]</strong>
+<blockquote><pre>
+namespace std {
+class nested_exception {
+public:
+  nested_exception() throw();
+  nested_exception( const nested_exception & ) throw() = default;
+  nested_exception& operator=( const nested_exception & ) throw() = default;
+  virtual ~nested_exception() = default;
+
+  // access functions
+  void rethrow_nested() const; <em>// [[noreturn]]</em>
+  exception_ptr nested_ptr() const;
+};
+
+template&lt; typename T >
+void throw_with_nested( T&& t ); <em>// [[noreturn]]</em>
+</pre></blockquote>
+    </p>
+    <p>
+    <code>nested_exception</code> is a class designed for use as a
+    <em>mixin</em> through multiple inheritence. It captures the
+    currently handled exception, and stores it for later use.
+    </p>
+    <p>
+    [<em>Note:</em> <code>nested_exception</code> has a virtual destructor to
+    make it a polymorphic class. Its presence can be tested for with <code>
+    dynamic_cast</code>. <em>--end note</em>]
+    </p>
+    
+    
+    <p>
+    <strong>18.7.6.1 Constructors [except.nested.constr]</strong>
+    </p>
+    <p>
+    <code>nested_exception() throw();</code>
+    </p>
+    <p>
+    <em>Effects:</em> The <code>nested_exception</code> default constructor
+    shall call <code>current_exception</code> and store the returned value.
+    </p>
+    
+    
+    <p>
+    <strong>18.7.6.2 Nested exception access functions [except.nested.access]
+    </strong>
+    </p>
+
+    <p>
+    <code>void rethrow_nested() const; <em>// [[noreturn]]</em></code>
+    </p>
+    <p>
+    <em>Throws:</em> the stored exception captured by this <code>nested_ptr
+    </code> object.
+    </p>
+    
+    <p>
+    <code>exception_ptr nested_ptr() const;</code>
+    </p>
+    <p>
+    <em>Returns:</em> The exception_ptr object captured by the initial
+    constructor.
+    </p>
+
+    <p>
+    <strong>18.7.6.3 Nested exception utilities [except.nested.utility]
+    </strong>
+    </p>
+
+    <p>
+    <code>
+    template&lt; typename T > void throw_with_nested( T&& t ); <em>// [[noreturn]]</em>
+    </code>
+    </p>
+    <p>
+    <em>Requires:</em> T is a <code>CopyConstructible</code> type.
+    </p>
+    <p>
+    <em>Throws:</em> If T is a non-union class type not derived from <code>
+    nested_exception</code>, an exception of unspecified type that is publicly
+    derived from both <code>T</code> and <code>nested_exception</code>.
+    Otherwise, t.
+    </p>
+    <p>
+    The thrown exception shall call the copy or move constructor for <code>
+    T</code> with the value of <code>t</code> when initializing that base
+    class member.
+    </p>
+
+    <p>
+    <code>
+    template&lt; typename E > void rethrow_if_nested( const E & e );
+    </code>
+    </p>
+    <p>
+    <em>Effects:</em> If and only if <code>e</code> is publicly derived from
+    <code> nested_exception</code> then calls <code>e.rethrow_nested()</code>.
+    </p>
+  <body>
+<html>

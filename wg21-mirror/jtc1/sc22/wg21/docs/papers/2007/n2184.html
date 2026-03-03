@@ -1,0 +1,1465 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+        "http://www.w3.org/TR/html4/strict.dtd">
+<html lang="en">
+<head>
+	<meta http-equiv="content-type" content="text/html; charset=utf-8">
+	<title>thread</title>
+	<style>
+	p {text-align:justify}
+	li {text-align:justify}
+	blockquote.note
+	{
+		background-color:#E0E0E0;
+		padding-left: 15px;
+		padding-right: 15px;
+		padding-top: 1px;
+		padding-bottom: 1px;
+	}
+	ins {background-color:#FFFFA0}
+	del {background-color:#FFFFA0}
+	</style>
+</head>
+<body>
+
+<address align=right>
+Document number: N2184=07-0044<br>
+<br>
+<a href="mailto:howard.hinnant@gmail.com">Howard E. Hinnant</a><br>
+2007-03-09
+</address>
+<hr>
+<h1 align=center>Thread Launching for C++0X</h1>
+
+<h2>Contents</h2>
+
+<ul>
+<li><a href="#Introduction">Introduction</a></li>
+<li><a href="#Goals">Goals</a></li>
+<li><a href="#Examples">Examples</a></li>
+<li><a href="#Synopsis">Synopsis</a></li>
+<li><a href="#Specification">Specification</a></li>
+<li><a href="#Acknowledgments">Acknowledgments</a></li>
+</ul>
+
+<h2><a name="Introduction"></a>Introduction</h2>
+
+<p>
+This paper concentrates on the basic thread launching layer for C++0X.  This paper does
+not include <tt>mutex</tt>, <tt>exclusive_lock</tt> or <tt>condition</tt>.  These are covered
+in <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n2094.html">N2094</a>.
+Nor does this paper cover <tt>future</tt> or <tt>thread_pool</tt>.  That is not because I do not support
+these features.
+This paper does not cover
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n2139.html">One-time object initialization</a>,
+but I believe we want it.
+</p>
+
+<p>
+Covered herein is just <tt>std::thread</tt>.
+</p>
+
+<p>
+The paper assumes a fair amount, such as motivation for multithreading in C++.  In an effort to be
+brief, this paper concentrates on why <i>this</i> <tt>std::thread</tt> is the foundation suitable
+for C++0X.  This paper neither proposes nor opposes a C-level threading API.
+</p>
+
+<h2><a name="Goals"></a>Goals</h2>
+
+<p>
+The <tt>std::thread</tt> proposed herein is not designed to be the
+ultimate thread launching facility.  Rather it is designed to be a solid
+foundation upon which higher level functionality can be non-intrusively
+layered.  There will probably be things you wished this
+<tt>std::thread</tt> directly supported.  Be assured that impressive
+higher level functionality has been shown to be portably implementable
+on top of this layer.  The purpose of this proposed <tt>std::thread</tt>
+is to provide a thin encapsulation over the OS thread.
+</p>
+
+<p>
+It provides:
+</p>
+
+<ul>
+<li>A one-to-one mapping from the <tt>std::thread</tt> handle to the underlying OS thread.</li>
+<li>The ability to move the <tt>std::thread</tt> among scopes (such as returning from factory functions).</li>
+<li>An easy to launch functions, and more generally functors.</li>
+<li>Easy syntax for joining with, and detaching the OS thread.
+<ul>
+<li>Inherent safety from accidently joining with the main thread.</li>
+</ul></li>
+<li>Cooperative cancellation.
+<ul>
+<li>Exception safe cancellation disabling and enabling.</li>
+<li>Cancellation disabling and enabling is a no-op for the main thread.</li>
+<li>Inherent safety from accidently canceling the main thread.</li>
+<li>Reasonable default clean up of child threads when a parent thread is canceled (child threads are canceled then detached).</li>
+</ul></li>
+<li>Application termination upon an unhandled exception.</li>
+</ul>
+
+<p>
+It does not provide the following; these features are expected in a higher level library:
+</p>
+
+<ul>
+<li>futures which provide both normal and exceptional results.
+<ul>
+<li>Arbitrary return values from a join.</li>
+<li>Propagation of unhandled exceptions across threads at join time (instead of termination).</li>
+</ul></li>
+<li>The ability for multiple threads to join a single thread.</li>
+<li>Thread pools which map many tasks onto a few threads.</li>
+</ul>
+
+<p>
+The design of this <tt>thread</tt> is an evolution from <tt>boost::thread</tt>.  The intent is
+to reuse as much of the <tt>boost::thread</tt> experience as possible, keeping the good, and
+changing the very minimum necessary to respond to the known limitations of this field experience.
+</p>
+
+<ul>
+<li><tt>boost</tt>'s non-copyable, one-handle-maps-to-one-os-thread, semantics are retained.
+But this <tt>thread</tt> is movable to allow returning <tt>thread</tt> from factory functions
+and placing into containers.</li>
+<li>This proposal adds cancellation to the <tt>boost::thread</tt>, which is a significant
+complication.  This change has a large impact not only on <tt>thread</tt> but the rest
+of the C++ threading library as well.  It is believed this large change is justifiable
+because of the benefit.
+<ul>
+<li>The thread destructor must now call <tt>cancel</tt> prior to detaching to avoid accidently leaking child
+threads when parent threads are canceled.</li>
+<li>An explicit <tt>detach</tt> member is now required to enable detaching without canceling.</li>
+</ul></li>
+<li>The concepts of thread handle and thread identity have been separated into two classes
+(they are the same class in <tt>boost::thread</tt>).  This is to support easier manipulation
+and storage of thread identity.</li>
+<li>The ability to create a thread id which is guaranteed to compare equal to no other
+joinable thread has been added (<tt>boost::thread</tt> does not have this).  This is handy
+for code which wants to know if it is being executed by the same thread as a previous call
+(recursive mutexes are a concrete example).</li>
+<li>There exists a "back door" to get the native thread handle so that clients can
+manipulate threads using the underlying OS if desired.</li>
+</ul>
+
+<h2><a name="Examples"></a>Examples</h2>
+
+<p>
+This section introduces common use cases of <tt>thread</tt> with simple examples.  See
+the <a href="#Synopsis">synopsis</a> for a brief overview of the entire proposal.  And
+see the <a href="#Specification">specification</a> for a detailed description of each
+item in the synopsis.
+</p>
+
+<h3>Creating a thread</h3>
+
+<p>
+A thread is launched by constructing a <tt>std::thread</tt> with a functor:
+</p>
+
+<blockquote><pre>
+#include &lt;thread&gt;
+
+void f();
+
+void bar()
+{
+    std::thread t(f);  // f() executes in separate thread
+}
+</pre></blockquote>
+
+<p>
+The functor can be a function, or a more general class with an <tt>operator()</tt>.
+Any return type is ignored.
+</p>
+
+<blockquote><pre>
+#include &lt;thread&gt;
+
+struct f
+{
+    double operator()() const;
+};
+
+void bar()
+{
+    std::thread t((f()));  // f() executes in separate thread
+}
+</pre></blockquote>
+
+<h3>Joining with a thread</h3>
+
+<p>
+A <tt>std::thread</tt> can be joined with with one of two syntaxes:
+</p>
+
+<blockquote><pre>
+t();  // wait for thread t to end
+</pre></blockquote>
+
+<p>or</p>
+
+<blockquote><pre>
+t.join();  // wait for thread t to end
+</pre></blockquote>
+
+<p>
+One can test if a <tt>thread</tt> is <i>joinable</i>.  If the <tt>thread</tt>
+has already been <tt>join</tt>ed with, or <tt>detach</tt>ed, then it is no longer <tt>joinable</tt>.
+If the thread has been moved from, it is no longer <tt>joinable</tt>, unless
+it has subsequently been moved back into.
+</p>
+
+<blockquote><pre>
+std::thread t(f);
+assert(t.joinable());
+
+std::thread t2(std::move(t));
+assert(!t.joinable());
+assert(t2.joinable());
+
+t = std::move(t2);
+assert(t.joinable());
+assert(!t2.joinable());
+
+t.join();
+assert(!t.joinable());
+</pre></blockquote>
+
+<p>
+Note: It is impossible to <tt>join</tt> with the main thread as one must have a
+<tt>std::thread</tt> object to join with.  And it is not possible to create a
+<tt>std::thread</tt> which refers to the main thread.
+</p>
+
+<h3>Uncaught exceptions</h3>
+
+<p>
+When a thread (other than the main thread) lets an exception go unhandled, the default
+behavior is to call <tt>std::terminate()</tt>.  However there are many options for easily
+modifying this default behavior.
+</p>
+
+<blockquote><pre>
+void f()
+{
+    throw 1;
+}
+
+int main()
+{
+    std::thread t(f);
+    t.join();
+}
+
+// std::terminate() is called after f throws.
+</pre></blockquote>
+
+<p>
+If the above is not the desired behavior, the client of <tt>f</tt> can easily wrap
+<tt>f</tt> in a functor using <tt>std::bind</tt> which catches unhandled exceptions
+and performs some other action.  For example here is such a functor which logs
+unhandled exceptions, but does not otherwise indicate an error:
+</p>
+
+<blockquote><pre>
+#include &lt;fstream&gt;
+#include &lt;thread&gt;
+#include &lt;functional&gt;
+
+void f()
+{
+    throw 1;
+}
+
+struct log_uncaught_exceptions
+{
+    template &lt;class F&gt;
+    void operator()(F f)
+    {
+        try
+        {
+            f();
+        }
+        catch (...)
+        {
+            std::ofstream("log.text", std::ios::app) &lt;&lt; "uncaught exception\n";
+        }
+    }
+};
+
+int main()
+{
+    std::thread t(std::bind(log_uncaught_exceptions(), f));
+    t.join();
+}
+
+The file log.text is appended with "uncaught exception".
+</pre></blockquote>
+
+<p>
+Indeed, it is believed that the functor adaptor is sufficiently general that the following
+can be <em>non-intrusively</em> built upon this proposal:
+</p>
+
+<ul>
+<li><tt>future</tt> with arbitrary return values.</li>
+<li><tt>future</tt> with exception translation/propagation on join.</li>
+<li><tt>shared_future</tt> which is copyable and has multi-join functionality.</li>
+<li><tt>thread_pool</tt> which queues a large number of functors to be
+executed using a small number of <tt>thread</tt>s.</li>
+</ul>
+
+<h3><tt>thread</tt> is move-only</h3>
+
+<p>
+A <tt>std::thread</tt> is not copyable, but is moveable.  This ensures that a <tt>thread</tt>
+can have only one parent or owner, but that ownership can be transferred among scopes, or
+even among threads.
+</p>
+
+<blockquote><pre>
+// factory function for thread
+std::thread
+CreateMyThread(const std::string&amp; name, int x)
+{
+    std::thread t(std::bind(f, name, x));
+    // maybe wait for / communicate with the new thread here, maybe not...
+    return t;
+}
+...
+// Details on how you want your thread created are encapsulated
+std::thread t = CreateMyThread("Task A", 26);
+</pre></blockquote>
+
+<blockquote><pre>
+// threads can be stored in containers
+int main()
+{
+    std::vector&lt;std::thread&gt; thread_group;
+    thread_group.push_back(std::thread(f));
+    ...
+    // Number of threads created here not known until run time
+    // (motivating the use of vector&lt;thread&gt; in this example)
+    ...
+    // Join with all of the threads
+    for (auto i = thread_group.begin(), e = thread_group.end(); i != e; ++i)
+        i-&gt;join();
+}
+</pre></blockquote>
+
+<h3>Thread ID</h3>
+
+<p>
+Despite the fact that <tt>std::thread</tt> is not copyable, its
+<tt><i>id</i></tt> <i>is</i> copyable.  Therefore clients can freely
+pass around this <tt>id</tt>.  But the only thing this information can
+be used for is comparing the identity of threads. The <tt>id</tt> of a
+thread can be obtained from a joinable <tt>std::thread</tt>.
+Additionally a thread can obtain its own <tt>id</tt> without the use of
+a <tt>std::thread</tt> (including the main thread). Finally an
+<tt>id</tt> can be default constructed and is then guaranteed not to
+compare equal to the <tt>id</tt> of any other running <tt>thread</tt>.
+</p>
+
+<blockquote><pre>
+std::thread::id id;               // Refers to no thread
+assert(id == std::thread::id());  // All default constructed id's compare equal
+
+id = std::this_thread::get_id();  // get id for this thread
+assert(id != std::thread::id());  // id now refers to this thread
+
+std::thread t(f);                 // launch a thread and call it t
+id = t.get_id();                  // id now refers to t's id
+assert(id != std::this_thread::get_id());
+</pre></blockquote>
+
+<h3><tt>this_thread</tt> Namespace</h3>
+
+<p>
+Note the use of the <tt>this_thread</tt> namespace to disambiguate when you are requesting
+the <tt>id</tt> for the current thread, vs the id of a child thread.  The <tt>get_id</tt>
+name for this action remains the same in the interest of reducing the conceptual footprint
+of the interface.  This design also applies to the <tt>cancellation_requested</tt> function:
+</p>
+
+<blockquote><pre>
+std::thread my_child_thread(f);
+typedef std::thread::id ID:
+
+ID my_id std::this_thread::get_id();  // The current thread's id
+ID your_id my_child_thread.get_id();  // The child   thread's id
+
+bool have_i_been_canceled = std::this_thread::cancellation_requested();  // Current thread's cancellation status
+bool have_you_been_canceled = my_child_thread.cancellation_requested();  // Child   thread's cancellation status
+</pre></blockquote>
+
+<p>
+The <tt>this_thread</tt> namespace also contains a few other functions that operate on, or query the
+current thread of execution.
+</p>
+
+<h3>Canceling threads</h3>
+
+<p>
+A joinable <tt>std::thread</tt> can be <i>cooperatively</i> canceled.  When
+a thread cancels, all it does is throw an exception of type <tt>thread_canceled</tt>.
+Thus a canceled thread can cancel its cancel simply by catching (and not re-throwing)
+<tt>thread_canceled</tt>.  One thread can request that another thread throw a
+<tt>thread_canceled</tt> exception with this syntax:
+</p>
+
+<blockquote><pre>
+std::thread t(f);
+t.cancel();  // request that the thread referred to by t cancel itself
+</pre></blockquote>
+
+<p>
+To actually respond to a request to cancel, a thread must execute a
+cancelation point.  A thread can call <tt>cancellation_point()</tt> in order
+to turn any code into a cancellation point.
+</p>
+
+<blockquote><pre>
+std::this_thread::cancellation_point();  // Will throw a thread_canceled exception if
+                                         // and only if exceptions are enabled, and if
+                                         // someone has called t.cancel() where t refers
+                                         // to this thread
+</pre></blockquote>
+
+<p>
+Note that the main thread can not be canceled (by another thread) because cancellation
+by another thread can only be done through a <tt>std::thread</tt> and there is no way
+to create a <tt>std::thread</tt> which refers to the main thread.
+</p>
+
+<p>
+The list of recommended cancellation points is:
+</p>
+
+<ul>
+<li><tt>void std::this_thread::cancellation_point()</tt></li>
+<li><tt>void std::this_thread::sleep(std::nanoseconds rel_time)</tt></li>
+<li><tt>void std::thread::join()</tt></li>
+<li><tt>void std::thread::operator()()</tt></li>
+<li><tt>void std::condition&lt;Lock&gt;::wait(Lock&amp;)</tt></li>
+<li><tt>template&lt;class Predicate&gt; void std::condition&lt;Lock&gt;::wait(Lock&amp;, Predicate)</tt></li>
+<li><tt>bool std::condition&lt;Lock&gt;::timed_wait(Lock&amp;, std::nanoseconds)</tt></li>
+<li><tt>template&lt;class Predicate&gt; void std::condition&lt;Lock&gt;::timed_wait(Lock&amp;, std::nanoseconds, Predicate)</tt></li>
+</ul>
+
+<p>
+A thread can disable cancellations for itself, even if it does execute a
+cancellation point such as <tt>cancellation_point</tt>.  This is done
+with the <tt>disable_cancellation</tt> class.  The construction of
+this class has the effect of disabling cancellations for the lifetime of
+the object.  When the object destructs, cancellation is automatically
+reverted to its previous state (typically re-enabled).
+</p>
+
+<blockquote><pre>
+{
+std::this_thread::disable_cancellation _;
+...
+// cancellation can not happen here
+std::this_thread::cancellation_point();  // guaranteed to have no effect
+...
+}  // cancellation enabled here
+std::this_thread::cancellation_point();  // Will throw if someone has requested a cancel()
+</pre></blockquote>
+
+<p>
+Because cancellation is disabled with a class object, the cancellation is guaranteed to
+be correctly enabled whether the scope is left normally, or by an exception (whether or not
+that exception is <tt>thread_canceled</tt>.
+</p>
+
+<p>
+Cancellation is not disabled during stack unwinding.  Destructors must be cancellation safe
+whether they are being executed due to a <tt>thread_canceled</tt> exception, or any other
+exception.  Thus automatically disabling cancellation when a <tt>thread_canceled</tt> is
+thrown is redundant.  And there is at least one corner case where it causes ill effects.
+For example:
+</p>
+
+<blockquote><pre>
+SomeClass::~SomeClass()
+{
+    std::this_thread::disable_cancellation _;
+    t_.join();
+}
+</pre></blockquote>
+
+<p>or</p>
+
+<blockquote><pre>
+SomeClass::~SomeClass()
+{
+    try
+    {
+        t_.join();
+    }
+    catch (...)
+    {
+    }
+}
+</pre></blockquote>
+
+<p>
+<tt>disable_cancellation</tt> scopes can be nested.  That is, outer code can disable
+cancellation, and then call other functions, without fear that those functions will disable,
+and subsequently enable cancellation prematurely.
+</p>
+
+<blockquote><pre>
+void foo()
+{
+    std::this_thread::disable_cancellation _;
+    // cancellation disabled here
+    ...
+}   // cancellation enabled only if it was enabled upon entering foo
+
+void bar()
+{
+    std::this_thread::disable_cancellation _;
+    // cancellation disabled here
+    foo();
+    // cancellation <i>still</i> disabled here
+}  // cancellation enabled only if it was enabled upon entering bar
+</pre></blockquote>
+
+<p>
+If the main thread calls <tt>this_thread::cancellation_point()</tt> or
+constructs and object of type
+<tt>this_thread::disable_cancellation</tt>, there is no effect.  The
+main thread can not be canceled.  Having these functions silently ignore
+the main thread allows library code to use this functionality without
+worry of whether it is being executed in the main thread or not.
+</p>
+
+<p>
+One can request permission from a <tt>disable_cancellation</tt> object to temporarily
+re-enable cancellation inside the scope.  This requires a non-<tt>const</tt> <tt>disable_cancellation</tt>
+object:
+</p>
+
+<blockquote><pre>
+void foo()
+{
+    std::this_thread::disable_cancellation no_cancel;
+    A a;
+    std::this_thread::enable_cancellation cancel_ok(no_cancel);
+    a.foo();  // this may be cancelled
+}  // disable cancellation, a.~A(), enable cancellation
+</pre></blockquote>
+
+<p>
+The <tt>enable_cancellation</tt> constructor simply reverts to the cancellation state
+that was in effect with the referenced <tt>disable_cancellation</tt> object was constructed.
+Thus <tt>enable_cancellation</tt> doesn't actually enable cancellations unless the referenced
+<tt>disable_cancellation</tt> was not constructed within the scope of another <tt>disable_cancellation</tt>.
+Thus when a function says:
+</p>
+
+<blockquote><pre>
+void bar()
+{
+    std::this_thread::disable_cancellation _;
+    foo();
+}
+</pre></blockquote>
+
+<p>
+then it is not possible for code within the function <tt>foo</tt> to
+enable cancellation (even if it tries to as with this example).  To
+enable cancellation in a called function, <tt>bar</tt> would have to
+communicate the name of its <tt>disable_cancellation</tt> object to that
+function.
+</p>
+
+<p>
+This design has been set up to provide flexibility for disabling and enabling cancellation, yet
+prevent accidental enabling when calling unknown code, and to prevent accidentally not re-enabling
+when exceptions propagate through a stack frame.
+</p>
+
+<h3>Destructing a thread</h3>
+
+<p>
+Every <tt>thread</tt> must either be <tt>join</tt>ed or <tt>detach</tt>ed within its
+lifetime.  To support cooperative cancellation, the <tt>thread</tt> destructor must
+be prepared to deal with <tt>thread</tt>s which have neither been <tt>join</tt>ed
+or <tt>detach</tt>ed.  Consider for example a cancelable <tt>thread</tt> that owns
+two child threads:
+</p>
+
+<blockquote><pre>
+std::thread t1(f1);
+std::thread t2(f2);
+t1.join();
+t2.join();  // what does t2.~thread() do if t1 throws thread_cancelled?
+</pre></blockquote>
+
+<p>
+Upon cancellation of this <tt>thread</tt> (<tt>t1.join()</tt> is a cancellation point), a
+<tt>thread_canceled</tt> exception propagates through the stack frame,
+destructing <tt>t2</tt> before it has had a chance to <tt>join</tt>.  If
+<tt>t2</tt> simply <tt>detach</tt>es, then <tt>t2</tt> may run for an
+arbitrarily long time, and consume arbitrarily large resources.  This
+may result in the cancellation request of the parent <tt>thread</tt>
+effectively not being honored.  Thus when a <tt>thread</tt> is
+destructed, if it is <tt>joinable</tt> then it is first
+<tt>cancel</tt>ed, and then <tt>detach</tt>ed.  This allows the parent
+(canceling) <tt>thread</tt> to continue to cancel without blocking, and
+yet notify all of its child <tt>thread</tt>s of the cancellation
+request.
+</p>
+
+<p>
+If semantics other than <tt>cancel(); detach();</tt> are desired for a <tt>thread</tt>
+destructor, this is easy to arrange for with a <i>thread manager</i> object.  Such an
+object would be a scope guard for a thread which points to the desired functionality
+upon destruction.  Smart pointers with policy destructors are easily and efficiently
+employed as scope guards.
+</p>
+
+<h3>Threading cooperatively</h3>
+
+<p>
+Namespace <tt>this_thread</tt> has two functions for yielding processor control to
+another thread:
+</p>
+
+<blockquote><pre>
+void yield();
+void sleep(std::nanoseconds <i>rel_time</i>);
+</pre></blockquote>
+
+<p>
+A thread can call these functions to control its own yielding of the processor.  There is no
+way to request another thread to yield or sleep.
+</p>
+
+<p>
+<i>Note:</i> <tt>std::nanoseconds</tt> is taken from
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n2058.html">N2058</a>
+which is currently targeted to TR2.  It is recommended that a minimal subset of N2058 be
+standardized to support the needs of the threading library.
+</p>
+
+<h3>Environment</h3>
+
+<p>
+There is one static member function of <tt>thread</tt> which yields a
+measure of the number of threads which could possibly execute
+concurrently:
+</p>
+
+<blockquote><pre>
+unsigned n = std::thread::hardware_concurrency();
+</pre></blockquote>
+
+<p>
+This can come in handy in a variety of situations such as sizing a thread pool.
+</p>
+
+<h2><a name="Synopsis"></a>Synopsis</h2>
+
+<blockquote><pre>
+<font color=#A00000>// &lt;thread&gt;</font>
+
+namespace std
+{
+
+<font color=#A00000>// Thread cancellation notification</font>
+
+class thread_canceled
+{
+public:
+    thread_canceled();
+    virtual ~thread_canceled();
+    virtual const char* what() const;
+};
+
+<font color=#A00000>// Unable to allocate thread-related resources</font>
+
+class thread_resource_error
+    : public std::exception
+{
+public:
+    virtual const char* what() const throw();
+};
+
+<font color=#A00000>// A move-only thread handle</font>
+
+class thread
+{
+private:
+    <font color=#A00000>// not copyable</font>
+    thread(const thread&amp;);
+    thread&amp; operator=(const thread&amp;);
+
+public:
+
+    <font color=#A00000>// construction, destruction</font>
+    thread();
+    template &lt;class F&gt; explicit thread(F <i>f</i>);
+    ~thread();
+
+    <font color=#A00000>// move semantics</font>
+    thread(thread&amp;&amp; <i>x</i>);
+    thread&amp; operator=(thread&amp;&amp; <i>x</i>);
+
+    void swap(thread&amp; <i>x</i>);
+
+    <font color=#A00000>// thread identity</font>
+    class id
+    {
+    public:
+        id();
+        friend bool operator==(const id&amp; <i>x</i>, const id&amp; <i>y</i>);
+        friend bool operator!=(const id&amp; <i>x</i>, const id&amp; <i>y</i>);
+    };
+
+    id get_id() const;
+
+    <font color=#A00000>// join-related members</font>
+    bool joinable() const;
+    void join();
+    void operator()();
+    void detach();
+
+    <font color=#A00000>// cancel-related members</font>
+    void cancel();
+    bool cancellation_requested() const;
+
+    <font color=#A00000>// a measure of the maximum number of threads which can run concurrently</font>
+    static unsigned hardware_concurrency();
+
+    typedef <i>implementation</i> native_handle_type;
+    native_handle_type native_handle();
+};
+
+namespace this_thread  <font color=#A00000>// functions for affecting and inspecting the current thread</font>
+{
+
+<font color=#A00000>// disable cancellation for this thread</font>
+class disable_cancellation
+{
+    disable_cancellation(const disable_cancellation&amp;);
+    disable_cancellation&amp; operator=(const disable_cancellation&amp;);
+public:
+    disable_cancellation();
+    ~disable_cancellation();
+};
+
+<font color=#A00000>// enable cancellation for this thread</font>
+class enable_cancellation
+{
+    enable_cancellation(const enable_cancellation&amp;);
+    enable_cancellation&amp; operator=(const enable_cancellation&amp;);
+public:
+    explicit enable_cancellation(disable_cancellation&amp; d);
+    ~enable_cancellation();
+};
+
+<font color=#A00000>// identity for this thread</font>
+thread::id get_id();
+
+<font color=#A00000>// cancel-related functions for this thread</font>
+void cancellation_point();
+bool cancellation_enabled();
+bool cancellation_requested();
+
+<font color=#A00000>// cooperative threading functionality</font>
+void yield();
+void sleep(std::nanoseconds rel_time);
+
+}  <font color=#A00000>// this_thread</font>
+
+}  <font color=#A00000>// std</font>
+</pre></blockquote>
+
+<h2><a name="Specification"></a>Specification</h2>
+
+<blockquote><pre>
+class thread_canceled
+{
+public:
+    thread_canceled();
+    virtual ~thread_canceled();
+    virtual const char* what() const;
+};
+</pre></blockquote>
+
+<blockquote><pre>
+thread_canceled()
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>thread_canceled</tt>.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+~thread_canceled()
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> Destructs an object of type <tt>thread_canceled</tt>.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+const char* what()
+</pre>
+
+<blockquote>
+<p>
+<i>Returns:</i> An implementation-deﬁned <tt>NTBS</tt>.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+<p>
+<i>Remarks:</i>  The message may be a null-terminated multibyte string
+(17.3.2.1.3.2), suitable for conversion and display as a wstring
+(21.2, 22.2.1.4). The return value remains valid until the exception
+object from which it is obtained is destroyed or a non-const member
+function of the exception object is called.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+class thread
+{
+private:
+    <font color=#A00000>// not copyable</font>
+    thread(const thread&amp;);
+    thread&amp; operator=(const thread&amp;);
+
+public:
+
+    <font color=#A00000>// construction, destruction</font>
+    thread();
+    template &lt;class F&gt; explicit thread(F <i>f</i>);
+    ~thread();
+
+    <font color=#A00000>// move semantics</font>
+    thread(thread&amp;&amp; <i>x</i>);
+    thread&amp; operator=(thread&amp;&amp; <i>x</i>);
+
+    void swap(thread&amp; <i>x</i>);
+
+    <font color=#A00000>// thread identity</font>
+    class id
+    {
+    public:
+        id();
+        friend bool operator==(const id&amp; <i>x</i>, const id&amp; <i>y</i>);
+        friend bool operator!=(const id&amp; <i>x</i>, const id&amp; <i>y</i>);
+    };
+
+    id get_id() const;
+
+    <font color=#A00000>// join-related members</font>
+    bool joinable() const;
+    void join();
+    void operator()();
+    void detach();
+
+    <font color=#A00000>// cancel-related members</font>
+    void cancel();
+    bool cancellation_requested() const;
+
+    <font color=#A00000>// a measure of the maximum number of threads which can run concurrently</font>
+    static unsigned hardware_concurrency();
+
+    typedef <i>implementation</i> native_handle_type;
+    native_handle_type native_handle();
+};
+</pre></blockquote>
+
+<blockquote><pre>
+thread()
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>thread</tt>.
+</p>
+<p>
+<i>Postconditions:</i>
+</p>
+<blockquote><pre>
+get_id() == thread::id()
+joinable() == false
+</pre></blockquote>
+<p>
+<i>Remarks:</i> <tt>get_id()</tt> returns an identity that refers to
+<i>not any thread</i>.  This identity compares equal to other
+non-<tt>join</tt>able <tt>thread</tt>s, and compares not equal to all
+other <tt>join</tt>able <tt>thread</tt>s.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+template &lt;class F&gt; explicit thread(F <i>f</i>)
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>thread</tt> and executes the
+functor <tt><i>f</i></tt> asynchronously.  <tt>F</tt> is a functor which takes
+no argument.  Any return value is ignored.
+</p>
+<p>
+<i>Postconditions:</i>
+</p>
+<blockquote><pre>
+get_id() != thread::id()
+joinable() == true
+</pre>
+<p>
+If the newly referenced thread immediately executes
+<tt>this_thread::cancellation_enabled()</tt> the return is
+<tt>true</tt>.
+</p>
+</blockquote>
+<p>
+<i>Throws:</i> <tt>thread_resource_error</tt> if unable to acquire the resources to
+start this thread.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+~thread()
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> If <tt>joinable()</tt> then <tt>cancel()</tt> followed by <tt>detach()</tt>,
+else there are no effects.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+thread(thread&amp;&amp; <i>x</i>)
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>thread</tt> from <tt><i>x</i></tt>.  
+</p>
+<p>
+<i>Postconditions:</i>  <tt><i>x</i>.joinable()</tt> is <tt>false</tt>. 
+<tt><i>x</i>.get_id() == thread().get_id()</tt>. <tt>joinable()</tt>
+returns the value that <tt><i>x</i>.joinable()</tt> did prior to the
+construction.
+<tt>get_id()</tt>
+returns the value that <tt><i>x</i>.get_id()</tt> did prior to the
+construction.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+thread&amp; operator=(thread&amp;&amp; <i>x</i>)
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> Assigns the state of <tt><i>x</i></tt> to <tt>*this</tt>
+and sets <tt><i>x</i></tt> to a default constructed state.
+</p>
+<p>
+<i>Postconditions:</i>  <tt><i>x</i>.joinable()</tt> is <tt>false</tt>. 
+<tt><i>x</i>.get_id() == thread().get_id()</tt>. <tt>joinable()</tt>
+returns the value that <tt><i>x</i>.joinable()</tt> did prior to the
+assignment.
+<tt>get_id()</tt>
+returns the value that <tt><i>x</i>.get_id()</tt> did prior to the
+assignment.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+void swap(thread&amp; <i>x</i>)
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> Swaps the state of <tt>*this</tt> and <tt><i>x</i></tt>.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+thread::id()
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>thread::id</tt> which compares
+equal to other default constructed <tt>thread::id</tt> objects.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+bool operator==(const id&amp; <i>x</i>, const id&amp; <i>y</i>)
+</pre>
+
+<blockquote>
+<p>
+<i>Returns:</i> If <tt><i>x</i></tt> and <tt><i>y</i></tt> both refer to
+<i>not any thread</i>, then returns <tt>true</tt>.  Else if
+<tt><i>x</i></tt> and <tt><i>y</i></tt> refer to the same thread, then
+returns <tt>true</tt>.  Else returns <tt>false</tt>.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+bool operator!=(const id&amp; <i>x</i>, const id&amp; <i>y</i>)
+</pre>
+
+<blockquote>
+<p>
+<i>Returns:</i> <tt>!(<i>x</i> == <i>y</i>)</tt>
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+id get_id() const
+</pre>
+
+<blockquote>
+<p>
+<i>Returns:</i> A <tt>thread::id</tt> which refers to this <tt>thread</tt>.  If this
+<tt>thread</tt> is not <tt>joinable()</tt> returns a default constructed <tt>id</tt>.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+bool joinable() const
+</pre>
+
+<blockquote>
+<p>
+<i>Returns:</i> <tt>get_id() != id()</tt>.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+void join()
+</pre>
+
+<blockquote>
+<p>
+<i>Preconditions:</i> <tt>joinable()</tt> is <tt>true</tt>.
+</p>
+<p>
+<i>Effects:</i> This thread blocks until the thread referenced by <tt>thread</tt> completes.
+</p>
+<p>
+<i>Postconditions:</i> After a normal return of <tt>join()</tt>,
+<tt>joinable()</tt> is <tt>false</tt>. An exceptional return will
+indicate that the calling <tt>thread</tt> has received a request to
+cancel.  In such an event, the <tt>thread</tt> referenced by
+<tt>*this</tt> remains unaffected.
+</p>
+<p>
+<i>Throws:</i> If <tt>this_thread::cancellation_requested()</tt> returns
+<tt>true</tt> during the call to <tt>join()</tt>, throws <tt>thread_canceled</tt>.
+</p>
+<p>
+<i>Remarks:</i> This function is a cancellation point for the calling thread.  [<i>Note:</i> The
+main thread can not be canceled even at a cancellation point. <i>--end note</i>]
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+void operator()()
+</pre>
+
+<blockquote>
+<p>
+This is an alias for <tt>join()</tt> with the same <i>Preconditions</i>, <i>Effects</i>,
+<i>Postconditions</i>, and <i>Throws</i> clauses.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+void detach()
+</pre>
+
+<blockquote>
+<p>
+<i>Preconditions:</i> <tt>joinable()</tt> is <tt>true</tt>.
+</p>
+<p>
+<i>Effects:</i> The referenced thread is allowed to continue execution with no referencing
+<tt>thread</tt>.  When the referenced thread ends execution it will clean up any resources owned by the
+thread.  <tt>*this</tt> no longer references this thread of execution.
+</p>
+<p>
+<i>Postconditions:</i> <tt>joinable()</tt> is <tt>false</tt>.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+void cancel()
+</pre>
+
+<blockquote>
+<p>
+<i>Preconditions:</i> <tt>joinable()</tt> is <tt>true</tt>.
+</p>
+<p>
+<i>Effects:</i> The referenced thread receives a request to throw an exception of
+type <tt>thread_canceled</tt> at the next cancellation point it executes where
+<tt>thread_self::cancellation_enabled()</tt> returns <tt>true</tt> as executed by
+the referenced thread.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+bool cancellation_requested() const
+</pre>
+
+<blockquote>
+<p>
+<i>Preconditions:</i> <tt>joinable()</tt> is <tt>true</tt>.
+</p>
+<p>
+<i>Returns:</i> If the referenced thread has received a request to throw an exception of
+type <tt>thread_canceled</tt> at the next cancellation point and has not yet done so,
+returns <tt>true</tt> else returns <tt>false</tt>.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+unsigned hardware_concurrency()
+</pre>
+
+<blockquote>
+<p>
+<i>Returns:</i> A measure of the number of threads which could possibly
+execute concurrently. This number should just be considered a hint.  On
+platforms where this information is not computable or well defined a
+return value of 1 is recommended, but not required.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+native_handle_type native_handle()
+</pre>
+
+<blockquote>
+<p>
+<i>Returns:</i> An implementation defined type representing the underlying OS thread handle.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+namespace this_thread
+{
+class disable_cancellation
+{
+    disable_cancellation(const disable_cancellation&amp;);
+    disable_cancellation&amp; operator=(const disable_cancellation&amp;);
+public:
+    disable_cancellation();
+    ~disable_cancellation();
+};
+}
+</pre></blockquote>
+
+<blockquote><pre>
+disable_cancellation()
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>disable_cancellation</tt>.  The construction
+has the effect of disabling requests to cancel this thread from other threads during the
+lifetime of this object (except as modified by <tt>enable_cancellation</tt>).  When a cancellation
+point is executed within the lifetime of this object, a request to cancel has no affect (except
+as modified by <tt>enable_cancellation</tt>).  The constructor also notes the current cancellation
+state so that it can be restored at the time this object is destructed.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+<p>
+<i>Postconditions:</i> <tt>this_thread::cancellation_enabled()</tt> returns <tt>false</tt>.
+</p>
+<p>
+<i>Remarks:</i>  This function has no effect if executed from the main thread.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+~disable_cancellation()
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> Restores the enable-cancellation state to the same as it was when this
+<tt>disable_cancellation</tt> was constructed.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+<p>
+<i>Remarks:</i>  This function has no effect if executed from the main thread.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+namespace this_thread
+{
+
+class enable_cancellation
+{
+    enable_cancellation(const enable_cancellation&amp;);
+    enable_cancellation&amp; operator=(const enable_cancellation&amp;);
+public:
+    explicit enable_cancellation(disable_cancellation&amp; d);
+    ~enable_cancellation();
+};
+
+}
+</pre></blockquote>
+
+<blockquote><pre>
+enable_cancellation(disable_cancellation&amp; <i>d</i>)
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> Constructs an object of type <tt>enable_cancellation</tt>.  The enable-cancellation
+state is set to the same state that would be observed immediately after <tt><i>d</i>.~disable_cancellation()</tt>.
+</p>
+<p>
+<i>Note:</i> The enable-cancellation may not necessarily be enabled if this construction happens within
+nested scopes of <tt>disable_cancellation</tt> objects.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+<p>
+<i>Remarks:</i>  This function has no effect if executed from the main thread.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+~enable_cancellation()
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> Disables cancellation.
+</p>
+<p>
+<i>Postconditions:</i> <tt>this_thread::cancellation_enabled()</tt> returns <tt>false</tt>.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+<p>
+<i>Remarks:</i>  This function has no effect if executed from the main thread.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+thread::id this_thread::get_id()
+</pre>
+
+<blockquote>
+<p>
+<i>Returns:</i> Returns the <tt>id</tt> of the current thread.  The return shall not be
+equal to a default constructed <tt>thread::id</tt>.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+void this_thread::cancellation_point()
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i> If <tt>cancellation_enabled() &amp;&amp; cancellation_requested()</tt> then
+throws an exception of type <tt>thread_canceled</tt>, else there is no effect.
+</p>
+<p>
+<i>Postconditions:</i> If a <tt>thread_canceled</tt> is thrown, then <tt>cancellation_requested()</tt>
+shall be <tt>false</tt>.
+</p>
+<p>
+<i>Throws:</i> <tt>thread_canceled</tt>.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+bool cancellation_enabled()
+</pre>
+
+<blockquote>
+<p>
+<i>Returns:</i>  If this is the main thread, returns <tt>false</tt>.
+Else returns <tt>true</tt> unless a <tt>disable_cancellation</tt> object
+has been constructed (and not destructed) and which has not been reverted
+with a <tt>enable_cancellation</tt> object.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+bool cancellation_requested()
+</pre>
+
+<blockquote>
+<p>
+<i>Returns:</i>  <tt>true</tt> if a <tt>cancel()</tt> has been called on this
+thread and the thread has not yet executed a cancellation point with cancellation
+enabled.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+void yield()
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i>  Offers the operating system the chance to schedule another thread.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+</blockquote>
+</blockquote>
+
+<blockquote><pre>
+void sleep(std::nanoseconds rel_time)
+</pre>
+
+<blockquote>
+<p>
+<i>Effects:</i>  This thread blocks for at least the amount of time specified, unless this
+thread receives a request to cancel.
+</p>
+<p>
+<i>Throws:</i> Nothing.
+</p>
+<p>
+<i>Remarks:</i> This function is a cancellation point.
+</p>
+</blockquote>
+</blockquote>
+
+
+<h2><a name="Acknowledgments"></a>Acknowledgments</h2>
+
+<p>
+This subject of this paper is controversial enough that there are probably as many different
+positions as there are people.  I would like to gratefully acknowledge the help and suggestions
+from the following people without implying support from anyone for this proposal.
+</p>
+
+<p>
+Thanks to Matt Austern, Hans Boehm, Eric Christopher, Greg Colvin, Lawrence Crowl, Beman Dawes,
+Peter Dimov, Kevlin Henney, James Kanze, Herb Sutter, and Anthony Williams.
+</p>
+
+</body>
+</html>

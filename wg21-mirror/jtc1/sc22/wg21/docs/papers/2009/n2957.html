@@ -1,0 +1,531 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=US-ASCII">
+<title>Reaching Scope of Lambda Expressions</title>
+</head>
+<body>
+<h1>Reaching Scope of Lambda Expressions</h1>
+
+<p>
+ISO/IEC JTC1 SC22 WG21 N2957 = 09-0147 - 2009-09-25
+</p>
+
+<p>
+Lawrence Crowl, crowl@google.com, Lawrence@Crowl.org
+</p>
+
+<p>
+<a href="#Problem">Problem</a><br>
+<a href="#Importance">Importance</a><br>
+<a href="#Solution">Solution</a><br>
+<a href="#Wording">Wording</a><br>
+<a href="#Acknowledgments">Acknowledgments</a><br>
+<a href="#References">References</a><br>
+</p>
+
+
+<h2><a name="Problem">Problem</a></h2>
+
+<p>
+The adoption of <a href="#N2927">[N2927]</a>
+restricts the referents of a lambda expression
+to the immediately-enclosing function or lambda expression.
+This restriction is severe
+and does damage to the utility of the lambda feature.
+</p>
+
+<p>
+One principle of lambda design is that
+programmers should be able to replace all well-structured control constructs
+with function calls taking lambda expressions as arguments.
+<a href="#N2927">[N2927]</a> prevents that replacement,
+and is essentially equivalent to saying that
+the body of a nested loop cannot access function parameters.
+</p>
+
+<p>
+Consider the following function to multiply square matricies.
+</p>
+
+<pre>
+matrix operator*( const matrix&amp; a, const matrix&amp; b )
+{
+    int n = a.numrows();
+    matrix c( n, n );
+    for ( int i = 0; i &lt; n; i++ ) {
+        for ( int j = 0; j &lt; n; j++ ) {
+            double t = 0.0;
+            for ( int k = 0; k &lt; n; k++ ) {
+                t += a[i][k] * b[k][j];
+            }
+            c[i][j] = t;
+        }
+    }
+    return c;
+}
+</pre>
+
+<p>
+Its rewrite into functions and lambdas,
+as intended by the adopted <a href="#N2550">[N2550]</a>,
+is as follows.
+Note that the rewrite is approximately the same size.
+</p>
+
+<pre>
+matrix operator*( const matrix&amp; a, const matrix&amp; b )
+{
+    int n = a.numrows();
+    matrix c( n, n );
+    for_range( 0, n-1, [&amp;]( int i ){
+        for_range( 0, n-1, [&amp;]( int j ){
+            double t = 0.0;
+            for_range( 0, n-1, [&amp;]( int k ){
+                t += a[i][k] * b[k][j];
+            } );
+            c[i][j] = t;
+        } );
+    } );
+    return c;
+}
+</pre>
+
+<p>
+However this straightforward reformulation is ill-formed
+as per <a href="#N2927">[N2927]</a> wording for
+5.1.1 [expr.prim.lambda] paragraphs 9&ndash;12.
+To make the code well-formed,
+the function must be rewritten as follows,
+where <ins>inserted</ins> text shows new code,
+which sometimes alter variable references.
+</p>
+
+<pre>
+matrix operator*( const matrix&amp; a, const matrix&amp; b )
+{
+    int n = a.numrows( );
+    matrix c( n, n );
+    for_range( 0, n-1, [&amp;]( int i ){
+        <ins>const matrix&amp; a1 = a;</ins>
+        <ins>const matrix&amp; b1 = b;</ins>
+	<ins>int& n1 = n;</ins>
+	<ins>matrix& c1 = c;</ins>
+        for_range( 0, n<ins>1</ins>-1, [&amp;]( int j ){
+            <ins>const matrix&amp; a2 = a1;</ins>
+            <ins>const matrix&amp; b2 = b1;</ins>
+	    <ins>int& n2 = n1;</ins>
+	    <ins>int& i2 = i;</ins>
+            double t = 0.0;
+            for_range( 0, n<ins>1</ins>-1, [&amp;]( int k ){
+                t += a<ins>2</ins>[i<ins>2</ins>][k] * b<ins>2</ins>[k][j];
+            } );
+            c<ins>1</ins>[i][j] = t;
+        } );
+    } );
+    return c;
+}
+</pre>
+
+<p>
+Such extensive mechanical editing
+will inhibit use,
+make errors more likely,
+and complicate code maintenance.
+Such editing is properly the domain of the compiler.
+</p>
+
+
+<h2><a name="Importance">Importance</a></h2>
+
+<p>
+One view of lambdas is that
+they are primarily useful for very short inline function arguments
+to standard algorithms,
+and hence do not need general scoping support.
+This view considerably underestimates the power of control abstraction.
+Indeed, the algorithms in the standard library
+are the beginning of control abstraction, not the end.
+In a highly concurrent world,
+programmers need more control constructs
+than can be reasonably provided by the language.
+Programmers will need to define and use their own constructs,
+and they will be using those constructs
+with the same frequency that
+current programmers use <code>for</code> and <code>if</code>.
+</p>
+
+<p>
+Consider this following example,
+adapted from <a href="#CrowlLeBlanc94">[CrowlLeBlanc94]</a>,
+for Gaussian elimination.
+It contains two constrol structures,
+one for the triangulation and one for the row reduction.
+Only the latter is a common control construct.
+</p>
+
+<pre>
+int size = system.size();
+triangulate( size, [&amp;]( int pivot, int reduce ) {
+    auto fraction = system[reduce][pivot] / system[pivot][pivot];
+    forall( pivot, size-1, [&amp;]( int variable ) {
+        system[reduce][variable] -= system[pivot][variable] * fraction;
+    } );
+} );
+</pre>
+
+<p>
+In particular, the <code>triangulate</code> control construct
+encapsulates all the available parallelism in the triangulation.
+Just as importantly, it also captures all the necessary synchronization.
+So,
+this highly parallel code contains no threads and no synchronization,
+which are the source of most effort and bugs in parallel programming.
+More imporantly,
+there is no particular commitment
+to any sequential or parallel execution of its control constructs.
+A vector machine might choose to execute
+<code>triangulate</code> serially and <code>forall</code> concurrently.
+On the other hand, a NUMA machine would likely 
+execute <code>triangulate</code> with coarse parallelism
+and <code>forall</code> sequentially.
+</p>
+
+<p>
+Good control abstraction enables more effective use of machine resources.
+But to be effectively programmed,
+lambda expressions must be able to easily substitute
+for ordinary well-structured control statements.
+For that easy substitution,
+we must restore the intent of <a href="#N2550">[N2550]</a>.
+</p>
+
+
+<h2><a name="Solution">Solution</a></h2>
+
+<p>
+In outline, the solution is as follows.
+</p>
+
+<ul>
+
+<li><p>
+Define reaching scope for a lambda expression
+as the enclosing lambda expressions
+out to and including the innermost function.
+That is, equivalent to replacing the lambda expressions by blocks.
+</p></li>
+
+<li><p>
+Define explicit and implicit captures
+with reference to the reaching scope.
+</p></li>
+
+<li><p>
+Define a capture of an entity to be a use (formally)
+of that entity within the scope containing the lambda expression.
+</p></li>
+
+<li><p>
+Define a lambda expression to be ill-formed
+if it uses (formally)
+anything from its reaching scope
+that it does not capture.
+</p></li>
+
+<li><p>
+Define a lambda expression to be ill formed
+if it captures an entity
+that is not either defined or captured
+in the immediately enclosing lambda expression or function.
+</p></li>
+
+<li><p>
+For entities captured by an outer lambda expression,
+define its nested lambda expression
+to capture those entities
+from the closure object of the outer lambda expression.
+That is, all captures are one level deep.
+This definition ensures that
+a closure object for a lambda expression
+contains all the information necessary
+to form a closure object for nested lambda expressions.
+</p></li>
+
+</ul>
+
+
+<h2><a name="Wording">Wording</a></h2>
+
+<p>
+As <a href="#N2927">[N2927]</a>
+has not yet been incorporated into the working draft,
+all edits are applied to the wording in <a href="#N2927">[N2927]</a>.
+All edits fall in section 5.1.1 [expr.prim.lambda].
+</p>
+
+<p>
+Before paragraph 10, add a new paragraph as follows.
+</p>
+
+<blockquote><p>
+<ins>The reaching scope of a lambda expression
+is the set of enclosing scopes up to and including
+the innermost enclosing function and its parameters.
+[<i>Note:</i>
+This reaching scope includes
+any intermediate lambda expressions and their parameter lists.
+The reaching scope of a lambda expression
+is the scope as it would have been
+if all lambda expressions were replaced by blocks.
+&mdash;<i>end note</i>]
+</ins>
+</p></blockquote>
+
+<p>
+Edit paragraph 10 as follows.
+</p>
+
+<blockquote><p>
+The <var>identifier</var>s in a <var>capture-list</var>
+are looked up
+using the usual rules for unqualified name lookup ([basic.lookup.unqual] 3.4.1);
+each such lookup shall find
+a variable or reference with automatic storage duration
+<ins>declared within the reaching scope of the lambda expression</ins>.
+An entity (i.e., a variable, a reference, or <code>this</code>)
+is said to be <dfn>explicitly captured</dfn>
+if it appears in the <var>lambda-expression</var>'s <var>capture-list</var>.
+An explicitly captured entity is used ([basic.def.odr] 3.2)
+<ins>in the scope containing the lambda expression</ins>.
+</p></blockquote>
+
+<p>
+Edit paragraph 11 as follows.
+</p>
+
+<blockquote><p>
+If a <var>lambda-expression</var>
+has an associated <var>capture-default</var>
+and its <var>compound-statement</var>
+uses ([basic.def.odr] 3.2)
+<code>this</code>
+or a variable or reference with automatic storage duration
+<del>declared in an enclosing function or <var>lambda-expression</var></del>
+and the used entity is not explicitly captured,
+then the used entity is said to be <dfn>implicitly captured</dfn><ins>;
+such entities shall be declared
+within the reaching scope of the lambda expression</ins>.
+<ins>An implicitly captured entity is used ([basic.def.odr] 3.2)
+in the scope containing the lambda expression.</ins>
+[<i>Note:</i>
+<ins>Thus the implicit capture of an entity
+by a nested <var>lambda-expression</var>
+can cause its implicit capture by the containing lambda-expression.</ins>
+Implicit uses of <code>this</code> can result in implicit capture.
+&mdash;<i>end note</i>]
+</p></blockquote>
+
+<p>
+Edit paragraph 12 as follows.
+</p>
+
+<blockquote><p>
+If <code>this</code> is captured,
+either explicitly or implicitly,
+the <var>lambda-expression</var> shall appear
+<del>directly in</del>
+<ins>within</ins> the definition of a non-static member function<del>,
+i.e., not in another <var>lambda-expression</var></del>.
+<del>
+[<i>Note:</i>
+This rule prevents access from a nested <var>lambda-expression</var>
+to the members of the enclosing <var>lambda-expression</var>'s closure object.
+&mdash;<i>end note</i>]
+</del>
+</p></blockquote>
+
+<p>
+Move the existing paragraph 9 to after paragraph 12
+and edit it as follows.
+</p>
+
+<blockquote><p>
+<del>
+A <var>lambda-expression</var>'s <var>compound-statement</var>
+can use (see above) <code>this</code>
+from an immediately-enclosing member function definition,
+as well as variables and references with automatic storage duration
+from an immediately-enclosing
+function definition or <var>lambda-expression</var>,
+provided these entities are captured (as described below).
+Any other use ([basic.def.odr] 3.2)
+of a variable or reference with automatic storage duration
+declared outside the <var>lambda-expression</var> is ill-formed.
+</del>
+<ins>
+If a <var>lambda-expression</var>
+uses ([basic.def.odr] 3.2)
+<code>this</code> or
+a variable or reference with automatic storage duration
+from its reaching scope,
+and that entity is not captured by the <var>lambda-expression</var>,
+the program is ill-formed;
+diagnostic required.
+If a <var>lambda-expression</var> captures an entity,
+and that entity is not defined or captured
+in the immediately enclosing lamba expression or function,
+the program is ill-formed;
+diagnostic required.
+</ins>
+[<i>Example:</i>
+</p>
+<blockquote><pre><code>
+void f1(int i) {
+  int const N = 20;
+  <ins>auto m1 =</ins> [=]{
+     int const M = 30;
+     <ins>auto m2 =</ins> <del>[=]</del><ins>[i]</ins>{
+        int x[N][M]; // OK: N and M are not "used"
+        x[0][0] = i; <ins>// OK: i is explicitly captured by m2</ins>
+                     <ins>// and implicitly captured by m1</ins>
+                     <del>// error: i is not declared in the immediately</del>
+     };              <del>// enclosing lambda-expression</del>
+  };
+  <ins>struct s1 {</ins>
+    <ins>int f;</ins>
+    <ins>int work(int n) {</ins>
+      <ins>int m = n*n;</ins>
+      <ins>int j = 40;</ins>
+      <ins>auto m3 = [this,m]{</ins>
+        <ins>auto m4 = [&amp;,j]{ // error: j not captured by m3</ins>
+          <ins>int x = n; // error: n implicitly captured by m4</ins>
+                     <ins>// but not captured by m3</ins>
+          <ins>x += m; // OK: m implicitly captured by m4</ins>
+                  <ins>// and explicitly captured by m3</ins>
+          <ins>x += N; // error: N is outside of the reaching scope</ins>
+          <ins>x += f; // OK: this captured implicitly by m4</ins>
+                  <ins>// and explicitly by m3</ins>
+        <ins>}</ins>
+      <ins>}</ins>
+    <ins>}</ins>
+  <ins>}</ins>
+}
+</code></pre></blockquote>
+<p>
+&mdash;<i>end example</i>]
+</p></blockquote>
+
+<p>
+After the above paragraph, add a new paragraph as follows.
+</p>
+
+<blockquote><p>
+<ins>
+If a <var>lambda-expression</var> <code>m1</code>
+captures an entity,
+and that entity
+is captured by
+an immediately enclosing <var>lambda-expression</var> <code>m2</code>,
+then <code>m1</code>'s capture is transformed as follows:
+</ins>
+</p>
+<ul>
+<li><p><ins>
+if <code>m2</code> captures the entity by copy,
+<code>m1</code> captures
+the corresponding non-static data member of <code>m2</code>'s closure type;
+</ins></p></li>
+
+<li><p><ins>
+if <code>m2</code> captures the entity by reference,
+<code>m1</code> captures the same entity captured by <code>m2</code>.
+</ins></p></li>
+</ul>
+<p>
+<ins>
+[<i>Note:</i>
+Therefore,
+all captures are one level deep
+and a closure object for a lambda expression
+contains all the information necessary
+to form a closure object for nested lambda expressions.
+&mdash;<i>end note</i>]
+[<i>Example:</i>
+The nested lambda expressions and invocations below
+will output <code>123234</code>.
+</ins>
+</p>
+<blockquote><pre><code>
+<ins>int a = 1, b = 1, c = 1;</ins>
+<ins>auto m1 = [a, &amp;b, &amp;c]() mutable {</ins>
+    <ins>auto m2 = [a, b, &amp;c]() mutable {</ins>
+        <ins>std::cout &lt;&lt; a &lt;&lt; b &lt;&lt; c;</ins>
+        <ins>a = 4; b = 4; c = 4;</ins>
+    <ins>};</ins>
+    <ins>a = 3; b = 3; c = 3;</ins>
+    <ins>m2();</ins>
+<ins>};</ins>
+<ins>a = 2; b = 2; c = 2;</ins>
+<ins>m1();</ins>
+<ins>std::cout &lt;&lt; a &lt;&lt; b &lt;&lt; c;</ins>
+</code></pre></blockquote>
+<p>
+<ins>
+&mdash;<i>end example</i>]
+</ins>
+</p></blockquote>
+
+
+<h2><a name="Acknowledgments">Acknowledgments</a></h2>
+
+<p>
+William M. Miller provided many helpful comments
+and alternate wording suggestions.
+</p>
+
+<h2><a name="References">References</a></h2>
+
+<dl>
+
+<dt>
+<a name="N2927">[N2927]</a>
+</dt>
+<dd>
+<cite>New wording for C++0x Lambdas (rev. 2)</cite>,
+Daveed Vandevoorde,
+ISO/IEC JTC1 SC22 WG21 N2927 = 09-0117 - 2009-07-15,
+<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2009/n2927.pdf">
+http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2009/n2927.pdf
+</a>
+</dd>
+
+<dt>
+<a name="N2550">[N2550]</a>
+</dt>
+<dd>
+<cite>Lambda Expressions and Closures:
+Wording for Monomorphic Lambdas (Revision 4)</cite>,
+Jaakko J&auml;rvi, John Freeman, Lawrence Crowl,
+ISO/IEC JTC1 SC22 WG21 N2550 = 08-0060 - 2008-02-29,
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2008/n2550.pdf">
+http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2008/n2550.pdf
+</a>
+</dd>
+
+<dt>
+<a name="CrowlLeBlanc94">[CrowlLeBlanc94]</a>
+</dt>
+<dd>
+<cite>Parallel Programming with Control Abstraction</cite>,
+Lawrence A. Crowl, Thomas J. LeBlanc,
+<cite>ACM Transactions on Programming Languages and Systems</cite>
+16(3): 524-576,
+May 1994,
+<a href="http://www.Crowl.org/Lawrence/paper/journals/1994J-TOPLAS-03-524/">
+http://www.Crowl.org/Lawrence/paper/journals/1994J-TOPLAS-03-524/
+</a>
+</dd>
+
+</dl>

@@ -1,0 +1,2736 @@
+<html>
+<head>
+<title>MT API</title>
+<style>
+p {text-align:justify}
+li {text-align:justify}
+blockquote.note
+{
+    background-color:#E0E0E0;
+    padding-left: 15px;
+    padding-right: 15px;
+    padding-top: 1px;
+    padding-bottom: 1px;
+}
+ins {background-color:#FFFFA0}
+del {background-color:#FFFFA0}
+</style>
+</head>
+
+<body>
+
+<address align=right>
+Document number: N2094=06-0164<br>
+<br>
+<a href="mailto:howard.hinnant@gmail.com">Howard E. Hinnant</a><br>
+
+2006-09-09
+</address>
+<hr>
+<h1 align=center>Multithreading API for C++0X - A Layered Approach</h1>
+
+<h2>Contents</h2>
+
+<ul>
+<li><a href="#Introduction">Introduction</a></li>
+<li>
+<a href="#thread_launching">Thread Launching</a>
+<ul>
+<li><a href="#futures">Futures</a></li>
+<li><a href="#tasks">Tasks</a></li>
+<li><a href="#thread_pool">Thread Pools</a></li>
+<li><a href="#task_wrapper">Building Your Own Task/Future Launcher</a></li>
+<li><a href="#thread">The OS Thread</a></li>
+</ul>
+</li>
+<li>
+<a href="#mutexes">Mutexes</a>
+<ul>
+<li>
+<a href="#mutex_concepts">Mutex Concepts</a>
+<ul>
+<li><a href="#exclusive_ownership">Exclusive ownership</a></li>
+<li><a href="#shared_ownership">Shared ownership</a></li>
+<li><a href="#convertible_shared">Convertible shared ownership</a></li>
+<li><a href="#upgradable_ownership">Upgradable ownership</a></li>
+</ul>
+</li>
+<li><a href="#std_mutex">Standard supplied mutexes</a></li>
+</ul>
+</li>
+<li>
+<a href="#locks">Locks</a>
+<ul>
+<li><a href="#basic_lock">The basic lock Concept</a></li>
+<li><a href="#exclusive_lock">exclusive_lock</a></li>
+<li><a href="#sharable_lock">sharable_lock</a></li>
+<li><a href="#upgradable_lock">upgradable_lock</a></li>
+<li><a href="#generic_locking">Generic Locking Algorithms</a></li>
+</ul>
+</li>
+<li><a href="#cv">Condition Variables</a></li>
+<li><a href="#Acknowledgments">Acknowledgments</a></li>
+</ul>
+
+<h2><a name="Introduction"></a>Introduction</h2>
+
+<p>
+This proposal is a collection of great ideas from many people and spanning years
+of work and experience.  Please see the <a
+href="#Acknowledgments">Acknowledgments</a>. And know that I probably missed
+some key ones (sorry in advance).
+</p>
+
+<p>
+I'm writing this with the knowledge that some parts of this proposal are hotly
+contested. Additionally, this is a huge proposal, encompassing thread-launching,
+mutexes/locks and condition variables.  It is hoped that the table of contents
+will allow you to quickly jump to your area of interest and gather all of the
+information important to you quickly and concisely.  <em>Not</em> covered herein
+are the incredibly important topics: memory model, atomics, and thread local data.
+</p>
+
+<h2><a name="thread_launching"></a>Thread Launching</h2>
+
+<p>
+I believe that we need flexibility in the way we launch threads (or really just units 
+of work).  Below is a top-down view of a fully prototyped API.
+</p>
+
+<h3><a name="futures"></a>Futures</h3>
+
+<p>
+This part of the proposal supports the views in
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n2096.html">N2096</a>
+with only a few minor changes (differences that can certainly be worked
+out).  Indeed, much of the work presented herein is based on the work in N2096.
+The important characteristics are consistent:  A <tt>future</tt>:
+</p>
+
+<ul>
+<li>Represents a copyable view of a value that may or may not be computed yet.</li>
+<li>One can query it for completeness and wait on it to complete.</li>
+<li>The work item which produces the result of a <tt>future</tt> may be mapped onto an <a href="#thread">OS thread</a>,
+queued for execution in a <a href="#thread_pool">thread pool</a>, or some other (possibly user-defined) mechanism for
+computing results.</li>
+<li>Destruction does not affect the execution of the underlying work-unit.</li>
+</ul>
+
+<p>
+Example use cases include:
+</p>
+
+<blockquote><pre>
+int f();
+double g(int x, const char* y);
+std::vector&lt;int&gt; h(int x);
+
+int main()
+{
+    std::future&lt;int&gt;    f1 = std::launch_in_thread(f);
+    std::future&lt;double&gt; f2 = std::launch_in_thread(std::bind(g, 1, "two"));
+    // ...
+    int    i = f1();
+    double d = f2();
+    // ...
+    std::thread_pool launch_in_pool;
+    std::future&lt;std::vector&lt;int&gt;&gt; f3 = launch_in_pool(std::bind(h, 100));
+    // ...
+    std::vector&lt;int&gt; v = f3();
+}
+</pre></blockquote>
+
+<p>
+<tt>future</tt>s can be easily and cheaply copied around, and queried by multiple threads,
+or even the same thread multiple times.  The <tt>future</tt> can also be waited on by
+several (simultaneous) clients.  If the work-unit computing the result for the <tt>future</tt>
+terminates via an exception, then that information is propagated to clients who wait on
+the future via a standard exception (new language features will be required to propagate
+a copy of an arbitrary exception).
+</p>
+
+<p>
+<b><tt>future</tt> synopsis:</b>
+</p>
+
+<blockquote><pre>
+template &lt;class R&gt; class future
+{
+private:
+    future(const task&lt;R&gt;&amp;);
+public:
+    future();
+    ~future();
+    future(task&lt;R&gt;&amp;&amp; t);
+    future(const future&amp; t);
+    future&amp; operator=(const future&amp; t);
+    bool ready() const;
+    bool is_normal() const;
+    void wait();
+    bool timed_wait(const timespec&amp; xt);
+    const R&amp; operator()() const;
+};
+</pre></blockquote>
+
+<p>
+Not proposed herein is <i>future groups</i>.  That is not because I think
+they're a bad idea.  It is simply because I ran out of time to prototype it.
+Everything proposed herein has been prototyped by myself, and in some cases by
+several more people independently.  I strongly suspect <i>future groups</i>
+(e.g. <tt>(f1 || f2) && f3</tt>) would be a valuable layer above futures and
+encourage an open mind towards this idea.  I do not currently have the
+expertise/experience to propose it.
+</p>
+
+<h3><a name="tasks"></a>Tasks</h3>
+
+<p>
+The introduction of 
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n2027.html">move semantics</a>
+in C++ impacts the way interfaces can be designed.  In particular, moveable but non-copyable
+types such as <tt>fstream</tt> can be handled much more elegantly in this new environment.
+For example clients will now be able to return such types from functions, and put such types
+into containers.
+</p>
+
+<blockquote><pre>
+std::vector&lt;std::ifstream&gt; find_files(<i>some_search_criteria</i>);
+</pre></blockquote>
+
+<p>
+It is important that C++ programmers be able to easily execute such functions
+with non-copyable return types.  Lack of attention to this detail will mean that
+C++ programmers will be able to execute such functions with ordinary
+(synchronous) calls, but will be confronted by a compile time error when they
+try to query a <tt>std::future&lt;std::vector&lt;std::ifstream&gt;&gt;</tt>
+resulting from an asynchronous call.
+</p>
+
+<p>
+Thus a <tt>task</tt> is introduced.  It functions much like a <a href="#futures"><tt>future</tt></a>,
+but does not require its type to be <tt>CopyConstructible</tt> (only
+<tt>MoveConstructible</tt>).  The <tt>task</tt> itself is also not <tt>CopyConstructible</tt>
+but only <tt>MoveConstructible</tt>.  You can place such objects in containers, and
+return them from functions, but you can not make copies of them, nor query them more
+than once.  It is a <i>one-shot</i> view of a work-unit's return value.
+</p>
+
+<p>
+Example use cases include:
+</p>
+
+<blockquote><pre>
+int f();
+double g(int x, const char* y);
+std::vector&lt;std::unique_ptr&lt;Foo&gt;&gt; h(int x);
+
+int main()
+{
+    std::task&lt;int&gt;    f1 = std::launch_in_thread(f);
+    std::task&lt;double&gt; f2 = std::launch_in_thread(std::bind(g, 1, "two"));
+    // ...
+    int    i = f1();
+    double d = f2();
+    // ...
+    std::thread_pool launch_in_pool;
+    std::task&lt;std::vector&lt;std::unique_ptr&lt;Foo&gt;&gt;&gt; f3 = launch_in_pool(std::bind(h, 100));
+    // ...
+    std::vector&lt;std::unique_ptr&lt;Foo&gt;&gt; v = f3();
+}
+</pre></blockquote>
+
+<p>
+Note that the exact same launching functions and thread pools can be used with
+<tt>task</tt> as is used with <tt>future</tt>.  The <tt>task</tt> fits seamlessly
+into this API, and has an ease of use equivalent to <tt>future</tt>.
+</p>
+
+<blockquote>
+Why do we need a separate class <tt>task</tt>?  Can't we just have a <i>move-from-<tt>future</tt></i>
+call?
+</blockquote>
+
+<p>
+Consider the following program with two threads calling two different functions, but
+with the same type of <tt>future</tt> as an argument:
+</p>
+
+<blockquote>
+<table border="0">
+<tr><th>Thread A</th><th></th><th>Thread B</th></tr>
+<tr>
+<td>
+<pre>
+void foo(future&lt;T&gt; f)
+{
+    T t = f();
+}
+</pre></td>
+<td>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</td>
+<td>
+<pre>
+void bar(future&lt;T&gt; f)
+{
+    T t = f();
+}
+</pre></td>
+</tr>
+</table>
+</blockquote>
+
+<p>
+There is no problem with this code, even if both <tt>future</tt>'s refer to the same
+result.  However, consider if one thread attempted to modify that result by
+moving from it:
+</p>
+
+<blockquote>
+<table border="0">
+<tr><th>Thread A</th><th></th><th>Thread B</th></tr>
+<tr>
+<td>
+<pre>
+void foo(future&lt;T&gt; f)
+{
+    T t = f();
+}
+</pre></td>
+<td>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</td>
+<td>
+<pre>
+void bar(future&lt;T&gt; f)
+{
+    T t = move(f()); // race condition?
+}
+</pre></td>
+</tr>
+</table>
+</blockquote>
+
+<p>
+By using a separate class <tt>task</tt> which is by design incapable of
+sharing with <tt>future</tt>'s, or even with other <tt>task</tt>'s, it is
+clear that there can be no race condition:
+</p>
+
+<blockquote>
+<table border="0">
+<tr><th>Thread A</th><th></th><th>Thread B</th></tr>
+<tr>
+<td>
+<pre>
+void foo(future&lt;T&gt; f)
+{
+    T t = f();
+}
+</pre></td>
+<td>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</td>
+<td>
+<pre>
+void bar(task&lt;T&gt; f)
+{
+    T t = f(); // Ok
+}
+</pre></td>
+</tr>
+<tr>
+<td>
+<pre>
+void foo(task&lt;T&gt; f)
+{
+    T t = f();
+}
+</pre></td>
+<td>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</td>
+<td>
+<pre>
+void bar(task&lt;T&gt; f)
+{
+    T t = f(); // Also Ok
+}
+</pre></td>
+</tr>
+</table>
+</blockquote>
+
+<p>
+In a nutshell, the <tt>future</tt> API must be such that clients are incapable
+of modifying the work-unit's return value, and <tt>task</tt> must not share ownership.
+To do otherwise presents an API to the C++ programmer that is overly error-prone.
+This is exactly why this proposal has no <tt>set_value</tt> functionality for
+<tt>future</tt> as proposed in
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n2096.html">N2096</a>.
+Herein, <a href="#task_wrapper"><tt>task_wrapper</tt></a> has the unique and protected privilege of setting the
+value associated with a <tt>task</tt> or <tt>future</tt>.
+</p>
+
+<p>
+Not only does <tt>task</tt> provide the functionality of returning move-only types,
+and aids in reasoning about program correctness,
+it can also provide significant performance benefits for those use cases where one
+returns a type that is expensive to copy, but cheap to move.
+</p>
+
+<p>
+Consider this benchmark:
+</p>
+
+<blockquote><pre>
+std::vector&lt;int&gt; func(unsigned s, int i)
+{
+    return std::vector&lt;int&gt;(s, i);
+}
+
+const unsigned Repeat = 10000;
+const unsigned Len    = 100000;
+
+int main()
+{
+    std::thread_pool launch_in_pool;
+    for (int i = 0; i &lt; Repeat; ++i)
+    {
+        std::future&lt;std::vector&lt;int&gt;&gt; f = launch_in_pool(std::bind(func, Len, i));
+        std::vector&lt;int&gt; v = f();
+    }
+}
+</pre></blockquote>
+
+<p>
+To study the overhead of this thread launching API, the above program has been run in 5 different
+configurations on a single processor machine, and the timing measured.  The for-loop was varied
+for each configuration:
+</p>
+
+<p>
+Ordinary function call:
+</p>
+
+<blockquote><pre>
+std::vector&lt;int&gt; v = func();
+</pre></blockquote>
+
+<p>
+launch in pool, catch in task:
+</p>
+
+<blockquote><pre>
+task&lt;std::vector&lt;int&gt;&gt; f = launch_in_pool(std::bind(func, Len, i));
+std::vector&lt;int&gt; v = f();
+ </pre></blockquote>
+
+<p>
+launch in thread, catch in task:
+</p>
+
+<blockquote><pre>
+task&lt;std::vector&lt;int&gt;&gt; f = launch_in_thread(std::bind(func, Len, i));
+std::vector&lt;int&gt; v = f();
+ </pre></blockquote>
+
+<p>
+launch in pool, catch in future:
+</p>
+
+<blockquote><pre>
+future&lt;std::vector&lt;int&gt;&gt; f = launch_in_pool(std::bind(func, Len, i));
+std::vector&lt;int&gt; v = f();
+ </pre></blockquote>
+
+<p>
+launch in thread, catch in future:
+</p>
+
+<blockquote><pre>
+future&lt;std::vector&lt;int&gt;&gt; f = launch_in_thread(std::bind(func, Len, i));
+std::vector&lt;int&gt; v = f();
+ </pre></blockquote>
+ 
+ <p>
+ The resulting timings are:
+ </p>
+
+<blockquote>
+<table border="0">
+<tr><td>Ordinary function call</td><td>:</td><td align="right">8.40 seconds</td></tr>
+<tr><td>launch in pool,   catch in task</td><td>:</td><td align="right">9.54 seconds</td></tr>
+<tr><td>launch in thread, catch in task</td><td>:</td><td align="right">12.18 seconds</td></tr>
+<tr><td>launch in pool,   catch in future</td><td>:</td><td align="right">28.87 seconds</td></tr>
+<tr><td>launch in thread, catch in future</td><td>:</td><td align="right">30.71 seconds</td></tr>
+</table>
+</blockquote>
+
+<p>
+For the ordinary function call case, move semantics does not come into play.  The <tt>vector</tt>
+is returned via RVO.
+</p>
+
+<p>
+Executing in a pool adds the overhead of coordinating with an already running <a href="#thread">thread</a> which
+executes <tt>func</tt> and then signals the main thread to get the result.  If the result
+is caught with a <tt>task</tt> it is moved out.  If the result is caught with a <tt>future</tt>,
+it is copied out.  If <tt>func</tt> is executed in a thread, instead of a pool, then more
+overhead is added for <a href="#thread">OS thread</a> startup and shutdown.
+</p>
+
+<p>
+It is clear that there are cases where the expense of copying from a <tt>future</tt> is significant
+enough to negate the performance one might gain from the use of threads (or even thread pools)
+on a multi-processor architecture.  The <tt>vector</tt> is not that big in this example.  It
+consumes only 391Kb, a small amount of memory by today's standards.  As the expense of copying
+the return value grows, so does the cost of using a <tt>future</tt> over that of a <tt>task</tt>
+or ordinary function call.  If the <i>free lunch</i> is truly over, and high-level threading is
+the answer, then we need to pay attention to order-of-magnitude effects in performance such as
+this.
+</p>
+
+<p>
+<b><tt>task</tt> synopsis:</b>
+</p>
+
+<blockquote><pre>
+template &lt;class R&gt; class task
+{
+private:
+    task(const task&amp;);
+    task&amp; operator=(const task&amp;);
+public:
+    task();
+    ~task();
+    task(task&amp;&amp; t);
+    task&amp; operator=(task&amp;&amp; t);
+    bool ready() const;
+    bool is_normal() const;
+    void wait();
+    bool timed_wait(const timespec&amp; xt);
+    R operator()();
+};
+</pre></blockquote>
+
+<p>
+Note that this <tt>task</tt> is a different class than that proposed in
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n2096.html">N2096</a>.
+This proposal has a similar class to that proposed in N2096, but it is called
+<a href="#task_wrapper"><tt>task_wrapper</tt></a> instead.
+</p>
+
+<h3><a name="thread_pool"></a>Thread Pools</h3>
+
+<p>
+A thread pool is an object that maps M tasks onto N OS threads, where M is
+typically much larger than N.  This can circumvent the cost of thread startup
+and shut down.  The design laid out here is basic.  One can specify the number
+of OS threads in the constructor, or default construct the class to let the
+implementation pick an "optimum" number of OS threads.  A function-call syntax
+is used to queue tasks which will be executed as an OS thread becomes available
+for work.  The client can optionally catch the return value of this queuing,
+either as a <a href="#futures"><tt>future</tt></a> or a <a href="#tasks"><tt>task</tt></a>
+to examine at a later point (example use shown
+under <a href="#tasks">Tasks</a> and <a href="#futures">Futures</a>).
+</p>
+
+<p>
+<b><tt>thread_pool</tt> synopsis:</b>
+</p>
+
+<blockquote><pre>
+class thread_pool
+{
+private:
+   thread_pool(const thread_pool&amp;);
+   thread_pool &amp; operator=(const thread_pool&amp;);
+public:
+    explicit thread_pool(unsigned n = thread_util::number_of_processors());
+    ~thread_pool()
+    template &lt;class F&gt;
+        task&lt;typename result_of&lt;F()&gt;::type&gt; operator()(F fn);
+};
+</pre></blockquote>
+
+<h3><a name="task_wrapper"></a>Building Your Own Task/Future Launcher</h3>
+
+<p>
+Some clients may want to create their own factory functions or classes similar
+to <tt>std::launch_in_thread(F)</tt> or <tt>std::thread_pool</tt>.  This is facilitated
+by a lower-level class called <tt>task_wrapper</tt>.
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2006/n2096.html">N2096</a>
+refers to this class as <tt>task</tt>.
+</p>
+
+<b><tt>task_wrapper</tt> synopsis:</b>
+
+<blockquote><pre>
+template &lt;class R, class F&gt; class task_wrapper
+{
+public:
+    task_wrapper(F f, task&lt;R&gt;&amp; ft);
+    task_wrapper(F f, future&lt;R&gt;&amp; ft);
+
+    task_wrapper(const task_wrapper&amp; tw);
+    task_wrapper(task_wrapper&amp;&amp; tw);
+    task_wrapper&amp; operator=(const task_wrapper&amp; tw);
+    task_wrapper&amp; operator=(task_wrapper&amp;&amp; tw);
+    ~task_wrapper();
+
+    void operator()()
+};
+</pre></blockquote>
+
+<p>
+<tt>task_wrapper</tt> is responsible for binding a <a href="#futures"><tt>future</tt></a> or <a href="#tasks"><tt>task</tt></a> to a
+nullary function returning a type <tt>R</tt>, and creating a new functor which manages
+storage for the return value of the user's function, and provides for that return value
+to be constructed in the provided-for storage.  It is also the <tt>task_wrapper</tt>
+which is responsible for detecting abnormal termination of the user's function and
+translating that into a suitable exception in the waiter's thread.
+</p>
+
+<p>
+Glancing at the implementation of <tt>std::launch_in_thread</tt> reveals how easy it is
+to craft a custom launcher:
+</p>
+
+<blockquote><pre>
+template &lt;class F&gt;
+task&lt;typename result_of&lt;F()&gt;::type&gt;
+launch_in_thread(F f)
+{
+    typedef typename result_of&lt;F()&gt;::type R;
+    task&lt;R&gt; t;
+    thread(task_wrapper&lt;R, F&gt;(std::move(f), t));
+    return t;
+}
+</pre></blockquote>
+
+<p>
+Upon return from this function, both <tt>task_wrapper</tt> and <a href="#tasks"><tt>task</tt></a> share ownership
+of the storage for the return value of <tt>f</tt>.  <tt>task_wrapper</tt> is now a function
+object that can be sent somewhere (anywhere) to be executed (<a href="#thread"><tt>thread</tt></a> in this example).
+</p>
+
+<p>
+A factory function could just as easily return a <a href="#futures"><tt>future</tt></a> instead of a <a href="#tasks"><tt>task</tt></a>
+as shown above.  Returning a <a href="#tasks"><tt>task</tt></a> has the advantage of allowing your clients to
+traffic in either <tt>future</tt>s or <tt>task</tt>s as an rvalue <tt>task</tt> is
+implicitly convertible to a <tt>future</tt> (and with very little expense - the cost of
+two pointer assignments and a pointer comparison).
+</p>
+
+<p>
+Here is another example: the launching operator of <tt>thread_pool</tt>:
+</p>
+
+<blockquote><pre>
+template &lt;class F&gt;
+task&lt;typename result_of&lt;F()&gt;::type&gt;
+thread_pool::operator()(F f)
+{
+    typedef typename result_of&lt;F()&gt;::type R;
+
+    task&lt;R&gt; t;
+    {
+    exclusive_lock&lt;mutex&gt; lock(mut_);
+    queue_.push_back(task_wrapper&lt;R, F&gt;(std::move(f), t));
+    }
+    cond_.notify_all();
+    return t;
+}
+</pre></blockquote>
+
+<p>
+Here again the function object <tt>task_wrapper</tt> binds the user's function
+with a <a href="#tasks"><tt>task</tt></a> to be returned to the user.  The <tt>task_wrapper</tt> function
+object is then stored in a container for later execution.
+</p>
+
+<h3><a name="thread"></a>The OS Thread</h3>
+
+<p>
+Recall that <a href="#tasks"><tt>task</tt></a> and <a href="#futures"><tt>future</tt></a> merely represent views of a work-unit's
+result.  They don't actually represent the work-unit itself, much less an OS-thread.
+Indeed, much of a <tt>future</tt>'s (or <tt>task</tt>'s) visible life can be spent waiting in a <tt>pool_thread</tt>
+queue as opposed to executing.  
+</p>
+
+<p>
+To represent an OS thread, a simple (low-level), <tt>thread</tt> class is introduced.  This class
+is designed to be as thin a layer over the OS thread as possible.  After all, <tt>task</tt>'s,
+<a href="#futures"><tt>future</tt>'s</a>, and possibly user-defined abstractions will be built on top of <tt>thread</tt>
+and thus all overhead is significant.
+</p>
+
+<b><tt>thread</tt> synopsis:</b>
+
+<blockquote><pre>
+class thread
+{
+private:
+    thread(const thread&amp;);
+    thread&amp; operator=(const thread&amp;);
+public:
+    thread();
+    ~thread();
+
+    thread(thread&amp;&amp; x);
+    thread&amp; operator=(thread&amp;&amp; x);
+
+    template &lt;class F&gt; explicit thread(F f);
+    void operator()();
+    
+    typedef <i>implementation-defined</i> native_handle_type;
+    native_handle_type native_handle();
+    thread_util::id    native_id() const;
+};
+</pre></blockquote>
+
+<p>
+<tt>thread</tt> provides no return type.  It is not copyable, only movable.  It
+provides no exception notification.  It models only the OS work-unit, and not
+any results (normal or abnormal results) of that work-unit.  Typical
+implementations will have only one or two simple types which represent the OS
+thread (e.g. pthread_t).  There is no need for member mutexes or condition
+variables at this level.  There is no need to store the user's function
+<tt>F</tt> within this class. It can be directly transferred to the work-unit
+from within the <tt>thread</tt> constructor.
+</p>
+
+<p>
+For accessing OS-specific functionality not covered by this API, the OS's thread handle is
+exposed.  Implementations are allowed to provide implementation-defined constructors in addition
+to the constructors shown here.  Such constructors might set OS thread attributes such as
+stack size or thread priority.
+</p>
+
+<p>
+A default constructed <tt>thread</tt> refers to no thread, and spawns no thread of execution.
+The <tt>thread</tt> destructor detaches from the thread of execution if it exists at that
+time.  Function operator syntax is used to allow a single thread to join.  Clients needing
+the functionality of multiple threads joining (even if the return type is void), should
+use <a href="#futures"><tt>future</tt></a> instead.
+</p>
+
+<p>
+The above is very similar to boost::threads and
+<a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2005/n1907.html">N1907</a>.  This
+is not by accident.  This API has a proven track record.  Yes, there are
+complaints and frustrations with this low-level API.  This is what the
+higher-level <a href="#tasks"><tt>task</tt></a> and <a href="#futures"><tt>future</tt></a> address.
+</p>
+
+<p>
+A notable departure from N1907 is the addition of <i>movability</i>.  This
+addition adds no overhead, and allows significant functionality such as putting
+<tt>thread</tt> into containers (which is very handy when building a
+<tt>thread_pool</tt>).  Indeed, the ability to put <tt>thread</tt> into
+containers largely negates the motivation for <tt>boost::thread_group</tt>.
+One can just as easily create a <tt>std::vector&lt;thread&gt;</tt>,
+or <tt>std::list&lt;thread&gt;</tt> as the need arises.
+It is not difficult to imagine a
+<tt>std::priority_queue&lt;<i>some-user-defined-thread-wrapper</i>&gt;</tt>
+which merely adds some ordering (priority) to <tt>thread</tt>.
+</p>
+
+<p>
+Another difference is that of thread identity.  Since <tt>thread</tt> is not copyable, it
+is not possible for two <tt>thread</tt> objects to compare equal (refer to the same OS
+thread).  However clients still need the ability to store, compare and copy objects which
+refer to thread identity.  Common use cases include comparing a stored thread id with the
+currently executing thread.  To meet this demand, thread identity, along with several
+utilities that operate only on the current thread of execution have been recast as
+free standing functions in a self-describing namespace:
+</p>
+
+<b><tt>thread_util</tt> synopsis:</b>
+
+<blockquote><pre>
+namespace std {
+namespace thread_util {
+
+typedef <i>implementation-defined</i> id;
+bool equal(id x, id y);
+id current();
+id not_any_thread();
+void yield();
+void sleep(const timespec&amp; rel_time);
+unsigned number_of_processors();
+
+}  // thread_util
+}  // std
+</pre></blockquote>
+
+<p>
+Using this facility, clients can easily store and compare OS thread id's:
+</p>
+
+<blockquote><pre>
+std::thread_util::id id;
+...
+if (!std::thread_util::equal(id, std::thread_util::current()))
+    id = std::thread_util::current();
+else
+    id = std::thread_util::not_any_thread();
+</pre></blockquote>
+
+<p>
+Thus this proposal encompasses all of the OS thread functionality offered by N1907 (and boost)
+but places some of it in namespace <tt>thread_util</tt> instead of having static <tt>thread</tt>
+functions.
+</p>
+
+<p>
+This proposal also adds two low-level thread utilities that N1907/boost do not offer:
+</p>
+
+<ol>
+<li>The ability to store a thread id that compares equal to no OS thread.</li>
+<li>The ability to query the environment for the number of processors.</li>
+</ol>
+
+<h2><a name="mutexes"></a>Mutexes</h2>
+
+<p>
+There are a set of four mutex concepts, each a refinement of the previous.  Notably absent
+from all of these concepts is Movable or Copyable.  Mutex concepts are introduced to allow
+user-defined mutexes in addition to the standard supplied mutexes.  C++ programmers will be
+able to plug their own mutexes into the standard framework much like they can use their
+own containers with standard supplied algorithms today.
+</p>
+
+<h3><a name="mutex_concepts"></a>Mutex Concepts</h3>
+
+<ol>
+<li>
+<a href="#exclusive_ownership">Exclusive ownership</a>
+	<ul>
+	<li>default constructor</li>
+	<li>destructor <tt>throw()</tt></li>
+	<li><tt>void lock()</tt></li>
+	<li><tt>bool try_lock()</tt></li>
+	<li><tt>void unlock() throw()</tt></li>
+	</ul>
+</li>
+<li>
+<a href="#shared_ownership">Shared ownership</a>
+	<ul>
+	<li><tt>void lock_sharable()</tt></li>
+	<li><tt>bool try_lock_sharable()</tt></li>
+	<li><tt>void unlock_sharable() throw()</tt></li>
+	</ul>
+</li>
+<li>
+<a href="#convertible_shared">Convertible shared ownership</a>
+	<ul>
+	<li><tt>void unlock_and_lock_sharable() throw()</tt></li>
+	<li><tt>bool try_unlock_sharable_and_lock()</tt></li>
+	</ul>
+</li>
+<li>
+<a href="#upgradable_ownership">Upgradable ownership</a>
+	<ul>
+	<li><tt>void lock_upgradable()</tt></li>
+	<li><tt>bool try_lock_upgradable()</tt></li>
+	<li><tt>void unlock_upgradable() throw()</tt></li>
+	<br>
+	<li><tt>void unlock_upgradable_and_lock()</tt></li>
+	<li><tt>bool try_unlock_upgradable_and_lock()</tt></li>
+	<li><tt>void unlock_and_lock_upgradable() throw()</tt></li>
+	<li><tt>void unlock_upgradable_and_lock_sharable() throw()</tt></li>
+	<li><tt>bool try_unlock_sharable_and_lock_upgradable()</tt></li>
+	</ul>
+</li>
+</ol>
+
+<h4><a name="exclusive_ownership"></a>Exclusive ownership</h4>
+
+<p>
+This is the base mutex concept which only models mutually exclusive ownership.  It has
+five required signatures.  Notably absent from this requirement is that of
+<tt>CopyConstructible</tt>, <tt>CopyAssignable</tt>, <tt>MoveConstructible</tt> and
+<tt>MoveAssignable</tt>.  Implementations are encouraged to supply additional
+implementation defined constructors which allow setting various OS dependent mutex
+attributes.
+</p>
+
+<p>
+The exception policy is that if a precondition is violated, the results are
+undefined. However the locking functions may fail due to lack of system
+resources, and are allowed to throw an exception in such an event. The
+try-locking, unlocking, and non-blocking conversion functions are specified to
+not throw an exception. On these signatures the empty throw specification is
+intended to indicate that the function will not throw a signature, and is not
+intended to indicate that the function may call unexpected() (it may or may not
+do so if preconditions are violated leading to undefined behavior).
+</p>
+
+<h5>Default constructor</h5>
+
+<p><font color="#AF0000">Not blocking</font></p>
+
+<p>
+This constructs a mutex with default attributes (appropriate for the environment), and
+leaves the mutex in an unlocked state.  The constructor may throw an exception to indicate
+failure.
+</p>
+
+<h5>Destructor</h5>
+
+<p><font color="#AF0000">Not blocking</font></p>
+
+<p>
+<i>Preconditions:</i> The mutex is in an unlocked state.
+</p>
+
+<p>
+The mutex destructor does not throw any exceptions.  It releases any resources that the mutex
+may have owned.
+</p>
+
+<h5><a name="lock"></a>void lock()</h5>
+
+<p><font color="#AF0000">Blocking</font></p>
+
+<p>
+<i>Precondition:</i> This thread does not currently have sharable or upgradable
+ownership of the mutex. It can only have exclusive ownership if the mutex
+supports recursive locking.
+</p>
+
+<p>
+<i>Effects:</i> Obtains exclusive ownership of the mutex, blocking if necessary.
+No other thread can have exclusive ownership, upgradable ownership, or sharable
+ownership while this thread owns exclusive ownership. The mutex may or may not
+support recursive locking on the same thread. If it does, the mutex must be
+unlocked the same number of times it is locked.
+</p>
+
+<p>
+<tt>lock()</tt> may throw an exception on failure.
+</p>
+
+<h5><a name="try_lock"></a>bool try_lock()</h5>
+
+<p><font color="#AF0000">Not blocking</font></p>
+
+<p>
+<i>Precondition:</i> This thread does not currently have sharable or upgradable
+ownership of the mutex. It can only have exclusive ownership if the mutex
+supports recursive locking.
+</p>
+
+<p>
+<i>Effects:</i> Will attempt to obtain exclusive ownership of the mutex. The
+intent is that the call will return immediately if it is unable to obtain
+ownership. This ownership can not be shared with other thread's exclusive,
+upgradable or sharable ownership. The mutex may or may not support recursive
+locking on the same thread. If it does, the mutex must be unlocked the same
+number of times it is locked.
+</p>
+
+<p>
+<i>Returns:</i> <tt>true</tt> if the lock was obtained, else returns
+<tt>false</tt>.
+</p>
+
+<h5><a name="unlock"></a>void unlock() throw()</h5>
+
+<p><font color="#AF0000">Not blocking</font></p>
+
+<p>
+<i>Precondition:</i> This thread currently owns exclusive ownership of the
+mutex. If the mutex is recursive, it must be unlocked the same number of times
+it was locked via the various routines which create exclusive ownership.
+</p>
+
+<p>
+<i>Effects:</i> Will release exclusive ownership of the mutex. Some
+implementations may briefly block to gain permission to write to the mutex
+state. But in general this is a non-blocking operation.
+</p>
+
+<h4><a name="shared_ownership"></a>Shared ownership</h4>
+
+<p>
+The shared ownership concept is a refinement of the exclusive ownership concept.  In addition
+to implementing all of the requirements of the exclusive ownership concept, the mutex conforming
+to the shared ownership concept will also implement three additional signatures:
+</p>
+
+<ul>
+<li><tt>void lock_sharable()</tt></li>
+<li><tt>bool try_lock_sharable()</tt></li>
+<li><tt>void unlock_sharable() throw()</tt></li>
+</ul>
+
+<p>
+This concept introduces the ability for multiple threads to simultaneously own a mutex.
+The intent is that the threads holding shared ownership will not modify the protected data,
+but only read it.  While any thread holds a sharable lock, no thread will hold an exclusive
+lock, and vice-versa.
+</p>
+
+<h5><a name="lock_sharable"></a>void lock_sharable()</h5>
+
+<p><font color="#AF0000">Blocking</font></p>
+
+<p>
+<i>Precondition:</i> This thread does not currently have exclusive or upgradable
+ownership of the mutex. It can only have sharable ownership if the mutex
+supports recursive sharable locking.
+</p>
+
+<p>
+<i>Effects:</i> Obtains sharable ownership of the mutex, blocking if necessary.
+No other thread can have exclusive ownership. But other threads may have
+upgradable ownership, or sharable ownership. The mutex may or may not support
+recursive sharable locking on the same thread. If it does, the mutex must be
+sharable-unlocked the same number of times it is sharable-locked.
+</p>
+
+<p>
+<tt>lock_sharable()</tt> may throw an exception on failure.
+</p>
+
+<h5><a name="try_lock_sharable"></a>bool try_lock_sharable()</h5>
+
+<p><font color="#AF0000">Not blocking</font></p>
+
+<p>
+<i>Precondition:</i> This thread does not currently have exclusive or upgradable
+ownership of the mutex. It can only have sharable ownership if the mutex
+supports recursive sharable locking.
+</p>
+
+<p>
+<i>Effects:</i> Will attempt to obtain sharable ownership of the mutex. The
+intent is that the call will return immediately if it is unable to obtain
+ownership. This ownership can not be shared with other thread's exclusive
+ownership, but may be shared with other thread's upgradable or sharable
+ownership. The mutex may or may not support recursive sharable locking on the
+same thread. If it does, the mutex must be sharable-unlocked the same number of
+times it is sharable-locked.
+</p>
+
+<p>
+<i>Returns:</i> <tt>true</tt> if the lock was obtained, else returns
+<tt>false</tt>.
+</p>
+
+<h5><a name="unlock_sharable"></a>void unlock_sharable() throw()</h5>
+
+<p><font color="#AF0000">Not blocking</font></p>
+
+<p>
+<i>Precondition:</i> This thread currently owns sharable ownership of the mutex.
+If the mutex is recursive, it must be sharable-unlocked the same number of times
+it was sharable-locked via the various routines which create sharable ownership.
+</p>
+
+<p>
+<i>Effects:</i> Will release sharable ownership of the mutex. Some
+implementations may briefly block to gain permission to write to the mutex
+state. But in general this is a non-blocking operation.
+</p>
+
+
+<h4><a name="convertible_shared"></a>Convertible shared ownership</h4>
+
+<p>
+The convertible shared ownership concept is a refinement of the shared ownership concept.
+In addition to implementing all of the requirements of the shared ownership
+concept, the mutex conforming to the convertible shared ownership concept will also
+implement two additional signatures:
+</p>
+
+<ul>
+<li><tt>void unlock_and_lock_sharable() throw()</tt></li>
+<li><tt>bool try_unlock_sharable_and_lock()</tt></li>
+</ul>
+
+<p>
+This concept introduces the ability to convert an exclusive lock to a sharable lock
+(in a non-blocking manner), and to try to convert a sharable lock into an exclusive
+lock in a non-blocking manner, which is not always possible.
+</p>
+
+<p>
+In converting an exclusive lock to a sharable lock, no other thread will be able
+to obtain exclusive ownership of the mutex during this transition.  Thus
+whatever changes the thread made to the data under the exclusive lock are still
+valid under the sharable lock.
+</p>
+
+<p>
+The conversion from a sharable lock to an exclusive lock is only guaranteed to
+succeed if no other thread is waiting for exclusive ownership, and if no other
+thread currently owns sharable or upgradable ownership of the mutex.  Whether or
+not successful, the protected data which was read under the sharable lock will
+still be valid after the attempted conversion.
+</p>
+
+<h5><a name="unlock_and_lock_sharable"></a>void unlock_and_lock_sharable() throw()</h5>
+
+<p><font color="#AF0000">Not blocking</font></p>
+
+<p>
+<i>Precondition:</i> This thread currently has exclusive ownership of the mutex.
+If the mutex is recursive, the exclusive lock count must be 1.
+</p>
+
+<p>
+<i>Effects:</i> Will atomically release exclusive ownership of the mutex and
+obtain sharable ownership. After this operation, other threads waiting on
+sharable or upgradable ownership may also obtain ownership. Other threads
+waiting on exclusive ownership will not have a chance to gain exclusive
+ownership during this operation. Some implementations may briefly block to gain
+permission to write to the mutex state. But in general this is a non-blocking
+operation.
+</p>
+
+<h5><a name="try_unlock_sharable_and_lock"></a>bool try_unlock_sharable_and_lock()</h5>
+
+<p><font color="#AF0000">Not blocking</font></p>
+
+<p>
+<i>Precondition:</i> This thread currently has sharable ownership of the mutex.
+If the mutex is recursive, the sharable lock count must be 1.
+</p>
+
+<p>
+<i>Effects:</i> Will try to atomically release sharable ownership of the mutex
+and obtain exclusive ownership. If ownership is obtained it is guaranteed that
+no other thread will obtain exclusive ownership before this thread does.
+Therefore the thread may assume that what it has read under the sharable
+ownership is still valid (if exclusive ownership was obtained).
+</p>
+
+<p>
+<i>Returns:</i> <tt>true</tt> if exclusive ownership was obtained, else returns
+<tt>false</tt>. If <tt>false</tt> is returned, the thread still has sharable
+ownership of the mutex.
+</p>
+
+<h4><a name="upgradable_ownership"></a>Upgradable ownership</h4>
+
+<p>
+The upgradable ownership concept is a refinement of the convertible shared
+ownership concept. In addition to implementing all of the requirements of the
+convertible shared ownership concept, the mutex conforming to the upgradable
+ownership concept will also implement eight additional signatures:
+</p>
+
+<ul>
+<li><tt>void lock_upgradable()</tt></li>
+<li><tt>bool try_lock_upgradable()</tt></li>
+<li><tt>void unlock_upgradable() throw()</tt></li>
+<br>
+<li><tt>void unlock_upgradable_and_lock()</tt></li>
+<li><tt>bool try_unlock_upgradable_and_lock()</tt></li>
+<li><tt>void unlock_and_lock_upgradable() throw()</tt></li>
+<li><tt>void unlock_upgradable_and_lock_sharable() throw()</tt></li>
+<li><tt>bool try_unlock_sharable_and_lock_upgradable()</tt></li>
+</ul>
+
+<p>
+This concept introduces the ability for a single thread which holds upgradable
+ownership to both share with other threads holding sharable ownership, while
+uniquely holding the privilege of upgrading this "shared ownership" to exclusive
+ownership without the danger of another thread gaining exclusive ownership
+during the transition (even though it is a potentially blocking transition). The
+protected data read under an upgradable lock will still be valid after the
+upgrade to an exclusive lock.
+</p>
+
+<p>
+As the concept of <i>upgradable</i> is meaningless without also the concept of
+converting one type of lock to the other, the lock conversion functionality is
+included within this concept instead of having a separate convertible upgradable
+ownership concept.
+</p>
+
+<h5><a name="lock_upgradable"></a>void lock_upgradable()</h5>
+
+<p><font color="#AF0000">Blocking</font></p>
+
+<p>
+<i>Precondition:</i> This thread does not currently have exclusive or sharable
+ownership of the mutex. It can only have upgradable ownership if the mutex
+supports recursive upgradable locking.
+</p>
+
+<p>
+<i>Effects:</i>  Obtains upgradable ownership of the mutex, blocking if
+necessary. No other thread can have exclusive or upgradable ownership. But other
+threads may have sharable ownership. The mutex may or may not support recursive
+upgradable locking on the same thread. If it does, the mutex must be
+upgradable-unlocked the same number of times it is upgradable-locked.
+</p>
+
+<p>
+<tt>lock_upgradable()</tt> may throw an exception on failure.
+</p>
+
+<h5><a name="try_lock_upgradable"></a>bool try_lock_upgradable()</h5>
+
+<p><font color="#AF0000">Not blocking</font></p>
+
+<p>
+<i>Precondition:</i> This thread does not currently have exclusive or sharable
+ownership of the mutex. It can only have upgradable ownership if the mutex
+supports recursive upgradable locking.
+</p>
+
+<p>
+<i>Effects:</i> Will attempt to obtain upgradable ownership of the mutex. The
+intent is that the call will return immediately if it is unable to obtain
+ownership. This ownership can not be shared with other thread's exclusive
+ownership or upgradable ownership, but may be shared with other thread's
+sharable ownership. The mutex may or may not support recursive upgradable
+locking on the same thread. If it does, the mutex must be upgradable-unlocked
+the same number of times it is upgradable-locked.
+</p>
+
+<p>
+<i>Returns:</i> <tt>true</tt> if the lock was obtained, else returns
+<tt>false</tt>.
+</p>
+
+<h5><a name="unlock_upgradable"></a>void unlock_upgradable() throw()</h5>
+
+<p><font color="#AF0000">Not blocking</font></p>
+
+<p>
+<i>Precondition:</i> This thread currently has upgradable ownership of the
+mutex. If the mutex is recursive, it must be upgradable-unlocked the same number
+of times it was upgradable-locked via the various routines which create
+upgradable ownership.
+</p>
+
+<p>
+<i>Effects:</i> Will release upgradable ownership of the mutex. Some
+implementations may briefly block to gain permission to write to the mutex
+state. But in general this is a non-blocking operation.
+</p>
+
+<h5><a name="unlock_upgradable_and_lock"></a>void unlock_upgradable_and_lock()</h5>
+
+<p><font color="#AF0000">Blocking</font></p>
+
+<p>
+<i>Precondition:</i> This thread currently has upgradable ownership of
+the mutex. If the mutex is recursive, the upgradable lock count must
+be 1.
+</p>
+
+<p>
+<i>Effects:</i> Will atomically release upgradable ownership of the mutex and
+obtain exclusive ownership. During this operation it is possible that other
+threads will obtain sharable or upgradable ownership. However, it is guaranteed
+that no other thread will obtain exclusive ownership before this thread does.
+Therefore the thread may assume that what it has read under the upgradable
+ownership is still valid.
+</p>
+
+<tt>unlock_upgradable_and_lock()</tt> may throw an exception on failure.
+
+<h5><a name="try_unlock_upgradable_and_lock"></a>bool try_unlock_upgradable_and_lock()</h5>
+
+<p><font color="#AF0000">Not blocking</font></p>
+
+<p>
+<i>Precondition:</i> This thread currently has upgradable ownership of the
+mutex. If the mutex is recursive, the upgradable lock count must be 1.
+</p>
+
+<p>
+<i>Effects:</i> Will try to atomically release upgradable ownership of the mutex
+and obtain exclusive ownership. If ownership is obtained it is guaranteed that
+no other thread will obtain exclusive ownership before this thread does.
+Therefore the thread may assume that what it has read under the upgradable
+ownership is still valid (if exclusive ownership was obtained).
+</p>
+
+<p>
+<i>Returns:</i> <tt>true</tt> if exclusive ownership was obtained, else returns
+<tt>false</tt>. If <tt>false</tt> is returned, the thread still has upgradable
+ownership of the mutex.
+</p>
+
+<h5><a name="unlock_and_lock_upgradable"></a>void unlock_and_lock_upgradable() throw()</h5>
+
+<p><font color="#AF0000">Not blocking</font></p>
+
+<p>
+<i>Precondition:</i> This thread currently has exclusive ownership of the mutex.
+If the mutex is recursive, the exclusive lock count must be 1.
+</p>
+
+<p>
+<i>Effects:</i> Will atomically release exclusive ownership of the mutex and
+obtain upgradable ownership. After this operation, other threads waiting on
+sharable ownership may also obtain ownership. Other threads waiting on exclusive
+or upgradable ownership will not have a chance to gain ownership during this
+operation. Some implementations may briefly block to gain permission to write to
+the mutex state. But in general this is a non-blocking operation.
+</p>
+
+<h5><a name="unlock_upgradable_and_lock_sharable"></a>void unlock_upgradable_and_lock_sharable() throw()</h5>
+
+<p><font color="#AF0000">Not blocking</font></p>
+
+<p>
+<i>Precondition:</i> This thread currently has upgradable ownership of the
+mutex. If the mutex is recursive, the upgradable lock count must be 1.
+</p>
+
+<p>
+<i>Effects:</i> Will atomically release upgradable ownership of the mutex and
+obtain sharable ownership. After this operation, other threads waiting on
+sharable or upgradable ownership may also obtain ownership. Other threads
+waiting on exclusive ownership will not have a chance to gain exclusive
+ownership during this operation. Some implementations may briefly block to gain
+permission to write to the mutex state. But in general this is a non-blocking
+operation.
+</p>
+
+<h5><a name="try_unlock_sharable_and_lock_upgradable"></a>bool try_unlock_sharable_and_lock_upgradable()</h5>
+
+<p><font color="#AF0000">Not blocking</font></p>
+
+<p>
+<i>Precondition:</i> This thread currently has sharable ownership of the mutex.
+If the mutex is recursive, the sharable lock count must be 1.
+</p>
+
+<p>
+<i>Effects:</i> Will try to atomically release sharable ownership of the mutex
+and obtain upgradable ownership. If ownership is obtained it is guaranteed that
+no other thread will obtain exclusive ownership before this thread has an
+opportunity to upgrade to exclusive ownership. Therefore the thread may assume
+that what it has read under the sharable ownership is still valid (if exclusive
+ownership is eventually obtained).
+</p>
+
+<p>
+<i>Returns:</i> <tt>true</tt> if upgradable ownership was obtained, else returns
+<tt>false</tt>. If <tt>false</tt> is returned, the thread still has sharable
+ownership of the mutex.
+</p>
+
+<h3><a name="std_mutex"></a>Standard supplied mutexes</h3>
+
+<p>
+The implementation provides the following types which meet these concepts:
+</p>
+
+<ol>
+<li><tt>mutex</tt></li>
+<li><tt>sharable_mutex</tt></li>
+<li><tt>convertible_shared_mutex</tt></li>
+<li><tt>upgradable_mutex</tt></li>
+<li><tt>null_mutex</tt></li>
+</ol>
+
+<p>
+It is unspecified whether all of the above mutex types are actually different types,
+or simply <tt>typedef</tt>'s to a smaller set of common types.
+</p>
+
+<p>
+The <tt>null_mutex</tt> models the upgradable ownership concept, and simply
+immediately returns for each call (with a value of <tt>true</tt> for the try-locks).
+This mutex can be useful for types which take a "synchronization policy" as a template
+parameter.
+</p>
+
+<h2><a name="locks"></a>Locks</h2>
+
+<p>
+There are three different types of locks:
+</p>
+
+<ul>
+<li><tt>exclusive_lock</tt></li>
+<li><tt>sharable_lock</tt></li>
+<li><tt>upgradable_lock</tt></li>
+</ul>
+
+<p>
+These three locks manage an appropriate mutex with a largely generic interface.
+The common part of this interface is described below for an imaginary type
+called <tt><i>basic_lock</i></tt> which essentially represents a lock concept.
+The interfaces unique to the three concrete types of locks are described later.
+</p>
+
+<h3><a name="basic_lock"></a>The basic lock Concept</h3>
+
+<blockquote><pre>
+extern detail::defer_lock_type       defer_lock;
+extern detail::try_lock_type         try_to_lock;
+extern detail::accept_ownership_type accept_ownership;
+
+template &lt;class Mutex&gt;
+class <i>basic_lock</i>
+{
+public:
+    typedef Mutex mutex_type;
+private:
+    mutex_type* <i>m_</i>;  // exposition only
+    bool <i>owns_</i>;      // exposition only
+public:
+    <i>basic_lock</i>();
+    explicit <i>basic_lock</i>(mutex_type&amp; <i>m</i>);
+    <i>basic_lock</i>(mutex_type&amp; <i>m</i>, detail::defer_lock_type);
+    <i>basic_lock</i>(mutex_type&amp; <i>m</i>, detail::try_lock_type);
+    <i>basic_lock</i>(mutex_type&amp; <i>m</i>, detail::accept_ownership_type);
+
+    ~<i>basic_lock</i>();
+
+    <i>basic_lock</i>(<i>basic_lock</i>&amp;&amp; <i>bl</i>);
+    <i>basic_lock</i>&amp; operator=(<i>basic_lock</i>&amp;&amp; <i>bl</i>);
+private:
+    <i>basic_lock</i>(const <i>basic_lock</i>&amp;);
+    <i>basic_lock</i>&amp; operator=(const <i>basic_lock</i>&amp;);
+public:
+    void lock();
+    bool try_lock();
+    void unlock();
+
+    bool owns() const;
+    operator <i>unspecified-bool-type</i>() const;
+    mutex_type* mutex() const;
+    
+    void swap(<i>basic_lock</i>&amp;&amp; <i>bl</i>);
+
+    mutex_type* release();
+};
+</pre></blockquote>
+
+<p>
+Each lock is templated on the mutex type, which is also represented by the nested
+type: <tt>mutex_type</tt>.  These locks manage a pointer to a mutex (which may be null),
+and an <tt><i>owns</i></tt> flag.  The lock does not govern the lifetime of the mutex.
+That is, the lock's responsibility is to lock / unlock the mutex in various ways, but
+not to own the memory which the mutex resides as a smart pointer would.
+</p>
+
+<h4><tt><i>basic_lock</i>();</tt></h4>
+
+
+<p>
+<i>Effects:</i> The default constructor constructs a lock which owns no mutex, and
+refers to no mutex.
+</p>
+
+<p>
+<i>Throws:</i> Nothing.
+</p>
+
+<p>
+<i>Postconditions:</i>
+<p>
+<blockquote><pre>
+mutex() == 0
+owns() == false
+</pre></blockquote>
+
+<h4><tt><i>basic_lock</i>(mutex_type&amp; <i>m</i>);</tt></h4>
+
+<p>
+<i>Effects:</i> This explicit constructor constructs a lock which refers to the
+mutex <tt><i>m</i></tt>, and owns it.  Calls <tt>lock()</tt> which will lock the
+mutex in a way defined differently for each type of lock, and may block in the
+process.
+</p>
+
+<p>
+<i>Preconditions:</i> The lifetime of <tt><i>m</i></tt> is greater than the
+lifetime of this lock and of any object which ownership of this mutex may
+be transferred to.
+</p>
+
+<p>
+<i>Postconditions:</i>
+<p>
+<blockquote><pre>
+mutex() == &amp;<i>m</i>
+owns() == true
+</pre></blockquote>
+
+<h4><tt><i>basic_lock</i>(mutex_type&amp; <i>m</i>, detail::defer_lock_type);</tt></h4>
+
+<p>
+<i>Effects:</i> This explicit constructor constructs a lock which refers to the
+mutex <tt><i>m</i></tt>, but does not own it.  It will not perform any operation
+on the mutex.
+</p>
+
+<p>
+<i>Preconditions:</i> The lifetime of <tt><i>m</i></tt> is greater than the
+lifetime of this lock and of any object which ownership of this mutex may
+be transferred to.
+</p>
+
+<p>
+<i>Throws:</i> Nothing.
+</p>
+
+<p>
+<i>Postconditions:</i>
+<p>
+<blockquote><pre>
+mutex() == &amp;<i>m</i>
+owns() == false
+</pre></blockquote>
+
+<h4><tt><i>basic_lock</i>(mutex_type&amp; <i>m</i>, detail::try_lock_type);</tt></h4>
+
+<p>
+<i>Effects:</i> This explicit constructor constructs a lock which refers to the
+mutex <tt><i>m</i></tt>.  Calls <tt>try_lock()</tt> which will attempt to gain
+ownership of <tt><i>m</i></tt> in a non-blocking manner defined differently for
+each type of lock.
+</p>
+
+<p>
+<i>Preconditions:</i> The lifetime of <tt><i>m</i></tt> is greater than the
+lifetime of this lock and of any object which ownership of this mutex may
+be transferred to.
+</p>
+
+<p>
+<i>Postconditions:</i>
+<p>
+<blockquote><pre>
+mutex() == &amp;<i>m</i></pre>
+<tt>owns()</tt> will report the success or failure of the attempt to gain lock ownership.
+</blockquote>
+
+<h4><tt><i>basic_lock</i>(mutex_type&amp; <i>m</i>, detail::accept_ownership_type);</tt></h4>
+
+<p>
+<i>Effects:</i> This explicit constructor constructs a lock which refers to the
+mutex <tt><i>m</i></tt>, and owns it, but will not perform any operation on the mutex.
+</p>
+
+<p>
+<i>Preconditions:</i> This thread has appropriate ownership of this mutex, and
+no other object is managing that ownership. The lifetime of <tt><i>m</i></tt> is
+greater than the lifetime of this lock and of any object which ownership
+of this mutex may be transferred to.
+</p>
+
+<p>
+<i>Throws:</i> Nothing.
+</p>
+
+<p>
+<i>Postconditions:</i>
+<p>
+<blockquote><pre>
+mutex() == &amp;<i>m</i>
+owns() == true
+</pre></blockquote>
+
+<h4><tt>~<i>basic_lock</i>();</tt></h4>
+
+<p>
+<i>Effects:</i> if <tt>owns()</tt> then calls <tt>unlock()</tt> which is defined
+appropriately for each lock.
+</p>
+
+<p>
+<i>Throws:</i> Nothing.
+</p>
+
+<h4><tt><i>basic_lock</i>(<i>basic_lock</i>&amp;&amp; <i>bl</i>);</tt></h4>
+
+<p>
+<i>Effects:</i> Mutex ownership (if any) is transferred from the rvalue source
+to this.  There is no effect on the referenced mutex.
+</p>
+
+<p>
+<i>Throws:</i> Nothing.
+</p>
+
+<p>
+<i>Postconditions:</i>
+<p>
+<blockquote>
+<tt>mutex() ==</tt> the value of <tt><i>bl</i>.mutex()</tt> before the call.<br>
+<tt>owns() ==</tt> the value of <tt><i>bl</i>.owns()</tt> before the call.<br>
+<tt><i>bl</i>.mutex() == 0</tt><br>
+<tt><i>bl</i>.owns() == false</tt>
+</pre></blockquote>
+
+<h4><tt><i>basic_lock</i>&amp; operator=(<i>basic_lock</i>&amp;&amp; <i>bl</i>);</tt></h4>
+
+<p>
+<i>Effects:</i> Mutex ownership (if any) is transferred from the rvalue source
+to this.  There is no effect on the referenced source mutex.  If this lock
+owns a mutex prior to the assignment, that mutex is unlocked with <tt>unlock()</tt>.
+</p>
+
+<p>
+<i>Throws:</i> Nothing.
+</p>
+
+<p>
+<i>Postconditions:</i>
+<p>
+<blockquote>
+<tt>mutex() ==</tt> the value of <tt><i>bl</i>.mutex()</tt> before the call.<br>
+<tt>owns() ==</tt> the value of <tt><i>bl</i>.owns()</tt> before the call.<br>
+<tt><i>bl</i>.mutex() == 0</tt><br>
+<tt><i>bl</i>.owns() == false</tt>
+</pre></blockquote>
+
+<p>
+<i>Notes:</i> With a recursive mutex it is possible that both this and
+<tt><i>bl</i></tt> own the same mutex before the assignment. In this case, this
+will own the mutex after the assignment (and <tt><i>bl</i></tt> will not), but
+the mutex's lock count will be decremented by one.
+</p>
+
+<h4><tt><i>basic_lock</i>(const <i>basic_lock</i>&amp;);</tt></h4>
+
+<p>
+Private and left undefined.  Lock types are not copyable.
+</p>
+
+<h4><tt><i>basic_lock</i>&amp; operator=(const <i>basic_lock</i>&amp; <i>bl</i>);</tt></h4>
+
+<p>
+Private and left undefined.  Lock types are not copyable.
+</p>
+
+<h4><tt>void lock();</tt></h4>
+
+<p>
+<i>Effects:</i>  If <tt>mutex() == 0</tt> or if <tt>owns() == true</tt>, throws
+a <tt>lock_error()</tt>.  Otherwise the referenced mutex is locked in a manner
+defined appropriately for each lock (which may block execution of this thread).
+</p>
+
+<p>
+<i>Throws:</i>  <tt>lock_error</tt>.  Exceptions may be thrown by the referenced
+mutex's locking function.
+</p>
+
+<p>
+<i>Postconditions:</i>  If an exception is thrown, there is no change of state
+to the lock.  If an exception is not thrown, <tt>owns() == true</tt>.
+</p>
+
+<h4><tt>bool try_lock();</tt></h4>
+
+<p>
+<i>Effects:</i>  If <tt>mutex() == 0</tt> or if <tt>owns() == true</tt>, throws
+a <tt>lock_error()</tt>.  Otherwise the referenced mutex is locked in a manner
+defined appropriately for each lock, but in a non-blocking manner that may not
+succeed.
+</p>
+
+<p>
+<i>Throws:</i>  <tt>lock_error</tt>.  Exceptions may be thrown by the referenced
+mutex's try-locking function.
+</p>
+
+<p>
+<i>Postconditions:</i>  If an exception is thrown, there is no change of state
+to the lock.  If an exception is not thrown, <tt>owns()</tt> reflects the success
+or failure of the attempted locking function.
+</p>
+
+<p>
+<i>Returns:</i> <tt>true</tt> if the lock was obtained.
+</p>
+
+<h4><tt>void unlock();</tt></h4>
+
+<p>
+<i>Effects:</i>  If <tt>mutex() == 0</tt> or if <tt>owns() == false</tt>, throws
+a <tt>lock_error()</tt>.  Otherwise the referenced mutex is unlocked in a manner
+defined appropriately for each lock.
+</p>
+
+<p>
+<i>Throws:</i>  <tt>lock_error</tt>.
+</p>
+
+<p>
+<i>Postconditions:</i>  <tt>owns() == false</tt>.
+</p>
+
+<h4><tt>bool owns() const;</tt></h4>
+
+<p>
+<i>Effects:</i> If <tt>mutex() == 0</tt> returns <tt>false</tt>.  Else
+returns <tt>true</tt> if this lock owns a lock on the mutex, else returns <tt>false</tt>.
+</p>
+
+<p>
+<i>Throws:</i>  Nothing.
+</p>
+
+<h4><tt>operator <i>unspecified-bool-type</i>() const;</tt></h4>
+
+<p>
+<i>Effects:</i> Returns non-null if <tt>owns() == true</tt>, else returns null.
+</p>
+
+<p>
+<i>Throws:</i>  Nothing.
+</p>
+
+<h4><tt>mutex_type* mutex() const;</tt></h4>
+
+<p>
+<i>Effects:</i> Returns a pointer to the referenced mutex, or 0 if there is no
+mutex to reference.
+</p>
+
+<p>
+<i>Throws:</i>  Nothing.
+</p>
+
+<h4><tt>void swap(<i>basic_lock</i>&amp;&amp; <i>bl</i>);</tt></h4>
+
+<p>
+<i>Effects:</i> Swaps state with <tt><i>bl</i></tt>.
+</p>
+
+<p>
+<i>Throws:</i>  Nothing.
+</p>
+
+<p>
+<i>Postconditions:</i> The states of <tt>*this</tt> and <tt><i>bl</i></tt> are swapped.
+</p>
+
+<h4><tt>mutex_type* release();</tt></h4>
+
+<p>
+<i>Effects:</i> Returns a pointer to the referenced mutex, or 0 if there is no mutex to reference.
+</p>
+
+<p>
+<i>Throws:</i>  Nothing.
+</p>
+
+<p>
+<i>Postconditions:</i>
+</p>
+
+<blockquote><pre>
+mutex() == 0
+owns() == false
+</pre></blockquote>
+
+<h3><a name="exclusive_lock"></a>exclusive_lock&lt;Mutex&gt;</h3>
+
+<p>
+<tt>exclusive_lock</tt> is meant to carry out the tasks for locking, unlocking and
+try-locking (recursive or not) for the Mutex. The Mutex must meet the mutex
+concept of exclusive ownership.  Additionally, if the constructor accepting
+ownership from a <tt>sharable_lock</tt> is instantiated, the mutex must meet the
+convertible shared ownership requirements. If the constructor accepting
+ownership from an <tt>upgradable_lock</tt> is instantiated, the mutex must meet
+the upgradable ownership requirements.
+</p>
+
+<p>
+Below the complete interface for <tt>exclusive_lock</tt> is shown.  However the
+description of each member will rely on the description of <tt><i>basic_lock</i></tt>
+as much as possible to prevent repetition.  Lack of description for <tt>exclusive_lock</tt>
+implies that the functionality is more completely described under <tt><i>basic_lock</i></tt>.
+</p>
+
+<blockquote><pre>template &lt;class Mutex&gt;
+class exclusive_lock
+{
+public:
+    typedef Mutex mutex_type;
+private:
+    mutex_type* m_;  // exposition only
+    bool owns_;    // exposition only
+public:
+    exclusive_lock();
+    explicit exclusive_lock(mutex_type&amp; m);
+    exclusive_lock(mutex_type&amp; m, detail::defer_lock_type);
+    exclusive_lock(mutex_type&amp; m, detail::try_lock_type);
+    exclusive_lock(mutex_type&amp; m, detail::accept_ownership_type);
+
+    ~exclusive_lock();
+
+    exclusive_lock(exclusive_lock&amp;&amp; sl);
+    explicit exclusive_lock(upgradable_lock&lt;mutex_type&gt;&amp;&amp; r);
+    exclusive_lock(upgradable_lock&lt;mutex_type&gt;&amp;&amp; r, detail::try_lock_type);
+    exclusive_lock(sharable_lock&lt;mutex_type&gt;&amp;&amp; r, detail::try_lock_type);
+    exclusive_lock&amp; operator=  (exclusive_lock&amp;&amp; sl);
+private:
+    exclusive_lock(exclusive_lock const&amp;);
+    explicit exclusive_lock(upgradable_lock&lt;mutex_type&gt; const&amp;);
+    exclusive_lock(upgradable_lock&lt;mutex_type&gt; const&amp;, detail::try_lock_type);
+    exclusive_lock(sharable_lock&lt;mutex_type&gt; const&amp;, detail::try_lock_type);
+    exclusive_lock&amp; operator=  (exclusive_lock const&amp;);
+public:
+    void lock();
+    bool try_lock();
+    void unlock();
+
+    bool owns() const;
+    operator <i>unspecified-bool-type</i>() const;
+    const mutex_type* mutex() const;
+
+    void swap(exclusive_lock&amp;&amp; w);
+
+    mutex_type* release();
+};
+
+template &lt;class Mutex&gt; void swap(exclusive_lock&lt;Mutex&gt;&amp; x, exclusive_lock&lt;Mutex&gt;&amp; y);
+template &lt;class Mutex&gt; void swap(exclusive_lock&lt;Mutex&gt;&amp;&amp; x, exclusive_lock&lt;Mutex&gt;&amp; y);
+template &lt;class Mutex&gt; void swap(exclusive_lock&lt;Mutex&gt;&amp; x, exclusive_lock&lt;Mutex&gt;&amp;&amp; y);
+</pre></blockquote>
+
+<h4>
+<a name="exclusive_lock Constructors"></a>exclusive_lock Constructors
+</h4>
+
+<blockquote><pre>
+<b>exclusive_lock(upgradable_lock&lt;mutex_type&gt;&amp;&amp; <i>r</i>);</b>
+</pre></blockquote>
+
+<p>
+<i>Effects:</i> If <tt><i>r</i>.owns()</tt> returns <tt>true</tt> then calls
+<tt><a href="#unlock_upgradable_and_lock">unlock_upgradable_and_lock()</a></tt>
+on the referenced mutex.  <tt><i>r</i>.release()</tt> is called.
+</p>
+
+<p>
+<i>Postconditions:</i>
+</p>
+<blockquote>
+<tt>mutex() ==</tt> the value <tt><i>r</i>.mutex()</tt> had before the construction.<br>
+<tt>owns() ==</tt> the value <tt><i>r</i>.owns()</tt> had before the construction.<br>
+<tt><i>r</i>.mutex() == 0</tt>.<br>
+<tt><i>r</i>.owns() == false</tt>.
+</blockquote>
+
+<p>
+<i>Notes:</i> If <i>r</i> is owned, this constructor will lock this <tt>exclusive_lock</tt>
+while unlocking <i>r</i>. If <i>r</i> is unlocked, then this <tt>exclusive_lock</tt> will be
+unlocked as well. Only rvalue <tt>upgradable_lock</tt>'s will match this signature.
+lvalue <tt>exclusive_lock</tt>'s can not transfer ownership unless "cast" to an rvalue.
+An lvalue <tt>upgradable_lock</tt> can be "cast" to an rvalue with the
+expression: <tt>move(lock);</tt> This constructor may block if other threads
+hold a <tt>sharable_lock</tt> on this mutex (<tt>sharable_lock</tt>'s can share
+ownership with an <tt>upgradable_lock</tt>).
+</p>
+
+<p>[<i>Example:</i></p>
+
+<blockquote><pre>
+mutex m;
+upgradable_lock&lt;mutex&gt; l1(mut);      // l1 upgradable-locked
+exclusive_lock&lt;mutex&gt; l2(move(l1)); // l2 locked, l1 unlocked
+</pre></blockquote>
+
+<p><i>-- end example</i>]</p>
+
+<blockquote><pre>
+<b>exclusive_lock(upgradable_lock&lt;mutex_type&gt;&amp;&amp; <i>r</i>, detail::try_lock_type);</b>
+</pre></blockquote>
+
+<p>
+<i>Effects:</i> If <tt><i>r</i>.owns()</tt> then calls
+<a href="#try_unlock_upgradable_and_lock"><tt>try_unlock_upgradable_and_lock()</tt></a>
+on the referenced mutex.
+</p>
+
+<ul>
+<li>if <a href="#try_unlock_upgradable_and_lock"><tt>try_unlock_upgradable_and_lock()</tt></a>
+returns <tt>true</tt> then <tt>mutex()</tt> obtains the value from <tt><i>r</i>.release()</tt>
+and <tt>owns()</tt> is set to <tt>true</tt>.</li>
+<li>if <a href="#try_unlock_upgradable_and_lock"><tt>try_unlock_upgradable_and_lock()</tt></a>
+returns <tt>false</tt> then <tt><i>r</i></tt> is unaffected and this <tt>exclusive_lock</tt> construction
+as the same effects as a default construction.</li>
+</ul>
+
+<p>
+Else <tt><i>r</i>.owns()</tt> is <tt>false</tt>.  <tt>mutex()</tt> obtains the value
+from <tt><i>r</i>.release()</tt> and <tt>owns()</tt> is set to <tt>false</tt>
+</p>
+
+<p>
+<i>Notes:</i> This construction will not block.  It will try to obtain mutex
+ownership from <i>r</i> immediately, while changing the lock type from a "read
+lock" to a "write lock".  If the "read lock" isn't held in the first place, the
+mutex merely changes type to an unlocked "write lock".  If the "read lock" is
+held, then mutex transfer occurs only if it can do so in a non-blocking manner.
+</p>
+
+<p>[<i>Example:</i></p>
+
+<blockquote><pre>
+mutex m;
+upgradable_lock&lt;mutex&gt; l1(mut);      // l1 upgradable-locked
+exclusive_lock&lt;mutex&gt; l2(move(l1), try_to_lock); // l2 tries to obtain lock from l1
+</pre></blockquote>
+
+<p><i>-- end example</i>]</p>
+
+<blockquote><pre>
+<b>exclusive_lock(sharable_lock&lt;mutex_type&gt;&amp;&amp; <i>r</i>, detail::try_lock_type);</b>
+</pre></blockquote>
+
+<p>
+<i>Effects:</i> If <tt><i>r</i>.owns()</tt> then calls
+<a href="#try_unlock_sharable_and_lock"><tt>try_unlock_sharable_and_lock()</tt></a>
+on the referenced mutex.
+</p>
+<ul>
+<li>if <a href="#try_unlock_sharable_and_lock"><tt>try_unlock_sharable_and_lock()</tt></a>
+returns <tt>true</tt> then <tt>mutex()</tt> obtains the value from <tt><i>r</i>.release()</tt>
+and <tt>owns()</tt> is set to <tt>true</tt>.</li>
+<li>if <a href="#try_unlock_sharable_and_lock"><tt>try_unlock_sharable_and_lock()</tt></a>
+returns <tt>false</tt> then <tt><i>r</i></tt> is unaffected and this <tt>exclusive_lock</tt> construction
+has the same effects as a default construction.</li>
+</ul>
+
+<p>
+Else <tt><i>r</i>.owns()</tt> is <tt>false</tt>.  <tt>mutex()</tt> obtains the value
+from <tt><i>r</i>.release()</tt> and <tt>owns()</tt> is set to <tt>false</tt>
+</p>
+
+<p>
+<i>Notes:</i> This construction will not block.  It will try to obtain mutex
+ownership from <i>r</i> immediately, while changing the lock type from a "read
+lock" to a "write lock".  If the "read lock" isn't held in the first place, the
+mutex merely changes type to an unlocked "write lock".  If the "read lock" is
+held, then mutex transfer occurs only if it can do so in a non-blocking manner.
+</p>
+
+<p>[<i>Example:</i></p>
+
+<blockquote><pre>mutex m;
+sharable_lock&lt;mutex&gt; l1(mut);      // l1 sharable-locked
+exclusive_lock&lt;mutex&gt; l2(move(l1), try_to_lock); // l2 tries to obtain lock from l1
+</pre></blockquote>
+
+<p><i>-- end example</i>]</p>
+
+<h4><tt><a name="Locking functions"></a></tt>Locking functions</h4>
+
+<blockquote><pre><b>void lock();</b></pre></blockquote>
+
+<p>
+<i>Effects:</i> Calls <tt><a href="#lock">lock()</a></tt> on the referenced mutex.</p>
+
+<blockquote><pre><b>bool try_lock();</b></pre></blockquote>
+
+<p>
+<i>Effects:</i> Calls <tt><a href="#try_lock">try_lock()</a></tt> on the referenced mutex.
+</p>
+
+<blockquote><pre><b>void unlock();</b></pre></blockquote>
+
+<p>
+<i>Effects:</i> Calls <tt><a href="#unlock">unlock()</a></tt> on the referenced mutex.
+</p>
+
+<h3><tt><a name="sharable_lock"></a></tt>sharable_lock&lt;Mutex&gt;</h3>
+
+<p>
+<tt>sharable_lock</tt> is meant to carry out the tasks for sharable-locking
+(such as read-locking), unlocking and try-sharable-locking (recursive or not)
+for the Mutex. The Mutex must meet the mutex concept of shared ownership.
+Additionally, if the constructor or assignment operator accepting ownership from
+a <tt>exclusive_lock</tt> is instantiated, the mutex must meet the convertible
+shared ownership requirements. If the constructor or assignment accepting
+ownership from an <tt>upgradable_lock</tt> is instantiated, the mutex must meet
+the upgradable ownership requirements.
+</p>
+
+<p>
+Below the complete interface for <tt>sharable_lock</tt> is shown. However the
+description of each member will rely on the description of
+<tt><i>basic_lock</i></tt> as much as possible to prevent repetition. Lack of
+description for <tt>sharable_lock</tt> implies that the functionality is more
+completely described under <tt><i>basic_lock</i></tt>.
+</p>
+
+<blockquote><pre>template &lt;class RW_Mutex&gt;
+class sharable_lock
+{
+public:
+    typedef RW_Mutex mutex_type;
+private:
+    mutex_type* <i>m_</i>;   // exposition only
+    bool <i>owns_</i>;     // exposition only
+public:
+    sharable_lock();
+    explicit sharable_lock(mutex_type&amp; <i>m</i>);
+    sharable_lock(mutex_type&amp; <i>m</i>, detail::defer_lock_type);
+    sharable_lock(mutex_type&amp; <i>m</i>, detail::try_lock_type);
+
+    ~sharable_lock();
+
+    sharable_lock(sharable_lock&amp;&amp; <i>r</i>);
+    explicit sharable_lock(upgradable_lock&lt;mutex_type&gt;&amp;&amp; <i>r</i>);
+    explicit sharable_lock(exclusive_lock&lt;mutex_type&gt;&amp;&amp; <i>w</i>);
+    sharable_lock&amp; operator=(sharable_lock&amp;&amp; <i>r</i>);
+private:
+    sharable_lock(sharable_lock const&amp;);
+    explicit sharable_lock(upgradable_lock&lt;mutex_type&gt; const&amp;);
+    explicit sharable_lock(exclusive_lock&lt;mutex_type&gt; const&amp;);
+    sharable_lock&amp; operator=(sharable_lock const&amp;);
+public:
+    void lock();
+    bool try_lock();
+    void unlock();
+
+    bool owns() const;
+    operator <i>unspecified-bool-type</i>() const;
+    const mutex_type* mutex() const;
+
+    void swap(sharable_lock&amp;&amp; <i>r</i>);
+
+    mutex_type* release();
+};
+
+template &lt;typename Mutex&gt; void swap(sharable_lock&lt;Mutex&gt;&amp; x, sharable_lock&lt;Mutex&gt;&amp; y);
+</pre></blockquote>
+
+<h4><a name="sharable_lock Constructors"></a>sharable_lock Constructors</h4>
+
+<blockquote><pre>
+<b>sharable_lock(upgradable_lock&lt;mutex_type&gt;&amp;&amp; r);</b>
+</pre></blockquote>
+
+<p>
+<i>Effects:</i> <tt>m_-&gt;<a
+href="#unlock_upgradable_and_lock_sharable">unlock_upgradable_and_lock_sharable()</a></tt>
+if <tt><i>r</i>.owns()</tt>.
+</p>
+
+<p>
+<i>Postconditions:</i>
+</p>
+<blockquote>
+<tt>mutex() ==</tt> the value <tt><i>r</i>.mutex()</tt> had before the construction.<br>
+<tt>owns() == </tt> the value <tt><i>r</i>.owns()</tt> had before the construction.<br>
+<tt><i>r</i>.mutex() == 0</tt>.<br>
+<tt><i>r</i>.owns() == false</tt>.
+</blockquote>
+
+<p><i>Notes:</i> If <i>r</i> is owned, this constructor will lock this
+sharable_lock while unlocking <i>r</i>.</p>
+
+<p>[<i>Example:</i></p>
+
+<blockquote><pre>mutex m;
+upgradable_lock&lt;mutex&gt; l1(mut);  // l1 upgradable-locked
+sharable_lock&lt;mutex&gt; l2(move(l1));   // l2 sharable-locked, l1
+unlocked</pre>
+</blockquote>
+
+<p><i>-- end example</i>]</p>
+
+<blockquote><pre>
+<b>sharable_lock(exclusive_lock&lt;mutex_type&gt;&amp;&amp; w);</b>
+</pre></blockquote>
+
+<p><i>Effects:</i> If <tt><i>w</i>.owns()</tt>,
+<tt>m_-&gt;<a href="#unlock_and_lock_sharable">unlock_and_lock_sharable()</a></tt>.
+</p>
+
+<p><i>Postconditions:</i>
+</p>
+<blockquote>
+<tt>mutex() ==</tt> the value <tt><i>w</i>.mutex()</tt> had before the construction.<br>
+<tt>owns() ==</tt> the value <tt><i>w</i>.owns()</tt> had before the construction.<br>
+<tt><i>w</i>.mutex() == 0</tt>.<br>
+<tt><i>w</i>.owns() == false</tt>.
+</blockquote>
+
+<p><i>Notes:</i> If <i>w</i> is owned, this constructor will transfer the
+exclusive ownership to a sharable-ownership of this sharable_lock. Only rvalue
+exclusive_lock's will match this signature. lvalue exclusive_lock's can not transfer
+ownership unless "cast" to an rvalue. An lvalue exclusive_lock can be "cast" to an
+rvalue with the expression:
+<tt>move(lock);</tt></p>
+
+<p>[<i>Example:</i></p>
+
+<blockquote><pre>
+mutex m;
+exclusive_lock&lt;mutex&gt; wl(mut);     // wl locked
+sharable_lock&lt;mutex&gt; rl(move(wl)); // rl sharable-locked, wl unlocked
+</pre></blockquote>
+
+<p><i>-- end example</i>]</p>
+
+<h4><tt><a name="Locking functions1696"></a></tt>Locking functions</h4>
+
+<blockquote><pre><b>void lock();</b></pre></blockquote>
+
+<p><i>Effects:</i> Calls
+<tt><a href="#lock_sharable">lock_sharable()</a></tt> on the
+referenced mutex.</p>
+
+<blockquote><pre><b>bool try_lock();</b></pre></blockquote>
+
+<p><i>Effects:</i> Calls
+<tt><a href="#try_lock_sharable">try_lock_sharable()</a></tt> on the
+referenced mutex.</p>
+
+<blockquote><pre><b>void unlock();</b></pre></blockquote>
+
+<p><i>Effects:</i> Calls
+<tt><a href="#unlock_sharable">unlock_sharable()</a></tt> on the
+referenced mutex.</p>
+
+<h3><tt><a name="upgradable_lock"></a></tt>upgradable_lock&lt;Mutex&gt;</h3>
+
+<p>
+<tt>upgradable_lock</tt> is meant to carry out the tasks for read-locking,
+unlocking and try-read-locking (recursive or not) for the mutex. Additionally
+the <tt>upgradable_lock</tt> can transfer ownership to a <tt>exclusive_lock</tt>
+with move syntax. The mutex must meet the mutex concept of upgradable
+ownership.
+</p>
+
+<p>
+Below the complete interface for <tt>upgradable_lock</tt> is shown. However the
+description of each member will rely on the description of
+<tt><i>basic_lock</i></tt> as much as possible to prevent repetition. Lack of
+description for <tt>upgradable_lock</tt> implies that the functionality is more
+completely described under <tt><i>basic_lock</i></tt>.
+</p>
+
+<blockquote><pre>template &lt;class RW_Mutex&gt;
+class upgradable_lock
+{
+public:
+    typedef RW_Mutex mutex_type;
+private:
+    mutex_type* <i>m_</i>;   // exposition only
+    bool <i>owns_</i>;     // exposition only
+public:
+    upgradable_lock();
+    explicit upgradable_lock(mutex_type&amp; <i>m</i>);
+    upgradable_lock(mutex_type&amp; <i>m</i>, detail::defer_lock_type);
+    upgradable_lock(mutex_type&amp; <i>m</i>, detail::try_lock_type);
+
+    ~upgradable_lock();
+
+    upgradable_lock(upgradable_lock&amp;&amp; <i>r</i>);
+    explicit upgradable_lock(exclusive_lock&lt;mutex_type&gt;&amp;&amp; <i>w</i>);
+    upgradable_lock(sharable_lock&lt;mutex_type&gt;&amp;&amp; <i>r</i>, detail::try_lock_type);
+    upgradable_lock&amp; operator=(upgradable_lock&amp;&amp; <i>r</i>);
+private:
+    upgradable_lock(upgradable_lock const&amp;);
+    explicit upgradable_lock(exclusive_lock&lt;mutex_type&gt; const&amp;);
+    upgradable_lock(sharable_lock&lt;mutex_type&gt; const&amp; <i>r</i>, detail::try_lock_type);
+    upgradable_lock&amp; operator=(upgradable_lock const&amp;);
+public:
+    void lock();
+    bool try_lock();
+    void unlock();
+
+    bool owns() const;
+    operator <i>unspecified-bool-type</i>() const;
+    const mutex_type* mutex() const;
+
+    void swap(upgradable_lock&amp;&amp; <i>r</i>);
+
+    mutex_type* release();
+};
+
+template &lt;typename Mutex&gt; void swap(upgradable_lock&lt;Mutex&gt;&amp; x, upgradable_lock&lt;Mutex&gt;&amp; y);
+</pre></blockquote>
+
+<p>
+Example code using <tt>upgradable_lock</tt>:
+</p>
+
+<blockquote><pre>
+std::upgradable_mutex mut;
+
+void foo()
+{
+    std::upgradable_lock&lt;std::upgradable_mutex&gt; read_lock(mut);
+    // ... do read operation
+    if (/* sometimes need to write */)
+    {
+        std::exclusive_lock&lt;std::upgradable_mutex&gt; write_lock(std::move(read_lock));
+        // ... do write operation, what was read hasn't changed
+    }
+}
+</pre></blockquote>
+
+<p>
+An <tt>upgradable_lock</tt> is most useful when a read operation sometimes decides it
+needs to write to the protected data, and needs to do so without allowing for the
+read data to change before acquiring the write lock (as could happen if the thread
+merely releases the read lock and blocks on a write lock).
+</p>
+
+<h4><a name="upgradable_lock Constructors"></a>upgradable_lock Constructors</h4>
+
+<blockquote><pre>
+<b>upgradable_lock(exclusive_lock&lt;mutex_type&gt;&amp;&amp; <i>w</i>);</b>
+</pre></blockquote>
+
+<p>
+<i>Effects:</i> If <tt><i>w</i>.owns()</tt>,
+<tt>m_.<a
+href="#unlock_and_lock_upgradable">unlock_and_lock_upgradable()</a></tt>.
+</p>
+
+<p>
+<i>Postconditions:</i>
+</p>
+<blockquote>
+<tt>mutex() ==</tt> the value <tt><i>w</i>.mutex()</tt> had before the construction.<br>
+<tt>owns() ==</tt> the value <tt><i>w</i>.owns()</tt> had before the construction.<br>
+<tt><i>w</i>.mutex() == 0</tt>.<br>
+<tt><i>w</i>.owns() == false</tt>.
+</blockquote>
+
+<p>
+<i>Notes:</i> If <i>w</i> is owned, this constructor will transfer the
+exclusive-ownership to a upgradable-ownership of this upgradable_lock. Only
+rvalue exclusive_lock's will match this signature. lvalue exclusive_lock's can not
+transfer ownership unless "cast" to an rvalue. An lvalue exclusive_lock can be
+"cast" to an rvalue with the expression: <tt>move(lock);</tt>
+</p>
+
+<p>[<i>Example:</i></p>
+
+<blockquote><pre>
+mutex m;
+exclusive_lock&lt;mutex&gt; wl(mut);     // wl locked
+upgradable_lock&lt;mutex&gt; rl(move(wl)); // rl upgradable-locked, wl unlocked
+</pre></blockquote>
+
+<p><i>-- end example</i>]</p>
+
+<blockquote><pre>
+<b>upgradable_lock(sharable_lock&lt;mutex_type&gt;&amp;&amp; <i>r</i>, detail::try_lock_type);</b>
+</pre></blockquote>
+
+<p>
+<i>Effects:</i> If <tt><i>r</i>.owns()</tt> then calls
+<a href="#try_unlock_sharable_and_lock_upgradable"><tt>try_unlock_sharable_and_lock_upgradable()</tt></a>
+on the referenced mutex.
+</p>
+<ul>
+<li>if <a href="#try_unlock_sharable_and_lock_upgradable"><tt>try_unlock_sharable_and_lock_upgradable()</tt></a>
+returns <tt>true</tt> then <tt>mutex()</tt> obtains the value from <tt><i>r</i>.release()</tt>
+and <tt>owns()</tt> is set to <tt>true</tt>.</li>
+<li>if <a href="#try_unlock_sharable_and_lock_upgradable"><tt>try_unlock_sharable_and_lock_upgradable()</tt></a>
+returns <tt>false</tt> then <tt><i>r</i></tt> is unaffected and this <tt>upgradable_lock</tt> construction
+has the same effects as a default construction.</li>
+</ul>
+
+<p>
+Else <tt><i>r</i>.owns()</tt> is <tt>false</tt>.  <tt>mutex()</tt> obtains the value
+from <tt><i>r</i>.release()</tt> and <tt>owns()</tt> is set to <tt>false</tt>
+</p>
+
+<p>
+<i>Postconditions:</i>
+</p>
+<blockquote>
+<tt>mutex() ==</tt> the value <tt><i>r</i>.mutex()</tt> had before the construction.<br>
+<tt>owns() ==</tt> the value <tt><i>r</i>.owns()</tt> had before the construction.<br>
+<tt><i>r</i>.mutex() == 0</tt>.<br>
+<tt><i>r</i>.owns() == false</tt>.
+</blockquote>
+
+<p><i>Notes:</i> This construction will not block.  It will try to obtain mutex
+ownership from <i>r</i> immediately, while changing the lock type from a "read lock" to
+an "upgradable lock".  If the "read lock" isn't held in the first place, the mutex merely
+changes type to an unlocked "upgradable lock".  If the "read lock" is held, then mutex
+transfer occurs only if it can do so in a non-blocking manner.
+</p>
+
+<p>[<i>Example:</i></p>
+
+<blockquote><pre>mutex m;
+sharable_lock&lt;mutex&gt; l1(mut);      // l1 sharable-locked
+upgradable_lock&lt;mutex&gt; l2(move(l1), try_to_lock); // l2 tries to obtain lock from l1
+</pre></blockquote>
+
+<p><i>-- end example</i>]</p>
+
+<h4><tt><a name="Locking functions3923"></a></tt>Locking functions
+</h4>
+
+<blockquote><pre><b>void lock();</b></pre></blockquote>
+
+<p>
+<i>Effects:</i> Calls
+<tt><a href="#lock_upgradable">lock_upgradable()</a></tt> on the
+referenced mutex.
+</p>
+
+<blockquote><pre><b>bool try_lock();</b></pre></blockquote>
+
+<p>
+<i>Effects:</i> Calls
+<tt><a href="#try_lock_upgradable">try_lock_upgradable()</a></tt> on
+the referenced mutex.
+</p>
+
+<blockquote><pre><b>void unlock();</b></pre></blockquote>
+
+<p>
+<i>Effects:</i> Calls
+<tt><a href="#unlock_upgradable">unlock_upgradable()</a></tt> on the
+referenced mutex.
+</p>
+
+<h3><a name="generic_locking"></a>Generic Locking Algorithms</h3>
+
+<h4><tt>temporary_lock</tt></h4>
+
+<p>
+Consider an algorithm which wants to easily switch back and forth among upgradable_lock,
+exclusive_lock, and sharable_lock.  Such code might look like:
+</p>
+
+<blockquote><pre>
+std::upgradable_mutex mut;
+
+void foo()
+{
+    typedef std::sharable_lock&lt;std::upgradable_mutex&gt; ReadLock;
+    typedef std::upgradable_lock&lt;std::upgradable_mutex&gt; UpgradableLock;
+    typedef std::exclusive_lock&lt;std::upgradable_mutex&gt; ExclusiveLock;
+    typedef std::temporary_lock&lt;ExclusiveLock, UpgradableLock&gt; WriteLock;
+
+    UpgradableLock upgradable_lock(mut);
+    // ... do read operation, sharing with other shared-locked threads
+    if (/* sometimes need to write */)
+    {
+        WriteLock write_lock(upgradable_lock);
+        // ... do write operation, what was read hasn't changed
+    }
+    // ... do more reading under upgradable_lock,
+    //     sharing with other shared-locked threads
+    if (/* sometimes need to write again */)
+    {
+        WriteLock write_lock(upgradable_lock);
+        // ... do write operation, what was read hasn't changed
+    }
+    ReadLock read_lock(std::move(upgradable_lock));
+    // ... do more reading under read_lock,
+    //     allowing for other shared-locked and upgradable-locked threads
+}
+</pre></blockquote>
+
+<p>
+The above example uses <tt>std::temporary_lock</tt> which is a generic, non-movable
+lock that simply transfers ownership from an <i>lvalue</i> lock to itself, and only
+for the current scope, and then on destruction transfers ownership back to the
+original lock.
+</p>
+
+<p>
+The example above also demonstrates transferring ownership from the <tt>upgradable_lock</tt>
+to a <tt>sharable_lock</tt> once it is known that no further <tt>exclusive_lock</tt>'s are
+needed.  This allows for a little more concurrency as only a single thread can have upgradable
+ownership of a mutex at once.  Note the use of <tt>move</tt> in this transfer which signals
+a complete relinquishing of control by <tt>upgradable_lock</tt>.
+</p>
+
+<p>
+<tt>temporary_lock</tt> is quite simple:
+</p>
+
+<blockquote><pre>
+template &lt;class Lock1, class Lock2&gt;
+class temporary_lock
+{
+private:
+    Lock1 lock1_;
+    Lock2&amp; lock2_;
+public:
+    temporary_lock(Lock2&amp; lock2) : lock1_(std::move(lock2)), lock2_(lock2) {}
+    ~temporary_lock() {lock2_ = Lock2(std::move(lock1_));}
+};
+</pre></blockquote>
+
+<p>
+<tt>temporary_lock</tt>'s function is to temporarily transfer mutex ownership to
+itself, from another lock, and then transfer it back.
+</p>
+
+<h4>Locking multiple locks without fear of deadlock</h4>
+
+<blockquote><pre>
+template &lt;class Lock1, class Lock2&gt;
+void lock(Lock1&amp; l1, Lock2&amp; l2);
+
+template &lt;class Lock1, class Lock2, class Lock3&gt;
+void lock(Lock1&amp; l1, Lock2&amp; l2, Lock3&amp; l3);
+
+template &lt;class Lock1, class Lock2, class Lock3, class Lock4&gt;
+void lock(Lock1&amp; l1, Lock2&amp; l2, Lock3&amp; l3, Lock4&amp; l4);
+</pre></blockquote>
+
+<p>
+These algorithms take a collection of locks and lock them without danger of
+deadlock. The algorithm used is unimportant but could be an ordering algorithm
+(say using the address of their contained mutex), or the <i> try and back
+off</i> algorithm.  When implementing the latter, it is helpful to also have
+some generic try-locking algorithms (which might be generally useful as well):
+</p>
+
+<blockquote><pre>
+template &lt;class Lock1, class Lock2&gt;
+unsigned try_lock(Lock1&amp; l1, Lock2&amp; l2);
+
+template &lt;class Lock1, class Lock2, class Lock3&gt;
+unsigned try_lock(Lock1&amp; l1, Lock2&amp; l2, Lock3&amp; l3);
+
+template &lt;class Lock1, class Lock2, class Lock3, class Lock4&gt;
+unsigned try_lock(Lock1&amp; l1, Lock2&amp; l2, Lock3&amp; l3, Lock4&amp; l4);
+</pre></blockquote>
+
+<p>
+The above return 0 if all locks were successfully locked, else they return with
+none of the locks locked.  The return value in this case is the 1-based index of
+the lock which failed to lock.  Here is how the three-lock, dead-lock safe
+algorithm could be coded on top of <tt>try_lock</tt>:
+</p>
+
+<blockquote><pre>
+template &lt;class Lock1, class Lock2, class Lock3&gt;
+void
+lock(Lock1&amp; l1, Lock2&amp; l2, Lock3&amp; l3)
+{
+    unsigned i = 1;
+    while (true)
+    {
+        switch (i)
+        {
+        case 1:
+            l1.lock();
+            i = try_lock(l2, l3);
+            if (i == 0)
+                return;
+            l1.unlock();
+            ++i;
+            break;
+        case 2:
+            l2.lock();
+            i = try_lock(l1, l3);
+            if (i == 0)
+                return;
+            l2.unlock();
+            if (i &gt; 1)
+                ++i;
+            break;
+        case 3:
+            l3.lock();
+            i = try_lock(l1, l2);
+            if (i == 0)
+                return;
+            l3.unlock();
+            break;
+        }
+    }
+}
+</pre></blockquote>
+
+<p>
+Here is example code which creates a thread-safe assignment operator using
+<tt>exclusive_lock</tt>, <tt>sharable_lock</tt>, and <tt>lock</tt>:
+</p>
+
+<blockquote><pre>
+class A
+{
+private:
+    typedef std::sharable_mutex Mutex;
+    typedef std::sharable_lock&lt;Mutex&gt; ReadLock;
+    typedef std::exclusive_lock&lt;Mutex&gt; WriteLock;
+
+    mutable Mutex mut_;
+    // ... other data
+public:
+    A&amp; operator=(const A&amp; a)
+    {
+        if (this != &amp;a)
+        {
+            WriteLock write_lock(  mut_, std::defer_lock);
+            ReadLock  read_lock (a.mut_, std::defer_lock);
+            std::lock(write_lock, read_lock);
+            // now safe to assign other data ...
+        }
+        return *this;
+    }
+};
+</pre></blockquote>
+
+<p>
+Without the use of <tt>std::lock</tt> in the above algorithm dead-lock becomes a
+possibility. All that would have to happen is for one thread to execute <tt>a1 =
+a2;</tt> while another thread executes <tt>a2 = a1;</tt>.  Note that it doesn't
+matter that we're dealing with two different kinds of locks above
+(<tt>ReadLock</tt> and <tt>WriteLock</tt>).  The generic locking algorithms
+don't need to know what kinds of locks they're operating on thanks to the
+generic interface of the locks.
+</p>
+
+<p>
+The common question at this point is:
+</p>
+
+<blockquote>
+What happens if someone wants to lock more than four locks?
+</blockquote>
+
+<p>
+I have two answers to that question:
+</p>
+
+<ol>
+<li>Such code seems extremely rare, and perhaps not even worth supporting.  Indeed, the
+two-lock overload alone is likely to satisfy 98% of the use cases.</li>
+<li>
+<p>One can easily create a templated lock adaptor class <tt>Lock2</tt>, or even
+<tt>Lock3</tt> or <tt>Lock4</tt>:</p>
+<blockquote><pre>
+template &lt;class L1, class L2&gt;
+class Lock2
+{
+private:
+    L1&amp; l1_;
+    L2&amp; l2_;
+    bool owns_;
+public:
+    Lock2(L1&amp; l1, L2&amp; l2)
+        : l1_(l1), l2_(l2), owns_(false) {}
+
+    void lock()
+    {
+        std::lock(l1_, l2_);
+        owns_ = true;
+    }
+
+    bool try_lock()
+    {
+        owns_ = std::try_lock(l1_, l2_) == 0;
+        return owns_;
+    }
+
+    void unlock()
+    {
+        owns_ = false;
+        l1_.unlock();
+        l2_.unlock();
+    }
+
+    // etc.
+};
+</pre></blockquote>
+<p>And then one merely needs to apply this adaptor to bundle up locks together:</p>
+<blockquote><pre>
+// Define L1 through L4 lock bundling types
+typedef std::exclusive_lock&lt;std::mutex&gt; L1;
+typedef Lock2&lt;L1, L1&gt; L2;
+typedef Lock2&lt;L2, L1&gt; L3;
+typedef Lock2&lt;L2, L2&gt; L4;
+
+// Here's 10 locks that need locking
+L1 l1(m1, std::defer_lock);
+L1 l2(m2, std::defer_lock);
+...
+L1 l10(m10, std::defer_lock);
+
+// Bundle the 10 locks into 4 locks;
+L2 l12(l1, l2);
+L2 l34(l3, l4);
+L2 l56(l5, l6);
+L4 l1234(l12, l34);
+L3 l567(l56, l7);
+L2 l89(l8, l9);
+
+// Lock 'em
+std::lock(l1234, l567, l89, l10);  // 10 locks safely locked!
+</pre></blockquote>
+<p>
+Using such a technique, there is no limit to the number of locks one can safely lock
+at one time.
+</p>
+</li>
+</ol>
+
+<h2><a name="cv"></a>Condition Variables</h2>
+
+<p>
+<b>Synopsis:</b>
+</p>
+
+<blockquote><pre>
+namespace std {
+
+template &lt;class Lock&gt;
+class condition
+{
+private:
+    condition(const condition&amp;);
+    condition&amp; operator=(const condition&amp;);
+public:
+    condition();
+    ~condition();
+
+    void notify_one();
+    void notify_all();
+    void wait(Lock&amp; lock);
+    template &lt;class Predicate&gt;
+        void wait(Lock&amp; lock, Predicate pred);
+    bool timed_wait(Lock&amp; lock, const timespec&amp; abs_time);
+    template &lt;class Predicate&gt;
+        bool timed_wait(Lock&amp; lock, const timespec&amp; abs_time, Predicate pred);
+};
+
+}  // namespace std
+</pre></blockquote>
+
+<p>
+Differences between this and <a href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2005/n1907.html">N1907</a>:
+</p>
+
+<ul>
+<li>
+The entire class is templated on the <tt>Lock</tt> type.  This is different than what is proposed
+in N1907 which only templates the <tt>wait</tt> member functions.
+The motivation is to enable both flexibility and efficiency.
+</li>
+</ul>
+
+<p>
+This <tt>condition</tt> variable is intended to work with user-defined locks and mutexes.
+All that is required is that <tt>Lock</tt> supply <tt>lock()</tt> and <tt>unlock()</tt>
+member functions.
+</p>
+
+<p>
+For typical Windows implementations, a data structure consisting a couple of mutexes and
+semaphores is commonly used (Alexander Terekhov's algorithm 8a).  This implementation only
+uses <tt>lock()</tt> and <tt>unlock()</tt> on the external mutex/lock.
+</p>
+
+<p>
+For a pthreads implementation a <tt>std::condition</tt> can contain an internal
+native mutex and native condition variable.  For waiting one simply locks the
+internal mutex, unlocks the external mutex, and waits on the native condition
+variable with the native mutex.  On returning from the wait, the external lock
+is locked, and the internal mutex is unlocked. For signaling in a pthreads
+implementation one locks the internal mutex, signals the native condition
+variable, and unlocks the internal mutex.
+</p>
+
+<p>
+As the above algorithm is more expensive than need be when locking on a native mutex type,
+<tt>condition</tt> can be specialized on <tt>mutex</tt> and <tt>exclusive_lock&lt;mutex&gt;</tt>.
+These specializations would hold nothing but a <tt>pthread_cond_t</tt> and the member
+functions would inline straight into the appropriate <tt>pthread_cond_*</tt> functions.
+</p>
+
+<p>
+This blend of flexibility and efficiency is not possible with the N1907 (boost) condition
+variable because one needs to have different data members to achieve both a general implementation
+and a native-efficient implementation (at least on pthreads).
+</p>
+
+<p>
+Additionally, if need be, clients can specialize <tt>std::condition</tt> on their
+user-defined mutexes or locks, if the general implementation is too inefficient, or
+does not work for some reason.
+</p>
+
+<p>
+With this design, clients can enjoy such flexibility as waiting with a read-locked mutex.  But they
+only pay for such flexibility if they use it.  condition&lt;native-mutex&gt; remains as
+efficient as the underlying OS allows.  The design also prevents accidental mismatching of
+condition variable and mutex/lock types.  For example given a <tt>condition&lt;mutex&gt;</tt>,
+it is a compile time error to use that object to wait on a <tt>my_special_mutex</tt>.
+</p>
+
+<h2><a name="Acknowledgments"></a>Acknowledgments</h2>
+
+<p>
+I'd like to start at the beginning.  Alexander Terekhov showed how to create a condition
+variable out of semaphores and mutexes.  This has been incredibly helpful.  Many people
+attempted the same task and it is Alexander's 8a algorithm that is universally used.
+The importance of this foundation layer is not to be underestimated.
+</p>
+
+<p>
+Much thanks to William Kempf for the original boost::threads design.  This is an
+important fundamental design.  I have personally learned a lot from William.
+</p>
+
+<p>
+Most the proposed thread-launching layer is based on code written by Peter Dimov.
+The critical breakthrough Peter accomplished is the complete orthogonality of the
+higher-level <tt>future</tt> level from the low-level <tt>thread</tt> level.  This
+higher level layer is efficient while being competely non-intrusive on the lower-level
+layer.  <tt>futures</tt> can layer on anything, completley independently.
+</p>
+
+<p>
+Ion Gazta&ntilde;aga also independently implemented <tt>future</tt> (as proposed by Kevlin
+Henney) on top of boost::threads non-intrusively (a critical breakthrough imho).
+Not only that but Ion has also independently implemented the
+exclusive/shared/upgradable mutex and locks concepts presented herein, and for
+processes, not just threads.  Ion has also been very influential in the basic
+lock concept, contributing important features such as <tt>accept_ownership</tt>
+and <tt>release</tt>.
+</p>
+
+<p>
+Kevlin Henney's N1883 was an eye-opener for the LWG (and indeed the C++ community)
+regarding futures.  Thank you.  N1883 has been extremely influential in this proposal.
+</p>
+
+<p>
+Thanks to Pete Becker for N1907 upon which much of this work is based.
+</p>
+
+<p>
+Beman Dawes has proposed and explored the area of exception propagation from an
+executing work unit to joining thread.  This will no doubt have an important
+impact on C++.
+</p>
+
+<p>
+Herb Sutter is the mind behind the very enticing <i>futures group</i> idea.
+</p>
+
+<p>
+Thanks to Sean Parent for helping me find the difference between a thread identity
+and a thread handle.
+</p>
+
+<p>
+Much thanks to concurrent work which is not represented here, but is nevertheless critical
+to this proposal's success.  Hans Boehm's and Herb Sutter's work on the C++ memory model
+has incalculable value.  Without such a foundation, this proposal is for naught.  And the
+atomics foundation is another critical level upon which this foundation depends.  Lawrence
+Crowl's thread-local-data work is similarly much appreciated.
+</p>
+
+<p>
+And finally a giant thanks to Clark Nelson for graciously putting up with my late
+delivery of this paper, requiring after hours work on his part.
+</p>
+
+</body>
+</html>

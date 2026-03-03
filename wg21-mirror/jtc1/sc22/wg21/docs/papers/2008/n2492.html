@@ -1,0 +1,1387 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+ "http://www.w3.org/TR/html4/strict.dtd">
+<html><head>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8">
+<title>C++ Data-Dependency Ordering: Atomics and Memory Model</title>
+</head><body>
+<h1>C++ Data-Dependency Ordering: Atomics and Memory Model</h1>
+
+<p>
+ISO/IEC JTC1 SC22 WG21 N2492 = 08-0002 - 2008-02-03
+</p>
+
+<p>
+Paul E. McKenney, paulmck@linux.vnet.ibm.com
+<br>
+Hans-J. Boehm, Hans.Boehm@hp.com, boehm@acm.org
+<br>
+Lawrence Crowl, crowl@google.com, Lawrence@Crowl.org
+</p>
+
+<p>
+<br><a href="#Introduction">Introduction</a>
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Problem">Problem</a>
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Prior">Prior Work</a>
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Alternatives">Alternatives Considered</a>
+<br><a href="#Solution">Solution</a>
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="#root">Dependency Root</a>
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="#tree">Dependency Tree</a>
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="#informal">Informal Specification</a>
+<br><a href="#Examples">Examples</a>
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="#indirection">Indirection</a>
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="#removal">Code Removal</a>
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="#sensitive">Control-Senstive Indirection</a>
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="#propogation">Constant Propogation</a>
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="#elimination">Control Elimination</a>
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="#control">Control Dependence</a>
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="#subexpression">Conditional Subexpression Elimination</a>
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="#results">Constant Results</a>
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="#selective">Selective Dependency Ordering</a>
+<br><a href="#Implementation">Implementation</a>
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="#promote">Promote to Acquire</a>
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="#unoptimize">Avoid Some Optimizations</a>
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="#tracking">Track Optimizations</a>
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="#truncate">Truncate Data-Dependency Trees</a>
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="#annotate">Annotate Functions</a>
+<br><a href="#Wording">Proposed Wording</a>
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="#intro.multithread">1.10 Multi-threaded executions and data races [intro.multithread]</a>
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="#atomics">29 Atomic operations library [atomics]</a>
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="#atomics.order">29.1 Order and Consistency [atomics.order]</a>
+<br>&nbsp;&nbsp;&nbsp;&nbsp;<a href="#atomics.types.operations">29.4.4 (tentative) Operations [atomics.types.operations (tentative)]</a>
+</p>
+
+<h2><a name="Introduction">Introduction</a></h2>
+
+<p>
+The efficiency of data structures
+that are read frequently and written rarely
+can substantially affect the scalability of some applications.
+Based on experience in making the Linux operating system scalable,
+we propose addenda to the memory model
+(<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2429.htm">N2429</a>)
+and atomics library
+(<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2427.htm">N2427</a>)
+for inter-thread data-dependency ordering.
+</p>
+
+<p>
+This proposal admits a trivial implementation,
+limiting significant implementation investment
+to those compilers and platforms
+where that investment will be recovered.
+</p>
+
+<h3><a name="Problem">Problem</a></h3>
+
+<p>
+There are two significant use cases
+where the current working draft
+(<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2461.pdf">N2461</a>)
+does not support scalability
+near that possible on some existing hardware.
+
+<dl>
+<dt>read access to rarely written concurrent data structures</dt>
+<dd>
+Rarely written concurrent data structures are quite common,
+both in operating-system kernels and in server-style applications.
+Examples include data structures representing
+outside state (such as routing tables),
+software configuration (modules currently loaded),
+hardware configuration (storage device currently in use),
+and security policies (access control permissions, firewall rules).
+Read-to-write ratios well in excess of a billion to one are quite common.
+</dd>
+
+<dt>publish-subscribe semantics for pointer-mediated publication</dt>
+<dd>
+Much communication between threads is pointer-mediated,
+in which the producer publishes a pointer
+through which the consumer can access information.
+Access to that data is possible without full acquire semantics.
+</dd>
+</dl>
+
+<p>
+In such cases, use of inter-thread data-dependency ordering has resulted in
+order-of-magnitude speedups and similar improvements in scalability
+on machines that support inter-thread data-dependency ordering.
+Such speedups are possible
+because such machines can avoid
+the expensive lock acquisitions, atomic instructions, or memory fences
+that are otherwise required.
+</p>
+
+<p>
+A simplified example use of inter-thread data-dependency ordering,
+found within the Linux kernel,
+looks something like the following:
+</p>
+
+<pre><code>
+struct foo {
+    int a;
+    struct foo *next;
+};
+struct foo *head;
+
+void insert(int a) {
+   struct foo *p = kmalloc(sizeof(*p), GFP_KERNEL); /* cannot fail */
+   spin_lock(&amp;mylock);
+   p-&gt;a = 1;
+   p-&gt;next = head;
+   smp_wmb();  /* Can be thought of as a store-release fence. */
+   head = p;
+   spin_unlock(&amp;mylock);
+}
+
+int getfirstval(void) { /* requires head not NULL */
+   struct foo *q = rcu_dereference(head);  /* see discussion below. */
+   int retval = q-&gt;a;
+   return retval;
+}
+</code></pre>
+
+<p>
+The effect of <code>getfirstval</code>
+is to return the value at the head of the list
+with little more (or even no more) overhead
+than would be required if the list were immutable,
+but while still allowing updates.
+The <code>rcu_dereference()</code> API used in <code>getfirstval()</code>
+can be fully implemented in different ways,
+optimized for different classes of machines:
+</p>
+
+<dl>
+<dt>strong memory ordering (e.g., TSO)
+<dd>
+<code>rcu_dereference()</code>
+simply prevents the compiler from performing optimizations
+that would order operations
+with data dependencies on <code>q</code>
+before the load from <code>head</code>.
+In this case,
+the code relies on the strong ordering
+to prevent the assignment to <code>retval</code>
+from seeing the pre-initialized version of the <code>a</code> field
+because the store to <code>a</code>
+must precede the store to <code>head-&gt;next</code>.
+</dd>
+
+<dt>weak memory ordering with enforced data-dependency ordering</dt>
+<dd>
+<code>rcu_dereference()</code>
+again prevents the compiler from performing optimizations
+that would order operations with data dependencies on <code>q</code>
+before the load from <code>head</code>.
+However, in this case,
+the code
+relies on the the machine's enforcement of data-dependency ordering
+to prevent the assignment to <code>retval</code>
+from seeing the pre-initialized version of the <code>a</code> field,
+because <code>q-&gt;a</code> depends on <code>q</code>.
+</dd>
+
+<dt>weak memory ordering without data-dependency ordering</dt>
+<dd>
+<code>rcu_dereference()</code>
+is promoted to a load-acquire operation.
+Because the acquire prevents <em>all</em> subsequent memory references
+from being reordered with the load from <code>head</code>,
+it must prevent any subsequent operations depending on <code>h</code>
+from being reordered with the load from <code>head</code>.
+</dd>
+</dl>
+
+<p>
+The current working draft
+(<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2461.pdf">N2461</a>)
+would require that these machines
+implement <code>rcu_dereference()</code> using either an acquire fence or
+a load-acquire.
+In both cases, this prohibits useful classes of compiler optimizations
+that involve code motion that does not break dependencies on the
+load from <code>head</code>.
+Worse yet, this requires emitting expensive memory fences for
+the second class of machines, which can result in unacceptable performance
+degradation.
+</p>
+
+<p>
+More elaborate examples are described in a
+<a href="http://wiki.dinkumware.com/twiki/pub/Wg21oxford/EvolutionWorkingGroup/ParallelCExperience.2007.04.17b.pdf">
+presentation at the Oxford 2007 meeting</a>,
+describing use cases from the Linux kernel.
+These uses cases begin on slide 37
+and include
+traversal of multiple levels of pointers, indexing arrays, and casts.
+</p>
+
+<h3><a name="Prior">Prior Work</a></h3>
+
+<p>
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2171.html">N2171</a>
+and
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2176.html">N2176</a>
+are the basis for the current memory model.
+These proposals support a wide range of memory-ordering use cases,
+but do not support dependency ordering.
+</p>
+
+<p>
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2153.pdf">N2153</a>
+by Silvera, Wong, McKenney, and Blainey
+was the first proposal to explicitly address weakly ordered architectures
+and the issues surrounding dependency ordering.
+It was succeded by 
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2237.pdf">N2237</a>.
+These papers also presented a number of use cases
+motivating non-SC memory ordering,
+including dependency ordering.
+</p>
+
+<p>
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2195.html">N2195</a>
+by Peter Dimov
+proposes an <code>atomic_load_address()</code>
+template function that protects a single level of indirection.
+Although this suffices for the very simple example above, it does
+not handle other examples given in a
+<a href="http://wiki.dinkumware.com/twiki/pub/Wg21oxford/EvolutionWorkingGroup/ParallelCExperience.2007.04.17b.pdf">presentation at the Oxford 2007 meeting</a>
+describing use cases from the Linux kernel (beginning on slide 37).
+In particular,
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2195.html">N2195</a>,
+does not support data dependencies that traverse
+multiple levels of indirection nor that traverse array accesses.
+</p>
+
+<p>
+An alternative proposal in
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2195.html">N2195</a>,
+introduces the notion of dynamic dependencies.
+Use of dynamic dependencies would permit the data-dependency trees
+to be scanned after performing those optimizations
+that do not break dynamic data-dependency trees.
+However, this proposal was rejected
+due to software-engineering concerns,
+which loom especially large
+in cases where the compiler is able to perform optimizations
+that the programmer cannot anticipate.
+For example, the programmer might be forgiven for assuming
+that an argument to a given function was variable,
+but a compiler doing inter-procedural analysis
+might discover that it was in fact constant,
+or, worse yet, zero.
+The compiler is therefore required to propagate dependency trees
+regardless of optimization.
+</p>
+
+<p>
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2359.html">N2359</a>,
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2360.html">N2360</a>, and
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2361.html">N2361</a>,
+by Paul E. McKenney
+present an approach combining elaborations to the
+memory model, atomics API, and annotations.
+Based on discussions
+on the cpp-threads mailing list
+and in the concurrency workgroup at the 2007 Oxford and Toronto meetings,
+this proposal adapts that work to the existing atomics proposal.
+</p>
+
+<h3><a name="Alternatives">Alternatives Considered</a></h3>
+
+<p>
+Although control dependencies are extremely intuitive,
+there are comparatively few known control-dependency use cases,
+and ARM CPUs only partially support control dependencies.
+Furthermore,
+some of the more troublesome optimization issues with switch statements
+involve control rather than data dependencies.
+Therefore, there is no support for control dependencies.
+If experience indicates that control dependencies also need to be enforced,
+a separate proposal will be put forward for them.
+</p>
+
+<p>
+Prohibiting dependency-breaking optimizations
+would remove the need for annotations.
+This faced severe resistance,
+as a number of people felt that
+this would prohibit valuable optimizations.
+Therefore, this proposal requires annotations
+for function arguments and return values
+through which data dependencies are required to flow.
+As inter-compilation-unit analysis becomes more common,
+it is hoped that tools will appear that check annotations
+or perhaps even produce them automatically.
+However,
+individual implementations are free to avoid the dependency issue entirely
+by simply refraining from breaking data dependencies,
+or by emitting compensating memory fences when breaking data dependencies.
+(Full disclosure: this was in fact the original proposal.)
+</p>
+
+<p>
+Simply relying on acquire fences
+would remove the need for dependency ordering.
+Although this is a reasonable strategy for many machines,
+it is inappropriate for weakly ordered machines
+that support data-dependency ordering.
+</p>
+
+<h2><a name="Solution">Solution</a></h2>
+
+<p>
+We propose explicit program support for inter-thread data-dependency ordering.
+Programmers will explicitly mark
+the root of tree of data-dependent operations,
+and implementations will respect that ordering.
+</p>
+
+<h3><a name="root">Dependency Root</a></h3>
+
+<p>
+To mark the root of a inter-thread data-dependency tree,
+programmers will use new variant of the atomic load defined in
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2427.html">N2427</a>.
+Specifically,
+this proposal augments 
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2427.html">N2427</a>
+by adding a <code>memory_order_consume</code> option that may be supplied
+to operations for which data-dependency semantics are permitted.
+The <code>memory_order</code> enumeration in
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2427.html">N2427</a>
+would then read as follows, keeping the enumeration in rough order
+of increasing memory-ordering strength:
+<p>
+
+<pre><code>
+typedef enum memory_order {
+    memory_order_relaxed, memory_order_consume, memory_order_acquire,
+    memory_order_release, memory_order_acq_rel, memory_order_seq_cst
+} memory_order;
+</code></pre>
+
+<h3><a name="tree">Dependency Tree</a></h3>
+
+<p>
+Given the load value as the root of a data-dependency tree,
+the tree is loosely defined as
+any operation or function
+(within the same thread)
+that has a data-dependent argument within the tree
+or reads a variable stored by a data-dependent assignment within the tree.
+</p>
+
+<p>
+Note that it is possible for a given value
+to be part of multiple dependency trees.
+One way that this might happen
+would be to add a value in one dependency tree
+to another value in a different dependency tree.
+The sum would then be in both dependency trees.
+</p>
+
+<p>
+The compiler must preserve the dependency tree through all optimizations.
+In particular,
+if the compiler is able to optimize a member of a dependency tree to a constant,
+then the compiler must either produce code
+that preserves the dependency tree
+or emit a memory barrier appropriate to the target architecture.
+</p>
+
+<p>
+A data-dependency tree ends
+by the death of values within the tree.
+Since trees extend into called functions
+and out through return values,
+these trees may extend until the end of program execution.
+The section on implementation
+describes strategies for dealing this unbounded extent
+in the normal compilation process.
+</p>
+
+<p>
+When normal compilation of an unbounded extent
+proves too inefficient,
+the programmer may explicitly prune a data-dependency tree
+by passing a value through the identity function
+<code>std::kill_dependency</code>.
+The result is, by definition, not inter-thread data-dependent on the argument,
+even though the values are identical.
+</p>
+
+<h3><a name="informal">Informal Specification</a></h3>
+
+<p>
+Informally,
+we define inter-thread data-dependency ordering
+in terms of
+</p>
+<dl>
+<dt>a 'consume' operation</dt>
+<dd>that is a weaker form of the 'acquire' operation,</dd>
+<dt>a 'carries dependency to' relationship</dt>
+<dd>that describes how data dependencies propogate,</dd>
+<dt>a 'dependency ordered before' relationship</dt>
+<dd>that captures the operations depending on the 'consume' operation, and</dd>
+<dt>a 'non-locally happens before' relationship</dt>
+<dd>that is a term of the general 'happens before' relationship.</dd>
+</dl>
+<p>
+The full details are within the formal wording.
+</p>
+
+<h2><a name="Examples">Examples</a></h2>
+
+<p>
+In
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2176.html">N2176</a>,
+Hans Boehm lists a number of example optimizations that can break
+dependency trees, which are discussed in the following subsections.
+<p>
+
+<h3><a name="indirection">Indirection</a></h3>
+
+<p>
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2176.html">N2176</a>
+example code:
+</p>
+
+<pre><code>
+r1 = x.load(memory_order_relaxed);
+r2 = *r1;
+</code></pre>
+
+<p>
+Recoding to this proposal's API:
+</p>
+
+<pre><code>
+r1 = x.load(memory_order_consume);
+r2 = *r1;
+</code></pre>
+
+<p>
+Assuming that <code>x</code> is an atomic,
+the <code>x.load(memory_order_consume)</code>
+will form the root of a dependency tree.
+The dependency tree extends to the indirection through r1,
+so the dependency is ordered.
+</p>
+
+<h3><a name="removal">Code Removal</a></h3>
+
+<p>
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2176.html">N2176</a>
+example code:
+</p>
+
+<pre><code>
+r1 = x.load(memory_order_relaxed);
+r3 = &amp;a + r1 - r1;
+r2 = *r3;
+</code></pre>
+
+<p>
+This could legitimately be optimized to the following,
+breaking the dependency tree:
+</p>
+
+<pre><code>
+r1 = x.load(memory_order_relaxed);
+r3 = &amp;a;
+r2 = *r3;
+</code></pre>
+
+<p>
+However, recoding to this proposal's API:
+</p>
+
+<pre><code>
+r1 = x.load(memory_order_consume);
+r3 = &amp;a + r1 - r1;
+r2 = *r3;
+</code></pre>
+
+<p>
+Again assuming that <code>x</code> is an atomic,
+the <code>x.load(memory_order_consume)</code>
+will form the root of a dependency tree.
+The dependency tree extends to the indirection through r1,
+so the dependency is ordered.
+Because the dependency trees must be traced prior to optimization,
+if the optimization is performed,
+a countervailing memory fence or artificial data dependency must be inserted.
+</p>
+
+<h3><a name="sensitive">Control-Senstive Indirection</a></h3>
+
+<p>
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2176.html">N2176</a>
+example code, recoding to this proposal's API:
+</p>
+
+<pre><code>
+r1 = x.load(memory_order_consume);
+if (r1 == 0)
+        r2 = *r1;
+else
+	r2 = *(r1 + 1);
+</code></pre>
+
+<p>
+Assuming that <code>x</code> is an atomic,
+the <code>x.load(memory_order_consume)</code>
+will form the root of a dependency tree.
+The dependency tree extends to the indirection through r1,
+so the dependency is ordered.
+</p>
+
+<h3><a name="propogation">Constant Propogation</a></h3>
+
+<p>
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2176.html">N2176</a>
+example code, as modified during email discussions,
+where <code>x</code> is known to be either 0 or 1:
+</p>
+
+<pre><code>
+if (x.load(memory_order_consume))
+	...
+else
+	...
+y = 42 * x / 13;
+</code></pre>
+
+<p>
+This might be optimized to the following:
+</p>
+
+<pre><code>
+if (x.load(memory_order_consume)) {
+	...
+	y = 3;
+} else {
+	...
+	y = 0;
+}
+</code></pre>
+
+<p>
+assuming that <code>x</code> is an atomic,
+the <code>x.load(memory_order_consume)</code>
+will form the root of a dependency tree.
+The dependency tree extends to the assignment to <code>y</code>,
+so the dependency is ordered.
+If the underlying machine
+preserves control-dependency ordering for writes,
+this optimization is perfectly legal.
+If the underlying machine does not preserve control-dependency ordering,
+then either this optimization must be avoided,
+a memory fence must be emitted after the load of <code>x</code>,
+or an artificial data dependency must be manufactured.
+An example artificial data dependency might be as follows:
+</p>
+
+<pre><code>
+if (r1 = x.load(memory_order_consume)) {
+	...
+	y = 3;
+} else {
+	...
+	y = 0;
+}
+y = y + r1 - r1;
+</code></pre>
+
+<p>
+The compiler would need to decide whether the add and subtract was
+better than the multiply and divide.
+</p>
+
+<h3><a name="elimination">Control Elimination</a></h3>
+
+<p>
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2176.html">N2176</a>
+example code:
+</p>
+
+<pre><code>
+r1 = x.load(memory_order_consume);
+if (r1)
+        r2 = y.a;
+else
+	r2 = y.a;
+</code></pre>
+
+<p>
+This might be optimized to the following in order to break dependency trees:
+</p>
+
+<pre><code>
+r1 = x.load(memory_order_relaxed);
+r2 = y.a;
+</code></pre>
+
+<p>
+This is a control dependency, so falls outside the scope of this proposal.
+</p>
+
+<h3><a name="control">Control Dependence</a></h3>
+
+<p>
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2176.html">N2176</a>
+example code:
+</p>
+
+<pre><code>
+r1 = x.load(memory_order_consume);
+if (r1)
+	f(&amp;y);
+else
+	g(&amp;y);
+</code></pre>
+
+<p>
+Assuming that <code>x</code> is an atomic,
+the <code>x.load(memory_order_consume)</code>
+will form the root of a dependency tree.
+However, there is no data dependency
+between the load and either of the function calls.
+There is instead a control dependency,
+which does not force ordering in this proposal.
+</p>
+
+<p>
+If this example were to be modified
+so that the variable <code>r1</code>
+were passed to <code>f()</code> and <code>g()</code>
+(rather than <code>y</code> as shown above),
+then the functions would have a data dependency on the load.
+</p>
+
+<h3><a name="subexpression">Conditional Subexpression Elimination</a></h3>
+
+<p>
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2176.html">N2176</a>
+example code:
+</p>
+
+<pre><code>
+r2 = x.load(memory_order_consume);
+r3 = r2-&gt;a;
+</code></pre>
+
+<p>
+There might be at temptation to optimize the code as follows:
+</p>
+
+<pre><code>
+r2 = x.load(memory_order_consume);
+r3 = r1-&gt;a;
+if (r1 != r2) r3 = r2-&gt;a;
+</code></pre>
+
+<p>
+However, assuming that <code>x</code> is an atomic,
+the <code>x.load(memory_order_consume)</code>
+will form the root of a dependency tree.
+The dependency tree extends to the indirection through <code>r2</code>,
+so the dependency is ordered and the optimization prohibited,
+at least in absence of a compensating fence
+or artificially generated data dependency.
+</p>
+
+<h3><a name="results">Constant Results</a></h3>
+
+<p>
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2176.html">N2176</a>
+example code:
+</p>
+
+<pre><code>
+r1 = x.load(memory_order_consume);
+r2 = a[r1-&gt;index % a_size];
+</code></pre>
+
+<p>
+If the variable <code>a_size</code>
+is known to the compiler to have the value one,
+then there might be a temptation to optimize as follows:
+</p>
+
+<pre><code>
+r1 = x.load(memory_order_consume);
+r2 = a[0];
+</code></pre>
+
+<p>
+However, again assuming that <code>x</code> is an atomic,
+the <code>x.load(memory_order_consume)</code>
+will form the root of a dependency tree.
+The dependency tree extends to the indirection through <code>r1</code>,
+so the dependency is ordered.
+Therefore, this optimization is prohibited
+unless accompanied by a compensating memory barrier
+or artificial data dependency.
+</p>
+
+<h3><a name="selective">Selective Dependency Ordering</a></h3>
+
+<p>
+In some cases, dependency ordering is important
+only for some fields of a structure.
+For example:
+</p>
+
+<pre><code>
+r1 = x.load(memory_order_consume);
+r2 = r1-&gt;index;
+do_something_with(a[r2]);
+</code></pre>
+
+<p>
+Indexing <code>a[]</code> with an uninitialized field could be fatal,
+but once the corresponding array element has been fetched,
+we might not care about subsequent dependencies.
+The <code>std::kill_dependency</code> primitive
+enables the programmer to tell the compiler
+that specific dependencies may be broken,
+for example, as follows:
+</p>
+
+<pre><code>
+r1 = x.load(memory_order_consume);
+r2 = r1-&gt;index;
+do_something_with(a[std::kill_dependency(r2)]);
+</code></pre>
+
+<p>
+This allows the compiler to reorder the call to <code>do_something_with</code>,
+for example, by performing speculative optimizations
+that predict the value of <code>a[r2]</code>.
+</p>
+
+<h2><a name="Implementation">Implementation</a></h2>
+
+<p>
+There are several implementation strategies.
+The first strategy is acceptable on all machines and compilers.
+The subsequent strategies are appropriate to subsets thereof.
+</p>
+
+<p>
+This proposal is expected to have minimal effect
+on strongly ordered machines (e.g., x86)
+and on weakly ordered machines
+that do not support data-dependency ordering (e.g., Alpha).
+The major burden of this proposal would fall on
+weakly ordered machines
+and their compilers that reorder data-dependent operations,
+such as ARM and PowerPC (and possibly also Itanium).
+Even for these architectures,
+a fully conforming compiler
+could use the same approach
+as weakly ordered machines that do not support data-dependency ordering,
+albeit at a performance penalty.
+</p>
+
+<h3><a name="promote">Promote to Acquire</a></h3>
+
+<p>
+Simply promoting all <code>memory_order_consume</code> operations
+to <code>memory_order_acquire</code>
+will meet the requirements of this proposal.
+</p>
+
+<p>
+For weakly ordered machines without data-dependency ordering,
+this implementation is also necessary.
+For other machines,
+it also serves as trivial first implementation.
+</p>
+
+<h3><a name="unoptimize">Avoid Some Optimizations</a></h3>
+
+<p>
+Compilers can implement <code>memory_order_consume</code> loads
+as regular loads,
+so long as the compiler attempts no optimizations
+that break data dependencies.
+This strategy will be particularly useful for non-optimizing compilers.
+</p>
+
+<p>
+This strategy does not apply
+to weakly ordered machines without data-dependency ordering,
+but only to 
+strongly ordered machines
+or weakly ordered machines with data-dependency ordering.
+</p>
+
+<h3><a name="tracking">Track Optimizations</a></h3>
+
+<p>
+For implementations on strongly ordered machines
+or weakly ordered machines with data-dependency ordering,
+compilers can implement <code>memory_order_consume</code> loads
+as regular loads,
+so long as the compiler tracks operations within a data-dependency tree
+and avoids optimizations that break data dependencies of those operations.
+Note, however, the caveat in the next subsection.
+</p>
+
+<p>
+In terms of the implementation burden on compilers,
+some of the compiler work to implement this strategy
+is also required
+to respect the existing <code>memory_order_acquire</code> loads.
+</p>
+
+<p>
+This strategy applies primarily to 
+weakly ordered machines with data-dependency ordering,
+secondarily to strongly ordered machines,
+and does not apply
+to weakly ordered machines without data-dependency ordering.
+</p>
+
+<h3><a name="truncate">Truncate Data-Dependency Trees</a></h3>
+
+<p>
+The above strategy
+implies that the compiler is avoiding optimizations
+in all functions dynamically called on a data-dependency tree.
+This implication is unacceptable for compilers
+that see only a portion of those functions.
+</p>
+
+<p>
+However, the compiler does not <em>need</em> to see all functions;
+it can simply emit an acquire fence
+on the tree root (which is atomic)
+before a tree extends into a function call or out of a function return.
+Given such a convention,
+the compiler can assume that
+there are no optimization restrictions at the start of a function.
+This strategy enables fully-optimized per-function compilation,
+with run-time performance
+no worse than,
+and often much better than, the first strategy.
+</p>
+
+<p>
+This strategy becomes more effective
+when performed after inlining
+or when considered in inter-procedural optimization.
+</p>
+
+<h3><a name="annotate">Annotate Functions</a></h3>
+
+<p>
+Many uses of data-dependency operations
+will be in the implementation of data structures.
+If their (presumably non-inline) access functions
+must truncate the data-dependency tree on return,
+much of the potential performance of data-dependency ordering
+may be lost.
+</p>
+
+<p>
+To address this performance opportunity,
+we propose to annotate function parameters and results
+to indicate that
+the compiler should assume that
+code on the other side of the function will handle depencencies correctly.
+</p>
+
+<p>
+As these annotations are not essential to data-dependency ordering,
+they are covered in a separate proposal,
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2008/n2493.html">N2493</a>.
+</p>
+
+<h2><a name="Wording">Proposed Wording</a></h2>
+
+<p>
+This section proposes wording changes
+to working draft
+<a href="http://open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2461.pdf">N2461</a>.
+</p>
+
+<h3><a name="intro.multithread">1.10 Multi-threaded executions and data races [intro.multithread]</a></h3>
+
+<p>
+Edit paragraph 4 as follows:
+</p>
+
+<blockquote>
+<p>
+The library defines a number of atomic operations (clause 29)
+and operations on locks (clause 30)
+that are specially identified as synchronization operations.
+These operations play a special role in making assignments in one thread
+visible to another.
+
+A synchronization operation is
+either
+<ins>a consume operation,</ins>
+an acquire operation<ins>,</ins>
+<del>or</del> a release operation,
+or both<ins> an acquire and release operation</ins>,
+on one or more memory locations;
+the semantics of these are described below.
+
+In addition, there are relaxed atomic operations,
+which are not synchronization operations,
+and atomic read-modify-write operations,
+which have special characteristics,
+also described below.
+
+[<i>Note:</i>
+For example, a call that acquires a lock
+will perform an acquire operation on the locations comprising the lock.
+Correspondingly, a call that releases the same lock
+will perform a release operation on those same locations.
+Informally, performing a release operation on <var>A</var>
+forces prior side effects on other memory locations
+to become visible to other threads
+that later perform <ins>a consume or</ins> an acquire
+operation on <var>A</var>.
+We do not include "relaxed" atomic operations as synchronization operations
+although, like synchronization operations, they cannot contribute to data races.
+&mdash;<i>end note</i>]
+</p>
+</blockquote>
+
+<p>
+Paragraph 6 (defining release sequence) is unchanged:
+</p>
+
+<blockquote>
+<p>
+A <dfn>release sequence</dfn> on an atomic object <var>M</var>
+is a maximal contiguous sub-sequence of side effects
+in the modification order of <var>M</var>,
+where the first operation is a release,
+and every subsequent operation
+</p>
+<ul>
+<li>is performed by the same thread that performed the release, or</li>
+<li>is a non-relaxed atomic read-modify-write operation.</li>
+</ul>
+</blockquote>
+
+<p>
+Paragraph 7 (defining synchronizes with) is unchanged:
+</p>
+
+<blockquote>
+<p>
+An evaluation <var>A</var>
+that performs a release operation on an object <var>M</var>
+<dfn>synchronizes with</dfn>
+an evaluation <var>B</var>
+that performs an acquire operation on <var>M</var>
+and reads a value written by
+any side effect in the release sequence headed by <var>A</var>.
+
+[<i>Note:</i>
+Except in the specified cases,
+reading a later value does not necessarily ensure visibility as described below.
+Such a requirement would sometimes interfere with efficient implementation.
+&mdash;<i>end note</i>]
+
+[<i>Note:</i>
+The specifications of the synchronization operations
+define when one reads the value written by another.
+For atomic variables, the definition is clear.
+All operations on a given lock occur in a single total order.
+Each lock acquisition "reads the value written" by the last lock release.
+&mdash;<i>end note</i>]
+</p>
+</blockquote>
+
+<p>
+After paragraph 7, add the following paragraphs.
+</p>
+
+<blockquote>
+
+<p>
+<ins>An evaluation <var>A</var>
+<dfn>carries a dependency to</dfn>
+an evaluation <var>B</var>
+if</ins>
+</p>
+<ul>
+<li>
+<ins>the result of <var>A</var> is an argument to <var>B</var> and
+<var>B</var> is not the <code>std::kill_dependency</code> intrinsic, or</ins>
+</li>
+<li>
+<ins><var>A</var> writes a scalar object or bit-field <var>M</var>,
+<var>B</var> reads the value written by <var>A</var> from <var>M</var>,
+and <var>A</var> is sequenced before <var>B</var>, or</ins>
+</li>
+<li>
+<ins>for some evaluation <var>X</var>,
+<var>A</var> carries a dependency to <var>X</var>,
+and <var>X</var> carries a dependency to <var>B</var>.</ins>
+</li>
+</ul>
+
+<p>
+<ins>[<i>Note:</i>
+'Carries a dependency to' is a subset of 'is sequenced before'.
+&mdash;<i>end note</i>]</ins>
+</p>
+
+<p>
+<ins>An evaluation <var>A</var>
+<dfn>is dependency ordered before</dfn>
+an evaluation <var>B</var>
+if,
+for some evaluation <var>X</var>,</ins>
+<ul> 
+<li>
+<ins><var>A</var>
+performs a release operation on an object <var>M</var>,
+<var>B</var> performs a consume operation on <var>M</var>,
+and <var>B</var> reads a value written by
+any side effect in the release sequence headed by <var>A</var>, or</ins>
+</li>
+<li>
+<ins><var>A</var> is dependency ordered before <var>X</var> and
+<var>X</var> carries a dependency to <var>B</var>.</ins>
+</li>
+</ul>
+
+<p>
+<ins>An evaluation <var>A</var>
+<dfn>non-locally happens before</dfn>
+an evaluation <var>B</var>
+if for some evaluation <var>X</var>,</ins>
+</p>
+<ul>
+<li>
+<ins><var>A</var> synchronizes with <var>B</var>, or</ins>
+</li>
+<li>
+<ins><var>A</var> synchronizes with <var>X</var> and
+<var>X</var> is sequenced before <var>B</var>, or</ins>
+</li>
+<li>
+<ins><var>A</var> is dependency ordered before <var>B</var>, or</ins>
+</li>
+<li>
+<ins><var>A</var> is sequenced before <var>X</var> and
+<var>X</var> non-locally happens before <var>B</var>, or</ins>
+</li>
+<li>
+<ins><var>A</var> non-locally happens before <var>X</var> and
+<var>X</var> non-locally happens before <var>B</var>.</ins>
+</li>
+</ul>
+
+<p>
+[<i>Note:</i>
+<var>A</var> does <em>not</em> necessarily
+non-locally happen before <var>B</var>
+if <var>A</var> is sequenced before <var>B</var>,
+or there is an <var>X</var>,
+such that <var>A</var> is dependency ordered before <var>X</var>
+and <var>X</var> is sequenced before <var>B</var>.
+The second case does not imply memory visibility ordering,
+and thus must be excluded.
+&mdash;<i>end note</i>]
+</p>
+
+</blockquote>
+
+<p>
+Edit paragraph 8 as follows:
+</p>
+
+<blockquote>
+<p>
+An evaluation <var>A</var>
+<dfn>happens before</dfn>
+an evaluation <var>B</var> if:
+</p>
+<ul>
+<li><var>A</var> is sequenced before <var>B</var>, or</li>
+<li><del><var>A</var> synchronizes with <var>B</var>, or</del></li>
+<li><del>for some evaluation <var>X</var>,</del>
+<var>A</var> <ins>non-locally</ins> happens before <del><var>X</var> and
+<var>X</var> happens before</del> <var>B</var>.
+</li>
+</ul>
+</blockquote>
+
+<h3><a name="atomics">29 Atomic operations library [atomics]</a></h3>
+
+<p>
+Edit the atomic library synopsis, as follows:
+</p>
+
+<blockquote>
+<p>
+// 29.1, order and consistency
+</p>
+<pre><code>
+enum memory_order;
+<ins>template&lt; typename <var>T</var> &gt;
+<var>T</var>* kill_dependency( <var>T</var>* <var>y</var> );</ins>
+</code></pre>
+</blockquote>
+
+<h3><a name="atomics.order">29.1 Order and Consistency [atomics.order]</a></h3>
+
+<p>
+Edit the <code>enum memory_order</code> synopsis as follows:
+</p>
+
+<blockquote>
+<pre><code>
+typedef enum memory_order {
+  memory_order_relaxed, <ins>memory_order_consume,</ins> memory_order_acquire,
+  memory_order_release, memory_order_acq_rel, memory_order_seq_cst
+} memory_order;
+</code></pre>
+</blockquote>
+
+<p>
+Edit the <code>memory_order</code> effects as follows:
+</p>
+
+<blockquote>
+<table>
+
+<tr><th>Element</th>
+<th>Meaning</th></tr>
+
+<tr><td valign=top><code>memory_order_relaxed</code></td>
+<td valign=top>the operation does not order memory</td></tr>
+
+<tr><td valign=top><code>memory_order_release</code></td>
+<td valign=top>the operation performs a release operation
+on the affected memory location,
+thus making regular memory writes visible to other threads
+through the atomic variable to which it is applied</td></tr>
+
+<tr><td valign=top><code>memory_order_acquire</code></td>
+<td valign=top>the operation performs an acquire operation
+on the affected memory location,
+thus making regular memory writes in other threads
+released through the atomic variable to which <del>is</del> <ins>it</ins> is applied
+visible to the current thread</td></tr>
+
+<tr><td valign=top><ins><code>memory_order_consume</code></ins></td>
+<td valign=top><ins>the operation performs a consume operation on the
+affected memory location,
+thus making regular memory writes in other threads
+released through the atomic variable to which it is applied
+visible to the regular memory reads
+that are dependencies of this consume operation.</ins></td></tr>
+
+<tr><td valign=top><code>memory_order_acq_rel</code></td>
+<td valign=top>the operation has both acquire and release semantics</td></tr>
+
+<tr><td valign=top><code>memory_order_seq_cst</code></td>
+<td valign=top>the operation has both acquire and release semantics<del>w</del>,
+and, in addition, has sequentially-consistent operation ordering</td></tr>
+
+</table>
+</blockquote>
+
+<p>
+After paragraph 6, append as follows:
+</p>
+
+<blockquote>
+<p>
+<code><ins>template&lt; typename <var>T</var> &gt;<br>
+<var>T</var>* kill_dependency( <var>T</var>* <var>y</var> );</ins></code>
+</p>
+<blockquote>
+<p>
+<ins><i>Effects:</i>
+The argument does not carry a dependency to
+the return value ([intro.multithread]).</ins>
+
+<p>
+<ins><i>Returns:</i> <code><var>y</var></code></ins>
+
+</blockquote>
+</blockquote>
+
+<h3><a name="atomics.flag">29.3 (tentative) Flag Type and Operations [atomics.flag (tentative)]</a></h3>
+
+<p>
+Edit paragraph 5 (referring to test and set operations) as follows:
+</p>
+
+<blockquote>
+<p>
+<i>Effects:</i>
+Atomically sets the value
+pointed to by <code>object</code> or by <code>this</code>
+to <code>true</code>.
+Memory is affected according to the value of <code>order</code>.
+<del>These operations are read-modify-write operations
+in the sense of the "synchronizes with" definition (1.10),
+so both such an operation and the evaluation that produced the input value
+synchronize with any evaluation that reads the updated value.</del>
+<ins>These operations are atomic read-modify-write operations
+(1.10 [intro.multithread]).</ins>
+</p>
+</blockquote>
+
+<p>
+Edit paragraph 10 (referring to fence operations) as follows:
+</p>
+
+<blockquote>
+<p>
+<i>Effects:</i>
+Memory is affected according to the value of <code>order</code>.
+<del>These operations are read-modify-write operations
+in the sense of the "synchronizes with" definition (1.10),
+so both such an operation and the evaluation that produced the input value
+synchronize with any evaluation that reads the updated value.</del>
+<ins>These operations are atomic read-modify-write operations
+(1.10 [intro.multithread]).</ins>
+</p>
+</blockquote>
+
+<h3><a name="atomics.types.operations">29.4.4 (tentative) Operations [atomics.types.operations (tentative)]</a></h3>
+
+<p>
+Edit paragraph 5 (referring to store operations) as follows:
+</p>
+
+<blockquote>
+<p>
+<i>Requires:</i>
+The <code>order</code> argument shall not be
+<ins><code>memory_order_consume</code>,</ins>
+<code>memory_order_acquire</code><ins>,</ins>
+nor <code>memory_order_acq_rel</code>.
+</p>
+</blockquote>
+
+<p>
+Edit paragraph 12 (referring to swap operations) as follows:
+</p>
+
+<blockquote>
+<p>
+<i>Effects:</i>
+Atomically replaces the value
+pointed to by <code>object</code> or by <code>this</code>
+with <code>desired</code>.
+Memory is affected according to the value of <code>order</code>.
+<del>These operations are read-modify-write operations
+in the sense of the "synchronizes with" definition (1.10),
+so both such an operation and the evaluation that produced the input value
+synchronize with any evaluation that reads the updated value.</del>
+<ins>These operations are atomic read-modify-write operations
+(1.10 [intro.multithread]).</ins>
+</p>
+</blockquote>
+
+<p>
+Edit paragraph 15 (referring to compare and swap operations) as follows:
+</p>
+
+<blockquote>
+<p>
+<i>Effects:</i>
+Atomically, compares the value
+pointed to by <code>object</code> or by <code>this</code>
+for equality with that in <code>expected</code>,
+and if <code>true</code>,
+replaces the value pointed to by <code>object</code> or by <code>this</code>
+with <code>desired</code>,
+and if <code>false</code>,
+updates the value in <code>expected</code>
+with the value pointed to by <code>object</code> or by <code>this</code>.
+Further, if the comparison is <code>true</code>,
+memory is affected according to the value of <code>success</code>,
+and if the comparison is <code>false</code>,
+memory is affected according to the value of <code>failure</code>.
+When only one <code>memory_order</code> argument is supplied,
+the value of <code>success</code> is <code>order</code>, and
+the value of <code>failure</code> is <code>order</code>
+except that a value of <code>memory_order_acq_rel</code>
+shall be replaced by the value <code>memory_order_require</code>
+and a value of <code>memory_order_release</code>
+shall be replaced by the value <code>memory_order_relaxed</code>.
+<del>These operations are read-modify-write operations
+in the sense of the "synchronizes with" definition (1.10),
+so both such an operation and the evaluation that produced the input value
+synchronize with any evaluation that reads the updated value.</del>
+<ins>These operations are atomic read-modify-write operations
+(1.10 [intro.multithread]).</ins>
+</p>
+</blockquote>
+
+<p>
+Edit paragraph 19 (referring to fence operations) as follows:
+</p>
+
+<blockquote>
+<p>
+<i>Requires:</i>
+The <code>order</code> argument shall <del>not</del> be
+<ins>neither</ins> <code>memory_order_relaxed</code>
+<ins>nor <code>memory_order_consume</code></ins>.
+</p>
+</blockquote>
+
+<p>
+Edit paragraph 20 (referring to fence operations) as follows:
+</p>
+
+<blockquote>
+<p>
+<i>Effects:</i>
+Memory is affected according to the value of <code>order</code>.
+<del>These operations are read-modify-write operations
+in the sense of the "synchronizes with" definition (1.10),
+so both such an operation and the evaluation that produced the input value
+synchronize with any evaluation that reads the updated value.</del>
+<ins>These operations are atomic read-modify-write operations
+(1.10 [intro.multithread]).</ins>
+</p>
+</blockquote>
+
+<p>
+Edit paragraph 22 (referring to fetch and op operations) as follows:
+</p>
+
+<blockquote>
+<p>
+<i>Effects:</i>
+Atomically replaces the value
+pointed to by <code>object</code> or by <code>this</code>
+with the result of the <var>computation</var>
+applied to the value
+pointed to by <code>object</code> or by <code>this</code>
+and the given <code>operand</code>.
+Memory is affected according to the value of <code>order</code>.
+<del>These operations are read-modify-write operations
+in the sense of the "synchronizes with" definition (1.10),
+so both such an operation and the evaluation that produced the input value
+synchronize with any evaluation that reads the updated value.</del>
+<ins>These operations are atomic read-modify-write operations
+(1.10 [intro.multithread]).</ins>
+</p>
+</blockquote>
+
+</body></html>

@@ -1,0 +1,381 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd">
+<html lang="en-us">
+<HEAD>
+<meta http-equiv="Content-Type" content="text/html;charset=US-ASCII" >
+<TITLE>N2177: Sequential Consistency for Atomics</title>
+</head>
+<BODY>
+<table summary="Identifying information for this document.">
+	<tr>
+		<th>Doc. No.:</th>
+		<td>WG21/N2177<br />
+		J16/07-0037</td>
+	</tr>
+	<tr>
+		<th>Date:</th>
+		<td>2007-03-09</td>
+	</tr>
+	<tr>
+		<th>Reply to:</th>
+		<td>Hans-J. Boehm</td>
+	</tr>
+	<tr>
+		<th>Phone:</th>
+		<td>+1-650-857-3406</td>
+	</tr>
+	<tr>
+		<th>Email:</th>
+		<td><a href="mailto:Hans.Boehm@hp.com">Hans.Boehm@hp.com</a></td>
+	</tr>
+</table>
+<H1>Sequential Consistency for Atomics</h1>
+
+Very informally, a sequentially consistent execution of a multi-threaded
+program is one that behaves as if actions from all the threads were
+simply interleaved into a single composite execution.  For most
+people, this is the natural review of threads before they learn
+about the complexities of weak memory models.
+<P>
+There has been an ongoing discussion about the semantics of "high level"
+C++ atomics.  ("High-level" here refers to that part of the atomics
+library that is meant to be understood by programmers other than the
+most expert library implementors.)
+Here we explain why a number of us believe that these "high level"
+atomic operations should present sequentially consistent semantics, in
+spite of substantial, though currently highly platform-specific,
+performance arguments to the contrary.
+<P>
+This is a somewhat hurried attempt to outline the arguments; it is not
+a thorough study of the trade-offs.  In fact, we know that some pieces
+of essential data are still missing.  In particular, we have much too little
+understanding of the inherent long-term cost of sequentially consistent
+atomics, with huge disagreements among the experts.  Sarita Adve and others
+are continuing to pursue this.
+<P>
+Although, I have attempted to outline the major issues on both sides,
+this represents primarily my own biased view.  I favor providing an easy-to-use
+interface to sequentially consistent atomics.  Others with large
+amounts of experience in the area have arrived at different conclusions.
+<H2>Simple rules for programmers</h2>
+As it stands, the proposed C++ memory model is designed to allow us
+to provide simple programming guidelines to the programmer as
+follows:
+<OL>
+<LI> Define a memory location as in the proposed standard. Quoting
+<A HREF="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2006/n2052.htm">
+N2052</a>:
+"A memory location is either an object of scalar type, or a maximal
+sequence of adjacent bit-fields all having non-zero width."
+<LI> Define a data race to occur if a memory location not holding
+a lock, atomic, or other synchronization object is accessed
+simultaneously by at least two threads, and one of the accesses
+is a write.  Ensure that your program cannot encounter a data race.
+<LI> If the above rules are satisfied, your program will execute
+according to sequentially consistent semantics, i.e. as though the
+actions and memory accesses of the different threads were interleaved, with the
+accesses from each thread occurring in order, and each access seeing
+the last prior update to the variable that occurs in this sequence.
+</ol>
+For the typical programmer, who uses only <TT>lock</tt>, <TT>unlock</tt>,
+condition variables,
+and "high-level" atomics, we would hope to make this the whole
+story.
+<P>
+This basic approach to a programming language level memory model
+was previously explored by Sarita Adve in her thesis.  See for example: S. Adve
+and Mark Hill, "Weak Ordering - A New Definition", ISCA '90.
+It is also currently the basis of the Java memory model.
+<P>
+For more advanced programmers, we do need to attach a couple
+of disclaimers to this for C++:
+<OL>
+<LI> A <TT>trylock</tt> primitive can be abused to perform memory
+operations in response to a lock acquisition instead of a release.
+The lock acquisition is likely to
+have only <TT>acquire</tt> semantics.  This causes the above
+definition of a <I>data race</i> to diverge from that in the standard.
+There is no legitimate reason to write a program that behaves in this
+manner.  (For details, see Boehm, "Reordering Constraints for
+Pthread-Style Locks", PPoPP '07.)
+<LI> "Low-level" atomics, especially but not only those with
+the <TT>relaxed</tt> ordering constraints, clearly fall outside this
+simple programming model, and require more sophisticated programmer
+understanding of memory visibility.  In particular, a program
+using <TT>relaxed</tt> atomic variables for all shared memory
+accesses has no races by our definition, but clearly does not
+exhibit sequentially consistent semantics.  (An alternative
+would be to technically continue to satisfy the above property
+by defining such programs to contain a data race.)
+</ol>
+There is no question or controversy that we want the preceding rules to hold
+for programs that use only locks for synchronization.  (Condition
+variables are irrelevant here, and don't impact the property.)
+The question here is really whether we want this property to hold
+for programs using both locks and high-level atomics.
+<P>
+It turns out that the most difficult part of ensuring sequential
+consistency for race free programs containing high-level atomics is
+to ensure that the high-level atomics themselves behave sequentially
+consistently, i.e. that a program whose only shared variables are
+high-level atomics behaves sequentially consistently.
+<P>
+In order to make the case for such sequentially consistent atomics,
+we argue that:
+<OL>
+<LI> Atomic variables are, or should be, used by a significant number of programmers.
+<LI> Under reasonable performance assumptions, sequentially consistent
+atomics can often satisfy this need.
+<LI> It is very unclear that there are viable alternatives.
+</ol>
+We address these in turn.
+
+<H2>Use of atomics</h2>
+There is a strong argument that the large majority of multi-threaded
+code should use locks to prevent simultaneous non-read-only access to
+shared variables.  And this is fine most of the time.  However,
+in reality, we do seem to see fairly frequent potentially simultaneous
+access to shared variables that call for the use of atomics.
+Notable examples include:
+<UL>
+<LI>Double-checked-locking, and similar lazy-initialization idioms.
+I believe Bill Pugh's group counted more than 90 uses of double-checked
+locking in the Java standard libraries long after it became known
+that such usage was incorrect.  There are similar anecdotes about some
+other vendors.
+<LI>Simple counters, e.g. of calls to a particular function.  (These are
+often erroneously implemented without any kind of synchronization if
+exact answers are not required.  This is incorrect, both because it
+leads to completely undefined behavior, and because it can in practice
+lead to completely incorrect results.  Atomic integers provide the
+natural solution, which usually incurs substantially less cost than locks.)
+<LI>Schemes that rely on atomic pointer updates to make read-mostly
+data structures much more efficient, such as Paul McKenney's RCU in the
+Linux kernel.  These become significantly simpler for user-level code
+in the presence of garbage collection.
+<LI>Variables shared with signal or interrupt handlers or other processes.
+Although the C++ standard is unlikely to fully address such applications,
+they are important in practice, and we should move towards better support.
+Locks are often not usable in such contexts.
+<LI>More sophisticated lock-free data structures.  We expect that unlike
+the others, these will be implemented by experts.
+</ul>
+We expect that only the last of these can be strictly confined to library
+writers.
+<H2>Performance of Sequentially Consistent Atomics</h2>
+We can very roughly break down the overhead of providing sequential
+consistency for atomics into that of satisfying three separate
+constraints:
+<OL>
+<LI>Atomics must have <TT>acquire</tt>/<TT>release</tt> semantics.  This
+is implicitly true for SPARC TSO, PA-RISC, and MIPS, and generally
+also believed
+to be automatic on X86.  It requires an explicit but relatively low cost
+ordering constraint or fence on Itanium, PowerPC, and ARM.  We believe
+that this part of the overhead is not interesting, since atomics without
+such constraints are extremely difficult to use, and are not correct
+for use with double-checked-locking, for example.  I believe nobody is
+arguing that this guarantee be dropped for high-level atomics.
+<LI>We must enforce load-after-store ordering for high-level atomics.
+This is needed for implementing Dekker's critical section algorithm and
+similar algorithms.  It is not needed in many cases, such as
+double-checked-locking.  (The extra cost can also often be optimized
+out in that particular case.)  Doug Lea's experience with the Java
+concurrency library was that it is needed more often than expected.
+(He does not agree with some of our other conclusions.)
+The cost typically involves a heavy-weight fence following atomic stores,
+which can usually be optimized away only if it is followed by another
+atomic store.
+(This applies to X86, ARM, SPARC, PowerPC, Alpha, Itanium, etc., though
+not PA-RISC.)  There appears to be at least a near-consensus that
+high-level atomics should enforce this property.
+<LI>We need to ensure that independent stores by different threads
+are seen in a consistent order by different observing threads.
+Thus if all variables in the following example are high-level
+atomics and initially zero, then that example, customarily
+referred to as "IRIW" (Independent Reads of Independent Writes)
+must not result in <TT>r1</tt> = <TT>r3</tt> = 1 and
+<TT>r1</tt> = <TT>r3</tt> = 0, i.e in Threads 3 and 4 seeing the
+updates to <TT>x</tt> and <TT>y</tt> in opposite orders
+<TABLE BORDER ALIGN=CENTER>
+        <TR>
+                <TD> Thread1 </td> <TD> Thread2 </td>
+                <TD> Thread3 </td> <TD> Thread4 </td>
+        </tr>
+        <TR>
+                <TD ROWSPAN=2>
+                        a: x = 1; <BR>
+                        
+                <TD ROWSPAN=2>
+                        b: y = 1; <BR>
+                        
+                <TD ROWSPAN=2>
+                        c: r1 = x; <BR>
+                        d: r2 = y; </td>
+                <TD ROWSPAN=2>
+                        e: r3 = y; <BR>
+                        f: r4 = x; </td>
+        </tr>
+</table>
+The cost of enforcing this guarantee is much less clear.  Currently it
+appears that the only architecture supporting C++ on which the guarantee
+is not implicitly provided is PowerPC, but the question is not yet fully
+settled for several other important architectures.  On PowerPC, the cost
+appears to be a heavyweight memory fence on every atomic load, which is
+clearly very substantial.  (See
+<A HREF="http://x10.sourceforge.net/wiki/index.php/Memory_Model_Table_of_Contents">
+http://x10.sourceforge.net/wiki/index.php/Memory_Model_Table_of_Contents</a>
+for the details.)
+<P>
+Enforcement of this ("IRIW") property is by far the
+most controversial, since, at least in one case, it is the most expensive.
+It is also the one property that is really motivated by the desire
+for an understandable and teachable programming model, rather than
+by specific practical applications.
+<P>
+It is possible to construct somewhat realistic code that relies on the
+IRIW guarantee.  But there widespread agreement that such code is
+difficult to find "in the wild".
+<P>
+Far more problematics is that I do not know of a way to teach students
+about atomics without the IRIW guarantee, and that its absence invalidates
+some fairly standard reasoning.  If we postulate that there is some
+global visibility order, and conclude that the assignment at <I>f</i>
+above must become visible before the assignment at <I>a</i>, since
+<I>f</i> sees the earlier value, and draw a similar conclusion about
+<I>d</i> and <I>b</i>, we are quickly lead to a contradiction.  But all
+of the steps in that reasoning chain seem rather natural.
+</ol>
+On architectures on which the IRIW guarantee is cheaply enforceable,
+the overall cost of sequential consistency for atomics appears to be
+within reason.  The added overhead for loads is typically on the order
+of at most a dozen cycles, which is usually trivial compared to the cost of
+the alternative of a lock acquisition.  The heavier weight fence required
+on a write for load-after-store ordering may be nearly as expensive
+as a lock acquisition.  But since it is typically used in contexts
+in which loads greatly outnumber stores, and a store is often
+associated with a subsequent coherence cache miss, we expect that this
+rarely a major factor.  And indeed the java.util.concurrent implementations
+appear to have been quite successful in spite of this kind of overhead.
+<P>
+(In cases in which this overhead is unacceptable, and expert programmers
+are involved, we still provide low-level atomics that can avoid the
+overhead.  But those are not the subject of this paper.)
+<P>
+On the other hand, there is no question that the kind of fences currently
+required on PowerPC reduce the utility of the facility.  In most
+cases, the costs will be comparable to lock-protecting the accesses.
+Nonetheless there are some cases in which I believe it remains useful:
+<UL>
+<LI>If atomics are used in situations in which locks are not a viable
+alternative (inter-process communication, signal handlers or interrupts)
+performance is likely to be a secondary issue.
+<LI>I suspect that many developers of more sophisticated lock-free
+algorithms will initially want to code the algorithm using sequentially
+consistent atomics, and then address tuning of memory ordering in
+a second pass.  In this case, the final product is likely to use
+primarily low-level atomics.  But the high-level sequentially consistent
+atomics are a very useful intermediate step.  I know that I have used
+such a process, and most papers in the literature imply a similar
+approach, typically by only presenting the sequential-consistency
+version of the algorithm.
+<LI>It seems likely that the expensive fences can be automatically
+optimized out in some common cases (simple counters?).
+This needs more investigation.
+<LI>Even in performance sensitive cases, a solution based on sequentially
+consistent atomics may outperform a lock-based solution, since it avoids
+modifying any shared cache lines in response to read-only accesses.
+</ul>
+<P>
+There are ongoing discussions about whether the IRIW guarantee is
+inherently difficult to provide, and whether this would impact
+scalability to high processor counts.  It is clear that an inherent
+cost is involved.  But it is unclear whether this cost can otherwise
+be safely avoided, or whether essential properties such as causal
+ordering for memory visibility (effectively transitivity of the
+happens-before relation) would also be impacted by dropping such
+a guarantee.
+<P>
+The current practical situation appears to be that we have some
+architectures providing the guarantee cheaply and others not, with no
+obvious correlation with available processor counts.  In particular,
+some of the largest machines, measured in processor counts,
+provide a documented memory model that provides the IRIW guarantee
+for atomics at no additional cost.
+
+<H2>Alternative Models</h2>
+Doug Lea and Vijay Saraswat have developed precise mathematical models
+for some alternative consistency models for "high-level" atomics.
+Details of Vijay's models can again be found at
+<A HREF="http://x10.sourceforge.net/wiki/index.php/Memory_Model_Table_of_Contents">
+http://x10.sourceforge.net/wiki/index.php/Memory_Model_Table_of_Contents</a>
+and possibly in paper N2226.
+<P>
+These models have the substantial advantage that they allow a cheaper
+implementation, at least on PowerPC, since they don't support the IRIW
+guarantee.
+They are also mathematically quite elegant.
+<P>
+However, in my opinion, and without advance access to N2226,
+these models currently lack
+the kind of easily presentable and teachable description we attempted
+to outline above.  Furthermore, it seems difficult to motivate
+one particular model.  There have been months of discussion
+about the details of these models.  The acceptable outcomes of
+one particular 5 line, 3 thread program were uncertain during
+much of that time.
+To me, it appears that there are
+several possible similar models, with the choice between them largely driven
+by existing hardware characteristics.  This again makes it likely that the
+model will be hard to motivate in an educational context.
+<P>
+Currently, the most comprehensible definition of such a model seems
+to be as "sequential consistency without the IRIW guarantee".  This
+unfortunately is very imprecise, leaves the leagality of several borderline
+test cases unclear, and does not give the programmer
+sufficient information for reasoning about the resulting atomics.
+
+<H2>My Conclusions</h2>
+There is ample empirical evidence that atomics with weaker, or explicit,
+ordering constraints,or requiring explicit fences,
+can be extremely difficult to use.  For example,
+even the experts designing the APIs, generally got them at least
+somewhat wrong, which is why we're designing one here.
+Even the most basic of ordering issues, namely the constraints
+enforced by lock acquisition and release, has generated much confusion
+and some clearly incorrect code.
+(Some details are provided in Boehm, "Reordering Constraints for
+Pthread-Style Locks", PPoPP '07.)
+Given that difficulty, it seems critical to include an
+easier-to-use alternative, even if it does not meet all performance constraints.
+<P>
+To date, only sequentially consistent atomics really seem you accomplish this.
+Nothing else seems sufficiently easily explainable to the intended
+audience.
+<P>
+This does not argue that sequential consistency should be the only
+model supported for C++ atomics.  The current plan is to support
+lower-level atomics with explicit ordering constraints (see
+<A HREF="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2145.html">
+N2145</a>)
+and possibly
+fences (see
+<A HREF="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2153.pdf">
+N2153</a>).  But I am arguing that sequential
+consistency should be the default model for C++ "high-level" atomics,
+with provisions for tuning memory visibility where required.
+<P>
+Note that even in this model, it is possible to build efficient
+lock-free data structures for machines that cannot implement sequentially
+consistent atomics with the highest performance; but it does require
+the difficult additional step of specifying explicit ordering constraints
+for atomic operations.
+<P>
+If we can generate a standards-appropriate definition of a
+strong memory model without the IRIW guarantee,
+a possible compromise may be to add a parameter
+to the atomics template to make it easier to remove the IRIW
+guarantee in the large majority of cases in which it is not needed,
+while keeping the far-easier-to-teach sequential consistency
+alternative as the default.
+</body>
+</html>

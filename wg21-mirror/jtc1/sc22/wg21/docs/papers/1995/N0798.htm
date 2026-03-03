@@ -1,0 +1,386 @@
+<html>
+<head>
+<TITLE>
+ISO/IEC JTC1/SC22/WG21
+N0798
+</TITLE>
+</head>
+<body>
+<h1>
+<img align=top src="/pics/iso44.gif" alt="ISO/">
+<img align=top src="/pics/iec44.gif" alt="IEC">
+JTC1/SC22/WG21
+N0798
+</h1>
+<pre>
+ 
++----------------------------+
+| CV-Qualified Constructors  |
+| X3J16/95-0198, WG21/N0798  |
+| (Discussion Draft)         |
++----------------------------+
+ 
++----------------------------+
+| Kevlin Henney              |
+| 2sdg Ltd                   |
+| kevlin@two-sdg.demon.co.uk |
++----------------------------+
+ 
+ 
+0. ABSTRACT
+ 
+A C++ programmer has a high degree of control over the placement, construction
+and subsequent use of an object. In most cases both the class user and its
+developer have control. However, the cv-qualification system is not yet
+complete enough to allow the programmer to take specific control of const
+or volatile allocation and construction of objects.
+ 
+This paper proposes that cv-qualification is defined for constructors. It is
+principally a discussion paper, so rationale and syntax are covered but
+changes to the working paper are currently omitted.
+ 
+ 
+1. INTRODUCTION
+ 
+The next three sections of this paper look at some particular problem areas
+that the introduction of cv-qualified constructors would address. The section
+following this considers alternative approaches and their shortcomings. The
+proposed syntax is used all the way through. It is explained in detail in the
+section following discussion of the alternatives.
+ 
+ 
+2. OPTIMIZING CONSTRUCTION
+ 
+Objects may be statically or dynamically created with cv-qualification, eg.
+ 
+    static volatile word &port = *(volatile word *) 0xfeedf00d;
+    const string message = argv[1];
+    const transform *skewer = new const transform(dx, dy);
+ 
+If such an object wishes to take advantage of its qualification it has no
+means of doing so at construction time. In contrast, for the rest of its
+lifetime its cv-qualification, or the cv-qualification of the access path to
+that object, is used to deduce and constrain which member functions are
+accessible. On the basis of overloading, different members may be selected
+implementing different strategies based on constness. This is after the fact of
+construction where a more appropriate alternative representation might have
+been selected.
+ 
+Additional cv-qualification of constructors would allow an such alternative
+construction. For instance, a particular feature set that is not accessible
+for a const object may be optimised away at construction time:
+ 
+    class recoverable_resource
+    {
+    public:
+        recoverable_resource(...)
+          : ..., undo(new change_history), ...
+        const recoverable_resource(...)
+          : ..., undo(0), ...
+        ...
+    };
+ 
+Strings or arrays can often allocate extra reserved space in anticipation of
+growth in the lifetime of the object. For a const object this optimization is
+a waste:
+ 
+    class ya_string
+    {
+    public:
+        ya_string(const ya_string &other)
+          : body(new char[other.size() * typical_growth_ratio + 1), ...
+        const ya_string(const ya_string &other)
+          : body(new char[other.size() + 1), ...
+        ...
+    };
+ 
+An extension of this technique is in constraining and guaranteeing how external
+resources are accessed:
+ 
+    class shmem_user
+    {
+    public:
+        shmem_user(const char *name)
+          : shmem(name, O_RDWR), ...
+        const shmem_user(const char *name)
+          : shmem(name, O_RDONLY), ...
+        ...
+    };
+ 
+A class may use cv-qualified constructors to impose certain restrictions. In
+much the same way that declaring a constructor disables the generation of a
+default constructor for a class, or declaring the copy constructor and
+copy assignment operator private prevent copying by public class users,
+cv-qualified constructors can play a role in constraining legal constructions:
+ 
+    class no_non_const
+    {
+    public: // all constructors
+        const no_non_const();
+        const no_non_const(const no_non_const &);
+    public: // other members
+        ...
+    };
+ 
+    class no_const
+    {
+    public: // all constructors
+        no_const();
+        no_const(const no_const &);
+        no_const(double, double);
+    public: // other members
+        ...
+    private: // corresponding disallowed const versions
+        const no_const();
+        const no_const(const no_const &);
+        const no_const(double, double);
+    };
+ 
+More general uses of this technique are explored in the next two sections, and
+the matching rules are clarified.
+ 
+ 
+3. OBJECT WRAPPERS
+ 
+Wrapper classes are often used to apply a high-level interface to a low level
+type. This may take the form of either a fully fledged abstraction that
+manages the type, or a simple convenience layer into which the objects of the
+low level type are passed. Consider the following code fragment of a class
+that provides a number of standard string operations on a given null
+terminated string:
+ 
+    class string_alias
+    {
+    public:
+        string_alias(char *str) : wrapped(str) {}
+        ...
+        char operator[](size_t pos) const { return wrapped[pos]; }
+        char &operator[](size_t pos) { return wrapped[pos]; }
+        size_t size() const { return strlen(wrapped); }
+        ...
+    private:
+        char *wrapped;
+    };
+ 
+Looking at the constructor provided above, only non-const strings may be
+aliased. A programmer looking to use this class for a const string is forced
+to cast away its constness:
+ 
+    bool check(const char *c_filename)
+    {
+        string_alias filename(const_cast&lt;char *>(c_filename));
+        ...
+    }
+ 
+The cast in this case not only casts away constness to allow construction:
+the appropriate type checking, and the guarantees that go with it, are also
+lost. The string_alias object created will now permit non-const operations on
+a const string, and thus introduce unwanted and potentially undefined run time
+behaviour. The designer of the string_alias class might chose to make the
+class more convenient to use by providing a weaker constructor that performs
+the cast itself:
+ 
+    class string_alias
+    {
+    public:
+        string_alias(const char *str)
+            : wrapped(const_cast&lt;char *>(str)) {}
+        ...
+    };
+ 
+From the class user's perspective this is easier to type, but the 'magic' cast
+in the constructor can more easily lead to undefined behaviour as the cause of
+the problem is now hidden:
+ 
+    bool check(const char *c_filename)
+    {
+        string_alias filename(c_filename);
+        ...
+    }
+ 
+The root of the problem is that there is no way to associate the constness of a
+constructor argument with the constness of the object being constructed.
+Introducing a constructor differentiated on const would allow the class
+developer to provide a safe const preserving route through the code:
+ 
+    class string_alias
+    {
+    public:
+        const string_alias(const char *str)
+            : wrapped(const_cast&lt;char *>(str)) {}
+        string_alias(char *str) : wrapped(str) {}
+        ...
+    };
+ 
+The programmer can now guarantee that only const operations are performed on
+aliased const strings:
+ 
+    const char *const_str = ...;
+    string_alias illegal(const_str); // not legal
+    const string_alias legal(const_str); // legal
+ 
+ 
+4. PROXY CLASSES
+ 
+This problem is not restricted to wrapping up low-level types. The method of
+viewing one object through another will always beg the question of how the
+cv-qualification of the target can be reflected in the proxy (often, however,
+such issues are swept aside and ignored). Consider the following classes that
+represent a string and sliced views of it. The view objects alias the target
+object, and hence must respect its constness. The solution presented here uses
+the proposed cv-qualification for constructors:
+ 
+    class full_string;
+ 
+    class sub_string
+    {
+    public:
+        const sub_string(const full_string &, size_t from, size_t size);
+        sub_string(full_string &, size_t from, size_t size);
+        const sub_string(const sub_string &);
+        sub_string(sub_string &);
+        ...
+    private:
+        full_string &target;
+        size_t start, count;
+    };
+ 
+    class full_string
+    {
+    public:
+        ...
+        const sub_string operator()(size_t from, size_t size) const;
+        sub_string operator()(size_t from, size_t size);
+        ...
+    };
+ 
+The reader is invited to consider where casts would have to be inserted in the
+class implementation or a class user's code if cv-qualified constructors were
+not present.  Also under consideration is the reliability and maintainability
+of such code, in particular the scope for introducing undefined behaviour.
+ 
+A simple solution is available by preventing public construction of the
+sub_string class, allowing only a befriended full_string to construct its
+instances. This, however, is only a partial solution as it does not address
+copying sub_string objects.
+ 
+ 
+5. ALTERNATIVE APPROACHES
+ 
+Adding an extra class might at first sight appear to be the solution to some
+of these problems.
+ 
+Patterning the creation of proxies after the STL container classes, where a
+container may return a normal iterator or a const iterator dependent on the
+const access path to the container, has some initial appeal. However,
+iterators represent a level of indirection not present in the examples chosen:
+the cv-qualification of the iterator describes the cv-qualification of the
+iterator itself and not the referenced container, the constness of which is
+described by the actual class of the iterator (plain or const). This is not
+the case with objects that are acting in some way like references rather than
+pointers.
+ 
+To preserve expected substitutability the non-const class would also have to
+be derived from the const version. It is possible that in some cases an
+additional protected constructor would have to be added to bypass the normal
+construction of the base or to actually implement the construction of the
+non-const derived class. This adds significant complexity and, potentially,
+insecurity in the long term.
+ 
+Templates represent an alternative method of generalisation. However, they
+have nothing to offer to this discussion: there is no appropriate way to select
+on the cv-qualification of a template parameter so that issues like
+substitutability may be tackled.
+ 
+The reason for dividing one class into two is based solely on the constness
+of construction alone: in all other respects the roles are already partitioned
+within a single class by cv-qualification of member functions. C++ has a sound
+and regular method for specifying cv-qualification of objects at creation (the
+recent change to allow a cv-qualifier in a new expression serves to illustrate
+the need and desire for a regular approach) and for specifying member function
+access throughout the object's lifetime. Programmers do not normally have to
+write more than one class to express the constness of the object; this
+proposal addresses some of the cases where the alternatives are either to do
+this or program around the problem some other way, often with casts and
+'trust-me' code.
+ 
+ 
+6. SYNTAX AND RULES
+ 
+A constructor selected on cv-qualification is only effective if it assumes
+that the qualification is a minimum requirement of the object under
+construction. For example, an unqualified constructor may be used to
+construct any kind of object but a const qualified constructor may only be
+used to construct const and const volatile objects. This is fully compatible
+with the status quo, where unqualified constructors are used to construct all
+objects. Adoption of this proposal would break no existing code.
+ 
+The syntax itself, where the cv-qualification precedes the constructor name,
+has been chosen to reflect the syntax used in the declaration of the object
+or the equivalent new expression:
+ 
+    class X
+    {
+    public:
+        const X();
+        X();
+        ...
+    };
+ 
+    const X a;
+    const X *p = new const X;
+ 
+It is also important that this syntax differs from the cv-qualification for
+ordinary non-static member functions. The semantics are quite different: a
+const constructor may only be called to construct a const object, but a
+non-const constructor may be called to construct any object; a const member
+function need not be called on a const object, but a non-const member may not
+be called on a const object. For an ordinary member the cv-qualification of
+the this pointer is that of the member, whereas in cv-qualified constructors
+this refers to a non-const object.
+ 
+Thus using a single syntax to express two quite separate ideas would lead
+to confusion, hence the different form chosen in this proposal.
+ 
+The cv-qualification of the object under construction acts as the tie breaker
+for overloading, eg.
+ 
+    const X x; // const X() invoked
+ 
+If there is any remaining ambiguity the construction is ill formed, eg.
+ 
+    class Y
+    {
+    public:
+        const Y();
+        volatile Y();
+        ...
+    };
+ 
+    const volatile Y y; // error
+ 
+The syntax for constructor definition simply prefixes the constructor name
+with the qualifier, eg.
+ 
+    Y::const Y()
+    {
+        ...
+    }
+ 
+ 
+7. SUMMARY
+ 
+An extension of cv-qualification for constructors has been proposed. This
+allows additional type safety and expressive power in the language without
+affecting existing code.
+ 
+ 
+8. ACKNOWLEDGEMENTS
+ 
+My thanks to Sean Corfield and John Skaller for their comments on the original
+draft, and again to Sean for publishing this draft in Overload, the C++ journal
+of the ACCU.
+ 
+</pre>
+</body>
+</html>

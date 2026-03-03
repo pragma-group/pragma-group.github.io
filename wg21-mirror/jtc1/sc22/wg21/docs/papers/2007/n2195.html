@@ -1,0 +1,559 @@
+﻿<html>
+<head>
+    <title>Proposed Text for Chapter 29, Atomic Operations Library [atomics]</title>
+    <meta content="http://schemas.microsoft.com/intellisense/ie5" name="vs_targetSchema" />
+    <meta http-equiv="Content-Language" content="en-us" />
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+</head>
+<body bgcolor="#ffffff">
+    <address>
+        Document number: N2195=07-0055</address>
+    <address>
+        Programming Language C++, Evolution/Library</address>
+    <address>
+        &nbsp;</address>
+    <address>
+        Peter Dimov, &lt;<a href="mailto:pdimov@pdimov.com">pdimov@pdimov.com</a>&gt;</address>
+    <address>
+        &nbsp;</address>
+    <address>
+        2007-03-07</address>
+    <h1>
+        Proposed Text for Chapter 29, Atomic Operations Library [atomics]</h1>
+    <ul>
+        <li><a href="#overview">Overview</a></li>
+        <li><a href="#rationale">Rationale</a></li>
+        <li><a href="#proposed">Proposed Text</a></li>
+        <li><a href="#implementability">Implementability</a></li>
+    </ul>
+    <h2>
+        <a name="overview">I. Overview</a></h2>
+    <p>
+        This document presents a complete proposal for Chapter 29, Atomic Operations Library,
+        of the C++ standard. It is based on the atomic operation proposals N2047 by Hans
+        Boehm, N2145 by Hans Boehm and Lawrence Crowl, on the memory model proposed in N2153
+        by Silvera, Wong, McKenney and Blainey, and on Alexander Terekhov's contributions
+        to mailing lists and the comp.programming.threads discussion group.</p>
+    <h2>
+        <a name="rationale">II. Rationale</a></h2>
+    <p>
+        This document deviates from the previous proposals in the following major areas:</p>
+    <ul>
+        <li>Absence of feature test macros or functions;</li>
+        <li>Absence of a dedicated enumerated set of atomic types;</li>
+        <li>Absence of a high-level C++ API (the <code>std::atomic&lt;T&gt;</code> class template);</li>
+        <li>Inclusion of an acquire+release ordering constraint;</li>
+        <li>Passing the constraint as a first argument instead of using several functions or
+            macros with the appropriate suffix;</li>
+        <li>Introduction of bi-directional fences as proposed in N2153;</li>
+        <li>Additional requirements on the ordered constraint that enable the programmer to
+            achieve sequential consistency and CCCC (cache-coherent casual consistency).</li>
+    </ul>
+    <h3>
+        A. Absence of feature test macros or functions</h3>
+    <p>
+        The proposal mandates the existence of the complete contents of the <code>&lt;atomic&gt;</code>
+        header and does not make any part of it optional. Given the expected time frame
+        of the C++ standard and the current hardware trends, this should not pose a problem
+        for most target platforms. A platform that does not provide a compare and swap primitive
+        has two choices: not conform to the requirements or provide an emulation using a
+        hidden spinlock pool, as explained in N2145. A spinlock primitive is included in
+        the proposed text in order to avoid the undesirable case where the application implements
+        a spinlock on top of such emulated atomics.</p>
+    <p>
+        Since most, if not all, lock-free algorithms and data structures require the compare
+        and swap primitive, a program or library is not likely to be able to use the facilities
+        in <code>&lt;atomic&gt;</code> in a meaningful way if <code>atomic_compare_swap</code>
+        is not present.</p>
+    <h3>
+        B. Absence of a dedicated enumerated set of atomic types</h3>
+    <p>
+        The general consensus is that an atomic library should be constrained to operate
+        on a certain specifically designated set of types. This proposal disagrees and requires
+        that any POD type that meets certain implementation-defined size and alignment restrictions
+        be <em>atomic</em> with respect to the library operations. The motivation for this
+        is twofold: one, allow C structs such as those shown below to be manipulated atomically:</p>
+    <pre>struct rwlock_state
+{
+    unsigned writer: 1;
+    unsigned readers: 31;
+};
+
+struct uses_dwcas
+{
+    void * p1;
+    void * p2;
+};
+</pre>
+    <p>
+        Two, to allow a variable to be manipulated both atomically and non-atomically in
+        different parts of the code. This scenario typically arises in "mostly lock-free"
+        data structures where the concurrent atomic accesses are guarded by a read lock,
+        whereas the exclusive accesses are done under the protection of a write lock and
+        need not be atomic and suffer the corresponding penalty.</p>
+    <p>
+        The ability to use atomic and non-atomic accesses on the same variable is a very
+        sharp knife. I maintain, however, that the ability to use low-level atomic accesses
+        at all is a sufficiently sharp knife in itself and will be only be done by expert
+        programmers. At a certain level of expertise, one values much more the ability to
+        succintly express a notion without the compiler throwing obstacles along the way,
+        rather than the annoying tendency of erecting safeguards where none are needed.</p>
+    <p>
+        I should note, however, that the rationale in this section only applies to the low-level,
+        C compatible API presented in the current proposal. A high-level interface will
+        obviously have different properties since it would target a different audience.</p>
+    <p>
+        It is also worth mentioning that the rest of the proposal is independent of the
+        definition of an <em>atomic</em> type and can be accepted even with the requirements
+        being tightened to only allow a specific set of atomic types.</p>
+    <h3>
+        C. Absence of a high-level C++ API</h3>
+    <p>
+        The proposed text does not include a high level C++ interface to the low-level atomic
+        operations such as a <code>std::atomic&lt;T&gt;</code> class template. This is partially
+        motivated by the fact that the precise semantics of <code>std::atomic</code> are
+        still being discussed and are generally not agreed upon. Another reason for the
+        exclusion of <code>std::atomic</code> is that it is completely implementable as
+        a library component (whereas the low-level operations will generally be either compiler
+        intrinsics or thin wrappers over compiler intrinsics). This makes <code>std::atomic</code>
+        a non-critical component for C++09 and a candidate for a technical report.</p>
+    <p>
+        Even though the proposed text does not contain <code>std::atomic</code>, it has
+        been written with its various definitions in mind and is sufficiently capable of
+        expressing them.</p>
+    <h3>
+        D. Inclusion of an acquire+release ordering constraint</h3>
+    <p>
+        The previous proposals contained only one bidirectional contraint, <em>ordered</em>.
+        Its precise definition varied, but the trend has been towards making it as strong
+        as possible. At the same time, it is generally acknowledged that there is a need
+        for a weaker bidirectional constraint that combines the semantics of the two unidirectional
+        constraints <em>acquire</em> and <em>release</em>. This documents proposes the name
+        <em>__acq_rel</em> for it.</p>
+    <h3>
+        E. Passing the constraint as a first argument instead of using a suffix</h3>
+    <p>
+        A previous version of this proposal used a function/macro name suffix to specify
+        the constraint, such as <code>atomic_load_acquire( &amp;x )</code>. This was consistent
+        with the direction that the other proposals have been taking. However, in the course
+        of producing a prototype implementation, I discovered that I had to introduce a
+        lower layer that was parameterized on the constraint type and used the notation
+        <code>__atomic_load( __acquire, &amp;x )</code>. This simplified many parts of the
+        implementation considerably because it allowed the constraint to be passed to a
+        lower-level function unmodified, rather than require five separate functions to
+        be written for the same purpose, as shown in the following example:</p>
+    <pre>template&lt; class Cn, class T &gt; inline T atomic_fetch_xor( Cn, T * p, T v )
+{
+	// static_assert( __is_integral(T) );
+
+	T r = *p;
+
+	while( !atomic_compare_swap( Cn(), p, &amp;r, r ^ v ) );
+
+	return r;
+}
+</pre>
+    <p>
+        The same constraint notation then happened to also provide a nice interface for
+        specifying the various kinds of fences.</p>
+    <h3>
+        F. Introduction of bidirectional fences</h3>
+    <p>
+        This document includes bidirectional fences as proposed in N2153, which also gives
+        motivating examples. One additional fence that "falls apart" from the notation is
+        the <em>acquire+release</em> fence that is expressed as <code>atomic_memory_fence( __acq_rel
+            )</code> and provides the equivalent of <em>#LoadLoad | #LoadStore | #StoreStore</em>
+        in Sun notation or <em>lwsync</em> on IBM platforms.</p>
+    <p>
+        The <code>atomic_compiler_fence( <em>constraint</em> )</code> function/macro provides
+        fences that only affect
+        compiler reorderings and have no effect on the hardware. A need for such control
+        arises in low-level code that communicates with interrupt or signal handlers.</p>
+    <h3>
+        G. Additional requirements on the ordered constraint</h3>
+    <p>
+        The current approaches for dealing with the <em>ordered</em> constraint have included</p>
+    <ul>
+        <li>Leaving its semantics not well specified;</li>
+        <li>Defining its semantics in isolation, without mentioning sequential consistency or
+            CCCC;</li>
+        <li>Demanding that ordered should provide sequential consistency.</li>
+    </ul>
+    <p>
+        The current text adopts a hybrid approach. It specifies the semantics of <em>ordered</em>
+        in isolation while at the same time demanding that:</p>
+    <ul>
+        <li>A program that only uses <em>ordered</em> operations is sequentially consistent;</li>
+        <li>A program that only uses <em>ordered</em> stores and <em>acquire</em> loads provides
+            CCCC.</li>
+    </ul>
+    <p>
+        This allows programmers to pick the level of consistency they desire. It also allows
+        an <code>std::atomic&lt;T&gt;</code> class template to provide either SC or CCCC.</p>
+    <h2>
+        <a name="proposed">III. Proposed Text</a></h2>
+    <h3>
+        Chapter 29, Atomic Operations Library [atomics]</h3>
+    <p>
+        This clause describes facilities that C++ programs may use to concurrently access
+        data from multiple threads without introducing undefined behavior.</p>
+    <h4>
+        Definitions</h4>
+    <p>
+        A POD type is <em>atomic</em> if it meets implementation-defined size and alignment
+        requirements. If a type is atomic, all types with the same size and equal or stricter
+        alignment shall also be atomic.</p>
+    <h4>
+        Header &lt;atomic&gt; synopsis</h4>
+    <pre>// Constraints
+
+typedef <em>unspecified</em> _Relaxed;
+typedef <em>unspecified</em> _Acquire;
+typedef <em>unspecified</em> _Release;
+typedef <em>unspecified</em> _Acq_Rel;
+typedef <em>unspecified</em> _Ordered;
+
+#define __relaxed <em>see below</em>
+#define __acquire <em>see below</em>
+#define __release <em>see below</em>
+#define __acq_rel <em>see below</em>
+#define __ordered <em>see below</em>
+
+// Operations
+
+template&lt; class Cn, class T &gt; inline T atomic_load( Cn, T const * p );
+template&lt; class Cn, class T &gt; inline T atomic_load( Cn, T const volatile * p );
+
+template&lt; class Cn, class T &gt; inline void atomic_store( Cn, T * p, T v );
+template&lt; class Cn, class T &gt; inline void atomic_store( Cn, T volatile * p, T v );
+
+template&lt; class Cn, class T &gt; inline T atomic_swap( Cn, T * p, T v );
+template&lt; class Cn, class T &gt; inline T atomic_swap( Cn, T volatile * p, T v );
+
+template&lt; class Cn, class T &gt; inline bool atomic_compare_swap( Cn, T * p, T * v, T w );
+template&lt; class Cn, class T &gt; inline bool atomic_compare_swap( Cn, T volatile * p, T * v, T w );
+
+template&lt; class Cn, class T &gt; inline T atomic_fetch_add( Cn, T * p, T v );
+template&lt; class Cn, class T &gt; inline T atomic_fetch_add( Cn, T volatile * p, T v );
+
+template&lt; class Cn, class T &gt; inline T * atomic_fetch_add( Cn, T * * p, ptrdiff_t v );
+template&lt; class Cn, class T &gt; inline T * atomic_fetch_add( Cn, T * volatile * p, ptrdiff_t v );
+
+template&lt; class Cn, class T &gt; inline T atomic_fetch_and( Cn, T * p, T v );
+template&lt; class Cn, class T &gt; inline T atomic_fetch_and( Cn, T volatile * p, T v );
+
+template&lt; class Cn, class T &gt; inline T atomic_fetch_or( Cn, T * p, T v );
+template&lt; class Cn, class T &gt; inline T atomic_fetch_or( Cn, T volatile * p, T v );
+
+template&lt; class Cn, class T &gt; inline T atomic_fetch_xor( Cn, T * p, T v );
+template&lt; class Cn, class T &gt; inline T atomic_fetch_xor( Cn, T volatile * p, T v );
+
+template&lt; class T &gt; inline void atomic_increment( T * p );
+template&lt; class T &gt; inline void atomic_increment( T volatile * p );
+
+template&lt; class T &gt; inline bool atomic_decrement( T * p );
+template&lt; class T &gt; inline bool atomic_decrement( T volatile * p );
+
+template&lt; class T &gt; inline T * atomic_load_address( T * const * p );
+template&lt; class T &gt; inline T * atomic_load_address( T * const volatile * p );
+
+// Fences
+
+template&lt; class Cn &gt; inline void atomic_memory_fence( Cn );
+template&lt; class Cn &gt; inline void atomic_compiler_fence( Cn );
+
+// Spinlocks
+
+typedef <em>unspecified</em> atomic_spinlock_t;
+#define ATOMIC_SPINLOCK_INITIALIZER <em>unspecified</em>
+
+inline bool atomic_spin_trylock( atomic_spinlock_t * lock );
+inline void atomic_spin_unlock( atomic_spinlock_t * lock );
+</pre>
+    <p>
+        The header <code>&lt;atomic&gt;</code> defines facilities for concurrent access
+        to shared data without synchronization.</p>
+    <p>
+        All symbols in <code>&lt;atomic&gt;</code> are allowed to be defined as macros or
+        compiler intrinsics. The operations are shown as function templates for functional
+        specification and presentation purposes. The implementation is allowed to not provide
+        functions or function templates. A program that passes an explicit template parameter
+        to an atomic operation is ill-formed. A program that tries to obtain the address
+        of any function or function template defined in <code>&lt;atomic&gt;</code> is ill-formed.</p>
+    <p>
+        The inclusion of <code>&lt;atomic&gt;</code> in a translation unit reserves all
+        identifiers starting with atomic_ or ATOMIC_ to the implementation.</p>
+    <p>
+        The symbols <code>__relaxed</code>, <code>__acquire</code>, <code>__release</code>,
+        <code>__acq_rel</code> and <code>__ordered</code> are shown in the synopsis as macros
+        for presentation purposes. The implementation is allowed to not define them as macros,
+        subject to the requirements below.</p>
+    <p>
+        All atomic operations and fences take a <em>constraint</em> as a first argument.
+        A <em>constraint</em> is a value of type <code>_Relaxed</code>, <code>_Acquire</code>,
+        <code>_Release</code>, <code>_Acq_Rel</code> or <code>_Ordered</code>.</p>
+    <p>
+        A constraint of type <code>_Relaxed</code> places no additional requirements on
+        the operation.</p>
+    <p>
+        A constraint of type <code>_Acquire</code> ensures that the load part of the atomic
+        operation has <em>acquire semantics</em> as defined in [intro.concur].</p>
+    <p>
+        A constraint of type <code>_Release</code> ensures that the store part of the atomic
+        operation has <em>release semantics</em> as defined in [intro.concur].</p>
+    <p>
+        A constraint of type <code>_Acq_Rel</code> combines the semantics of <code>_Acquire</code>
+        and <code>_Release</code> and is only allowed on read-modify-write atomic operations.</p>
+    <p>
+        A constraint of type <code>_Ordered</code> ensures that all operations that precede
+        the atomic operation in program order are performed before the atomic operation
+        with respect to any other thread, and that all operations that follow the atomic
+        operation are performed after the atomic operation with respect to any other thread.</p>
+    <p>
+        A program that contains no data races except those introduced by atomic operations
+        with an <code>_Ordered</code> constraint shall produce a <em>sequentially consistent</em>
+        execution.</p>
+    <p>
+        A program that contains no data races except those introduced by atomic operations
+        with an <code>_Ordered</code> constraint or atomic_load operations with an <code>_Acquire</code>
+        constraint shall produce a <em>cache-coherent causally consistent</em> execution.</p>
+    <p>
+        An atomic operation on a non-volatile object is not part of the observable behavior
+        ([intro.execution]). An implementation is allowed to transform, reorder, coalesce
+        or eliminate atomic operations on non-volatile objects if this produces a valid
+        execution according to [intro.execution] and [intro.concur].</p>
+    <p>
+        All atomic operations require an <em>atomic</em> type as <code>T</code>. A program
+        that attempts to use an atomic operation on a non-atomic type is ill-formed.</p>
+    <p>
+        No atomic operation or fence throws an exception.</p>
+    <h4>
+        Constraints</h4>
+    <pre>typedef <em>unspecified</em> _Relaxed;
+typedef <em>unspecified</em> _Acquire;
+typedef <em>unspecified</em> _Release;
+typedef <em>unspecified</em> _Acq_Rel;
+typedef <em>unspecified</em> _Ordered;
+</pre>
+    <p>
+        The types <code>_Relaxed</code>, <code>_Acquire</code>, <code>_Release</code>, <code>
+            _Acq_Rel</code> and <code>_Ordered</code> are unspecified distinct POD types.</p>
+    <pre>#define __relaxed <em>see below</em>
+#define __acquire <em>see below</em>
+#define __release <em>see below</em>
+#define __acq_rel <em>see below</em>
+#define __ordered <em>see below</em>
+</pre>
+    <p>
+        The symbols <code>__relaxed</code>, <code>__acquire</code>, <code>__release</code>,
+        <code>__acq_rel</code> and <code>__ordered</code> are values of type <code>_Relaxed</code>,
+        <code>_Acquire</code>, <code>_Release</code>, <code>_Acq_Rel</code> and <code>_Ordered</code>,
+        respectively. It is unspecified whether they are lvalues or rvalues.</p>
+    <p>
+        [<em>Note:</em> two possible definitions of <code>_Relaxed</code> and <code>__relaxed</code>
+        might be</p>
+    <pre>struct _Relaxed {};
+#define __relaxed _Relaxed()
+</pre>
+    <p>
+        and</p>
+    <pre>enum _Relaxed { __relaxed };
+</pre>
+    <p>
+        <em>--end note</em>]</p>
+    <h4>
+        Operations</h4>
+    <pre>template&lt; class Cn, class T &gt; inline T atomic_load( Cn, T const * p );
+template&lt; class Cn, class T &gt; inline T atomic_load( Cn, T const volatile * p );</pre>
+    <p>
+        <em>Requires:</em> <code>Cn</code> shall be one of <code>_Relaxed</code>, <code>_Acquire</code>
+        or <code>_Ordered</code>.</p>
+    <p>
+        <em>Returns:</em> <code>*p</code>.</p>
+    <pre>template&lt; class Cn, class T &gt; inline void atomic_store( Cn, T * p, T v );
+template&lt; class Cn, class T &gt; inline void atomic_store( Cn, T volatile * p, T v );</pre>
+    <p>
+        <em>Requires:</em> <code>Cn</code> shall be one of <code>_Relaxed</code>, <code>_Release</code>
+        or <code>_Ordered</code>.</p>
+    <p>
+        <em>Effects:</em> <code>*p = v;</code></p>
+    <pre>template&lt; class Cn, class T &gt; inline T atomic_swap( Cn, T * p, T v );
+template&lt; class Cn, class T &gt; inline T atomic_swap( Cn, T volatile * p, T v );</pre>
+    <p>
+        Effects: <code>*p = v;</code></p>
+    <p>
+        Returns: The old contents of <code>*p</code>.</p>
+    <pre>template&lt; class Cn, class T &gt; inline bool atomic_compare_swap( Cn, T * p, T * v, T w );
+template&lt; class Cn, class T &gt; inline bool atomic_compare_swap( Cn, T volatile * p, T * v, T w );</pre>
+    <p>
+        <em>Effects:</em> Compares <code>*p</code> with <code>*v</code> by using a bitwise
+        comparison and if they match, updates <code>*p</code> to contain <code>w</code>.
+        In either case updates <code>*v</code> with the old value of <code>*p</code> by
+        using a bitwise copy. Performs no lvalue to rvalue conversion on <code>*p</code>
+        or <code>*v</code>.</p>
+    <p>
+        <em>Returns:</em> <code>true</code> if the update to <code>*p</code> has succeeded,
+        <code>false</code> otherwise. The function is allowed to fail spuriously.</p>
+    <p>
+        [<em>Example:</em></p>
+    <pre>template&lt; class Cn, class T &gt; inline T atomic_fetch_xor( Cn, T * p, T v )
+{
+    static_assert( std::is_integral&lt;T&gt;::value, &quot;This function requires an integral type&quot; );
+
+    T r = *p;
+
+    while( !atomic_compare_swap( Cn(), p, &r, r ^ v ) );
+
+    return r;
+}
+</pre>
+    <p>
+        <em>--end example</em>]</p>
+    <pre>template&lt; class Cn, class T &gt; inline T atomic_fetch_add( Cn, T * p, T v );
+template&lt; class Cn, class T &gt; inline T atomic_fetch_add( Cn, T volatile * p, T v );</pre>
+    <p>
+        <em>Requires:</em> <code>T</code> shall be integral.</p>
+    <p>
+        <em>Effects:</em> <code>*p += v;</code></p>
+    <p>
+        <em>Returns:</em> The old contents of <code>*p</code>.</p>
+    <pre>template&lt; class Cn, class T &gt; inline T * atomic_fetch_add( Cn, T * * p, ptrdiff_t v );
+template&lt; class Cn, class T &gt; inline T * atomic_fetch_add( Cn, T * volatile * p, ptrdiff_t v );</pre>
+    <p>
+        <em>Effects:</em> <code>*p += v;</code></p>
+    <p>
+        <em>Returns:</em> The old contents of <code>*p</code>.</p>
+    <pre>template&lt; class Cn, class T &gt; inline T atomic_fetch_and( Cn, T * p, T v );
+template&lt; class Cn, class T &gt; inline T atomic_fetch_and( Cn, T volatile * p, T v );</pre>
+    <p>
+        <em>Requires:</em> <code>T</code> shall be integral.</p>
+    <p>
+        <em>Effects:</em> <code>*p &amp;= v;</code></p>
+    <p>
+        <em>Returns:</em> The old contents of <code>*p</code>.</p>
+    <pre>template&lt; class Cn, class T &gt; inline T atomic_fetch_or( Cn, T * p, T v );
+template&lt; class Cn, class T &gt; inline T atomic_fetch_or( Cn, T volatile * p, T v );</pre>
+    <p>
+        <em>Requires:</em> <code>T</code> shall be integral.</p>
+    <p>
+        <em>Effects:</em> <code>*p |= v;</code></p>
+    <p>
+        <em>Returns:</em> The old contents of <code>*p</code>.</p>
+    <pre>template&lt; class Cn, class T &gt; inline T atomic_fetch_xor( Cn, T * p, T v );
+template&lt; class Cn, class T &gt; inline T atomic_fetch_xor( Cn, T volatile * p, T v );</pre>
+    <p>
+        <em>Requires:</em> <code>T</code> shall be integral.</p>
+    <p>
+        <em>Effects:</em> <code>*p ^= v;</code></p>
+    <p>
+        <em>Returns:</em> The old contents of <code>*p</code>.</p>
+    <pre>template&lt; class T &gt; inline void atomic_increment( T * p );
+template&lt; class T &gt; inline void atomic_increment( T volatile * p );</pre>
+    <p>
+        <em>Requires:</em> <code>T</code> shall be integral.</p>
+    <p>
+        <em>Effects:</em> <code>++*p;</code></p>
+    <p>
+        <em>Constraint:</em> <code>_Relaxed</code>.</p>
+    <pre>template&lt; class T &gt; inline bool atomic_decrement( T * p );
+template&lt; class T &gt; inline bool atomic_decrement( T volatile * p );</pre>
+    <p>
+        <em>Requires:</em> <code>T</code> shall be integral.</p>
+    <p>
+        <em>Effects:</em> <code>--*p;</code></p>
+    <p>
+        <em>Returns:</em> <code>true</code> if the new value of <code>*p</code> is zero,
+        <code>false</code> otherwise.</p>
+    <p>
+        <em>Constraint:</em> <code>_Acquire</code> if the new value of <code>*p</code> is
+        zero, <code>_Release</code> otherwise.</p>
+    <pre>template&lt; class T &gt; inline T * atomic_load_address( T * const * p );
+template&lt; class T &gt; inline T * atomic_load_address( T * const volatile * p );</pre>
+    <p>
+        <em>Returns:</em> <code>*p</code>.</p>
+    <p>
+        <em>Constraint:</em> <code>_Acquire</code> only with respect to <code>**p</code>.</p>
+    <h4>
+        Fences</h4>
+    <pre>template&lt; class Cn &gt; inline void atomic_memory_fence( Cn );</pre>
+    <p>
+        <em>Effects:</em> When <code>Cn</code> is</p>
+    <ul>
+        <li><code>_Relaxed</code>, has no effect;</li>
+        <li><code>_Acquire</code>, ensures that all subsequent operations in program order are
+            performed after all preceding loads in program order;</li>
+        <li><code>_Release</code>, ensures that all preceding operations in program order are
+            performed after all subsequent stores in program order;</li>
+        <li><code>_Acq_Rel</code>, combines the semantics of <code>_Acquire</code> and <code>
+            _Release</code>;</li>
+        <li><code>_Ordered</code>, ensures that all preceding operations in program order are
+            performed after all subsequent operations in program order.</li>
+    </ul>
+    <pre>template&lt; class Cn &gt; inline void atomic_compiler_fence( Cn );</pre>
+    <p>
+        <em>Effects:</em> as <code>atomic_memory_fence</code>, but only inhibits compiler
+        reorderings and has no effect on hardware reorderings.</p>
+    <h4>
+        Spinlocks</h4>
+    <pre>typedef <em>unspecified</em> atomic_spinlock_t;</pre>
+    <p>
+        <code>atomic_spinlock_t</code> is an unspecified POD type that represents a <em>spinlock</em>.
+        The behavior of a program that overwrites the contents of a locked <em>spinlock</em>
+        is undefined.</p>
+    <pre>#define ATOMIC_SPINLOCK_INITIALIZER <em>unspecified</em></pre>
+    <p>
+        <code>ATOMIC_SPINLOCK_INITIALIZER</code> shall be used as an initializer for <code>atomic_spinlock_t</code>
+        objects with static storage duration.</p>
+    <pre>inline bool atomic_spin_trylock( atomic_spinlock_t * spinlock );</pre>
+    <p>
+        <em>Requires:</em> <code>*spinlock</code> shall be an initialized object of type
+        <code>atomic_spinlock_t</code>.</p>
+    <p>
+        <em>Effects:</em> Attempts to lock <code>*spinlock</code>. The attempt shall succeed
+        only if <code>*spinlock</code> is not locked.</p>
+    <p>
+        <em>Returns:</em> true if <code>*spinlock</code> has been locked by the current
+        thread, false otherwise.</p>
+    <p>
+        <em>Constraint:</em> <code>_Acquire</code>.</p>
+    <pre>inline void atomic_spin_unlock( atomic_spinlock_t * spinlock );</pre>
+    <p>
+        <em>Requires:</em> <code>*spinlock</code> shall be locked by the current thread.</p>
+    <p>
+        <em>Effects:</em> Unlocks <code>*spinlock</code>.</p>
+    <p>
+        <em>Postconditions:</em> <code>*spinlock</code> is no longer locked.</p>
+    <p>
+        <em>Constraint:</em> <code>_Release</code>.</p>
+    <h3>
+        Additions to Chapter 20, General utilities library [utilities]</h3>
+    <p>
+        Add to the synopsis of &lt;type_traits&gt; the following type property trait:</p>
+    <pre>template&lt; class T &gt; struct is_atomic;
+</pre>
+    <p>
+        Add to Table 39, Type Property Predicates, the following:</p>
+    <table border="1" cellpadding="8" cellspacing="0">
+        <tr>
+            <td>
+                <code>template&lt; class T &gt; struct is_atomic;</code></td>
+            <td>
+                T is atomic ([atomics])</td>
+            <td>
+                T shall be a complete type.</td>
+        </tr>
+    </table>
+    <h2>
+        <a name="implementability">IV. Implementability</a></h2>
+    <p>
+        A prototype implementation of the proposal for Microsoft Visual C++ 7.1 is available
+        at:</p>
+    <p>
+        <a href="http://www.pdimov.com/cpp/N2195/atomic.hpp">http://www.pdimov.com/cpp/N2195/atomic.hpp</a></p>
+    <hr />
+    <p>
+        <em>Thanks to Hans Boehm and Lawrence Crowl for reviewing this document.</em></p>
+    <p>
+        <em>--end</em></p>
+</body>
+</html>

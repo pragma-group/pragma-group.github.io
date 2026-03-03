@@ -1,0 +1,459 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.0 Transitional//EN"> <html lang="en-us">
+<HEAD>
+<TITLE>WG21/N2338: Concurrency memory model compiler consequences</TITLE>
+<META http-equiv=Content-Type content="text/html; charset=windows-1252">
+
+</HEAD>
+<BODY>
+<TABLE 
+  summary="This table provides identifying information for this document."><TBODY>
+  <TR>
+    <TH>Doc. No.:</TH>
+    <TD>WG21/N2338<BR>J16/07-0198</TD></TR>
+  <TR>
+    <TH>Date:</TH>
+    <TD>2007-08-04</TD></TR>
+  <TR>
+    <TH>Reply to:</TH>
+    <TD>Hans-J. Boehm</TD></TR>
+  <TR>
+    <TH>Phone:</TH>
+    <TD>+1-650-857-3406</TD></TR>
+  <TR>
+    <TH>Email:</TH>
+    <TD><A 
+href="mailto:Hans.Boehm@hp.com">Hans.Boehm@hp.com</A></TD></TR></TBODY></TABLE>
+<H1>Concurrency memory model compiler consequences</H1>
+<P>This paper describes the compiler consequences of adopting the
+N2334 memory model proposal (a revision of <A
+href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2300.htm">N2300</A>).
+<P>
+The concurrency memory model imposes constraints on the order in
+which memory operations on shared variables may become visible to other
+threads.  Operations on locations known to be thread-local (e.g. operations
+on function scope variables whose address is not taken) are unaffected,
+and may be optimized as in the single-threaded case.
+<P>
+Thus the effect of the proposal is limited to three kinds of memory
+operations:
+<OL>
+<LI>Normal memory operations that operate on potentially shared locations.
+<LI>Operations on synchronization objects such as locks.
+<LI>Atomic operations, as provided in the atomics library.
+</ol>
+<P>
+Clearly the first is the most interesting, since those operations
+are likely to be the most frequent.  The frequency of the last in
+existing code is zero, and in purely lock-based code will remain there.
+Performance of the
+last is probably determined much more by the runtime implementation
+than compiler transformations.  Nonetheless, we discuss them all in
+turn, at least briefly.
+<H2>Ordinary operations on potentially shared memory</h2>
+The proposed standard gives undefined semantics to code with any
+data races.  A data race occurs whenever two operations in
+separate threads can access the same location at the same time
+in a sequentially consistent execution,
+and one of them is a store operation.  (This is almost, but not
+quite equivalent to the N2334 definition.  See N2335.
+There is another obscure way to introduce an N2334 race,
+but it is not relevant to this discussion.)
+<P>
+Thus source-to-source transformations on C++ programs may not
+introduce data races.  Doing so would introduce undefined
+semantics.
+<P>
+Indeed, a weak converse of this statement is generally also true.
+A transformation that preserves sequential correctness, and
+preserves the state of memory at synchronization operations,
+and does not introduce data races, preserves correctness.
+If it failed to preserve correctness a thread would have
+to observe the changed sequence of state changes between
+synchronization operations.  It cannot do so without performing
+a concurrent memory operation on a location altered between
+those synchronization points.  This involves a data race,
+either in the original program, or introduced by the compiler.
+We excluded the latter case, and the former preserves correctness.
+<P>
+Thus the crucial question is to identify transformations
+that may introduce data races.  We examine what we expect to be
+some of the most common examples.
+<H3>Adjacent field overwrites</h3>
+Consider an update to the field <TT>b</tt> in a
+potentially shared <TT>struct</tt>
+declared as
+<PRE>
+struct { char a; int b:9; int c:7; char d; }
+</pre>
+Many existing compilers on conventional 32-bit machines will
+implement the update by loading the entire 1 word structure,
+replacing the bits corresponding to <TT>b</tt>, and then
+rewriting the entire structure.  By overwriting other
+fields, including for example <TT>a</tt>, in the process,
+this will introduce a race with another thread concurrently
+updating field <TT>a</tt>.  According to the proposed
+standard, field <TT>a</tt> is in a separate memory location;
+thus this introduces a race not present in the original source
+code.
+<P>
+Indeed, it can unexpectedly overwrite such a concurrent update to
+<TT>a</tt>, thus resulting in incorrect results.
+<P>
+Generally updates to one memory location, as defined in the
+standard, may not result in implicit updates to others, even
+if the original value is written back.
+
+<H3>Speculative code motion involving stores</h3>
+It is generally not allowable to introduce stores to
+potentially shared memory
+locations that might not otherwise have been written between the
+same synchronization points.  Such an introduced store
+might race with a concurrent store to the same location
+in another thread, and potentially overwrite the value written
+by the original store.
+<P>
+(This constraint can be weakened a bit, since acquire and release
+operations generally allow one-way motion of ordinary memory
+operations across them.  Thus an update to <TT>x</tt>
+immediately after a lock release allows bogus write to <TT>x</tt>
+to be inserted just before the lock release.  A race with
+the latter would imply a race with the former.  But current
+compilers rarely perform this sort of transformation, and we expect
+it to rarely be substantially profitable.) 
+<P>
+Thus if we have the code:
+<PRE>
+switch (y) {
+    case 0: x = 17; w = 1; break;
+    case 1: x = 17; w = 3; break;
+    case 2: w = 9; break;
+    case 3: x = 17; w = 1; break;
+    case 4: x = 17; w = 3; break;
+    case 5: x = 17; w = 9; break;
+    default: x = 17; w = 42; break;
+}
+</pre>
+and <TT>x</tt> is potentially shared, it is not acceptable to
+reduce code size by transforming this to
+<PRE>
+tmp = x; x = 17;
+switch (y) {
+    case 0: w = 1; break;
+    case 1: w = 3; break;
+    case 2: x = tmp; w = 9; break;
+    case 3: w = 1; break;
+    case 4: w = 3; break;
+    case 5: w = 9; break;
+    default: w = 42; break;
+}
+</pre>
+Doing so would introduce a race if <TT>y</tt> were 2, and another thread
+were concurrently updating <TT>x</tt>.  Again the concurrent update
+might be lost as a result of the spurious store.
+
+<H3>Speculative register promotion</h3>
+A very similar problem occurs more commonly if a variable is promoted
+to a register, and unconditionally loaded into that register and
+later written back, even though the original variable may have not
+been written along all control paths.
+<P>
+A typical example is
+<PRE>
+for (p = q; p = p -&gt; next; ++p) {
+    if (p -&gt; data &gt; 0) ++count;
+}
+</pre>
+where the variable <TT>count</tt> is potentially shared.  Many compilers
+currently translate this to something along the lines of
+<PRE>
+register int r1 = count;
+for (p = q; p = p -&gt; next; ++p) {
+    if (p -&gt; data &gt; 0) ++r1;
+}
+count = r1;
+</pre>
+This is unsafe if the list <TT>q</tt> is known to the programmer
+to contain no positive data, and there is a concurrent thread updating
+<TT>count</tt>.  In this rather esoteric case, the transformation
+introduces a race.  Since it potentially
+hides an update that did not race in the original source,
+it is disallowed by the proposal.
+<P>
+(This example is designed to explain the compiler consequences
+of the proposed rules, not motivate them.
+For a more motivational example, see
+<A HREF="http://portal.acm.org/citation.cfm?id=1064978.1065042">
+Boehm, Threads Cannot be Implemented as a Library, PLDI 2005</a>.
+Particularly section 4.3.)
+<P>
+There are usually alternative ways to optimize such code.  The
+following transformed version is safe, and approximately equally
+efficient:
+<PRE>
+register int r1 = 0;
+for (p = q; p = p -&gt; next; ++p) {
+    if (p -&gt; data &gt; 0) ++r1;
+}
+if (r1) count += r1;
+</pre>
+This relies on a fairly special purpose transformation.
+By the arguments of the next section, the following more general variant
+is usually also safe in an optimizing compiler context, <EM>in spite
+of the fact that it may introduce a race</em>:
+<PRE>
+register int r1 = count;
+register bool count_modified = false;
+for (p = q; p = p -&gt; next; ++p) {
+    if (p -&gt; data &gt; 0) { ++r1; count_modified = true; }
+}
+if (count_modified) count = r1;
+</pre>
+This potentially involves a race, since it introduces a <EM>load</em>
+of <TT>count</tt> that was not requested by the original source.
+
+<H3>Speculative code motion involving loads</h3>
+Races can be introduced by introducing either a speculative store
+or load.  A source-to-source C++ to C++ transformation is invalid if
+it does so in either form, since the proposed standard gives the
+result undefined semantics.
+<P>
+However, there is a significant difference between the two:
+A newly introduced store always has the potential to hide the
+value of a concurrent, now racing, store.  Thus such an
+introduction not only produces a C++ program with formally
+undefined semantics; the resulting program is also virtually
+guaranteed to compile to machine code that is an incorrect
+translation of the original code.
+<P>
+On the other hand, a compiler that introduces a racing load at
+the machine code level, and then discards the result of the load,
+generally will not have changed the semantics of the program.
+<P>
+This is a subtle distinction: C++-source-to-C++-source transformations
+that introduce a racing load are invalid.  On the other hand
+compiler transformations that do so on the way to generating
+object code for conventional machines may be completely correct,
+since races <EM>in the object code</em> typically do not have
+undefined semantics.  At this level, the semantics are defined by
+the architecture specification, not the C++ standard.
+<P>
+This may seem like a spurious distinction, but it is not.
+The author of C++ source code provides an implicit promise to the
+compiler: There are no data races on ordinary variables.
+This allows the compiler to safely perform some common optimizations
+that would otherwise be invalid.  (See
+<A HREF="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2176.html#undefined">
+the relevant section of N2176</a> for details.)  If the
+compiler itself introduces potentially racing loads in intermediate code, it
+can, and has to, remember that these loads may race, and have to be treated
+as such by subsequent optimizations.
+<P>
+This distinction also allows the relatively easy use of race
+detection tools at various levels.
+If we had hypothetical hardware (or a virtual machine) that aborted
+the program when a race was detected, compilers would not be allowed to
+introduce potentially racing loads.  In this environment, adding
+such a race, even if the result of the load were unused <EM>would</em>
+change the semantics of the program.  Although such environments
+are not commonplace, they have certainly been proposed, and may well turn
+out to be very useful.
+<P>
+This again argues that whether or not it is safe to introduce
+racing loads should depend on the target architecture and its
+semantics.  If the target is C++ source code, it is disallowed.
+If it is a standard, for example X86, processor, it usually is allowed.
+If the target provides race detection for debugging purposes, it
+is again disallowed.
+<P>
+Thus if our source program reads
+<PRE>
+if (x) z = w + 1;
+</pre>
+and our target is a conventional hardware platform, it is
+acceptable to compile this as
+<PRE>
+r1 = w; if (x) z = r1 + 1;
+</pre>
+to better overlap load latencies for <TT>x</tt> and <TT>w</tt>.
+This may introduce a new race if <TT>x</tt> is false.  But the result
+of the racing load is not used in that case.  And the semantics
+of the resulting <EM>object program</em> on a standard architecture
+is unaffected.
+<P>
+The final transformation of the previous section has essentially the
+same characteristics.
+<H2>Synchronization operations</h2>
+Conventional implementations of synchronization operations like locks
+rely on
+a combination of the following to enforce memory ordering:
+<UL>
+<LI>On weakly ordered machines, library routines implementing the
+synchronization operations include the necessary fences.
+<LI>
+Synchronization operations are mostly treated as opaque by
+compilers.  Thus memory operations cannot be moved across them,
+since the compiler cannot determine whether the synchronization
+routine might read or write such a memory location.
+</ul>
+This approach will continue to work, without modification.
+<P>
+The one significant change over some past standards
+is that the memory model
+makes it explicit that lock acquisition only has "acquire"
+semantics, and movement of memory operations past a lock
+acquisition <EM>into</em> the critical section is allowed.
+This allows the compiler some flexibility that is technically
+disallowed under the current Posix thread specification.
+More importantly, it often means that lock acquisition
+requires one, not two, memory fence instructions.  This
+may speed it up significantly.  (This is what motivated
+the slightly more complicated N2334 definition of a data
+race.)
+<P>
+However, we believe that this optimization is already performed
+in many cases, in spite of its dubious standing with respect
+to existing standards.  Thus even this does not appear to be
+imply a real change to existing practice.
+<H2>Atomic operations</h2>
+Note that this section takes some liberties with atomics syntax,
+relative to the current atomics proposal N2381 or its predecessor
+<A HREF="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2324.html">
+N2324</a>.  Hopefully the intent is clear,
+and this can be updated as we pin down the real syntax.
+<P>
+We use variable <TT>v</tt> to represent an atomic
+in the examples.  Other variables are not atomic.
+<P>
+We expect that atomic operations will initially be treated as opaque
+by the compiler, just like the other synchronization
+operations from the last section,
+and thus prevent movement of other memory operations
+across atomic operations.  The only substantial difference from
+locking primitives is that atomic operations would usually be
+expanded in-line.
+<P>
+This is safe.  And for most applications, we should expect that only
+small amounts of performance will be left on the table as a result of this
+simplification.  In most cases, the presence or absence of an additional
+memory fence is likely to have far more impact than compiler optimizations
+involving reordering of atomics.
+<P>
+However, some more aggressive compiler optimizations on atomics are
+allowed by the model:
+<UL>
+<LI> As mentioned above, acquire and release ordered atomics, like locks,
+really prevent reordering in only one direction.  Thus
+<PRE>
+x = 1; r1 = v.load_acquire();
+</pre>
+can be safely transformed to
+<PRE>
+r1 = v.load_acquire(); x = 1;
+</pre>
+and
+<PRE>
+v.store_release(1); x = 1;
+</pre>
+can safely be transformed to
+<PRE>
+x = 1; v.store_release(1);
+</pre>
+Similarly, an atomic release store followed by an atomic acqire load may be reordered.
+<LI>
+Relaxed atomic operations can be reordered in both directions,
+with respect to either ordinary memory operations or other relaxed atomic operations.
+But the requirement that updates must be
+observed in modification order disallows this if the two operations may apply to the same atomic object.
+(The same restriction applies to the one-way reordering of acquire/release atomic operations.)
+<LI>
+The current formulation of the memory model does not prevent combining
+of consecutive atomic reads from the same location.  But this needs
+to be constrained by quality of implementation considerations, and
+is probably rarely desirable.  We may want to consider imposing further
+constraints in this regard, though those may be difficult to state.
+<P>
+Currently there is no explicit prohibition against translating
+<PRE>
+while (v.load_acquire()) {}
+</pre>
+to
+<PRE>
+r1 = v.load_acquire(); while (r1) {}
+</pre>
+though I think most of us would agree that this should be avoided
+in a high
+quality implementation.  However, such transformations may also be
+difficult to disallow, without disallowing implementations that simply never
+schedule this thread.  And I think it would be a mistake to try
+to dictate fairness at this level, since that would disallow
+some special-purpose cooperative threading implementations.
+<LI>
+The current memory model also does not prohibit combining
+adjacent stores to the same location, i.e. simply
+replacing them with the final store.  This is generally indistinguishable
+from scheduling threads so that the intermediate stores are simply
+not seen.
+<P>
+Once again, combining an unbounded number of consecutive stores
+in this way is strongly discouraged, but currently not formally
+disallowed.
+<P>
+In this way atomics are very different from volatiles.
+Volatiles guarantee that the right number of memory operations
+are performed, but do not guarantee atomicity.  Atomics do guarantee
+atomicity, but allow consecutive operations to be combined.
+</ul>
+Note that the reordering constraints imposed by atomics also
+have implications on common subexpression elimination
+or partial redundancy elimination.
+For example, it is not acceptable to transform
+<PRE>
+r1 = x + 1; r2 = v.load_acquire(); r3 = x + 1;
+</pre>
+to
+<PRE>
+r1 = x + 1; r2 = v.load_acquire(); r3 = r1;
+</pre>
+This would effectively move the second load of <TT>x</tt> to before
+the <TT>load_acquire()</tt>, i.e. in the wrong direction.
+This optimization would clearly not be performed
+by the more naive implementation that treats load_acquire() as an
+opaque function call.
+<P>
+On most fence-based architectures, we expect
+<TT>v.store_ordered(x)</tt> to be implemented as something like
+<PRE>
+fence_preventing_store_load_and_store_store_reordering;
+v = x;
+full_fence;
+</pre>
+The full fence is typically needed to prevent reordering with a later
+atomic load.  (Really we only need a fence that prevents store-load
+reordering.  But typically this requires the most expensive fence.)
+It can be removed if the compiler can see that the
+next atomic load is preceded by a fence for another reason.  Depending
+on the architecture, this may happen, for example, in the double-checked
+locking case.
+<P>
+On X86 processors, we expect that the standard implementation of
+an ordered store will consist of a single <TT>xchg</tt> instruction, whose
+result is ignored.  This is expected to provide both the necessary fencing
+and total ordering guarantees.
+<P>
+The <TT>store_release</tt> operation can usually be implemented without
+the trailing expensive fence.  We expect that on X86 hardware it will
+be implemented as a plain store instruction, which implicitly provides
+the required ordering guarantees on that architecture.
+<P>
+On most architectures, both a sequentially consistent load and a
+<TT>load_acquire</tt> operation will be implemented with a load
+instruction, followed by a fence that provides both
+load-store and load-load ordering.  In a few cases, a more expensive
+fence may be required.  On X86, a simple load instruction is expected to
+suffice.
+<P>
+The proposed C++ sequentially consistent atomics are essentially equivalent to
+Java volatiles.  Thus Doug Lea's
+<A HREF="http://g.oswego.edu/dl/jmm/cookbook.html">JSR133 Cookbook</a>
+also provides some useful implementation advice.
+</BODY></HTML>

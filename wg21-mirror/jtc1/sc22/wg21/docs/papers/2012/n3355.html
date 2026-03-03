@@ -1,0 +1,484 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+
+<meta http-equiv="Content-Type" content="text/html;charset=US-ASCII">
+
+<style type="text/css">
+
+body {
+  color: #000000;
+  background-color: #FFFFFF;
+}
+
+del {
+  text-decoration: line-through;
+  color: #8B0040;
+}
+ins {
+  text-decoration: underline;
+  color: #005100;
+}
+
+p.example {
+  margin: 2em;
+}
+pre.example {
+  margin: 2em;
+}
+div.example {
+  margin: 2em;
+}
+
+code.extract {
+  background-color: #F5F6A2;
+}
+pre.extract {
+  margin: 2em;
+  background-color: #F5F6A2;
+  border: 1px solid #E1E28E;
+}
+
+p.function {
+}
+
+p.attribute {
+  text-indent: 3em;
+}
+
+blockquote.std {
+  color: #000000;
+  background-color: #F1F1F1;
+  border: 1px solid #D1D1D1;
+  padding: 0.5em;
+}
+
+blockquote.stddel {
+  text-decoration: line-through;
+  color: #000000;
+  background-color: #FFEBFF;
+  border: 1px solid #ECD7EC;
+  padding: 0.5em;
+}
+
+blockquote.stdins {
+  text-decoration: underline;
+  color: #000000;
+  background-color: #C8FFC8;
+  border: 1px solid #B3EBB3;
+  padding: 0.5em;
+}
+
+table {
+  border: 1px solid black;
+  border-spacing: 0px;
+  margin-left: auto;
+  margin-right: auto;
+}
+th {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.2em;
+  border: none;
+}
+td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.2em;
+  border: none;
+}
+
+</style>
+
+<title>C++ Distributed Counters</title>
+</head>
+<body>
+<h1>C++ Distributed Counters</h1>
+
+<p>
+ISO/IEC JTC1 SC22 WG21 N3355 = 12-0045 - 2012-01-14
+</p>
+
+<p>
+Lawrence Crowl, crowl@google.com, Lawrence@Crowl.org
+</p>
+
+<p>
+<a href="#Introduction">Introduction</a><br>
+<a href="#Solution">Solution</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#counter_operations">Counter Operations</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#simple_counters">Simple Counters</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#counter_buffers">Counter Buffers</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#duplex_counters">Duplex Counters</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#weak_counters">Weak Counters</a><br>
+<a href="#synopsis">Synopsis</a><br>
+</p>
+
+
+<h2><a name="Introduction">Introduction</a></h2>
+
+<p>
+Long-running multithreaded server programs
+may need to maintain many counters to aid in program diagnosis.
+As these counters are much more commonly incremented than read,
+we desire an implementation of counters that 
+minimizes the cost of incrementing the counter,
+accepting increased costs to obtain the count.
+</p>
+
+<h2><a name="Solution">Solution</a></h2>
+
+<p>
+We propose a set of coordinated counter types
+that collectively provide for distributed counting.
+The essential component of the design is a trade-off
+between the cost of the counter
+and the "lag" between an increment and its appearance in a "read" value.
+That is, the read of a counter value may not reflect the most recent increments.
+</p>
+
+<p>
+These counters are parameterized by the base integer type
+that maintains the count.
+Avoid situations that overflow the integer.
+(See <code>exchange</code> below.)
+</p>
+
+<p>
+Finally, in keeping with the desire for minimum counter cost,
+these counters provide no memory ordering;
+their only effect is to maintain the count.
+(See 1.10 [intro.multithread] of the standard.)
+</p>
+
+
+<h3><a name="counter_operations">Counter Operations</a></h3>
+
+<p>
+Several operations are shared among most counters.
+They are:
+</p>
+
+<dl>
+<dt><code><var>constructor</var>( integer );</code></dt>
+<dd>
+<p>
+The parameter is the initial counter value.
+</p>
+</dd>
+
+<dt><code><var>constructor</var>();</code></dt>
+<dd>
+<p>
+Equivalent to an initial value of zero.
+</p>
+</dd>
+
+<dt><code>void inc( integer );</code></dt>
+<dd>
+<p>
+Add a value to the counter.  There is no default value.
+</p>
+</dd>
+
+<dt><code>void dec( integer );</code></dt>
+<dd>
+<p>
+Subtract a value from the counter.  There is no default value.
+</p>
+</dd>
+
+<dt><code>integer load();</code></dt>
+<dd>
+<p>
+Returns the value of the counter.
+</p>
+</dd>
+
+<dt><code>integer exchange( integer );</code></dt>
+<dd>
+<p>
+Replaces the existing count by the count in the parameter
+and returns the previous count,
+which enables safe concurrent count extraction.
+This operation has particular utility in long-running programs
+in occasionally draining the counter
+to prevent integer overflow.
+</p>
+</dd>
+</dl>
+
+<p>
+There are no copy or assignment operations.
+</p>
+
+
+<h3><a name="simple_counters">Simple Counters</a></h3>
+
+<p>
+The base of the design is an <code>atomic_counter</code>,
+which provides atomicity, but without reducing increment cost
+over the plain <code>atomic_int</code>.
+</p>
+
+<p>
+A <code>serial_counter</code> is available
+to ease conversion from concurrent to serial code.
+It provides the same interface,
+but without the cost of atomicity.
+</p>
+
+
+<h3><a name="counter_buffers">Counter Buffers</a></h3>
+
+<p>
+The cost of incrementing a counter is reduced
+by reducing the contention on the counter.
+We achieve this by placing a <dfn>counter buffer</dfn>
+in front of a counter.
+Counts are transfered from the buffer to the counter
+with a <code>push</code> operation on the buffer.
+The destructor does an implicit push.
+</p>
+
+<dl>
+<dt><code>void push();</code></dt>
+<dd>
+<p>
+Transfers the count in the buffer to the primary counter.
+</p>
+</dd>
+</dl>
+
+<p>
+Counter buffers
+require a reference to an <code>atomic_counter</code>
+as their constructor parameter,
+i.e. the primary counter.
+The lifetime of the primary counter must cover the lifetime of the buffer.
+Any increments in the buffer since the last <code>push</code> call
+are not reflected in the queries on the prime.
+</p>
+
+<p>
+There are two forms of counter buffers,
+a <code>serial_counter_buffer</code>
+for use when all increments on the buffer come from the same thread
+and
+an <code>atomic_counter_buffer</code>
+for use when increments on the buffer may come from the different threads.
+The latter is useful for processor-local buffers,
+which can substantially reduce inter-processor communication.
+</p>
+
+<p>
+An example use of a counter buffer is as follows.
+</p>
+
+<pre>
+<code>atomic_counter&lt;int&gt; lower_case_count( 0 );
+
+void count_lower_case( std::vector&lt; string &gt; arg )
+    serial_counter_buffer&lt;int&gt; cntbuf( lower_case_count );
+    for ( arg::iterator i = arg.begin(); i != arg.end(); i++ )
+        if ( is_lower_case( *i ) )
+            cntbuf.inc(1);
+}</code>
+</pre>
+
+<p>
+You can also place a <code>serial_counter_buffer</code>
+in front of an <code>atomic_counter_buffer</code> to further reduce costs.
+</p>
+
+<pre>
+<code>atomic_counter&lt;int&gt; global_counter( 0 );
+atomic_counter_buffer&lt;int&gt; processor_local( global_counter );
+serial_counter_buffer&lt;int&gt; function_local( processor_local );</code>
+</pre>
+
+
+<h3><a name="duplex_counters">Duplex Counters</a></h3>
+
+<p>
+The push model of counters sometimes yields an unacceptable lag
+in the observed value of the count.
+To avoid this lag,
+the <code>duplex_counter</code> and its <code>duplex_counter_buffer</code>
+provide a pull model of counters.
+</p>
+
+<pre>
+<code>duplex_counter&lt;int&gt; lower_case_count( 3 );
+
+void count_lower_case( std::vector&lt; string &gt; arg )
+    duplex_counter_buffer&lt;int&gt; cntbuf( lower_case_count );
+    for ( arg::iterator i = arg.begin(); i != arg.end(); i++ )
+        if ( is_lower_case( *i ) )
+            cntbuf.inc(1);
+}</code>
+</pre>
+
+<p>
+Another thread may call <code>lower_case_count.load()</code>
+and get the current count.
+That operation will poll each buffer for its count and return the sum.
+Naturally, any <code>inc</code>s done to a buffer after it is polled
+will be missed,
+but no counts will be lost.
+</p>
+
+<p>
+The exchange operation works by atomically transfering
+buffer counts to the main counter.
+That is,
+every count will be extracted
+by one and only one <code>exchange</code> operation.
+</p>
+
+
+<h3><a name="weak_counters">Weak Counters</a></h3>
+
+<p>
+Duplex counters can be expensive because 
+the counter exchange operation
+and the buffer <code>inc</code>/<code>dec</code> operations
+require write concurrency to the same object.
+To reduce that concurrency cost,
+the <code>weak_counter</code> and its <code>weak_counter_buffer</code>
+do not provide the <code>exchange</code> operation.
+This difference means that
+the polling is a read-only operation
+and requires less expensive synchronization.
+Use this counter when you do not intend to exchange values.
+</p>
+
+
+<h2><a name="synopsis">Synopsis</a></h2>
+
+<p>
+The synopsis is as follows.
+</p>
+
+<p>
+Note the presence of a <code>counter_bumper</code> class.
+This class could be eliminated
+by parameterizing the buffers on the type of the primary counter
+rather than on the underlying representation.
+</p>
+
+<pre>
+<code>template&lt; typename Integral &gt; class serial_counter
+{
+public:
+    constexpr serial_counter();
+    constexpr serial_counter( Integral in );
+    serial_counter( const serial_counter&amp; ) = delete;
+    serial_counter&amp; operator=( const serial_counter&amp; ) = delete;
+    void inc( Integral by );
+    void dec( Integral by );
+    Integral load();
+    Integral exchange( Integral to );
+};
+
+template&lt; typename Integral &gt; class counter_bumper
+{
+public:
+    constexpr counter_bumper( Integral in );
+    counter_bumper( const counter_bumper&amp; ) = delete;
+    counter_bumper&amp; operator=( const counter_bumper&amp; ) = delete;
+    void inc( Integral by );
+    void dec( Integral by );
+};
+
+template&lt; typename Integral &gt; class atomic_counter
+: public counter_bumper&lt; Integral &gt;
+{
+public:
+    constexpr atomic_counter();
+    constexpr atomic_counter( Integral in );
+    atomic_counter( const atomic_counter&amp; ) = delete;
+    atomic_counter&amp; operator=( const atomic_counter&amp; ) = delete;
+    Integral load();
+    Integral exchange( Integral to );
+};
+
+template&lt; typename Integral &gt; class serial_counter_buffer
+{
+public:
+    serial_counter_buffer( atomic_counter&lt; Integral &gt;&amp; p );
+    serial_counter_buffer() = delete;
+    serial_counter_buffer( const serial_counter_buffer&amp; ) = delete;
+    serial_counter_buffer&amp; operator=( const serial_counter_buffer&amp; )
+        = delete;
+    void inc( Integral by );
+    void dec( Integral by );
+    void push();
+    ~serial_counter_buffer();
+};
+
+template&lt; typename Integral &gt; class atomic_counter_buffer
+: public counter_bumper&lt; Integral &gt;
+{
+public:
+    atomic_counter_buffer( counter_bumper&lt; Integral &gt;&amp; p );
+    atomic_counter_buffer() = delete;
+    atomic_counter_buffer( const atomic_counter_buffer&amp; ) = delete;
+    atomic_counter_buffer&amp; operator=( const atomic_counter_buffer&amp; )
+        = delete;
+    void push();
+    ~atomic_counter_buffer();
+};
+
+template&lt; typename Integral &gt; class weak_counter
+{
+public:
+    weak_counter();
+    weak_counter( Integral in );
+    void inc( Integral by );
+    void dec( Integral by );
+    Integral load();
+    ~weak_counter();
+};
+
+template&lt; typename Integral &gt;
+class weak_counter_buffer
+{
+public:
+    weak_counter_buffer( weak_counter&lt; Integral &gt;&amp; p );
+    weak_counter_buffer() = delete;
+    weak_counter_buffer( const weak_counter_buffer&amp; ) = delete;
+    weak_counter_buffer&amp; operator=( const weak_counter_buffer&amp; ) = delete;
+    void inc( Integral by );
+    void dec( Integral by );
+    ~weak_counter_buffer();
+};
+
+template&lt; typename Integral &gt; class duplex_counter
+: public counter_bumper&lt; Integral &gt;
+{
+public:
+    duplex_counter();
+    duplex_counter( Integral in );
+    Integral load();
+    Integral exchange( Integral to );
+    ~duplex_counter();
+};
+
+template&lt; typename Integral &gt;
+class duplex_counter_buffer
+: public counter_bumper&lt; Integral &gt;
+{
+public:
+    duplex_counter_buffer( duplex_counter&lt; Integral &gt;&amp; p );
+    duplex_counter_buffer() = delete;
+    duplex_counter_buffer( const duplex_counter_buffer&amp; ) = delete;
+    duplex_counter_buffer&amp; operator=( const duplex_counter_buffer&amp; )
+        = delete;
+    ~duplex_counter_buffer();
+};</code>
+</pre>
+
+</body>
+</html>

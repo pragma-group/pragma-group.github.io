@@ -1,0 +1,334 @@
+<html>
+<head>
+<title>N2907 - Managing the lifetime of thread_local variables with
+  contexts</title>
+</head>
+<body>
+<table>
+<tr><td>Document Number:</td><td>N2907=09-0097</td></tr>
+<tr><td>Date:</td><td>2009-06-18</td></tr>
+<tr><td>Author:</td><td><a href="mailto:anthony@justsoftwaresolutions.co.uk">Anthony
+      Williams</a><br>Just Software Solutions Ltd</td></tr>
+</table>
+
+<h1>N2907 - Managing the lifetime of thread_local variables with
+  contexts</h1>
+
+<p>This paper discusses a suggestion I made on the LWG reflector
+  and cpp-thread mailing list to address the issues raised in N2880
+  surrounding the lifetime of <code>thread_local</code> variables.</p>
+
+<p>The basic idea of this proposal is that the lifetime
+  of <code>thread_local</code> variables is tied to the lifetime of an
+  instance of the new class <code>thread_local_context</code>. Each
+  thread has an implicit instance of such a class constructed prior to
+  the invocation of the thread function, and destroyed after
+  completion of the thread function, but additional instances can be
+  created in order to deliberately limit the lifetime
+  of <code>thread_local</code> variables: when
+  a <code>thread_local_context</code> object is destroyed, all
+  the <code>thread_local</code> variables tied to it are also
+  destroyed.</p>
+
+<h2>Addressing the concerns of N2880</h2>
+
+<p>This enables us to address several of the concerns of
+  N2880. Firstly, if we use a mechanism other than <code>thread::join</code>
+  to wait for a thread to complete its work &mdash; such as waiting for a
+  <code>unique_future</code> to be ready &mdash; then N2880 correctly
+  highlights that under the current working paper the destructors
+  of <code>thread_local</code> variables will still be running after
+  the waiting thread has resumed. By judicious use
+  of a <code>thread_local_context</code> instance and block scoping,
+  we can ensure that the <code>thread_local</code> variables are
+  destroyed before the future value is set. e.g.
+
+<pre>
+int find_the_answer();
+void thread_func(std::promise&lt;int&gt; * p)
+{
+    int local_result;
+    {
+        thread_local_context context; // create a new context for thread_locals
+        local_result=find_the_answer();
+    } // destroy thread_local variables along with the context object
+    p-&gt;set_value(local_result);
+}
+
+int main()
+{
+    std::promise&lt;int&gt; p;
+    std::thread t(thread_func,&amp;p);
+    t.detach(); // we're going to wait on the future
+    std::cout&lt;&lt;p.get_future().get()&lt;&lt;std::endl;
+}
+</pre>
+
+<p>When the call to <code>get()</code> returns, we know that not only
+  is the future value ready, but the <code>thread_local</code>
+  variables on the other thread have also been destroyed.</p>
+
+<h2>Reusing threads</h2>
+
+<p>A second concern of N2880 was the potential for accumulating vast
+  amounts of <code>thread_local</code> variables when reusing threads
+  for multiple independent tasks, such as when implementing a thread
+  pool. Under such circumstances, the thread pool implementation can
+  wrap each task inside a scope containing a
+  <code>thread_local_context</code> variable to ensure that when a
+  task is completed its <code>thread_local</code> variables are
+  destroyed in a timely fashion. e.g.</p>
+
+<pre>
+std::mutex task_mutex;
+std::queue&lt;std::function&lt;void()&gt;&gt; tasks;
+std::condition_variable task_cond;
+bool done=false;
+
+void worker_thread()
+{
+    std::unique_lock&lt;std::mutex&gt; lk(task_mutex);
+    while(!done)
+    {
+        task_cond.wait(lk,[]{return !tasks.empty();});
+        std::function&lt;void()&gt; task=tasks.front();
+        tasks.pop_front();
+        lk.unlock();
+        {
+            thread_local_context context;
+            task();
+        }
+        lk.lock();
+    }
+}
+</pre>
+
+<p>With this scheme, the <code>thread_local</code> variables are
+  destroyed between each task invocation when
+  the <code>thread_local_context</code> object is destroyed, so if the
+  sets of variables used by the tasks do not overlap then the problem
+  of increasing memory usage is avoided.</p>
+
+<h2>Consequences for implementations</h2>
+
+<p>Obviously, such a class would have to be tightly integrated with
+  the mechanism for <code>thread_local</code> variables used by a
+  compiler, so that they can be destroyed at the appropriate points,
+  and constructed again if necessary. This is a key point &mdash; for
+  the second scenario to work, then if
+  a <code>thread_local_context</code> is destroyed and a fresh one
+  constructed then any <code>thread_local</code> variables used during
+  the lifetime of a context object must be created afresh, even if
+  they were already created and destroyed during the lifetime of a
+  prior context object on the same thread.</p>
+
+<p>This does mean that implementations are pretty much restricted to
+  initializing <code>thread_local</code> variables on first use, with
+  a mechanism that allows the destructor
+  of <code>thread_local_context</code> objects to reset that "first
+  use" flag. If the <code>thread_local_context</code> is implemented
+  with compiler intrinsics then the compiler may still be able to
+  find optimization opportunities that allow batching of
+  initializations or less-frequent checking of the "first use"
+  flag.</p>
+
+<h2>Nesting of <code>thread_local_context</code> object lifetimes</h2>
+
+<p>There is are interesting issues surrounding the behaviour of code
+  with nested <code>thread_local_context</code> objects. Is such
+  nesting allowed at all? What happens to <code>thread_local</code>
+  variables that have already been assigned variables when
+  a <code>thread_local_context</code> object is constructed? What
+  about pointers to such variables?</p>
+
+<p>I believe there are several possible answers to these questions,
+  and I will address each in turn.</p>
+
+<h3>Is nesting allowed?</h3>
+
+<p>Certainly it could be argued that things are simpler if nesting is
+  disallowed, and the use cases primarily point
+  to <code>thread_local_context</code> being used high up in the call
+  chain either directly in the thread function or not many levels
+  down. However, I think this is an unnecessary restriction. What I do
+  believe is important however is that lifetimes are properly nested,
+  and a couple of simple rules should be enforced:</p>
+
+<ul>
+  <li>destruction of a <code>thread_local_context</code> object should
+    be done on the same thread as construction, and</li>
+  <li>destruction of <code>thread_local_context</code> objects must be
+    in the order of construction.</li>
+</ul>
+
+<p>If these rules are not obeyed then <code>std::terminate</code>
+  should be called in the destructor of
+  the <code>thread_local_context</code> object being executed when the
+  violation is discovered.</p>
+
+<h3>What happens to <code>thread_local</code> variables with values
+  assigned prior to construction of
+  a <code>thread_local_context</code>?</h3>
+
+<p>The importance of this question can be neatly demonstrated by the
+  following example. Note that this example does not use a nested
+  context, but the same issues apply, and the answer should be the
+  same in examples that do use nested contexts (if we permit
+  them).</p>
+
+<pre>
+static thread_local int i=0;
+
+int main()
+{
+    i=42;
+    {
+        thread_local_context context;
+        std::cout&lt;&lt;i&lt;&lt;",";
+        i=123;
+    }
+    std::cout&lt;&lt;i&lt;&lt;std::endl;
+}
+</pre>
+
+<p>What does this program print?</p>
+
+<ol>
+  <li>42,123</li>
+  <li>0,42</li>
+  <li>0,123</li>
+  <li>Undefined behaviour / std::terminate called</li>
+</ol>
+
+<p>I can see use cases for both option 1 (42,123) and option 2
+  (0,42). Option 3 is only there as a straw man &mdash; the whole
+  point of the context objects is that <code>thread_local</code>
+  objects created within the lifetime of the context object are then
+  destroyed when the context object is destroyed.</p>
+
+<p>Though potentially tempting, I think that undefined behaviour or
+  termination is undesirable as it would be hard to identify the
+  problem when looking at the source code, and it would be easy to
+  trigger such behaviour by calling a function that
+  used <code>thread_local</code> prior to the construction of the
+  context.</p>
+
+<p>So, which of options 1 and 2 do we go for? I favour option 2: the
+  construction of the context object creates a "clean slate"
+  for <code>thread_local</code> variables.</p>
+
+<p>The downside of doing so is that any library that
+  uses <code>thread_local</code> data structures as a cache for
+  optimization purposes (such as an allocator with thread-local heaps)
+  will have to recreate those structures within each context, even
+  though it might be desirable to preserve such structures across
+  contexts. For example, with the <code>worker_thread</code> in the
+  code above it might be desirable to preserve per-thread heaps across
+  task invocations to avoid repeatedly constructing/destructing the
+  heap. </p>
+
+<p>However, I believe that this downside is outweighed by the clarity
+  of the code: with option 2, within a
+  new <code>thread_local_context</code> you know that you have a
+  "clean slate", and that no <code>thread_local</code> variables have
+  values left from another scope. With option 1, then our worker
+  thread example would suddenly start "leaking" values from one task
+  to another if that variable happened to be used in the code outside
+  the context. With option 2 this is not possible, as each task gets a
+  new copy of all the variables.</p>
+
+<h3>What about pointers to <code>thread_local</code> variables?</h3>
+
+<p>Let's look at our example again, but this time we'll also store the
+  address of <code>i</code> in a normal local variable <code>p</code>,
+  and dereference this pointer inside the context.</p>
+
+<pre>
+static thread_local int i=0;
+
+int main()
+{
+    i=42;
+    int* p=&amp;i;
+    {
+        thread_local_context context;
+        std::cout&lt;&lt;i&lt;&lt;",";
+        std::cout&lt;&lt;*p&lt;&lt;",";
+        *p=99;
+        i=123;
+    }
+    std::cout&lt;&lt;i&lt;&lt;std::endl;
+}
+</pre>
+
+<p>What does this example print now?</p>
+
+<ol>
+  <li>42,42,123</li>
+  <li>0,42,99</li>
+  <li>0,0,99</li>
+  <li>Undefined behaviour</li>
+</ol>
+
+<p>I believe that options 1 and 2 here are the behaviours that best
+  correspond to options 1 and 2 for the lifetime issues: if we
+  preserve values from the parent context (option 1)
+  then <code>*p</code> and <code>i</code> refer to the same
+  variable. On the other hand, if we go for option 2 (the "clean
+  slate" option), then <code>*p</code> refers to the variable from the
+  outer context, whereas in the nested context <code>i</code> refers
+  to the new variable (which thus has a different address.)</p>
+
+<p>I think the third and fourth alternatives are understandable from
+  an implementation perspective if we go for the "clean slate" option,
+  but not desirable. The third alternative corresponds to an
+  implementation that magically saves the values of
+  the <code>thread_local</code> variables when the new context is
+  initialized, and reuses the same addresses to refer to the value of
+  that <code>thread_local</code> variable in the current context. For
+  example, this could be done on a segmented architecture
+  where <code>thread_local</code> variables live in a special segment,
+  and that segment is remapped for the new context, and the mapping
+  restored when the context is destroyed. However, I think this is
+  undesirable behaviour &mdash; we allow pointers
+  to <code>thread_local</code> variables to be passed between threads,
+  and I think this is directly analagous: we should also allow
+  pointers to <code>thread_local</code> variables to be passed between
+  contexts in a single thread. The fourth option (Undefined
+  behaviour) is just a "give implementors freedom" option, but I
+  think it is undesirable for the reasons just given, and because I
+  think undefined behaviour should not be introduced without very
+  good cause.</p>
+
+<h2>Interaction with <code>std::packaged_task</code> and the
+  proposed <code>std::async</code> function</h2>
+
+<p>If this proposal is adopted, then it could be used as part of an
+  implementation of <code>std::async</code> (as proposed in N2889 and
+  N2901) to ensure that the associated future did not become ready
+  before the thread-local variables for the asynchronous task had been
+  destroyed.</p>
+
+<p>This proposal could also be integrated
+  with <code>std::packaged_task</code> to ensure that the contained
+  task was run in its own context, and that the context was destroyed
+  (and the future result value stored) before the future became
+  ready. This would allow end users to write a simple function for
+  spawning a task with a return value on a new thread without having
+  to worry about the issue of destruction of thread-local
+  variables. However, it could potentially yield surprising behaviour
+  if the task was invoked directly on an existing thread, particularly
+  if the "clean slate" option was chosen.</p>
+
+<h2>Proposed Wording</h2>
+
+<p>I have no proposed wording at this time. If the committee agrees to
+  proceed with this, then I can work to provide wording.</p>
+
+<h2>Acknowledgements</h2>
+
+<p>Thanks to Alberto Ganesh Barbati, Peter Dimov, Lawrence Crowl,
+  Beman Dawes and others who have commented on this proposal on the
+  mailing lists and via personal email.</p>
+
+</body></html>

@@ -1,0 +1,200 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html;charset=US-ASCII">
+<title>Abandoning a Process</title>
+</head>
+
+<body>
+<h1>Abandoning a Process</h1>
+
+<p> ISO/IEC JTC1 SC22 WG21 N2383 = 07-0243 - 2007-08-05
+
+<p> Lawrence Crowl, crowl@google.com, Lawrence@Crowl.org
+
+<p>This document is a revision of a portion of
+<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2007/n2325.html">N2325</a>
+= 07-0185 - 2007-06-22.
+
+
+<h2>Introduction</h2>
+
+<p> The primary problem with destruction of static-duration objects
+is access to static-duration objects after their destructors have executed,
+thus resulting in undefined behavior.
+To prevent this problem,
+<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2007/n2382.html">N2382
+Dynamic Initialization and Destruction with Concurrency</a>
+requires that all user threads finish before destruction begins
+(via a call to <code>exit</code> or return from <code>main</code>).
+
+<p> In many applications,
+finishing a thread requires canceling the thread from the outside.
+See
+<a href="http://www.open-std.org/JTC1/SC22/WG21/docs/papers/2007/n2320.html">N2320 Multi-threading Library for Standard C++</a>
+and its successors
+for proposed mechanisms to canceling threads.
+For various reasons, this cancellation needs to be cooperative.
+
+<h2>Problem</h2>
+
+<p> In essence, the problem is that
+applications may not be able to cooperatively cancel.
+There are a number of reasons for this problem.
+
+<ul>
+<li>Cooperative cancellation requires that
+all code be able to handle cancellation.
+This requirement is new; nearly all existing code is not properly written.
+The difficulty of the code is equivalent to exception safety,
+which is known to be a hard task.</li>
+
+<li>Synchronization dependences between modules
+may require threads to cancel in a particular order.
+However, for large-scale applications,
+no one knows the full set of dependences between modules
+because there are many and they are constantly changing.
+Furthermore, there may even be circular dependences,
+making a cancellation order unachievable.</li>
+
+<li>Operating system constraints seem to indicate that
+programs blocked on I/O may not be cancelable
+and hence cannot participate in cooperative cancellation.</li>
+</ul>
+
+<p> In summary, relying on only cooperative cancellation
+to terminate processes
+will not meet the needs of many applications.
+
+<h2>Solution</h2>
+
+<p> If cooperative cancellation is not possible,
+it would be better to never execute static destructors.
+The Committee has clearly stated that it
+wishes to preserve execution of static destructors
+in normal applications.
+So, we need a mechanism to abandon an application process
+without cooperatively canceling all threads
+and without executing the static destructors.
+
+<p> Such a mechanism already exists in the <code>_exit</code> function.
+Unfortunately, that function has no mechanism
+to enable applications to flush critical information to stable storage.
+In short, <code>_exit</code> is too drastic.
+
+<p> The existing standard has a facility (<code>atexit</code>)
+to register functions
+that must execute when the program exits
+(via a return from <code>main</code> or an explicit call to <code>exit</code>).
+That function, though, implies execution of the static destructors,
+and thus does not solve the problem.
+
+<p> The solution lies between <code>_exit</code> and <code>exit</code>,
+a function that executes registered functions,
+but does not execute static destructors.
+Threads my continue to run while registered functions execute,
+and static-duration variables are still live for both the threads
+and the registered functions.
+
+<p> We considered using
+the existing <code>atexit</code> function registration facility,
+but ultimately decided against it because
+programs often use <code>atexit</code> for destructor-like actions,
+and because
+existing compilers often use <code>atexit</code>
+to register static destructors.
+Thus a new registration facility is needed.
+
+<p> The burden of converting to the new registration facility
+is not large,
+programmers need simply find all calls to <code>atexit</code>
+and, after verifying that the register function is appropriate,
+also call the new registration facility.
+The number of calls to <code>atexit</code> is not large.
+
+<p> For the new facility,
+we have chosen <code>quick_exit</code> and <code>at_quick_exit</code>.
+Other logical choices, like <code>_Exit</code> already seem to be in use,
+while there are no occurances of <code>quick_exit</code>
+in a Google code search.
+
+<h2>Changes to the Standard</h2>
+
+<p> Only one section of the standard need change
+to support this proposal.
+
+<h3>18.4 Start and termination [lib.support.start.term]</h3>
+
+<p> In paragraph 1, table 20, edit
+
+<blockquote>
+<p>Functions: <code>abort atexit <ins>at_quick_exit</ins>
+exit <ins>quick_exit</ins></code>
+</blockquote>
+
+<p> After the existing final paragraph 9,
+add a new function entry:
+
+<blockquote>
+<p><code>extern "C" int at_quick_exit(void (*<var>f</var>)(void))<br>
+extern "C++" int at_quick_exit(void (*<var>f</var>)(void))</code>
+</blockquote>
+
+<p> Add a new paragraph 10,
+<blockquote>
+<p><i>Effects:</i>
+The <code>at_quick_exit()</code> functions
+register the function pointed to by <code><var>f</var></code>,
+to be called without arguments when <code>quick_exit</code> is called.
+</blockquote>
+
+<p> Add a new paragraph 11,
+<blockquote>
+<p>For the execution of a function registered with <code>at_quick_exit()</code>,
+if control leaves the function
+because it provides no handler for a thrown exception,
+<code>terminate()</code> is called (18.7.3.3).
+</blockquote>
+
+<p> Add a new paragraph 12,
+<blockquote>
+<p><i>Implementation limits:</i>
+The implementation shall support the registration of at least 32 functions.
+</blockquote>
+
+<p> Add a new paragraph 13,
+<blockquote>
+<p><i>Returns:</i>
+The <code>at_quick_exit()</code> function returns
+zero if the registration succeeds, nozero if it fails.
+</blockquote>
+
+<p> After the new paragraph 13,
+add a new function entry:
+
+<blockquote>
+<p><code>quick_exit(int <var>status</var>)</code>
+</blockquote>
+
+<p> Add a new paragraph 14,
+
+<blockquote>
+<p><i>Effects:</i>
+Functions registered by calling <code>at_quick_exit</code> are called.
+Objects are not destroyed
+as a result of calling <code>quick_exit()</code>.
+Functions with <code>at_quick_exit</code> registration
+are called in the reverse order of their registration,
+except that a function is called after any previously registered functions
+that had already been called at the time it was registered.
+</blockquote>
+
+<p> Add a new paragraph 15,
+<blockquote>
+<p><i>Returns:</i>
+The <code>at_quick_exit()</code> function does not return.
+</blockquote>
+
+</body>
+</html>

@@ -1,0 +1,1548 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN"
+   "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+<title>Clarifying C++ Futures</title>
+<meta http-equiv="Content-Type" content="text/html;charset=US-ASCII">
+<style type="text/css">
+table { border: 1px solid black; border-spacing: 0px }
+caption { font-weight: bold }
+th { text-align: left; vertical-align: top; padding: 0.5em; border: 1px solid black }
+td { text-align: left; vertical-align: top; padding: 0.5em; border: 1px solid black }
+dt { font-weight: bold; }
+</style>
+</head>
+<body>
+<h1>Clarifying C++ Futures</h1>
+
+<p>
+ISO/IEC JTC1 SC22 WG21 N3170 = 10-0160 - 2010-10-17
+</p>
+
+<p>
+Lawrence Crowl, crowl@google.com, Lawrence@Crowl.org
+<br>
+Anthony Williams, anthony@justsoftwaresolutions.co.uk
+<br>
+Howard Hinnant, howard.hinnant@gmail.com
+</p>
+
+<p>
+<a href="#Introduction">Introduction</a><br>
+<a href="#Concurrency">Easy Concurrency</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Early">Early Call</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Late">Late Return</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Multiple">Multiple Get</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Reference">Const Reference</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Naming">Naming Types</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Undefined">Undefined Behavior</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Deferred">Deferred Functions</a><br>
+<a href="#Copyable">Copyable Versus Move-Only Types</a><br>
+<a href="#Concurrently">Get Value Concurrently</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#External">External Synchronization</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Moving">Moving Get</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#Invalidation">Move Invalidation</a><br>
+<a href="#Atomic">Atomic Operation</a><br>
+<a href="#Summary">Summary</a><br>
+<a href="#Solution">Solution</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#US202">US 202 &mdash; 30.6.8/18</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#US203">US 203 &mdash; 30.6.8</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#US204">US 204 &mdash; 30.6.8/7-8</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#US205">US 205 &mdash; 30.6.9/3</a><br>
+<a href="#Wording">Wording</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#futures.overview">30.6.1 Overview [futures.overview]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#futures.unique_future">30.6.6 Class template <code>future</code> [futures.unique_future]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#futures.shared_future">30.6.7 Class template <code>shared_future</code> [futures.shared_future]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#futures.atomic_future">30.6.8 Class template <code>atomic_future</code> [futures.atomic_future]</a><br>
+&nbsp;&nbsp;&nbsp;&nbsp;<a href="#futures.async">30.6.9 Function template <code>async</code> [futures.async]</a><br>
+</p>
+
+
+<h2><a name="Introduction">Introduction</a></h2>
+
+<p>
+At the Summer 2010 meeting of the C++ Standards Committee,
+it became apparent that members had different models
+for how futures were intended to be used,
+and thus different views on the interface of futures.
+This paper explores
+the uses of futures, problems with those uses, and solutions to those problems.
+It captures and extends the discussion at the meeting.
+We analyze the implications of the current interface.
+We present a relatively minimal solution.
+Finally, we propose normative wording.
+</p>
+
+<p>
+This paper specifically addresses the following national body comments.
+</p>
+
+<dl>
+<dt>US 202 &mdash; 30.6.8/18</dt>
+<dd>
+<p>
+The note in this paragraph says "unlike future, calling get more than
+once on the same atomic_future object is well defined and produces the
+result again." There is nothing in future that says anything negative
+about calling get more than once.
+</p>
+
+<p>
+Remove this note, or add words to the requirements for future that
+reflect what this note says.
+</p>
+</dd>
+
+<dt>US 203 &mdash; 30.6.8</dt>
+<dd>
+<p>
+Both future and shared_future specify that calling most member
+functions on an object for which valid() == false produces undefined
+behavior. There is no such statement for atomic_future.
+</p>
+
+<p>
+Add a new paragraph after 30.6.8 [futures.atomic_future]/2 with the
+same words as 30.6.7 [futures.shared_future]/3.
+</p>
+</dd>
+
+<dt>US 204 &mdash; 30.6.8/7-8</dt>
+<dd>
+<p>
+According to the definition of atomic_future, all members of
+atomic_future are synchronizing except constructors.  However,
+it would probably be appropriate for a move constructor to be
+synchronizing on the source object. If not, the postconditions on
+paragraphs 7-8, might not be satisfied. This may be applicable if a
+collection of futures are being doled out to a set of threads that
+process their value.
+</p>
+
+<p>
+Make the move constructor for atomic future lock the source.
+</p>
+</dd>
+
+<dt>US 205 &mdash; 30.6.9/3</dt>
+<dd>
+<p>
+The third sentence says "If the invocation is not deferred, a call
+to a waiting function on an asynchronous return object that shares
+the associated asynchronous state created by this async call shall
+block until the associated thread has completed." The next sentence
+says "If the invocation is not deferred, the join() on the created
+thread..." Blocking until a thread completes is not necessarily a
+join.
+</p>
+
+<p>
+Decide whether the requirement is to block until finished or to call
+join, and rewrite to match.
+</p>
+</dd>
+</dl>
+
+
+<h2><a name="Concurrency">Easy Concurrency</a></h2>
+
+<p>
+There are many uses for futures.
+In this section, we concentrate on the use case
+for obtaining easy concurrency from sequential code.
+Given the following example,
+</p>
+
+<blockquote><pre><code>
+void original( type arg ) {
+    ....1
+    ....2  type var = work( arg );
+    ....3  if ( cond1 ) {
+    ....4      use1( var );
+    ....5  } else {
+    ....6      use2( var );
+    ....7  }
+}
+</code></pre></blockquote>
+
+<p>
+the task is to use <code>async</code> and <code>future</code>
+to obtain concurrency within the example.
+</p>
+
+
+<h3><a name="Early">Early Call</a></h3>
+
+<p>
+<strong>Technique:</strong>
+The working technique is to move the call of <code>work</code> earlier,
+so that <code>work</code> executes concurrently with code <code>....2</code>.
+</p>
+
+<blockquote><pre><code>
+void early_call( type arg ) {
+    ....1  <ins>auto ftr = async( [=]{ return work( arg ); } );</ins>
+    ....2  type var = <del>work( arg )</del> <ins>ftr.get()</ins>;
+    ....3  if ( cond1 ) {
+    ....4      use1( var );
+    ....5  } else {
+    ....6      use2( var );
+    ....7  }
+}
+</code></pre></blockquote>
+
+<p>
+This code works in general with the existing unique <code>future</code>,
+which requires at most one call to <code>get</code>.
+This approach works in general, even when the return value is not stored.
+</p>
+
+<blockquote><pre><code>
+void early_not_stored( type arg ) {
+    ....1  <ins>auto ftr = async( [=]{ return work( arg ); } );</ins>
+    ....2  use1( <del>work( arg )</del> <ins>ftr.get()</ins> );
+}
+</code></pre></blockquote>
+
+
+<h3><a name="Late">Late Return</a></h3>
+
+<p>
+<strong>Technique:</strong>
+Another approach to easy concurrency
+is to change uses of any stored return value
+into access to the future value,
+effectively moving the time the return value is needed to later.
+So, for the <code>original</code> example above,
+the <code>work</code> executes concurrently with code <code>....3</code>
+and either <code>....4</code> or <code>....6</code>.
+</p>
+
+<blockquote><pre><code>
+void late_return( type arg ) {
+    ....1  
+    ....2  <del>type var</del> <ins>auto ftr</ins> = <ins>async( [=]{ return</ins> work( arg )<ins>; } )</ins>;
+    ....3  if ( cond1 ) {
+    ....4      use1( <del>var</del> <ins>ftr.get()</ins> );
+    ....5  } else {
+    ....6      use2( <del>var</del> <ins>ftr.get()</ins> );
+    ....7  }
+}
+</code></pre></blockquote>
+
+
+<h4><a name="Multiple">Multiple Get</a></h4>
+
+<p>
+<strong>Problem:</strong>
+This code works with unique <code>future</code>
+only if <code>get()</code> is called at most once.
+Any edit to the code that introduces a second call
+introduces undefined behavior.
+</p>
+
+<blockquote><pre><code>
+void bad_second_use( type arg ) {
+    ....1  
+    ....2  <del>type var</del> <ins>auto ftr</ins> = <ins>async( [=]{ return</ins> work( arg )<ins>; } )</ins>;
+    ....3  if ( cond1 ) {
+    ....4      use1( <del>var</del> <ins>ftr.get()</ins> );
+    ....5  } else {
+    ....6      use2( <del>var</del> <ins>ftr.get()</ins> );
+    ....7  }
+    ....8  use3( <del>var</del> <ins>ftr.get()</ins> ); // second use is undefined
+}
+</code></pre></blockquote>
+
+<p>
+<strong>Workaround:</strong>
+The example can be made to work with a <code>shared_future</code>.
+</p>
+
+<blockquote><pre><code>
+void good_second_use( type arg ) {
+    ....1  
+    ....2  <del>type var</del> <ins>shared_future&lt;type&gt; ftr</ins>
+               = <ins>async( [=]{ return</ins> work( arg )<ins>; } )</ins>;
+    ....3  if ( cond1 ) {
+    ....4      use1( <del>var</del> <ins>ftr.get()</ins> );
+    ....5  } else {
+    ....6      use2( <del>var</del> <ins>ftr.get()</ins> );
+    ....7  }
+    ....8  use3( <del>var</del> <ins>ftr.get()</ins> ); // second use is defined
+}
+</code></pre></blockquote>
+
+
+<h4><a name="Reference">Const Reference</a></h4>
+
+<p>
+<strong>Problem:</strong>
+The return late approach fails for slightly more complicated examples.
+For instance, modify the else clause in our example
+to either read or write <code>var</code>.
+
+<blockquote><pre><code>
+void write_to_get( type arg ) {
+    ....1  
+    ....2  <del>type var</del> <ins>shared_future&lt;type&gt; ftr</ins>
+               = <ins>async( [=]{ return</ins> work( arg )<ins>; } )</ins>;
+    ....3  if ( cond1 ) {
+    ....4      use1( <del>var</del> <ins>ftr.get()</ins> );
+    ....5  } else {
+    ....6      if ( cond2 ) {
+    ....7          use2( <del>var</del> <ins>ftr.get()</ins> );
+    ....8      } else {
+    ....9          <del>var</del> <ins>ftr.get()</ins> = something();
+                   // assign to const reference!
+    ....10     }
+    ....11 }
+    ....12 use3( <del>var</del> <ins>ftr.get()</ins> );
+}
+</code></pre></blockquote>
+
+<p>
+The problem is that the <code>get()</code> on <code>shared_future</code>
+returns a <code>const</code> reference,
+which means that the update of the variable is ill-formed.
+</p>
+
+<p>
+<strong>Solution:</strong>
+The return late approach can work <em>in general</em>
+only if the get function returns a non-<code>const</code>
+reference to the appropriate storage.
+That is, the <code>shared_future::get</code> call
+serves as a replacement for naming the former variable
+that held the function return value.
+</p>
+
+
+<h4><a name="Naming">Naming Types</a></h4>
+
+<p>
+<strong>Problem:</strong>
+Programmers must name the return type
+when declaring the <code>shared_future</code>;
+<code>auto</code> is not available within template argument lists.
+</p>
+
+<p>
+<strong>Solution:</strong>
+The burden of manual type inference can be eliminated
+by providing a second <code>async</code>
+that returns a <code>shared_future</code>.
+</p>
+
+<blockquote><pre><code>
+void auto_shared( type arg ) {
+    ....1  
+    ....2  <del>type var</del> <ins>auto ftr</ins>
+               = <ins>shared_async( [=]{ return</ins> work( arg )<ins>; } )</ins>;
+    ........
+}
+</code></pre></blockquote>
+
+<p>
+<strong>Solution:</strong>
+The burden of manual type inference can also be eliminated
+by providing an operation
+to turn an rvalue unique <code>future</code>
+into an rvalue <code>shared_future</code>:
+</p>
+
+<blockquote><pre><code>
+template&lt; Type &gt;
+shared_future&lt; Type &gt; future::share() { .... }
+</code></pre></blockquote>
+
+<p>
+Which changes the above code to:
+</p>
+
+<blockquote><pre><code>
+void auto_shared( type arg ) {
+    ....1  
+    ....2  <del>type var</del> <ins>auto ftr</ins>
+               = <ins>async( [=]{ return</ins> work( arg )<ins>; } ).share()</ins>;
+    ........
+}
+</code></pre></blockquote>
+
+<p>
+<strong>Observation:</strong>
+The cost of conversion
+between unique <code>future</code> and <code>shared_future</code>
+is very low
+because they share the same representation.
+</p>
+
+
+<h4><a name="Undefined">Undefined Behavior</a></h4>
+
+<p>
+<strong>Problem:</strong>
+Failing to apply the workaround results in undefined behavior.
+</p>
+
+<p>
+<strong>Strawman:</strong>
+To avoid undefined behavior,
+the library committee showed a strong preference [13-2-0-4]
+for have a second use of such a <code>get</code> throw an exception.
+Unfortunately, that approach turns a problem
+that is diagnosable at compile time
+into a defined run-time behavior.
+That is, a programmer could exploit the defined throw
+to control normal program execution.
+</p>
+
+<p>
+<strong>Solution:</strong>
+Leave the behavior as undefined,
+but encourage implementations to detect
+a second call and then
+either call <code>std::terminate</code>
+or throw an exception.
+</p>
+
+<p>
+<strong>Problem:</strong>
+Programmers must use a <code>shared_future</code>
+only for some uses.
+The core of the problem is that unique <code>future</code>
+was designed around move-only types,
+and thus permits only one call to <code>get</code>.
+</p>
+
+<p>
+<strong>Solution:</strong>
+We can address the problem by separating the sharing of futures
+from their applicability to move-only types.
+In particular, we can make sharing a feature of the future type,
+and 'move only' a feature of operations on that future.
+There is support [9-5-1-3]
+for allowing multiple <code>get</code> operations
+on a unique <code>future</code> for a copyable type.
+</p>
+
+<p>
+<strong>Note:</strong>
+This solution also substantially reduces
+the need for easy type conversion,
+because it preserves the unique <code>future</code>
+for concurrency conversion.
+</p>
+
+<p>
+<strong>Problem:</strong>
+In generic contexts, different constraints on <code>get</code>
+depending on the template argument
+may lead to subtly broken code.
+</p>
+
+<p>
+<strong>Solution:</strong>
+Separate the <code>get</code> operation into two variants,
+one intended to be called only once
+and one intended to be called multiple times.
+The latter does not support move-only types,
+and so would not be available
+in specializations of futures on move-only types.
+There is support [10-2-1-4]
+for renaming the only-once <code>get</code> to something else.
+Suggestions include
+<code>release</code>, <code>pop</code>, and <code>drain</code>.
+</p>
+
+
+<h3><a name="Deferred">Deferred Functions</a></h3>
+
+<p>
+<strong>Technique:</strong>
+One of the mechanisms that supports easy concurrency is deferred functions.
+This mechanism enables the system to adapt
+to the amount of parallelism available,
+which avoids over-subscribing the system.
+That is, programmers can specify more concurrency than they think they need
+with confidence that the excess will not have a significant cost.
+</p>
+
+<p>
+<strong>Observation:</strong>
+The single-use <code>get</code> of unique <code>future</code>
+keeps the cost of excess concurrency low
+by avoiding threads when they are not helpful.
+The implementation need not store the function result,
+but can instead return it directly.
+The implementation does not need to catch exceptions,
+but can instead pass them up unhindered.
+</p>
+
+
+<h2><a name="Copyable">Copyable Versus Move-Only Types</a></h2>
+
+<p>
+The current futures have seemingly inconsistent support
+for copyable and move-only argument types.
+</p>
+
+<p>
+<strong>Observation:</strong>
+The current unique <code>future</code>
+supports only a single-use, value-returning <code>get</code>.
+This design is most appropriate to move-only types.
+</p>
+
+<p>
+<strong>Observation:</strong>
+The current <code>shared_future</code>
+supports only a multi-use, const-reference returning <code>get</code>.
+This design is most appropriate to copyable types.
+In particular,
+it does not support moving a result out of the future.
+This design means that its use with move-only types
+is restricted to accessing the result through the const reference returned.
+This may or may not be a problem, depending on the type
+(e.g. a <code>const unique_ptr&lt;T&gt;</code>
+still allows non-const access to the <code>T</code> object).
+</p>
+
+<p>
+<strong>Observation:</strong>
+The single-use value <code>get</code> is move optimized.
+E.g. <code>std::vector&lt;int&gt;&nbsp;v&nbsp;=&nbsp;ftr.get()</code>.
+</p>
+
+<p>
+<strong>Observation:</strong>
+The const reference <code>get</code> is access optimized.
+E.g. <code>int&nbsp;i&nbsp;=&nbsp;ftr.get()[3]</code>.
+</p>
+
+
+<h2><a name="Concurrently">Get Value Concurrently</a></h2>
+
+<p>
+The <code>shared_future</code> is designed to be shared between threads,
+that is to allow multiple concurrent <code>get</code> operations.
+</p>
+
+<p>
+<strong>Note:</strong>
+There is some committee support [4-10-2-1]
+for renaming <code>shared_future</code> to <code>multi_future</code>.
+</p>
+
+
+<h3><a name="External">External Synchronization</a></h3>
+
+<p>
+<strong>Problem:</strong>
+The <code>get</code> operation on <code>shared_future</code>
+currently returns a const reference.
+This reference persists
+beyond the scope of any locking that operations on the future can provide.
+Thus, access through the reference
+<em>requires</em> programmer-provided external synchronization.
+</p>
+
+<p>
+<strong>Solution:</strong>
+Programmers can avoid that external synchronization
+by returning a type that is thread-safe for const qualification.
+</p>
+
+<p>
+<strong>Problem:</strong>
+The objects in the standard library must meet this const requirement,
+but it is not presently a requirement on user types
+and the existing specification for <code>shared_future</code>
+does not make such a requirement.
+</p>
+
+<p>
+<strong>Solution:</strong>
+Normatively, make this const requirement
+apply to the argument types of <code>shared_future</code>.
+</p>
+
+<p>
+<strong>Problem:</strong>
+Such a const requirement
+would fail for a <code>get</code> returning a non-const reference,
+which was our solution to an earlier problem.
+</p>
+
+<p>
+<strong>Solution:</strong>
+We can provide a different <code>get</code> operation
+that returns a copy of the future object.
+This copying would be done under a lock internal to the future's liaison state.
+</p>
+
+<p>
+<strong>Note:</strong>
+This lock is not required for a unique <code>future</code>
+because it <em>a priori</em> cannot be copied concurrently.
+</p>
+
+<p>
+<strong>Note:</strong>
+The copy-returning <code>get</code> can exploit copy elision.
+Returning a copy is not necessarily any more expensive
+than returning a reference and copying the object outside the call.
+</p>
+
+<p>
+<strong>Problem:</strong>
+The use of a non-const-reference-returning <code>get</code>
+requires care in managing external synchronization.
+</p>
+
+<p>
+<strong>Solution:</strong>
+Do not provide a non-const-reference-returning <code>get</code>
+for <code>shared_future</code>.
+(This solution constrains expert programmers.)
+</p>
+
+
+<h3><a name="Moving">Moving Get</a></h3>
+
+<p>
+<strong>Problem:</strong>
+A version of <code>get</code> that returns a copy
+is not applicable to move-only types.
+</p>
+
+<p>
+<strong>Solution:</strong>
+Disable <code>shared_future</code> for move-only types.
+This solution is more extreme than the status quo.
+</p>
+
+<p>
+<strong>Solution:</strong>
+Disable copying of move-only types out of <code>shared_future</code>,
+permitting only const lvalue access.
+This solution is the status quo.
+</p>
+
+<p>
+<strong>Problem:</strong>
+Sharing a future for move-only types
+would enable "first available consumer" program structures,
+and hence disabling <code>shared_future</code> for move-only types,
+or providing onliy reference-returning <code>get</code>,
+would limit programmers.
+</p>
+
+<p>
+<strong>Solution:</strong>
+Provide a <code>get</code> that moves out its value,
+and throws an exception on a second call.
+</p>
+
+<p>
+<strong>Problem:</strong>
+The above solution
+puts exception handling into non-exceptional code.
+Indeed, with a <code>shared_future</code>,
+one can expect multiple calls
+because otherwise a unique <code>future</code> would suffice.
+</p>
+
+<p>
+<strong>Strawman:</strong>
+Return a default-constructed object when the object has been previously moved.
+Unfortunately, this strawman puts an undesireable constraint on programmers.
+</p>
+
+<p>
+<strong>Solution:</strong>
+We can avoid the multiple-move attempt
+by providing a <code>get</code> operation that
+move-assigns the value if and only if it has not been moved.
+That <code>get</code> operation
+would return a boolean indicating whether or not the move occurred.
+</p>
+
+<p>
+For example,
+</p>
+
+<blockquote><pre><code>
+moveonly var;
+....
+if ( ftr.moving_get( var ) ) {
+    .... // var has the value; use it.
+}
+else {
+    .... // another thread already moved the value;
+    // var does not have the value; do something else.
+}
+</code></pre></blockquote>
+
+<p>
+<strong>Solution:</strong>
+We can avoid the multiple-move attempt
+by providing a <code>get</code> operation that
+calls a user function if and only if the value has not been moved.
+That function would receive the moved value as a parameter.
+For convenience, that <code>get</code> operation
+would return a boolean indicating whether or not the function was called.
+</p>
+
+<p>
+For example,
+we can forward the value to a function.
+</p>
+
+<blockquote><pre><code>
+....
+if ( ftr.conditional_get( [](moveonly arg){ forward(arg); } ) ) {
+    .... // value was forwarded.
+}
+else {
+    .... // value was not forwarded.
+}
+</code></pre></blockquote>
+
+
+<h3><a name="Invalidation">Move Invalidation</a></h3>
+
+<p>
+<strong>Problem:</strong>
+A call-once <code>get</code> changes the future state to invalid.
+The wait operations have a precondition of valid.
+For unique <code>future</code> this precondition is not a problem.
+However, for a <code>shared_future</code>,
+another thread could invalidate the precondition
+just before a call to <code>wait</code>.
+</p>
+
+<p>
+<strong>Solution:</strong>
+Permit wait calls on an invalid future.
+Return immediately from the wait.
+</p>
+
+
+<h2><a name="Atomic">Atomic Operation</a></h2>
+
+<p>
+The working draft defines an <code>atomic_future</code>
+for direct sharing of future variables.
+This type is modeled on <code>shared_future</code>,
+which is not a bad approach at the high level.
+Indeed the discussion above that applies to <code>shared_future</code>
+also applies to <code>atomic_future</code>.
+Unfortunately, the other details of the interface of <code>atomic_future</code>
+seem less sound.
+</p>
+
+<p>
+<strong>Problem:</strong>
+The copy assign operation implies a transactional read and write,
+which is less performant than alternatives,
+as it implies acquiring a pair of locks,
+e.g. with <code>std::lock()</code>.
+</p>
+
+<p>
+<strong>Solution:</strong>
+Assign a <code>shared_future</code> to an <code>atomic_future</code>,
+rather than assigning an <code>atomic_future</code>,
+Do the same with the copy constructor.
+</p>
+
+<p>
+<strong>Problem:</strong>
+The copy assign operation returns a reference to the left-hand side,
+which is problematic,
+as the subsequent read implied by that reference
+is not coordinated with the write.
+</p>
+
+<p>
+<strong>Solution:</strong>
+Return an rvalue rather than an lvalue.
+</p>
+
+<p>
+<strong>Problem:</strong>
+There is no mechanism to obtain a <code>shared_future</code>
+from an <code>atomic_future</code>.
+</p>
+
+<p>
+<strong>Solution:</strong>
+Add an implicit conversion operator on <code>atomic_future</code>
+yielding a <code>shared_future</code>.
+</p>
+
+<p>
+<strong>Problem:</strong>
+There is no mechanism
+to swap the liaison state of an <code>atomic_future</code>.
+</p>
+
+<p>
+<strong>Solution:</strong>
+Add an <code>exchange</code> operation,
+like those of chapter 29.
+</p>
+
+<p>
+<strong>Problem:</strong>
+There is no mechanism
+to compare-and-swap the liaison state of an <code>atomic_future</code>.
+</p>
+
+<p>
+<strong>Solution:</strong>
+Add a <code>compare_exchange</code> operation,
+like those of chapter 29.
+Unlike those operations,
+the measure of equality is whether or not the futures
+refer to the same liaison state.
+</p>
+
+<p>
+<strong>Observation:</strong>
+The <code>package_task</code> that sets a future's liaison state
+happens before successful <code>get</code> operations (30.6.4 [futures.state],
+and so the get operation provides memory synchronization.
+Thus there appears no need for memory synchronization specifications
+on <code>atomic_future</code> operations.
+</p>
+
+<p>
+<strong>Problem:</strong>
+The sequential consistency of <code>atomic_future</code> operations
+is not specified.
+</p>
+
+<p>
+<strong>Solution:</strong>
+The solution is arguable.
+However, for consistency with other atomic operations
+that do not specify memory order,
+<code>atomic_future</code> operations should be sequentially consistent.
+</p>
+
+<p>
+<strong>Problem:</strong>
+The liaison state is atomically reference counted,
+and extra work is performed on temporaries.
+</p>
+
+<p>
+<strong>Solution:</strong>
+Add move operations.
+These operations only affect performance.
+</p>
+
+<p>
+<strong>Solution:</strong>
+This consideration also applies to <code>shared_future</code>.
+</p>
+
+<p>
+<strong>Problem:</strong>
+The <code>get</code> operation returns a const reference,
+as does <code>shared_future</code>.
+This return implies that future values must be thread-safe read only.
+</p>
+
+<p>
+<strong>Solution:</strong>
+Add a locking <code>get</code> to copy out the future value,
+even when copies are mutating.
+</p>
+
+<p>
+<strong>Problem:</strong>
+Such an interface would be incompatible
+with sharing the liaison state
+between <code>shared_future</code> and <code>atomic_future</code>,
+which in turn implies the solutions above may be ill-advised.
+</p>
+
+<p>
+<strong>Solution:</strong>
+Give ourselves more time to develop the <code>atomic_future</code> interface
+by removing <code>atomic_future</code> from the library.
+</p>
+
+<p>
+<strong>Problem:</strong>
+The existing interface is already in the FCD,
+and requires consensus to remove.
+</p>
+
+
+<h2><a name="Summary">Summary</a></h2>
+
+<p>
+The existing futures interfaces have problems.
+Our solution consists of two primary approaches:
+</p>
+
+<p>
+We preserve the distinction that a unique <code>future</code>
+has unique ownership of the <code>get</code> side of the liaison state.
+We also preserve the distinction that a <code>shared_future</code>
+enables multiple ownership of the <code>get</code> side of the liaison state.
+Finally, we preserve the distinction that an <code>atomic_future</code>
+enables concurrent access to a future variable.
+</p>
+
+<p>
+The operations
+on unique <code>future</code> and <code>shared_future</code>
+discussed in this paper
+and their analysis
+are as follows.
+</p>
+
+<table>
+<thead>
+
+<tr>
+<th rowspan=2 colspan=2>operation</th>
+<th colspan=2>unique <code>future</code></th>
+<th colspan=2><code>shared_future</code></th>
+</tr>
+
+<tr>
+<th><code>&lt;moveonly&gt;</code></th>
+<th><code>&lt;copyable&gt;</code></th>
+<th><code>&lt;moveonly&gt;</code></th>
+<th><code>&lt;copyable&gt;</code></th>
+</tr>
+
+</thead>
+<tbody>
+
+<tr>
+<td rowspan=2><code>get</code> only once,
+returning rvalue</td>
+<td>throw on second call</td>
+<td colspan=2><strong>problem:</strong>
+no diagnostics, throw abuse</td>
+<td colspan=2><strong>problem:</strong>
+non-exceptional throw</td>
+</tr>
+
+<tr>
+<td>undefined (terminate) on second call</td>
+<td colspan=2><strong>okay:</strong>
+supports call early, diagnostics</td>
+<td colspan=2><strong>unsupportable:</strong>
+no effective way to ensure that another thread will not grab the value</td>
+</tr>
+
+<tr>
+<td rowspan=2>conditional <code>get</code>,
+returning <code>bool</code></td>
+<td>move assign</td>
+<td colspan=2 rowspan=2><strong>unneeded:</strong>
+testing <code>valid</code> beforehand is sufficient</td>
+<td colspan=2><strong>okay:</strong>
+minimal, simple support for move-only types in <code>shared_future</code></td>
+</tr>
+
+<tr>
+<td>callback</td>
+<td colspan=2><strong>okay:</strong>
+generalizes support for move-only types in <code>shared_future</code></td>
+</tr>
+
+<tr>
+<td rowspan=3><code>get</code> called many times</td>
+<td>returns rvalue</td>
+<td><strong>unsupportable:</strong>
+requires copying non-copyable types</td>
+<td><strong>okay:</strong>
+supports value futures</td>
+<td><strong>unsupportable:</strong>
+requires copying non-copyable types</td>
+<td><strong>okay:</strong>
+supports locked copying</td>
+</tr>
+
+<tr>
+<td>returns non-const lvalue</td>
+<td><strong>restricted:</strong>
+must use result in place</td>
+<td><strong>okay:</strong>
+supports return value late</td>
+<td colspan=2><strong>tricky:</strong>
+requires external synchronization</td>
+</tr>
+
+<tr>
+<td>returns const lvalue</td>
+<td><strong>restricted:</strong>
+must use result in place,
+does not support general late return</td>
+<td><strong>restricted:</strong>
+does not support general late return</td>
+<td><strong>restricted:</strong>
+must use result in place,
+requires thread-safe <code>const</code></td>
+<td><strong>restricted:</strong>
+requires thread-safe <code>const</code></td>
+</tr>
+
+<tr>
+<td><code>valid</code></td>
+<td></td>
+<td colspan=2><strong>okay</strong>
+</td>
+<td colspan=2><strong>tricky:</strong>
+one-way unstable; in the presence of moving gets,
+<code>true</code> does not imply that it will remain so</td>
+</tr>
+
+<tr>
+<td>wait operations</td>
+<td></td>
+<td colspan=2><strong>okay</strong>
+</td>
+<td colspan=2><strong>modify:</strong>
+needs update for invalid futures</td>
+</tr>
+
+</tbody>
+</table>
+
+<p>
+Observations on the <code>atomic_future</code> interface
+are as follows.
+</p>
+
+<table>
+<thead>
+
+<tr>
+<th colspan=2>operation</th>
+<th>observation</th>
+</tr>
+
+</thead>
+<tbody>
+
+<tr>
+<td rowspan=2>copy<br>assignment</td>
+<td><code>const atomic_future&amp;</code> argument,
+<code>atomic_future&amp;</code> lvalue result</td>
+<td><strong>problem:</strong>
+implies transactional semantics,
+uncoordinated read and write</td>
+</tr>
+
+<tr>
+<td><code>const shared_future&amp;</code> argument,
+<code>shared_future</code> rvalue result</td>
+<td><strong>okay:</strong>
+similar to <code>atomic</code> (chapter 29) operations</td>
+</tr>
+
+<tr>
+<td rowspan=2>copy<br>constructor</td>
+<td><code>atomic_future</code> argument</td>
+<td><strong>problem:</strong>
+atomic types should be variables, not values;
+similar to <code>atomic</code> (chapter 29) operations</td>
+</tr>
+
+<tr>
+<td><code>shared_future</code> argument,
+<code>shared_future</code> rvalue result</td>
+<td><strong>okay:</strong>
+similar to <code>atomic</code> (chapter 29) operations</td>
+</tr>
+
+<tr>
+<td rowspan=2>move<br>assignment</td>
+<td><code>atomic_future&amp;&amp;</code> argument,
+<code>atomic_future&amp;</code> lvalue result</td>
+<td><strong>problem:</strong>
+atomic types should be variables, not values;
+similar to <code>atomic</code> (chapter 29) operations</td>
+</tr>
+
+<tr>
+<td><code>shared_future&amp;&amp;</code> argument,
+<code>shared_future</code> rvalue result</td>
+<td><strong>optional:</strong>
+implementations can avoid some reference counting</td>
+</tr>
+
+<tr>
+<td rowspan=2>move<br>constructor</td>
+<td><code>atomic_future</code> argument</td>
+<td><strong>problem:</strong>
+atomic types should be variables, not values;
+similar to <code>atomic</code> (chapter 29) operations</td>
+</tr>
+
+<tr>
+<td><code>shared_future</code> argument,
+<code>shared_future</code> rvalue result</td>
+<td><strong>optional:</strong>
+implementations can avoid some reference counting</td>
+</tr>
+
+<tr>
+<td rowspan=2>conversion<br>operator,<br>
+<code>shared_future</code><br>rvalue result</td>
+<td><code>const</code> member function</td>
+<td><strong>okay:</strong>
+similar to <code>atomic</code> (chapter 29) operations</td>
+</tr>
+
+<tr>
+<td><code>&amp;&amp;</code> member function</td>
+<td><strong>optional:</strong>
+implementations can avoid some reference counting</td>
+</tr>
+
+<tr>
+<td rowspan=2><code>exchange</code><br>function,<br>
+<code>shared_future</code><br>rvalue result</td>
+<td>plain member function</td>
+<td><strong>okay:</strong>
+similar to <code>atomic</code> (chapter 29) operations</td>
+</tr>
+
+<tr>
+<td><code>&amp;&amp;</code> member function</td>
+<td colspan=2><strong>optional:</strong>
+implementations can avoid some reference counting</td>
+</tr>
+
+<tr>
+<td><code>compare_exchange</code><br>function</td>
+<td>plain member function</td>
+<td><strong>okay:</strong>
+similar to <code>atomic</code> (chapter 29) operations</td>
+</tr>
+
+</tbody>
+</table>
+
+
+<h2><a name="Solution">Solution</a></h2>
+
+<p>
+We choose generally conservative solutions
+to the issues raised by the national body comments.
+</p>
+
+
+<h3><a name="US202">US 202 &mdash; 30.6.8/18</a></h3>
+
+<p>
+The national body comment is:
+</p>
+
+<blockquote>
+<p>
+The note in this paragraph says "unlike future, calling get more than
+once on the same atomic_future object is well defined and produces the
+result again." There is nothing in future that says anything negative
+about calling get more than once.
+</p>
+
+<p>
+Remove this note, or add words to the requirements for future that
+reflect what this note says.
+</p>
+</blockquote>
+
+<p>
+This comment indicates a misinterpretation of the intent of the future design.
+We address weaknesses in the design exposed by the misinterpretation
+and the subsequent committee discussion.
+</p>
+
+<dl>
+<dt>Multiple <code>future::get</code> call diagnosis</dt>
+<dd>
+<p>
+The current unique <code>future</code>
+makes multiple calls to <code>get</code> undefined behavior.
+We propose to add a suggestion that implementers
+detect a second call and throw <code>future_error</code>
+with an error condition of <code>future_errc::no_state</code>.
+</p>
+</dd>
+
+<dt>Support for restricted late return</dt>
+<dd>
+<p>
+We ease use of the late-return pattern
+by providing an easy conversion
+from <code>future</code> to <code>shared_future</code>.
+We propose to add a <code>future::share</code> operation
+to enable effective use of <code>auto</code>.
+</p>
+</dd>
+
+<dt>Enable safe concurrent <code>get</code></dt>
+<dd>
+<p>
+The current definition of <code>shared_future</code>
+enables data races on <code>get</code>.
+We propose to avoid this
+by adding a requirement that
+the argument type to <code>shared_future</code>
+meet the 'const means concurrency-safe' requirement
+in place for the standard library.
+<b>[FIX Also for <code>atomic_future</code> if we keep it.]</b>
+</p>
+</dd>
+
+</dl>
+
+
+<h3><a name="US203">US 203 &mdash; 30.6.8</a></h3>
+
+<p>
+The national body comment is:
+</p>
+
+<blockquote>
+<p>
+Both future and shared_future specify that
+calling most member functions on an object for which valid() == false
+produces undefined behavior.
+There is no such statement for atomic_future.
+
+Add a new paragraph after 30.6.8 [futures.atomic_future]/2 with the
+same words as 30.6.7 [futures.shared_future]/3.
+</p>
+</blockquote>
+
+<p>
+We believe the proposed resolution goes in the wrong direction.
+Atomic futures may become invalid due to concurrent agents,
+and hence making operations on them invalid is unsupportable.
+While <code>shared_future</code>
+does not currently suffer from this problem,
+plausible future extensions could introduce it.
+So, we propose to 
+change <code>shared_future</code> operations
+that currently require <code>valid() == true</code>
+to instead throw throw <code>future_error</code>
+with an error condition of <code>future_errc::no_state</code>.
+</p>
+
+
+<h3><a name="US204">US 204 &mdash; 30.6.8/7-8</a></h3>
+
+<p>
+The national body comment is:
+</p>
+
+<blockquote>
+<p>
+According to the definition of atomic_future,
+all members of atomic_future are synchronizing except constructors.
+However, it would probably be appropriate
+for a move constructor to be synchronizing on the source object.
+If not, the postconditions on paragraphs 7-8, might not be satisfied.
+This may be applicable if a collection of futures
+are being doled out to a set of threads that process their value.
+</p>
+
+<p>
+Make the move constructor for atomic future lock the source.
+</p>
+</blockquote>
+
+<p>
+We could not agree
+on what the interface to <code>atomic_future</code> should be
+nor could we find a use case for it.
+Therefore, we propose to remove <code>atomic_future</code>.
+</p>
+
+<p>
+However, if we continue to support <code>atomic_future</code>,
+then we concur with the proposed resolution.
+</p>
+
+<h3><a name="US205">US 205 &mdash; 30.6.9/3</a></h3>
+
+<p>
+The national body comment is:
+</p>
+
+<blockquote>
+<p>
+The third sentence says
+"If the invocation is not deferred,
+a call to a waiting function on an asynchronous return object
+that shares the associated asynchronous state created by this async call
+shall block until the associated thread has completed."
+The next sentence says
+"If the invocation is not deferred, the join() on the created thread..."
+Blocking until a thread completes is not necessarily a join.
+</p>
+
+<p>
+Decide whether the requirement is to block until finished or to call join,
+and rewrite to match.
+</p>
+</blockquote>
+
+<p>
+<b>[FIX Note changed proposal.]</b>
+We propose to clarify that "block until finished" 
+is the same as "as if <code>join()</code>",
+which preserves the happens-before chain.
+</p>
+
+
+<h2><a name="Wording">Wording</a></h2>
+
+
+<h3><a name="futures.overview">30.6.1 Overview [futures.overview]</a></h3>
+
+<p>
+Adjust the synopsis to reflect the changes below.
+</p>
+
+
+<h3><a name="futures.unique_future">30.6.6 Class template <code>future</code> [futures.unique_future]</a></h3>
+
+<p>
+Edit paragraph 3 as follows.
+</p>
+
+<blockquote>
+<p>
+The effect of calling any member function other than the destructor,
+the move-assignment operator, or <code>valid</code>
+on a <code>future</code> object for which <code>valid() == false</code>
+is undefined.
+<ins>
+[<i>Note:</i>
+Implementations are encouraged to detect this case
+and throw <code>future_error</code>
+with an error condition of <code>future_errc::no_state</code>.
+&mdash;<i>end note</i>]
+</ins>
+</p>
+</blockquote>
+
+<p>
+Edit the synopsis as follows.
+</p>
+
+<blockquote><pre><code>
+namespace std {
+  template &lt;class R&gt;
+  class future {
+  public:
+    future();
+    future(future &&);
+    future(const future& rhs) = delete;
+    ~future();
+    future& operator=(const future& rhs) = delete;
+    future& operator=(future&&);
+
+<ins>    shared_future&lt;R&gt; share();</ins>
+
+    ....
+</code></pre></blockquote>
+
+<p>
+After paragraph 11,
+add a new function entry as follows.
+</p>
+
+<blockquote>
+<p>
+<code>shared_future&lt;R&gt; share();</code>
+</p>
+<blockquote>
+<p>
+<i>Effects:</i>
+<code>shared_future&lt;R&gt;(std::move(*this));</code>
+</p>
+
+<p>
+<i>Postcondition:</i>
+<code>valid() == false</code>
+</p>
+</blockquote>
+</blockquote>
+
+<p>
+Remove paragraphs 13, 19, 21, and 24.
+</p>
+
+<blockquote>
+<p>
+<del><i>Requires:</i>
+<code>valid() == true</code>.</del>
+</p>
+</blockquote>
+
+
+<h3><a name="futures.shared_future">30.6.7 Class template <code>shared_future</code> [futures.shared_future]</a></h3>
+
+<p>
+Edit paragraph 3 as follows.
+</p>
+
+<blockquote>
+<p>
+The effect of calling any member function other than
+the destructor,
+<ins>the copy-assignment operator,</ins>
+the move-assignment operator,
+or <code>valid()</code> on a <code>shared_future</code> object
+for which <code>valid() == false</code>
+<del>is undefined</del>
+<ins>shall throw <code>future_error</code>
+with an error condition of <code>future_errc::no_state</code>.</ins>
+</p>
+</blockquote>
+
+<p>
+Edit paragraph 19 as follows.
+</p>
+
+<blockquote>
+<p>
+<i>Requires:</i>
+<del><code>valid() == true</code>.</del>
+The copy constructor of <code>R</code>
+and calls through the reference returned from <code>get()</code>
+shall not introduce a data race (17.6.3.10 [res.on.objects]).
+</p>
+</blockquote>
+
+<p>
+Remove paragraphs 24, 26, and 29.
+</p>
+
+<blockquote>
+<p>
+<del><i>Requires:</i>
+<code>valid() == true</code>.</del>
+</p>
+</blockquote>
+
+
+<h3><a name="futures.atomic_future">30.6.8 Class template <code>atomic_future</code> [futures.atomic_future]</a></h3>
+
+<p>
+Remove this section.
+Otherwise, edit as below.
+</p>
+
+<p>
+Edit paragraph 2 as follows.
+</p>
+
+<blockquote>
+<p>
+Unlike <code>future</code> and <code>shared_future</code>,
+member functions of <code>atomic_future</code>
+other than constructors and destructors
+are synchronization operations (1.10).
+<ins>The copy constructor is a synchronizing operation on the argument object,
+but not the constructed object.</ins>
+<del>Accessor member functions perform acquire operations on the object.
+All member function calls shall be included in the order of
+<code>memory_order_seq_cst</code> operations (29.3).</del>
+<ins>All synchronizing operations on <code>atomic_future</code>
+are sequentially consistent (1.10, 29.3).</ins>
+</p>
+</blockquote>
+
+<p>
+Remove paragraph 13.
+</p>
+
+<blockquote>
+<p>
+<del><i>Throws:</i>
+<code>future_error</code> with an error condition of <code>no_state</code>
+if the precondition is not met.</del>
+</p>
+</blockquote>
+
+<p>
+After paragraph 14 add a new paragraph as follows.
+</p>
+
+<blockquote>
+<p>
+<i>Requires:</i>
+The copy constructor of <code>R</code>
+and calls through the reference returned from <code>get()</code>
+shall not introduce a data race (17.6.3.10 [res.on.objects]).
+</p>
+</blockquote>
+
+<p>
+Edit paragraphs 21, 25, and 29 as follows.
+</p>
+
+<blockquote>
+<p>
+<i>Throws:</i>
+<ins><code>future_error</code> with an error condition of <code>no_state</code>
+if <code>valid() == false</code>,
+otherwise</ins>
+<code>future_error</code> if an error condition occurs.
+</p>
+</blockquote>
+
+
+<h3><a name="futures.async">30.6.9 Function template <code>async</code> [futures.async]</a></h3>
+
+<p>
+Edit paragraph 5 as follows.
+</p>
+
+<blockquote>
+<p>
+<i>Synchronization:</i>
+the invocation of <code>async</code>
+happens before (1.10) the invocation of <code>f</code>.
+[<i>Note:</i>
+this statement applies even when the corresponding future object
+is moved to another thread.
+&mdash;<i>end note</i>]
+If the invocation is not deferred,
+a call to a waiting function on an asynchronous return object
+that shares the associated asynchronous state
+created by this <code>async</code> call
+shall block until the associated thread has completed<ins>,
+as if joined ([thread.thread.member])</ins>.
+If the invocation is not deferred,
+the <code>join()</code> on the created thread
+happens-before (1.10) the first function that
+successfully detects the ready status of the associated asynchronous state
+returns
+or before the function that
+gives up the last reference to the associated asynchronous state returns,
+whichever happens first.
+If the invocation is deferred,
+the completion of the invocation of the deferred function
+happens-before the calls to the waiting functions return.
+</p>
+</blockquote>
+
+</body>
+</html>

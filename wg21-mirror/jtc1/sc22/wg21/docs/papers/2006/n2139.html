@@ -1,0 +1,505 @@
+<html>
+<head>
+<title>Thoughts on a Thread Library for C++</title>
+</head>
+<body>
+<p><em>Document Number: N2139=06-0209<br>
+Anthony Williams &lt;<a href="mailto:anthony@justsoftwaresolutions.co.uk">anthony@justsoftwaresolutions.co.uk</a>&gt;<br>
+Just Software Solutions Ltd<br>
+2006-11-06</em></p>
+
+<h1>Thoughts on a Thread Library for C++</h1>
+
+<h2>Introduction</h2>
+
+<p>This document outlines my thoughts for a new thread library interface for
+C++. It is based heavily on N2094 by Howard Hinnant, but also reflects thoughts
+arising from discussion on the committee reflectors and the boost mailing list.</p>
+
+<p>This proposal assumes that the <em>"Generalized Constant Expressions"</em> proposal by Gabriel Dos Reis and Bjarne Stroustrup
+will be accepted for inclusion in the next C++ Standard. If this is not the case, then this proposal will need refining.</p>
+
+<h2><a name="onetime">One-time initialization</a></h2>
+
+<p>Being able to initialize an object in a guaranteed thread-safe manner, or ensure
+that a function is run only once is important for many libraries. It is for this
+reason that POSIX provides <code>pthread_once</code>, and boost provides <code>call_once</code>. Microsoft
+Windows Vista is also due to have a one-time initialization facility.</p>
+
+<p>Given the importance of this facility, I think it should be included in any
+threading library for C++, and I was surprised to find that it had been omitted
+from all the thread-related papers in the Pre-Portland mailing.</p>
+
+<h3>One-time function calls</h3>
+
+<p>I propose that we provide two mechanisms for this. The first, <code>call_once</code>, is
+analagous to the functions already mentioned, and should provide a means to
+execute a function precisely once, and ensure that any threads executing the
+<code>call_once</code> will wait until the once-function has been completed. In order to
+provide the most benefit to user code, the once-function should not be limited
+to functions taking no parameters and returning void, but should be extended to
+cover any callable object which can be called with no parameters.</p>
+
+<p>In common with the pre-existing functions, this proposal requires the use of a
+<code>once_flag</code> to guarantee the one-time initialization. The interface is proposed as
+follows:<p>
+
+<pre>
+    struct once_flag
+    {
+        constexpr once_flag();
+    };
+
+    template&lt;typename Callable&gt;
+    void call_once(once_flag&amp; flag, Callable func);
+</pre>
+
+<dl>
+<dt>Requires:</dt>
+<dd>
+<p>
+        The <code>Callable</code> parameter <code>func</code> is copyable. Copying shall have no side
+        effects, and the effect of calling the copy shall be equivalent to
+        calling the original.</p>
+
+<p>
+        Calling <code>func</code> shall not throw an exception.</p>
+</dd>
+<dt>
+    Semantics:
+      </dt>
+<dd>
+<p>
+        The parameter <code>func</code>, or a copy thereof, is called exactly once, even when
+        <code>call_once</code> is called multiple times with the same <code>flag</code>. If multiple calls
+        to <code>call_once</code> with the same <code>flag</code> are executing concurrently in separate
+        threads, then only one thread shall call <code>func</code>, and no thread shall
+        proceed until the call to <code>func</code> has completed.
+   </p>
+<p>     
+        A call to <code>call_once</code> is not affected by a prior or concurrent call to
+        <code>call_once</code> from the same or another thread with a different <code>flag</code>
+        parameter.
+        </p>
+<p>
+        Instances of <code>once_flag</code> may be declared with any storage duration,
+        including automatic and dynamic storage. Initialization must proceed
+        correctly in these cases.
+        </p>
+
+</dd>
+<dt>
+    Examples:
+</dt>
+<dd>
+<pre>
+        std::once_flag flag;
+
+        void init();
+
+        void f()
+        {
+            std::call_once(flag,init);
+        }
+
+        struct initializer
+        {
+            void operator()();
+        };
+
+        void g()
+        {
+            static std::once_flag flag2;
+            std::call_once(flag2,initializer());
+        }
+</pre>
+</dd>
+
+</dl>
+
+<h3>One-time object initialization</h3>
+
+<p>As well as running a function just once, an important use case is to initialize
+an object for use from multiple threads. Though such a task could be done by
+passing the address of the object to initialize into a function passed to
+<code>call_once</code>, (e.g. <code>call_once(flag,bind(&amp;object::initialize,&amp;some_instance))</code>), this
+is a clumsy construction.</p>
+
+<p>I understand that in Portland it was agreed to investigate reuse of the <code>private</code>
+and <code>protected</code> keywords to ensure thread-safe initialization of local statics. I propose the following class template
+      <code>once_init</code> as a library-based alternative.</p>
+
+<pre>
+    template&lt;typename T&gt;
+    class once_init
+    {
+    public:
+        <em>implementation-defined-type</em> operator-&gt;();
+    };
+</pre>
+
+<dl>
+<dt>    Requires:</dt>
+
+<dd><p>        The template parameter <code>T</code> is default-constructible.</p></dd>
+
+<dt>    Semantics:</dt>
+<dd>
+<p>
+        Creating an instance <code>oi</code> of type <code>once_init&lt;T&gt;</code>, will default-construct a
+        single object of type <code>T</code>, which will persist for the lifetime of <code>oi</code>. In
+        the presence of a race-condition on the construction of <code>oi</code> and use of
+        the contained object, exactly one thread shall construct the contained
+        object. All other threads involved in the race condition shall block
+        until construction of said object has completed.</p>
+
+<p>
+        If <code>oi</code> is an instance of type <code>once_init&lt;T&gt;</code>, and <code>d</code> and <code>f</code> are a data
+        member and a member function of <code>T</code> respectively, </p>
+
+<ul>
+        <li> <code>oi-&gt;f()</code> is well-formed, and calls the member function <code>f</code> on the
+          contained instance of <code>T</code>.</li>
+
+        <li><code>oi-&gt;d</code> is well-formed, and refers to the data member <code>d</code> of the
+          contained instance of <code>T</code>.</li>
+
+</ul>
+<p>
+        Instances of <code>once_init</code> may be declared with any storage duration,
+        including automatic and dynamic storage. Initialization must proceed
+        correctly in these cases.</p>
+<p>
+        In order to avoid the general object-initialization-order problems
+          associated with namespace-scope objects, should
+          <code>operator-&gt;</code> be invoked on an instance of
+          <code>once_init</code> with static storage duration prior to its
+          constructor being run, the behaviour shall be as-if the constructor
+          was called immediately prior to the call to
+          <code>operator-&gt;</code>, and the actual call to the constructor
+          shall have no effect.
+        </p>
+</dd>
+
+<dt>    Examples:</dt>
+<dd>
+<pre>
+
+        class A
+        {
+        public:
+            void f();
+        };
+
+        void foo()
+        {
+            static once_init&lt;A&gt; a;
+            a-&gt;f();
+        }
+        </pre>
+      </dd>
+    </dl>
+
+<h2>General Thread Synchronization</h2>
+
+<p>The basic synchronization primitive in common use is the mutex. N2094 covers a
+variety of types of mutex and associated locks. I believe that <em>"convertible
+shared ownership"</em> is a dangerous concept and should not be supported, so the
+<code>try_unlock_shareable_and_lock</code> and <code>try_unlock_shareable_and_lock_upgradeable</code>
+functions should be removed, and <code>unlock_and_lock_shareable</code> moved into the
+<em>upgradeable</em> concept. That leaves three mutex concepts: <em>exclusive ownership</em>,
+<em>shared ownership</em>, and <em>upgradeable ownership</em>, which I believe cover the majority
+of use cases.</p>
+
+<h3>Mutex Initialization</h3>
+
+<p>There are many possible scenarios in which a mutex object may be constructed,
+for example:</p>
+
+<pre>
+    std::mutex global;
+
+    void f()
+    {
+        static std::mutex local_static;
+        std::mutex automatic;
+        std::mutex* dynamic=new std::mutex;
+    }
+    </pre>
+
+<p>Mutex types should be guaranteed to be correctly initialized in all cases. </p>
+
+<p>This includes the local static, which would be subject to race conditions with
+many current compilers, if <code>f</code> or <code>g</code> were to be called from multiple threads
+concurrently. Correct initialization in such cases could be accomplished via
+platform and compiler-specific mechanisms, by use of a <a href="#onetime">One-Time Initialization</a>
+mechanism as described above, or by use of a <code>constexpr</code> constructor.</p>
+
+<p>A mutex object may also be used as a non-static data member of a class, in order
+to protect other data members from concurrent modification:</p>
+
+<pre>
+    struct X
+    {
+        std::mutex mtx;
+        std::vector&lt;std::string&gt; entries;
+
+        void foo(std::string const&amp; s)
+        {
+            std::exclusive_lock&lt;std::mutex&gt; lk(mtx);
+            entries.push_back(s);
+        }
+    };
+    </pre>
+
+<p>The mutex type must be such that no explicit initialization of such a data
+member is required. A <code>constexpr</code> constructor should yield sufficient guarantees.</p>
+
+<h3>Try Locks and Timed Locks</h3>
+
+<p>
+Each of these mutex concepts provides an associated set of <em>lock</em> and <em>unlock</em>
+functions, including <em>"try lock"</em> functions. Rather than a single signature for
+each <em>"try lock"</em> function, I propose an overloaded set, as follows:</p>
+
+<pre>
+    bool try_lock();
+    bool try_lock(unsigned spin_count);
+    bool try_lock(target_time_type target_time);
+    bool try_lock(time_duration_type wait_time);
+    </pre>
+
+<p>with similar sets for <code>try_lock_shareable</code>, <code>try_lock_upgradeable</code> and so on.</p>
+
+<p>The overload with no arguments should just try and acquire the lock, as in
+N2094.</p>
+
+<p>
+The overload taking a spin count should use the spin count as a hint when trying
+to acquire the lock. The intention is that on those implementations where the
+attempted lock acquisition is implemented as a single atomic instruction, the
+implementation should spin the specified number of times. This hint is merely
+advisory, and an implementation may choose to ignore it.</p>
+
+<p>
+The overload taking a target time should keep trying until the specified
+time. It is intended that <code>target_time_type</code> be compatible with the <code>datetime</code> type
+from N2058, and should be one and the same, if <code>datetime</code> is incorporated into the
+Standard.</p>
+
+<p>The final overload, taking a wait time, should keep trying for the specified
+duration. It is intended that <code>time_duration_type</code> be compatible with the duration
+types from N2058, so that one can write</p>
+
+<pre>
+    some_mutex.try_lock(milliseconds(50));
+    </pre>
+
+<p>
+As such, it may be necessary for this overload to be a template:</p>
+
+<pre>
+    template&lt;typename time_impl&gt;
+    bool try_lock(basic_time_duration&lt;time_impl&gt; wait_time);
+    </pre>
+
+<p>
+although providing a separate <code>time_duration_type</code> with implicit conversions from
+<code>basic_time_duration&lt;T&gt;</code> would also be acceptable to the author.</p>
+
+<p>
+Since timed locks cannot always be efficiently implemented on the underlying
+mutex, I propose that the additional overloads with time parameters are separate
+"add-on" concepts to the basic mutex concepts. The implementation of the
+standard mutex types may or may not choose to support these concepts.</p>
+
+<p>
+The overload with spin count hint should be part of the standard mutex concepts,
+however. For those cases where the spin count makes no sense, it can be ignored.</p>
+
+<p>
+I therefore propose a set of adaptor templates: <code>timed_exclusive_adaptor</code>,
+<code>timed_shareable_adaptor</code> and <code>timed_upgradeable_adaptor</code>. Each of these templates
+will take a mutex type as a template parameter, and this mutex must meet the corresponding
+concept without the timed aspect. The adaptor will then provide the appropriate timed
+signatures. It is expected that implementations will provide specializations of
+this adaptor for the standard mutex types alongside the generic template, to
+cover cases where they already provide the interface, or it can be efficiently
+implemented with knowledge of the implementation details of the mutex.</p>
+
+<pre>
+    template&lt;typename Mutex&gt;
+    class timed_exclusive_adaptor
+    {
+    public:
+        timed_exclusive_adaptor();
+        ~timed_exclusive_adaptor();
+
+        void lock();
+        bool try_lock();
+        bool try_lock(unsigned spin_count);
+        bool try_lock(target_time_type target_time);
+        bool try_lock(time_duration_type wait_time);
+        void unlock();
+    };
+
+    template&lt;typename Mutex&gt;
+    class timed_shareable_adaptor
+    {
+    public:
+        timed_shareable_adaptor();
+        ~timed_shareable_adaptor();
+
+        void lock();
+        bool try_lock();
+        bool try_lock(unsigned spin_count);
+        bool try_lock(target_time_type target_time);
+        bool try_lock(time_duration_type wait_time);
+        void unlock();
+
+        void lock_shareable();
+        bool try_lock_shareable();
+        bool try_lock_shareable(unsigned spin_count);
+        bool try_lock_shareable(target_time_type target_time);
+        bool try_lock_shareable(time_duration_type wait_time);
+        void unlock_shareable();
+    };
+
+    template&lt;typename Mutex&gt;
+    class timed_upgradeable_adaptor
+    {
+    public:
+        timed_upgradeable_adaptor();
+        ~timed_upgradeable_adaptor();
+
+        void lock();
+        bool try_lock();
+        bool try_lock(unsigned spin_count);
+        bool try_lock(target_time_type target_time);
+        bool try_lock(time_duration_type wait_time);
+        void unlock();
+
+        void lock_shareable();
+        bool try_lock_shareable();
+        bool try_lock_shareable(unsigned spin_count);
+        bool try_lock_shareable(target_time_type target_time);
+        bool try_lock_shareable(time_duration_type wait_time);
+        void unlock_shareable();
+
+        void lock_upgradeable();
+        bool try_lock_upgradeable();
+        bool try_lock_upgradeable(unsigned spin_count);
+        bool try_lock_upgradeable(target_time_type target_time);
+        bool try_lock_upgradeable(time_duration_type wait_time);
+        void unlock_upgradeable();
+
+        void unlock_upgradeable_and_lock();
+        bool try_unlock_upgradeable_and_lock();
+        bool try_unlock_upgradeable_and_lock(unsigned spin_count);
+        bool try_unlock_upgradeable_and_lock(target_time_type target_time);
+        bool try_unlock_upgradeable_and_lock(time_duration_type wait_time);
+
+        void unlock_upgradeable_and_lock_sharable();
+        void unlock_and_lock_shareable();
+        void unlock_and_lock_upgradeable();
+    };
+    </pre>
+
+<h3>Lock objects</h3>
+
+<p>
+N2094 describes 3 different types of lock object: <em>exclusive</em>, <em>shareable</em> and
+<em>upgradeable</em>. Whilst I agree with the overall concepts, I believe that the use of
+move constructors to upgrade and downgrade locks is dangerous. For example:</p>
+
+<pre>
+    void f(upgradeable_mutex&amp; m)
+    {
+        upgradeable_lock ul(m);
+
+        if(xyz())
+        {
+            exclusive_lock el(move(ul));
+            do_stuff();
+        }
+        // do we have a lock or not?
+    }
+    </pre>
+
+<p>The move constructors have their place, as they allow transfer of the lock
+between functions. Therefore I propose an additional class
+<code>upgrade_to_exclusive_lock</code>, which takes an <code>upgradeable_lock</code> and upgrades it to <em>exclusive</em>  for
+the lifetime of the <code>upgrade_to_exclusive_lock</code> instance. e.g.</p>
+
+<pre>
+    void f(upgradeable_mutex&amp; m)
+    {
+        upgradeable_lock ul(m);
+
+        if(xyz())
+        {
+            upgrade_to_exclusive_lock el(ul);
+            // we now have an exclusive lock
+            // ul cannot be used
+        }
+        // ul is back to being an upgradeable
+    }
+    </pre>
+
+<dl>
+<dt>
+Interface:</dt>
+
+<dd>
+<pre>
+    template &lt;class Mutex&gt;
+    class upgrade_to_exclusive_lock
+    {
+    public:
+        typedef Mutex mutex_type;
+    public:
+        explicit upgrade_to_exclusive_lock(upgradeable_lock&lt;mutex_type&gt;&amp; m);
+
+        ~upgrade_to_exclusive_lock();
+
+        upgrade_to_exclusive_lock(upgrade_to_exclusive_lock&amp;&amp; sl);
+        upgrade_to_exclusive_lock&amp; operator=  (upgrade_to_exclusive_lock&amp;&amp; sl);
+    private:
+        upgrade_to_exclusive_lock(upgrade_to_exclusive_lock const&amp;);
+        explicit upgrade_to_exclusive_lock(upgradable_lock&lt;mutex_type&gt; const&amp;);
+        upgrade_to_exclusive_lock&amp; operator=  (upgrade_to_exclusive_lock const&amp;);
+    public:
+        bool owns() const;
+        operator unspecified-bool-type() const;
+        const mutex_type* mutex() const;
+
+        void swap(upgrade_to_exclusive_lock&amp;&amp; w);
+    };
+        </pre></dd>
+
+<dt>
+Semantics:</dt>
+<dd>
+
+    <p>On construction, the mutex owned by the <code>upgradeable_lock</code> is upgraded to an
+    exclusive lock as-if by calling <code>unlock_upgradeable_and_lock()</code> on the mutex
+    owned by the <code>upgradeable_lock</code>.</p>
+
+        <p>On destruction, the mutex owned by the <code>upgradeable_lock</code> is downgraded to an
+    upgradeable lock as-if by calling <code>unlock_and_lock_upgradeable()</code> on the mutex
+    owned by the <code>upgradeable_lock</code>.</p>
+
+    <p>Rather than just upgrading the mutex, but leaving the <code>upgradeable_lock</code>
+    alone, the constructor should modify the <code>upgradeable_lock</code> so that any
+    operations performed directly on it fail in a clear manner, rather than
+    potentially deadlock.</p>
+      </dd>
+    </dl>
+
+<h2>Acknowledgements</h2>
+
+<p>Thanks to Howard Hinnant, Peter Dimov and Roland Schwarz for comments on some of
+the interfaces proposed here, and Jeff Garland who pointed me to the Date-Time
+papers N1900 and N2058.</p>
+
+</body></html>

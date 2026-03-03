@@ -1,0 +1,343 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML Basic 1.1//EN"
+"http://www.w3.org/TR/xhtml-basic/xhtml-basic11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en-us">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=us-ascii"/>
+  <title>Library thread-safety from a user's point of view, with wording</title>
+  <style type="text/css">
+    ins { color:green; }
+    del { color:red; }
+  </style>
+</head>
+
+<body>
+<table>
+  <tr><th>Document Number:</th><td>N2519=08-0029</td></tr>
+  <tr><th>Date:</th><td>2008-01-28</td></tr>
+  <tr><th>Reply to:</th><td>Jeffrey Yasskin
+  &lt;<a href="mailto:jyasskin@google.com">jyasskin@google.com</a>></td></tr>
+</table>
+
+<h1>Library thread-safety from a user's point of view, with wording</h1>
+
+<ol>
+  <li><a href="#Introduction">Introduction</a></li>
+  <li><a href="#Types">An informal, type-based approach</a></li>
+  <li><a href="#Objects">More formality by analogizing objects to
+  memory locations</a></li>
+  <li><a href="#Design-decisions">Design decisions</a></li>
+  <li><a href="#Existing-practice">Existing practice</a></li>
+  <li><a href="#Proposed-Wording">Proposed wording</a></li>
+  <li><a href="#Acknowledgements">Acknowledgements</a></li>
+  <li><a href="#Revision-history">Revision history</a></li>
+  <li><a href="#References">References</a></li>
+</ol>
+
+<h2 id="Introduction">Introduction</h2>
+<p>With the introduction of multi-threading into the C++ standard, the
+contract between standard library users and implementers needs to
+explicitly state the conditions under which concurrent operations on
+standard library components have defined behavior. This must be at a
+higher level than the memory model itself so that users don't need to
+know exactly which memory operations a given invocation performs.</p>
+
+<h2 id="Types">An informal, type-based approach</h2>
+<p>There are three levels at which a type can informally be "thread-safe".</p>
+<ul>
+  <li>Separate instances of the type can be constructed and accessed
+  concurrently by different threads. This prohibits unsynchronized
+  access to static objects in the type's methods. It probably requires
+  copy-on-write implementations to synchronize their shared
+  internals. I believe this is what N2410 calls the "basic"
+  thread-safety guarantee. This has little or no impact on performance
+  and does actually deliver the promised safety, so it should be
+  required of implementations.</li>
+
+  <li>Concurrent calls to const methods (and possibly others specially
+  noted as non-modifying) are safe, but non-const method calls must be
+  related to all other calls by the happens-before relation. This
+  makes caching more expensive and rules out some amortized data
+  structures like splay trees. This level of thread-safety is not
+  widely recognized or named in the literature, but it's important
+  because it matches the guarantees provided by the memory model for
+  primitive types. I'd suggest calling it the "primitive", "scalar",
+  or "const" thread-safety guarantee. Because it describes the
+  guarantees currently made by STL implementers, it should also be
+  required of implementations.</li>
+
+  <li>Concurrent calls to all methods are safe. I believe N2410 calls
+  this the "strong" thread-safety guarantee. This is the guarantee
+  provided for the <code>atomic&lt;T></code> family, but it can have a
+  severe negative impact on performance. Furthermore, real safety
+  often requires atomicity across several member function calls, so
+  providing per-function-call locking would create an illusion of
+  safety that did in fact not exist. For these reasons,
+  implementations should not be required to provide this level of
+  thread-safety for most of the classes in the standard library.</li>
+</ul>
+
+<p>In the rest of this paper, I will assume types make the "const"
+guarantee by default, I will call types that make only the basic
+guarantee "thread-isolated", and I'll call types that make the strong
+guarantee "concurrency-tolerant". (These names are Lawrence Crowl's
+and my invention and don't reflect any sort of consensus. Better
+adjectives would be welcome.)</p>
+
+<p>A function can only be thread-safe or not. If it uses a non-const
+static object without synchronization, it is quite likely not to be
+thread-safe. Note that reentrancy is related to but not identical to
+thread-safety. A function may use a thread-specific object to get
+thread-safety without thereby getting reentrancy.</p>
+
+<p>Arguments complicate this story. For instance, it's not safe to call</p>
+<pre>    void square_in_place(int* i) {
+        *i *= *i;
+    }</pre>
+<p>concurrently on the same <code>int</code>, even though the function
+itself is thread-safe. Functions that take <em>two</em> non-const,
+non-concurrency-tolerant arguments (including <code>*this</code> for
+methods) are a recipe for deadlock, unless at most one of the
+troublesome arguments is shared between threads.</p>
+
+<h2 id="Objects">More formality by analogizing objects to memory locations</h2>
+<p>In order to deal with arguments in a uniform way and make a stab at
+a more formal definition, I'm going to steal a page from the memory
+model. Let's say that an object sits at a single notional memory
+location, which can be accessed and modified independent of the actual
+memory locations that comprise the object. The notional location of a
+scalar object is identical to its memory location. Some objects, such
+as containers, may have both the shallow location representing the
+whole object, and deep locations representing user-visible subobjects,
+frequently of user-defined types, but these objects need to be called
+out specifically. In general, passing a const object to a function
+(including to a method as <code>*this</code>) should be an access to
+the object's memory location, and passing a non-const object should be
+a modification. Then [1.10p3]'s definition of conflict carries over
+(renamed to "object conflict"), as does [1.10p11]'s definition of a
+data race (now called an "object race"). It is the user's
+responsibility to avoid object races, and it is the library
+implementer's responsibility to ensure that a lack of object races
+implies a lack of data races.</p>
+
+<p>Thread-isolated objects can express their restrictions concisely by
+saying that all method calls are modifications instead of only the
+non-const ones. Concurrency-tolerant objects could say that all
+methods are simple accesses, but that violates my intuition about
+modifications, so I've introduced the idea of a concurrency-tolerant
+method that can modify an object without conflicting with other
+concurrency-tolerant methods. These closely resemble atomic
+operations, but may not appear to happen all at once.</p>
+
+<p>Objects, even if not all methods are concurrency-tolerant, also
+have the opportunity to provide edges in the happens-before
+relation. In particular, a type may specify that certain methods
+perform a release operation on the object, and that others perform an
+acquire operation. The effect is exactly the same as if the operations
+were performed on a real memory location, even if the object
+implements them differently. Users should be able to safely treat
+objects identically to real memory locations.</p>
+
+<h2 id="Design-decisions">Design decisions</h2>
+<p>N2410 requires most standard library functions to be
+reentrant. This is unrelated to thread-safety, although it seems like
+a good idea. (I'd be surprised if <code>sort()</code>'s comparator was
+not allowed to call <code>sort()</code>!) I've included it here too,
+but replaced the undefined term "reentrant" with recursive and
+thread-safe.</p>
+
+<h2 id="Existing-practice">Existing practice</h2>
+<p>As far as is known, the proposed wording reflects existing practice in 
+current implementations of the standard library.</p>
+
+<h2 id="Proposed-Wording">Proposed Wording</h2>
+<p>Insert new definitions in 17.1:</p>
+<blockquote>
+  <dl>
+    <dt>access [defns.access]</dt>
+    <dd>An object is <dfn>accessed</dfn> by any modification, any
+    direct access to a member variable, any member function call on
+    the object, or any call to a standard library function taking the
+    object as a parameter.</dd>
+
+    <dt>concurrency-tolerant [defns.concurrency.tolerant]</dt>
+    <dd>A term applied to functions that relaxes certain restrictions
+    on concurrent calls to other concurrency-tolerant functions
+    ([library.concurrency]). <i>[Note:</i> Constructors and
+    destructors cannot be concurrency-tolerant, although they can be
+    synchronization operations as in the case of
+    <code>unique_lock</code> and <code>thread</code>. <i>--end
+    note]</i></dd>
+
+    <dt>modification [defns.modification]</dt>
+    <dd>An object is <dfn>modified</dfn> by its constructor and
+    destructor, by directly modifying a member variable, and, unless
+    otherwise specified, by calling non-const member functions on the
+    object or passing the object as a non-const parameter to a
+    standard library function. <i>[Note:</i> This definition implies
+    that an object need not be modified when a memory location inside
+    it is modified (for example, when an object contains
+    <code>mutable</code> members). This helps insulate users from
+    implementation details, and, combined with the requirement in
+    [res.on.thread.safety], restricts the implementation of such
+    objects. <i>--end note]</i></dd>
+  </dl>
+</blockquote>
+
+<p>Insert a new section between 17.3 and 17.4, titled "Concurrent use
+of the library [library.concurrency]":</p>
+<blockquote>
+  <p>Two expression evaluations have an <dfn>object conflict</dfn> if
+  one of them modifies an object and the other one accesses the same
+  object. The execution of a program contains an <dfn>object
+  race</dfn> if it contains two object-conflicting actions in
+  different threads, at least one of which is not
+  <dfn>concurrency-tolerant</dfn>, and neither happens before the
+  other. Any such object race results in undefined behavior. Unless
+  otherwise specified, operations on objects in the standard library
+  are not concurrency-tolerant and are not synchronization
+  operations.</p>
+</blockquote>
+
+<p>Replace section 17.4.4.5 with one titled "Recursion [recursion]":</p>
+<blockquote>
+  <p>Functions in the C++ Standard Library that can call user-defined
+  functions must be able to be called recursively from them.</p>
+</blockquote>
+
+<p>Insert a new section between 17.4.4.5 and 17.4.4.6, titled "Thread
+safety [res.on.thread.safety]":</p>
+<blockquote>
+  <p>The implementation must ensure that, when uses of the standard
+  library are free of object races, calls to standard library
+  functions do not introduce any data races, except where otherwise
+  specified.</p>
+</blockquote>
+
+<p>To 3.7.3 Dynamic storage duration [basic.stc.dynamic], add:</p>
+<blockquote>
+  <p>Any allocation and/or deallocation functions defined in a C++
+  program, including the default versions in the library, shall not
+  introduce data races (1.10 [intro.multithread]) as a result of
+  concurrent calls from different threads. Calls that allocate or
+  deallocate a particular unit of storage shall occur in a single
+  total order, and each such deallocation call happens before the next
+  allocation (if any) in this order. <i>[Note:</i>
+  [basic.stc.dynamic.deallocation] implies that the behavior is
+  undefined if the call to allocate a particular unit of storage does
+  not happen before the call that deallocates it. <i>--end
+  note]</i></p>
+</blockquote>
+
+<p>Change 19.3 Error numbers [errno] paragraph 1 as indicated:</p>
+<blockquote>
+  <p>The header <code>&lt;cerrno></code> is described in (Table
+  29). Its contents are the same as the POSIX header
+  <code>&lt;errno.h></code>, except that errno shall be defined as a
+  macro<ins> that expands to a separate modifiable lvalue for each
+  thread of execution</ins>. <i>[Note:</i> The intent is to remain in
+  close alignment with the POSIX standard. <i>--end note]</i> </p>
+</blockquote>
+
+<p>To 20.6.1 The default allocator [default.allocator], add:</p>
+<blockquote>
+  <p>All member functions of the default allocator are
+  concurrency-tolerant ([library.concurrency]). Allocation and
+  deallocation calls that allocate or return a particular unit of
+  storage shall occur in a single total order, and each such
+  deallocation call happens before the next allocation (if any) in
+  this order. <i>[Note:</i> [basic.stc.dynamic.deallocation] implies
+  that the behavior is undefined if the call to allocate a particular
+  unit of storage does not happen before the call that deallocates
+  it. <i>--end note]</i></p>
+</blockquote>
+
+<p>To 20.7 Date and Time [date.time], add:</p>
+<blockquote>
+  <p>The functions <code>asctime</code>, <code>ctime</code>,
+  <code>gmtime</code>, and <code>localtime</code> may introduce a data
+  race if called concurrently with each other
+  ([res.on.thread.safety]).</p>
+</blockquote>
+
+<p>To 21.5 Null-terminated sequence utilities [c.strings], add:</p>
+<blockquote>
+  <p>The functions <code>strerror</code> and <code>strtok</code> may
+  introduce a data race if called concurrently with each other
+  ([res.on.thread.safety]).</p>
+</blockquote>
+
+<p>To 23.1 Container requirements [container.requirements], add a
+paragraph between paragraphs 11 and 12.</p>
+<blockquote>
+  <p>All of <code>begin</code>, <code>end</code>, <code>rbegin</code>,
+  <code>rend</code>, <code>front</code>, <code>back</code>,
+  <code>at</code>, <code>find</code>, <code>lower_bound</code>,
+  <code>upper_bound</code>, and <code>equal_range</code> do not modify
+  containers other than <code>basic_string</code>.
+  <code>operator[]</code> does not modify sequences other than
+  <code>basic_string</code>. <i>[Note:</i> <code>operator[]</code>
+  does modify associative containers, even if it does not result in a
+  change in the caller-visible state of the object. <i>--end note]</i>
+  An iterator is modified when it is invalidated. An object is
+  modified when a pointer or reference that refers to it is
+  invalidated.</p>
+</blockquote>
+
+<p>To 23.3.5 Class template bitset [template.bitset], add:</p>
+<blockquote>
+  <p>A <code>bitset</code> of any size may consist of just a single
+  memory location, so accesses and modifications to any contained
+  bits, including through <code>reference</code>s, conflict.</p>
+</blockquote>
+
+<p>Change 26.7 C Library [c.math] paragraph 5 and 6 as indicated:</p>
+<blockquote>
+  <p>The <code>rand</code> function has the semantics specified in the
+  C standard, except that the implementation may specify that
+  particular library functions may call <code>rand</code>. <ins>The
+  <code>rand</code> function may introduce a data race if called
+  concurrently with itself ([res.on.thread.safety]). <i>[Note:</i>
+  This does not imply that functions specified to call
+  <code>rand</code> may introduce data races. <i>--end
+  note]</i></ins></p>
+</blockquote>
+
+<p>Add to Chapter 27 Input/output library [input.output] (somewhere):</p>
+<blockquote>
+  <p>When a standard iostream object <code>str</code> is synchronized
+  with a standard stdio stream <code>f</code> [ios.members.static],
+  all operations on <code>str</code> are concurrency-tolerant.
+  Concurrent access to other objects in the iostreams library must be
+  locked as usual. <i>[Note:</i> This is the minimum guarantee to
+  match POSIX behavior on files. <i>--end note]</i></p>
+</blockquote>
+
+<h2 id="Acknowledgements">Acknowledgements</h2>
+<p>This document builds upon wording in N2298 and N2410. Without
+encouragement from Lawrence Crowl, this paper would never have been
+written, and he and Matt Austern helped to flesh out the ideas and get
+the new wording right.</p>
+
+<h2 id="Revision-history">Revision history</h2>
+<p>N2519 - Initial version.</p>
+
+<h2 id="References">References</h2>
+<p><a
+href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2334.htm">
+N2334</a>, Concurrency memory model (revised again), Clark Nelson and
+Hans-J.  Boehm</p>
+<p><a
+href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2410.html">
+N2410</a>, Thread-Safety in the Standard Library (Rev 1), Beman Dawes,
+Peter Dimov, and Herb Sutter</p>
+<p><a
+href="http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2007/n2447.htm">N2447</a>,
+Multi-threading Library for Standard C++, Howard E. Hinnant, Jeff
+Garland, Alisdair Meredith, Chris Kohlhoff, Dietmar K&uuml;hl, Nathan
+Myers, PremAnand M Rao, and Nick Stoughton</p>
+<p><a
+href="http://www.opengroup.org/onlinepubs/007908799/xsh/flockfile.html"><code>flockfile()</code>
+and friends</a>, from the POSIX Threads Extension (1003.1c-1995).</p>
+
+</body>
+</html>

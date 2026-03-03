@@ -1,0 +1,418 @@
+<html>
+<head>
+<TITLE>
+ISO/IEC JTC1/SC22/WG21
+N0790
+</TITLE>
+</head>
+<body>
+<h1>
+<img align=top src="/pics/iso44.gif" alt="ISO/">
+<img align=top src="/pics/iec44.gif" alt="IEC">
+JTC1/SC22/WG21
+N0790
+</h1>
+<pre>
+** Title: Allocator Cleanup
+** Author: Nathan Myers &lt;myersn@roguewave.com>
+** Document: WG21/N0790 = X3J16/95-0190
+** Sections: [lib.allocator.requirements], [lib.allocator.default],
+             [and many sections in Clauses 21 and 23].
+ 
+---------------------------------------------------------------
+ 
+** Description
+ 
+It is obvious, to anyone who looks, that the interface for Allocator
+is not pretty.  It has generality, but is not very nice to use.  It
+involves using very long names, and calling functions with a messy
+notation.  It turns out it can be markedly improved.
+ 
+** Discussion
+ 
+In Monterey, Bill Plauger suggested what would (if it worked) have
+been a substantial syntactic simplification of the Allocator
+requirements, and of the default allocator.  It had some technical
+problems, which I agreed to look into and, if they could be solved,
+write up a detailed proposal.  This is that proposal.
+ 
+The essence of the change is as follows:
+ 
+The current Allocator interface, as implemented in the default
+allocator, looks something like:
+ 
+  template &lt;class T>
+    class allocator {
+      ...
+      allocator(const allocator&);
+ 
+      template &lt;class T>
+        struct types {
+          typedef T*   pointer;
+          typedef T&   reference;
+          ...
+        };
+      template &lt;class T>
+        typename types&lt;T>::pointer
+        address(typename types&lt;T>::reference x);
+      ...
+      template &lt;class T, class U>
+        typename types&lt;T>::pointer
+        allocate(size_type, typename types&lt;U>::const_pointer hint);
+      template &lt;class T>
+        void deallocate&lt;types&lt;T>::pointer p);
+      ...
+    };
+ 
+Most of its members are templates, and common uses of them require
+explicit "template f&lt;>()" notation.  Use of this allocator as a
+template parameter in a collection looks like:
+ 
+!  template &lt;class T, class Allocator = allocator>
+     class Container {
+       ...
+       template &lt;class T> class Treenode;
+!      typedef typename Allocator::types&lt;Treenode&lt;T> >::pointer
+!         Treenode_ptr;
+       template &lt;class T>
+         struct Treenode { Treenode_ptr left_, right_; T t; };
+ 
+      public:
+       Container(const Allocator& alloc = Allocator())
+         : alloc_(alloc), root_(0) {}
+ 
+       void aMember();
+ 
+      private:
+!      Allocator alloc_;
+       Treenode_ptr root_;
+     };
+ 
+   template &lt;class T, class Allocator>
+     void Container::aMember()
+     {
+!      Treenode_ptr p = new(
+!        alloc_.template allocate&lt; Treenode&lt;T> >(1, this)) Treenode&lt;T>;
+       ...
+       alloc_.template destroy&lt;Treenode&lt;T> >(p);
+       alloc_.template deallocate&lt;Treenode&lt;T> >(p);
+     }
+ 
+(The lines marked "!" are those that change in the next example.)
+While this is all very general, it would be better if it were
+shorter and had less punctuation and repetition.  Now, suppose
+allocator looked, instead, like this:
+ 
+  template &lt;class T>                                   // 1
+    class allocator {
+      ...
+      template &lt;class U>
+        allocator(const allocator&lt;U>&);                // 2
+      template &lt;class U>
+        struct rebind { typedef allocator&lt;U> other; }; // 3
+      ...
+      typedef T*   pointer;
+      typedef T&   reference;
+      ...
+      pointer address(reference x);
+      ...
+ 
+      template &lt;class U>
+        pointer allocate(size_type, typename allocator&lt;U>::const_pointer hint);
+      void deallocate(pointer p);
+      ...
+    };
+ 
+This looks better already.  The first thing to notice is that
+most of the template members have disappeared, and most of the
+names are shorter.  Here's what use of it looks like:
+ 
+!  template &lt;class T, class Allocator = allocator&lt;void> >  // 4
+     class Container {
+       ...
+       template &lt;class T> class Treenode;
++      typedef typename Allocator::rebind&lt; Treenode&lt;T> >::other
++        Treenode_allocator;                               // 5
+!      typename Treenode_allocator::pointer Treenode_ptr;  // 6
+       template &lt;class T>
+         struct Treenode { Treenode_ptr left_, right_; T t; };
+ 
+      public:
+       Container(const Allocator& alloc = Allocator())
+         : alloc_(alloc), root_(0) {}                      // 7
+ 
+       void aMember();
+ 
+      private:
+!      Treenode_allocator alloc_;
+       Treenode_ptr root_;
+     };
+ 
+   template &lt;class T, class Allocator>
+     void Container::aMember()
+     {
+!      Treenode_ptr p = new(alloc_.allocate(1, this)) Treenode&lt;T>;  // 8
+       ...
+       alloc_.destroy(p);
+       alloc_.deallocate(p);
+     }
+ 
+The lines marked "!" are changed, and those marked "+" are new.
+Most are about the same length or shorter, but the last one is
+lots shorter, which is good because that's the one you have to
+type (and read) over and over again.
+ 
+Let's look at what is happening in the new version of the allocator.
+ 
+1. allocator is a template (again).  However, container templates
+   take, as a parameter, an instantiation and not the template itself.
+ 
+2. It has a template copy constructor, so it can construct an
+   allocator&lt;T> from any allocator&lt;U>.
+ 
+3. Interestingly, it has a template class member named "rebind".
+   This is effectively a template typedef: if the name Allocator
+   is bound to SomeAllocator&lt;T>, then Allocator::rebind&lt;U>::other
+   is the same type as SomeAllocator&lt;U>.
+ 
+4. In the header for the class template Container, the default
+   value for template parameter Allocator is an instantiation of
+   the default allocator template.
+ 
+5. The typedef for Treenode_allocator is a bit long, because the
+   language doesn't have real template typedefs.  [c'est la vie]
+ 
+6. The declaration of member typedef Treenode_ptr is short and
+   comprehensible.
+ 
+7. In the constructor for Container the template copy constructor is
+   used to copy (via implicit conversion) the Allocator argument to
+   the Treenode_allocator data member.
+ 
+8. In the definition of Container&lt;>::aMember(), we can see the member
+   allocate() called with no "&lt;>", and only one mention of Treenode&lt;T>.
+   This was the goal: the most common use is simple and comprehensible.
+ 
+The bottom line is that this alternative formulation has exactly
+the same semantic power as the status quo, but the notation is
+more natural.  Most uses of it don't involve qualifying names with
+"template &lt;>", or "typename".  Further, most uses are shorter because
+they don't have to mention an intervening member template.
+ 
+The primary effect on the WP of this change (outside of clause 20)
+is that all uses of the sequence "Allocator::types&lt;T>::" become
+"allocator_type::", and the declaration of allocator_type changes.
+Details are expressed below.  The changes are largely mechanical.
+ 
+A side benefit of this change is that a substantial subset of its full
+power can be implemented on a compiler that lacks member templates, if
+it supports default arguments.
+ 
+** Proposed Resolution
+In Clause 22, in [lib.allocator.requirements], change the
+names used in the table and descriptions of the table, each
+place they appear, as follows:
+ 
+  Old                                   New
+  X::types&lt;T>::pointer           X::pointer
+  X::types&lt;T>::const_ pointer    X::const_pointer
+  X::types&lt;T>::reference         X::reference
+  X::types&lt;T>::const_reference   X::const_reference
+  X::types&lt;T>::value_type        X::value_type
+ 
+  x.template address&lt;T>(r)       X::address(r)
+  x.template address&lt;T>(s)       X::address(s)
+  x.template allocate&lt;T>(n)      x.allocate(n)
+  x.template allocate&lt;T,U>(n)    x.allocate&lt;U>(n,u)
+  x.template deallocate&lt;T>(p)    x.deallocate(p)
+  x.template max_size&lt;T>()       x.max_size()
+  x.template construct&lt;T,U>(p,u) x.construct(p,u);
+  x.template destroy&lt;T,U>(p)     x.destroy(p);
+ 
+And add a member type:
+ 
+  x.rehost&lt;U>::other             for X an instantiation of XT&lt;T>,
+                                 the type XT&lt;U>.
+ 
+Also, change
+ 
+  new((void*)x.template allocate&lt;T>(1)) T
+  new((void*)x.template allocate&lt;T>(n)) T[n]
+ 
+to
+ 
+  new((void*)x.allocate(1)) T
+  new((void*)x.allocate(n)) T[n]
+ 
+In [lib.memory], in the &lt;memory> synopis, replace
+ 
+  class allocator;
+  class allocator::types&lt;void>;
+  void* operator new(size_t N, allocator& a);
+ 
+with
+ 
+  template &lt;class T> class allocator;
+  template &lt;> class allocator&lt;void>;
+  template &lt;class T> void* operator new(size_t N, allocator&lt;T>& a);
+ 
+Replace the definition of the default allocator in
+[lib.default.allocator] with:
+ 
+  namespace std {
+    template &lt;class T>
+    class allocator {
+    public:
+      typedef size_t    size_type;
+      typedef ptrdiff_t difference_type;
+      typedef T*        pointer;
+      typedef const T*  const_pointer;
+      typedef T&        reference;
+      typedef const T&  const_reference;
+      typedef T         value_type;
+      template &lt;class U> struct rehost { typedef allocator&lt;U> other; };
+ 
+      allocator() throw();
+      template &lt;class U> allocator(const allocator&lt;U>&) throw();
+      template &lt;class U> allocator& operator=(const allocator&lt;U>&) throw();
+      ~allocator() throw();
+ 
+      pointer address(reference x) const;
+      const_pointer address(const_reference x) const;
+      template &lt;class U = void>
+        pointer allocate(size_type, const U* hint);
+      void deallocate(pointer p);
+      void construct(pointer p, const T& val);
+      void destroy(T* p);
+      size_type max_size() const throw();
+    };
+ 
+    template &lt;class T>
+      void* operator new(size_t N, allocator&lt;T>& a);
+    template &lt;class T, class U>
+      bool operator== (const allocator&lt;U>&, const allocator&lt;U>&) throw();
+    template &lt;class T, class U>
+      bool operator!= (const allocator&lt;U>&, const allocator&lt;U>&) throw();
+ 
+    // specialization on void, lacks reference, address(),
+    //   construct(), destroy() members:
+    template &lt;> class allocator&lt;void> {
+    public:
+      typedef size_t    size_type;
+      typedef ptrdiff_t difference_type;
+      typedef void*        pointer;
+      typedef const void*  const_pointer;
+      typedef void         value_type;
+      template &lt;class U> struct rehost { typedef allocator&lt;U> other; };
+ 
+      allocator() throw();
+      template &lt;class U> allocator(const allocator&lt;U>&) throw();
+      template &lt;class U> allocator& operator=(const allocator&lt;U>&) throw();
+      ~allocator() throw();
+ 
+      template &lt;class U = void>
+        pointer allocate(size_type, const U* hint);
+      void deallocate(pointer p);
+      size_type max_size() const throw();
+    };
+  }
+ 
+Delete paragraph 1, and change paragraph 2:
+ 
+  It is assumed that any pointer types ahve a (possibly lossy)
+  conversion to void*, yielding a pointer sufficient for use as
+  the _this_ value in a constructor or destructor.
+ 
+Change the declarations following, in [lib.allocator.members], to
+match, and their descriptions.  In particular, describe max_size()
+as:
+ 
+  Returns: the largest value N for which the call
+    allocate(N,0) can succeed.
+ 
+and add a description of operator !=:
+ 
+  template &lt;class T,class U>
+    bool operator!=(const allocator&lt;T>&, const allocator&lt;U>&) throw();
+ 
+  Returns: false, always.
+ 
+[We add operator!= so we can declare it throw(), for efficiency.]
+Replace the example with the text below:
+ 
+  [Example: Here is a sample container parameterized on the allocator type.
+ 
+    template &lt;class T, class Allocator = allocator&lt;void> >
+      class Container {
+        template &lt;class T> class Treenode;
+        typedef typename Allocator::rebind&lt; Treenode&lt;T> >::other
+          Treenode_allocator;
+        Treenode_allocator::pointer Treenode_ptr;
+        template &lt;class T>
+          struct Treenode { Treenode_ptr left_, right_; T t; };
+ 
+       public:
+        Container(const Allocator& alloc = Allocator())
+          : alloc_(alloc), root_(0) {}
+ 
+        void aMember();
+ 
+       private:
+         Treenode_allocator alloc_;
+        Treenode_ptr root_;
+      };
+ 
+    template &lt;class T, class Allocator>
+      void Container::aMember()
+      {
+        Treenode_ptr p = new(alloc_.allocate(1, this)) Treenode&lt;T>;
+        ...
+        alloc_.destroy(p);
+        alloc_.deallocate(p);
+      }
+ 
+  and here is an allocator for shared memory:
+ 
+    template &lt;class T>
+    class shared_allocator: public std::allocator&lt;T> {
+      class impl {
+        impl(void* region);
+        ~impl();
+        void* allocate(size_t);
+        void* deallocate(void*);
+        friend class shared_allocator&lt;T>;
+      }
+      impl* impl_;
+ 
+     public:
+      template &lt;class U> struct rehost { typedef shared_allocator&lt;U> other; };
+      shared_allocator(void* region) : impl_(region) {}
+      template &lt;class T>
+        shared_allocator(const shared_allocator&lt;T>&) throw();
+      template &lt;class T>
+        shared_allocator& operator=(const shared_allocator&lt;T>&) throw();
+      ~shared_allocator();
+ 
+      template &lt;class U>
+        pointer allocate(size_t N, const U*)
+          { return impl_->allocate(N*sizeof T); }
+      void deallocate(T* p)
+          { impl_->deallocate(p); }
+    };
+ 
+  ]
+ 
+****
+ 
+In Clauses 21 (Strings) and 23 (Containers), change the definition
+in each place where Allocator occurs as follows:
+ 
+1. Replace each occurrence of "typename Allocator::types&lt;T>::" with
+   "allocator_type::".
+ 
+2. Change the default Allocator parameter of each template from
+   "Allocator = allocator" to "Allocator = allocator&lt;T>".
+ 
+</pre>
+</body>
+</html>

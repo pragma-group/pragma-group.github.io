@@ -1,0 +1,172 @@
+<html>
+	<head>
+		<title>Smart Pointer Comparison Operators</title>
+		<meta content="http://schemas.microsoft.com/intellisense/ie5" name="vs_targetSchema">
+		<meta http-equiv="Content-Language" content="en-us">
+		<meta http-equiv="Content-Type" content="text/html; charset=windows-1252">
+	</head>
+	<body bgColor="#ffffff">
+		<ADDRESS>Document number: N1590=04-0030</ADDRESS>
+		<ADDRESS>Programming Language C++, Library Working Group</ADDRESS>
+		<ADDRESS>&nbsp;</ADDRESS>
+		<ADDRESS>Peter Dimov &lt;<A href="mailto:pdimov@mmltd.net">pdimov@mmltd.net</A>&gt;</ADDRESS>
+		<ADDRESS>&nbsp;</ADDRESS>
+		<ADDRESS>February 11, 2004</ADDRESS>
+		<h1>
+			Smart Pointer Comparison Operators</h1>
+		<h2>
+			Introduction</h2>
+		<p>As pointed out in Technical Report Issue 2.3, the comparison operators of <code>shared_ptr</code>
+			may, in some cases, violate the usual</p>
+		<P>
+			<code>(p == q) == (!(p &lt; q) &amp;&amp; !(q &lt; p))</code></P>
+		<P>
+			relationship. Specifically, the value-based <code>p == q</code> and the 
+			ownership-based <code>p &lt; q</code> may both hold, when <code>p</code> and <code>q</code>
+			both store <code>NULL</code> or have a custom deleter that doesn't delete. The 
+			reverse is also true; <code>p == q</code>, <code>p &lt; q</code> and <code>q &lt; p</code>
+			may all yield <code>false</code>, when <code>p</code> and <code>q</code> share 
+			ownership but point to different subobjects.</P>
+		<P>This behavior can be considered surprising and counter-intuitive. The rest of 
+			this paper attempts to explain why it was chosen.</P>
+		<H2>weak_ptr::operator&lt;</H2>
+		<P>Since a <code>weak_ptr</code> can expire at any time, it is not possible to 
+			order weak pointers based on their value. Accessing the value of a deleted 
+			pointer invokes undefined behavior, and <code>reinterpret_cast</code> tricks 
+			are no good, either, as the same pointer value can be reused by the next <code>new</code>
+			expression. Using <code>p.lock().get()</code> for ordering is similarly flawed, 
+			as this implies that the value of <code>p &lt; q</code> may change when <code>p</code>
+			or <code>q</code> expires. If <code>p</code> and <code>q</code> are members of 
+			a <code>std::set</code>, this will break its invariant.</P>
+		<P>The only practical alternative is to order weak pointers by the address of their 
+			control block, as the current specification effectively demands.</P>
+		<P>A related question is whether <code>weak_ptr</code> needs an ordering at all. 
+			The answer is that sets and maps with <code>weak_ptr</code> keys are a very 
+			convenient way to non-intrusively associate arbitrary data with an object 
+			managed by a <code>shared_ptr</code>. One example is an application that has 
+			access to some arbitrary collection or graph of <code>shared_ptr</code> instances 
+			and needs to visit every object exactly once. A <code>set&lt; weak_ptr&lt;void&gt; 
+				&gt;</code> can be used to record whether an object has been visited:</P>
+		<pre>
+set&lt; weak_ptr&lt;void&gt; &gt; s;
+
+for( each shared_ptr instance p )
+{
+   if( s.count(p) )
+   {
+      // already visited
+   }
+   else
+   {
+      s.insert(p);
+      visit(p);
+   }
+}
+</pre>
+		<P>
+			A slight variation is to assign identifiers to objects:</P>
+		<pre>
+map&lt; weak_ptr&lt;void&gt;, int &gt; m;
+
+for( each shared_ptr instance p )
+{
+   map&lt; weak_ptr&lt;void&gt;, int &gt;::iterator i = m.find(p);
+
+   if( i != m.end() )
+   {
+      emit_reference(i-&gt;second);
+   }
+   else
+   {
+      m[p] = m.size() + 1;
+      emit_object(*p);
+   }
+}
+</pre>
+		<P>
+			Another example is an application that needs to determine whether a collection 
+			of <code>shared_ptr</code> instances is "self contained", or whether there are 
+			external <code>shared_ptr</code> variables that reference some of the objects. 
+			The solution is to use <code>map&lt; weak_ptr&lt;void&gt;, long &gt;</code> to 
+			manually recreate the use counts of the objects, and then compare the results 
+			with <code>use_count()</code>. Objects with external references can now be 
+			recognized by their higher <code>use_count()</code>:</P>
+		<pre>
+map&lt; weak_ptr&lt;void&gt;, long &gt; m;
+
+for( each shared_ptr instance p )
+{
+   ++m[p];
+}
+
+for( map&lt; weak_ptr&lt;void&gt;, long &gt;::iterator i = m.begin(); i != m.end(); ++i )
+{
+   if( i-&gt;first.use_count() &gt; i-&gt;second )
+   {
+      // (i-&gt;first.use_count() - i-&gt;second) external references
+   }
+}
+</pre>
+		<P>This can be used to detect cyclic structures, or as a test for <code>use_count()</code>.</P>
+		<H2>shared_ptr::operator&lt;</H2>
+		<P>For <code>shared_ptr</code>, there are two possible candidates for a natural 
+			ordering, one ownership-based and consistent with <code>weak_ptr::operator&lt;</code>, 
+			the other value-based and equivalent to <code>p.get() &lt; q.get()</code>.</P>
+		<P>The value-based alternative considers all <code>shared_ptr</code> instances that 
+			store <code>NULL</code> equivalent. It also handles shared pointers to 
+			statically allocated objects (with a null deleter) better. For example, given a 
+			statically allocated object <code>x</code> of class <code>X</code>, <code>shared_ptr&lt;X&gt;(&amp;x, 
+				null_deleter())</code> will be equivalent to another <code>shared_ptr&lt;X&gt;(&amp;x, 
+				null_deleter())</code>.</P>
+		<P>The ownership-based ordering, on the other hand, is consistent with <code>weak_ptr</code>, 
+			and considers two <code>shared_ptr</code> copies equivalent, even when their 
+			pointer values, as returned by <code>get()</code>, differ. This is typically 
+			the case when two <code>shared_ptr&lt;void&gt;</code> instances point to 
+			different subobjects of the same object, or when an object inherits the same 
+			interface class <code>I</code> multiply, but not virtually. A <code>std::set&lt; 
+				shared_ptr&lt;void&gt; &gt;</code> or a <code>std::set&lt; shared_ptr&lt;I&gt; 
+				&gt;</code> will now be able to correctly identify and reject duplicates.</P>
+		<P>The second option was chosen for the proposal for the following reasons:</P>
+		<UL>
+			<LI>
+				Consistency with <code>weak_ptr</code>.
+			<LI>
+				Sets of shared pointers typically contain objects and <code>NULL</code>
+			is uncommon.
+			<LI>
+				A trivial workaround exists for the "<code>shared_ptr</code> to static object" 
+				problem, namely, instead of constructing a <code>shared_ptr&lt;X&gt;(&amp;x, 
+					null_deleter())</code> on demand, keep it a static instance, alongside <code>x</code>
+				itself. Now all shared pointers to <code>x</code> can be copies of this "master <code>
+					shared_ptr</code>" and will compare equivalent with respect to <code>operator&lt;</code>.
+			<LI>
+				A programmer can use a predicate that returns <code>p.get() &lt; q.get()</code>, 
+				if this is the desired behavior. This predicate is easy to write even for 
+				inexperienced programmers.</LI></UL>
+		<H2>shared_ptr::operator==</H2>
+		<P>Given the above <code>operator&lt;</code> definitions, it seems reasonable to 
+			not provide an <code>operator==</code> at all, to avoid confusion. This is 
+			already the case with <code>weak_ptr</code>. However, leaving out <code>operator==</code>
+			entirely for <code>shared_ptr</code> presents a problem.</P>
+		<P>Because of the conversion to "unspecified-bool-type" (pointer to member in a 
+			typical implementation), the expression <code>p == q</code> would compile and 
+			have the semantics of <code>(p.get() != 0) == (q.get() != 0)</code>, which is 
+			undesirable. To suppress this behavior, we must provide some kind of equality 
+			comparison.</P>
+		<P>One option could be to "poison" the operator (as done with <code>std::tr1::function&lt;S&gt;</code>):</P>
+		<pre>
+  template&lt;class T, class U&gt; void operator==(shared_ptr&lt;T&gt;, shared_ptr&lt;U&gt;); // never defined
+</pre>
+		<P>(An even better alternative is to define <code>shared_ptr::operator==</code> as 
+			a private member.)</P>
+		<P>However, going to such great lengths to disable equality comparisons, when an 
+			intuitive definition of <code>p == q</code> exists (<code>p.get() == q.get()</code>) 
+			seems a bit excessive. It is arguably better to supply two comparison 
+			operators, <code>p == q</code> and <code>p &lt; q</code>, that are both useful 
+			in isolation, and just educate users about the nonobvious relationship between 
+			them.</P>
+		<P>The alternative <code>p == q</code> definition, <code>!(p &lt; q) &amp;&amp; !(q 
+				&lt; p)</code>, remains unexplored at this point.</P>
+		<ADDRESS>--end</ADDRESS>
+	</body>
+</html>
