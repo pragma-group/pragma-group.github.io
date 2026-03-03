@@ -69,7 +69,12 @@ def _rewrite_worker(arg: tuple[str, str]) -> str:
     def _rel(url_path: str) -> str | None:
         target = (mirror_root / url_path.lstrip("/")).resolve()
         if not target.exists():
-            return None
+            # Extensionless URLs may be stored as name/index.html directories.
+            index_variant = target / "index.html"
+            if index_variant.exists():
+                target = index_variant
+            else:
+                return None
         try:
             return os.path.relpath(target, path.parent).replace("\\", "/")
         except ValueError:

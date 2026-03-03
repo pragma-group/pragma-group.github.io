@@ -154,7 +154,12 @@ def _rewrite_worker(arg: tuple[str, str]) -> str:
     def _rel(url_path: str) -> str | None:
         target = (mirror_root / url_path.lstrip("/")).resolve()
         if not target.exists():
-            return None
+            # Extensionless URLs may be stored as name/index.html directories.
+            index_variant = target / "index.html"
+            if index_variant.exists():
+                target = index_variant
+            else:
+                return None
         try:
             return os.path.relpath(target, path.parent).replace("\\", "/")
         except ValueError:
@@ -497,6 +502,14 @@ class Crawler:
                         # Read fully so we can parse outbound links without a
                         # second request.  HTML pages are small (< 1 MB).
                         body = resp.content
+                        # GitHub Pages serves a file with no extension as
+                        # application/octet-stream (download), not text/html.
+                        # Save extensionless HTML pages as name/index.html so
+                        # the directory-index mechanism renders them correctly,
+                        # and links like href="docs/standards" still resolve.
+                        if lp.suffix.lower() not in (".html", ".htm"):
+                            lp = lp / "index.html"
+                        lp.parent.mkdir(parents=True, exist_ok=True)
                         lp.write_bytes(body)
                     else:
                         # Stream large files (PDFs, ZIPs) chunk by chunk.
