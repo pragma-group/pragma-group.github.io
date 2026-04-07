@@ -80,16 +80,52 @@ The workflow runs **`rsync -avz --checksum`** to `${DEPLOY_PATH}/` for the publi
 
 1. **SSH** — Add the CI public key to `~/.ssh/authorized_keys` for `SSH_USER`.
 2. **Directory** — The deploy workflow runs **`mkdir -p`** on `DEPLOY_PATH` before rsync so intermediate segments (e.g. **`site/pragma`**) are created if missing. Ensure `SSH_USER` can create that path under the parent and that the nginx user can read the deployed tree. For permission patterns (including avoiding `403` when ownership changes), see **`paperflow/doc/deploy-environments.md`** in the Paperflow monorepo (same host; sections 3–5).
-3. **nginx** — Add a `location` that matches your public URL. Example for `https://paperflow.org/pragma/` when files live under `/var/www/html/paperflow/site/pragma/`:
+3. **nginx** — The mirror uses **root-relative** URLs (`/jtc1/...`, `/pics/...`, etc.). Under `https://paperflow.org/pragma/`, the browser would otherwise request those paths at the **host root**, so nginx must **`sub_filter`** HTML/CSS responses to prefix `/pragma` on those links. **Binary files** (PDF, images, archives) are not filtered—only `text/html` and `text/css`.
+
+Canonical vhost snippet for `paperflow.org` is kept in the Paperflow deployment tree as **`paperflow.nginx`** (same block as production); the copy below must stay in sync when you change filters:
 
 ```nginx
+    location = /pragma {
+        return 301 /pragma/;
+    }
+
     location /pragma/ {
         alias /var/www/html/paperflow/site/pragma/;
         index index.html;
         autoindex off;
+        gzip off;
+        sub_filter_types text/html text/css;
+        sub_filter_once off;
+        sub_filter 'href="/jtc1/'  'href="/pragma/jtc1/';
+        sub_filter 'src="/jtc1/'   'src="/pragma/jtc1/';
+        sub_filter 'href="/pics/'  'href="/pragma/pics/';
+        sub_filter 'src="/pics/'   'src="/pragma/pics/';
+        sub_filter 'href="/icons/' 'href="/pragma/icons/';
+        sub_filter 'src="/icons/'  'src="/pragma/icons/';
+        sub_filter 'href="/JTC1/'  'href="/pragma/JTC1/';
+        sub_filter 'src="/JTC1/'   'src="/pragma/JTC1/';
+        sub_filter 'url(/jtc1/'  'url(/pragma/jtc1/';
+        sub_filter 'url(/pics/'   'url(/pragma/pics/';
+        sub_filter 'url(/icons/'  'url(/pragma/icons/';
+        sub_filter 'url(/JTC1/'   'url(/pragma/JTC1/';
+        sub_filter 'url("/jtc1/'  'url("/pragma/jtc1/';
+        sub_filter 'url("/pics/'   'url("/pragma/pics/';
+        sub_filter 'url("/icons/'  'url("/pragma/icons/';
+        sub_filter 'url("/JTC1/'   'url("/pragma/JTC1/';
+        # meta refresh: content="0; url=/jtc1/..." (must not match external ?url=/... except our prefixes)
+        sub_filter 'url=/jtc1/'  'url=/pragma/jtc1/';
+        sub_filter 'url=/pics/'  'url=/pragma/pics/';
+        sub_filter 'url=/icons/' 'url=/pragma/icons/';
+        sub_filter 'url=/JTC1/'  'url=/pragma/JTC1/';
+        sub_filter 'URL=/jtc1/'  'URL=/pragma/jtc1/';
+        sub_filter 'URL=/pics/'  'URL=/pragma/pics/';
+        sub_filter 'URL=/icons/' 'URL=/pragma/icons/';
+        sub_filter 'URL=/JTC1/'  'URL=/pragma/JTC1/';
     }
 ```
 
-If `DEPLOY_PATH` differs, set `alias` to that path with a trailing slash. Broader vhost notes for `paperflow.org` (redirects, other locations) are in the paperflow deploy doc linked above.
+If `DEPLOY_PATH` differs, set `alias` to that path (trailing slash as shown). If new root-relative prefixes appear in mirrored HTML/CSS (including `meta http-equiv="refresh"` with `url=/…` in `content`), add matching `sub_filter` lines. **`gzip off`** in this block avoids subtle `sub_filter` + compression issues; retest before re-enabling gzip here.
+
+**MIME:** nginx maps extensions via `mime.types`; if a rare type under `jtc1/sc22` downloads with the wrong `Content-Type`, add a `types { }` override in this `location` or extend the global map.
 
 To deploy outside CI, use **Actions → Deploy (rsync) → Run workflow** or copy the `mkdir` / `rsync` commands from [.github/workflows/deploy-rsync.yml](.github/workflows/deploy-rsync.yml).
