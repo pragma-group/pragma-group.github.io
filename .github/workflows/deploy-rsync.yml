@@ -1,0 +1,78 @@
+# Rsync public site paths to production host over SSH (same secrets/vars as paperflow.org paperflow).
+# Syncs only: icons/, jtc1/, pics/, index.html
+# Sequences after Inject PRAGMA Column: same triggers as former publish-pages.yml.
+# Secrets / variables: README.md (Deployment).
+
+name: Deploy (rsync)
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'pragma/pragma-outputs.csv'
+  workflow_run:
+    workflows:
+      - 'Inject PRAGMA Column'
+    types:
+      - completed
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-rsync-pragma
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: >-
+      github.event_name == 'push'
+      || github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'workflow_run'
+          && github.event.workflow_run.conclusion == 'success')
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Install SSH key and known_hosts
+        if: >-
+          github.event_name == 'workflow_run'
+          || github.ref_name == github.event.repository.default_branch
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/wg21_deploy_key
+          chmod 600 ~/.ssh/wg21_deploy_key
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Rsync site
+        if: >-
+          github.event_name == 'workflow_run'
+          || github.ref_name == github.event.repository.default_branch
+        env:
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          DEPLOY_PATH="${DEPLOY_PATH:?Set DEPLOY_PATH in repository Variables}"
+          REMOTE="${SSH_USER}@${SSH_HOST}:${DEPLOY_PATH}"
+          RSH="ssh -i $HOME/.ssh/wg21_deploy_key -o IdentitiesOnly=yes"
+          echo "Rsync icons/ jtc1/ pics/ index.html → ${REMOTE}/"
+          rsync -avz --delete -e "$RSH" icons/ "${REMOTE}/icons/"
+          rsync -avz --delete -e "$RSH" jtc1/ "${REMOTE}/jtc1/"
+          rsync -avz --delete -e "$RSH" pics/ "${REMOTE}/pics/"
+          rsync -avz -e "$RSH" index.html "${REMOTE}/index.html"
