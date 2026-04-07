@@ -59,7 +59,7 @@ Workflow: [.github/workflows/deploy-rsync.yml](.github/workflows/deploy-rsync.ym
 
 - **push** to `main`, with **`pragma/pragma-outputs.csv` ignored** — so a CSV-only push does not deploy here.
 - **`workflow_run`** after a successful **Inject PRAGMA Column** run — covers the CSV-only path (inject commits HTML, then deploy runs).
-- **`workflow_dispatch`** — full manual deploy.
+- **`workflow_dispatch`** — run deploy from the Actions tab (CI-only; no local rsync script in this repo).
 
 Automation uses the GitHub Actions **`production`** [Environment](https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment) so you can require manual approval before rsync if desired. Restrict deployment branches to **`main`** if you use that feature.
 
@@ -72,14 +72,14 @@ Automation uses the GitHub Actions **`production`** [Environment](https://docs.g
 
 **`DEPLOY_PATH`:** Set this to the absolute path nginx serves for the public URL. For example, if the site is exposed at `https://paperflow.org/pragma/`, sync the repo root into a directory such as `/var/www/html/paperflow/site/pragma` and map that path in nginx (example below).
 
-The workflow runs **`rsync -avz`** to `${DEPLOY_PATH}/` for the public site only: **`icons/`**, **`jtc1/`**, **`pics/`** (each with **`--delete`** on that subtree), and **`index.html`**. Other repository paths (for example **`pragma/`**, **`.github/`**) are not deployed.
+The workflow runs **`rsync -avz --checksum`** to `${DEPLOY_PATH}/` for the public site only: **`icons/`**, **`jtc1/`**, **`pics/`** (each with **`--delete`** on that subtree), and **`index.html`**. **`--checksum`** means unchanged content is skipped even if modification times differ; other repository paths (for example **`pragma/`**, **`.github/`**) are not deployed.
 
 **After switching off GitHub Pages:** In this repository, open **Settings → Pages** and set the source to **None** (or disable Pages) so the old Pages deployment is not used.
 
 ### Server setup
 
 1. **SSH** — Add the CI public key to `~/.ssh/authorized_keys` for `SSH_USER`.
-2. **Directory** — Create `DEPLOY_PATH` and ensure `SSH_USER` can write there and the nginx worker user (commonly `www-data`) can read files and traverse directories. For permission patterns (including avoiding `403` when ownership changes), see **`paperflow/doc/deploy-environments.md`** in the Paperflow monorepo (same host; sections 3–5).
+2. **Directory** — The deploy workflow runs **`mkdir -p`** on `DEPLOY_PATH` before rsync so intermediate segments (e.g. **`site/pragma`**) are created if missing. Ensure `SSH_USER` can create that path under the parent and that the nginx user can read the deployed tree. For permission patterns (including avoiding `403` when ownership changes), see **`paperflow/doc/deploy-environments.md`** in the Paperflow monorepo (same host; sections 3–5).
 3. **nginx** — Add a `location` that matches your public URL. Example for `https://paperflow.org/pragma/` when files live under `/var/www/html/paperflow/site/pragma/`:
 
 ```nginx
@@ -92,12 +92,4 @@ The workflow runs **`rsync -avz`** to `${DEPLOY_PATH}/` for the public site only
 
 If `DEPLOY_PATH` differs, set `alias` to that path with a trailing slash. Broader vhost notes for `paperflow.org` (redirects, other locations) are in the paperflow deploy doc linked above.
 
-### Manual rsync
-
-From the repo root (requires `bash` and `rsync`; uses your normal SSH agent or `~/.ssh/config`):
-
-```bash
-DEPLOY_PATH=/var/www/html/paperflow/site/pragma SSH_HOST=your.host SSH_USER=you ./scripts/deploy-rsync.sh
-```
-
-Or invoke the same `rsync` flags as in [.github/workflows/deploy-rsync.yml](.github/workflows/deploy-rsync.yml).
+To deploy outside CI, use **Actions → Deploy (rsync) → Run workflow** or copy the `mkdir` / `rsync` commands from [.github/workflows/deploy-rsync.yml](.github/workflows/deploy-rsync.yml).
